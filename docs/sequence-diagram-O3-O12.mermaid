@@ -1,0 +1,42 @@
+%% O3 状态刷新时序（合成期列表订阅）
+sequenceDiagram
+    actor U as 用户
+    participant A as app.do_synthesis
+    participant SS as SynthesisService._run
+    participant Q as queue.synthesize_project
+    participant P as lib.progress
+    participant UI as 合成Tab(s_log / s_queue_list)
+
+    U->>A: 点「开始合成」
+    A->>A: state=SynthesisState(...); state.segment_states=build_segment_states(proj)
+    A->>SS: start(state, project, bindings, ...)
+    SS->>Q: synthesize_project(..., cb_seg_state=update_segment_state)
+    loop 每 0.5s 轮询 + 每生成一段
+        Q->>Q: tts_engine.synthesize_segment(seg)
+        Q->>P: cb_seg_state(seg_id, "done", 1.0)
+        P-->>SS: state.segment_states[seg_id] 更新
+        A->>A: time.sleep(0.5)
+        A->>UI: yield (snapshot_text(), to_queue_rows(state.segment_states))
+    end
+    Note over UI: s_queue_list 展示 ✅/⏳/❌ + 进度%；s_log 同步文本
+    Note over A: 终态(done/cancelled/error) 再 yield 一次收尾
+
+%% O12 暂停/恢复时序（段边界协作挂起）
+sequenceDiagram
+    actor U as 用户
+    participant A as app.pause_synthesis / resume_synthesis
+    participant S as SynthesisService
+    participant R as _run(worker线程)
+    participant Q as queue.synthesize_project
+
+    U->>A: 点「⏸ 暂停」
+    A->>S: pause(state)
+    S->>S: state.paused=True; state.status="paused"
+    Note over R: 段边界 `while state.paused and not state.cancel: sleep(0.1)` 挂起
+    R->>Q: 不再调 next(gen) -> 进行中段跑完即停、停止提交新段
+    A->>A: yield (gr.update(), to_queue_rows) -> UI 显示 ⏸
+    U->>A: 点「▶ 恢复」
+    A->>S: resume(state)
+    S->>S: state.paused=False; state.status="running"
+    R->>Q: 退出挂起，继续 next(seg) 合成
+    Q->>Q: 后续段继续 -> 完成 -> state.status="done"

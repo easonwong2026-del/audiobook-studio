@@ -1,0 +1,110 @@
+{
+  "meta": {
+    "title": "测试有声书",
+    "author": "测试作者",
+    "total_segments": 12,
+    "max_tokens": 120,
+    "generated_by": "WorkBuddy",
+    "version": "2.0"
+  },
+  "voices": {
+    "旁白": {
+      "description": "沉稳男中音，纪录片风格，语速适中",
+      "suggested_audio": null
+    },
+    "小明": {
+      "description": "10岁男孩，声音清脆活泼",
+      "suggested_audio": null
+    },
+    "妈妈": {
+      "description": "温柔女声，30多岁",
+      "suggested_audio": null
+    }
+  },
+  "chapters": [
+    {
+      "id": 1,
+      "title": "早晨",
+      "segments": [
+        {
+          "id": "1-001",
+          "role": "旁白",
+          "emotion": "neutral",
+          "text": "清晨的阳光透过窗帘洒进房间，小明慢慢睁开了眼睛。"
+        },
+        {
+          "id": "1-002",
+          "role": "妈妈",
+          "emotion": "happy",
+          "text": "小明，快起床了，今天要去动物园哦！"
+        },
+        {
+          "id": "1-003",
+          "role": "小明",
+          "emotion": "excited",
+          "text": "真的吗？太好了！我马上起来！"
+        },
+        {
+          "id": "1-004",
+          "role": "旁白",
+          "emotion": "neutral",
+          "text": "小明飞快地穿好衣服，跑到客厅。桌子上摆着热腾腾的早餐。"
+        },
+        {
+          "id": "1-005",
+          "role": "妈妈",
+          "emotion": "neutral",
+          "text": "先吃早餐吧，吃饱了才有力气玩。"
+        },
+        {
+          "id": "1-006",
+          "role": "小明",
+          "emotion": "happy",
+          "text": "我今天要看大熊猫，还要看长颈鹿！"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "动物园",
+      "segments": [
+        {
+          "id": "2-001",
+          "role": "旁白",
+          "emotion": "neutral",
+          "text": "动物园里人山人海，到处都是小朋友的欢笑声。"
+        },
+        {
+          "id": "2-002",
+          "role": "小明",
+          "emotion": "excited",
+          "text": "妈妈快看，那只熊猫在吃竹子！"
+        },
+        {
+          "id": "2-003",
+          "role": "妈妈",
+          "emotion": "happy",
+          "text": "是啊，它吃得好香啊。你知道熊猫一天要吃多少竹子吗？"
+        },
+        {
+          "id": "2-004",
+          "role": "小明",
+          "emotion": "neutral",
+          "text": "不知道，是不是很多很多？"
+        },
+        {
+          "id": "2-005",
+          "role": "旁白",
+          "emotion": "neutral",
+          "text": "他们在动物园里度过了一个美好的下午。"
+        },
+        {
+          "id": "2-006",
+          "role": "小明",
+          "emotion": "happy",
+          "text": "妈妈，这是我过得最开心的一天！"
+        }
+      ]
+    }
+  ]
+}

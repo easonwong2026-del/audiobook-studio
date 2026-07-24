@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# 运行时产物（合成音频 / 测试试听 / 预览）
+*.wav
+workspace/test_output/
+workspace/*.wav
+workspace/projects/*/output/
+workspace/projects/*/segments/
+workspace/projects/*/preview/
+workspace/projects/*/supplement_cache/
+voice_library/
+
+# 本地运行时数据根（用户项目 / 测试夹具，不入库；数据目录默认外置到 D:\AudiobookStudio）
+workspace/
+
+# 用户/机器相关配置（含数据目录绝对路径）
+config.json
+
+# 备份（单独归档，不入库）
+backups/
+
+# 编辑器 / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 工程师临时备份（含 app.py.bak-20260721-215715 这类时间戳后缀变体）
+*.bak*
+
+# 日志
+*.log
+tests/run_log.txt
+
+# 临时探针文件
+probe_*.txt
+
+# 半成品备份（手动创建的 WIP 快照，不入库）
+_bak*/

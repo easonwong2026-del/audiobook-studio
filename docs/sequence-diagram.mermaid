@@ -1,0 +1,71 @@
+sequenceDiagram
+    participant App as app.py
+    participant PS as ProjectService
+    participant PR as ProjectRepository
+    participant BR as BindingRepository
+    participant CR as ConfigRepository
+    participant TR as TaskRepository
+    participant SS as SynthesisService
+    participant SPS as SupplementService
+    participant Disk as 磁盘 JSON
+
+    Note over App,Disk: == 打开项目链路 ==
+    
+    App->>PS: open_project_as_snapshot(name)
+    PS->>PR: load_snapshot(name)
+    PR->>Disk: 读 project.json
+    PR->>Disk: 读 structured_script.json
+    PR->>Disk: 读 voice_bindings.json
+    PR-->>PS: ProjectSnapshot
+    PS-->>App: ProjectSnapshot
+
+    Note over App,Disk: == 创建项目链路 ==
+    App->>PS: create_project(name, script_file)
+    PS->>PR: create_project(name, script_path)
+    PR->>Disk: makedirs + copy2 + atomic write project.json + voice_bindings.json
+    PR-->>PS: name
+    PS-->>App: None
+
+    Note over App,Disk: == 绑定音色链路 ==
+    App->>PS: bind_voice(project, role, src, category)
+    PS->>PR: get_project_dir(project)
+    PR-->>PS: project_dir
+    PS->>Disk: copy2(src → project_dir/voices/)
+    PS->>PR: load_project(project)
+    PR-->>PS: (meta, script, bd)
+    PS->>PS: update bd dict
+    PS->>PR: save_bindings(project_dir, bd)
+    PR->>Disk: atomic write voice_bindings.json
+    PR-->>PS: None
+    PS->>PR: load_snapshot(project)
+    PR-->>PS: fresh snapshot
+    PS-->>App: dest
+
+    Note over App,Disk: == 设置数据目录 ==
+    App->>PS: set_data_dir(new_dir)
+    PS->>CR: set_data_dir(new_dir)
+    CR->>CR: read old config
+    CR->>Disk: atomic write config.json
+    PS->>PR: set WORKSPACE_ROOT
+    PS-->>App: abs_path
+
+    Note over App,Disk: == 合成提交 ==
+    App->>SS: SynthesisService.start(state, project, bindings, ...)
+    SS->>SS: submit worker thread
+    SS->>TR: save_task(TaskRecord(task_id, "synthesis", project, "running"))
+    TR->>Disk: atomic write task_records/<task_id>.json
+    SS-->>App: task_id
+
+    Note over App,Disk: == 合成完成 ==
+    SS->>SS: worker 完成
+    SS->>TR: save_task(TaskRecord(task_id, ..., "done"))
+    TR->>Disk: atomic write task_records/<task_id>.json
+    
+    Note over App,Disk: == 补录提交 ==
+    App->>SPS: synthesize_lines(role, lines, speaker, ...)
+    SPS->>TR: save_task(TaskRecord(task_id, "supplement", project, "running"))
+    TR->>Disk: atomic write
+    SPS->>SPS: 逐句合成
+    SPS->>TR: save_task(TaskRecord(task_id, ..., "done"))
+    TR->>Disk: atomic write
+    SPS-->>App: results

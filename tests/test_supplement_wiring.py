@@ -1,0 +1,151 @@
+"""补录页接线 AST 回归（无需 import gradio，与 test_app_wiring.py 同风格）。
+
+验证：
+  - 左侧新增「角色补录」导航按钮（ui/navigation.py 中 NAV_ITEMS + app.py nav["nav_supplement"]）。
+  - 新增 grp-supplement 分组（ui/pages/supplement_page.py 中 elem_id="grp-supplement"）。
+  - _GROUPS 在 app.py 运行时装填 7 项。
+  - _goto 定义在 ui/navigation.py 中，返回 7 个 gr.update。
+  - 新增 handler 均定义且接 ss（首参或含 ss），并已接线。
+"""
+from __future__ import annotations
+
+import os
+import sys
+import ast
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+# app.py 源码
+APP_PATH = os.path.join(PROJECT_ROOT, "app.py")
+with open(APP_PATH, encoding="utf-8") as f:
+    SRC = f.read()
+TREE = ast.parse(SRC)
+
+# ui/navigation.py 源码
+NAV_PATH = os.path.join(PROJECT_ROOT, "ui", "navigation.py")
+with open(NAV_PATH, encoding="utf-8") as f:
+    NAV_SRC = f.read()
+NAV_TREE = ast.parse(NAV_SRC)
+
+# ui/pages/supplement_page.py 源码
+SUP_PATH = os.path.join(PROJECT_ROOT, "ui", "pages", "supplement_page.py")
+with open(SUP_PATH, encoding="utf-8") as f:
+    SUP_SRC = f.read()
+SUP_TREE = ast.parse(SUP_SRC)
+
+
+def find_func(tree, name):
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    return None
+
+
+def _arg_ids_with_vararg(fn):
+    names = [a.arg for a in fn.args.args]
+    if fn.args.vararg is not None:
+        names.append("*" + fn.args.vararg.arg)
+    return names
+
+
+def test_nav_supplement_button_present():
+    # 导航按钮由 create_nav_buttons() 在 ui/navigation.py 中动态创建
+    # 检查 NAV_ITEMS 中包含 "nav-supplement"
+    assert '"nav-supplement"' in NAV_SRC, "navigation.py 缺少 nav-supplement elem_id"
+    # 检查 app.py 中通过 nav["nav_supplement"] 引用
+    assert 'nav_supplement = nav["nav_supplement"]' in SRC, \
+        "app.py 缺少 nav_supplement = nav[...]"
+
+
+def test_grp_supplement_present():
+    # grp-supplement 分组在 supplement_page.py 中定义
+    assert 'elem_id="grp-supplement"' in SUP_SRC, "缺少 grp-supplement 分组"
+
+
+def test_groups_tuple_has_seven_items():
+    # _GROUPS 声明在 ui/navigation.py 中（空列表占位），
+    # 实际填充在 app.py 运行时：_GROUPS[:] = [7 个 group]
+    # app.py 中的赋值使用 _GROUPS[:] 下标（ast.Subscript）
+    for node in ast.walk(TREE):
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Subscript):
+                    if isinstance(t.value, ast.Name) and t.value.id == "_GROUPS":
+                        val = node.value
+                        assert isinstance(val, (ast.List, ast.Tuple)), \
+                            f"_GROUPS[:] 赋值应为列表/元组（实际 {type(val).__name__}）"
+                        assert len(val.elts) == 7, \
+                            f"_GROUPS[:] 应为 7 项（实际 {len(val.elts)}）"
+                        return
+    raise AssertionError("未找到 _GROUPS[:] = [...] 赋值")
+
+
+def test_goto_returns_seven_updates():
+    # _goto 定��在 ui/navigation.py 中，返回 tuple(GeneratorExp)
+    # 实际返回 7 个 gr.update，因为 NAV_ITEMS 包含 7 项
+    # 验证 _goto 存在且返回 tuple(...) 调用
+    fn = find_func(NAV_TREE, "_goto")
+    assert fn is not None, "navigation.py 中未定义 _goto"
+    has_tuple_return = False
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Return) and isinstance(n.value, ast.Call):
+            if isinstance(n.value.func, ast.Name) and n.value.func.id == "tuple":
+                has_tuple_return = True
+                break
+    assert has_tuple_return, "_goto 未返回 tuple(...) 调用"
+    # 验证 NAV_ITEMS 有 7 项
+    for node in ast.walk(NAV_TREE):
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name) and t.id == "NAV_ITEMS":
+                    assert isinstance(node.value, (ast.List, ast.Tuple)), \
+                        "NAV_ITEMS 应为列表"
+                    assert len(node.value.elts) == 7, \
+                        f"NAV_ITEMS 应为 7 项（实际 {len(node.value.elts)}）"
+                    return
+    raise AssertionError("未找到 NAV_ITEMS 定义")
+
+
+def test_supplement_handlers_defined_and_take_ss():
+    expected = {
+        "refresh_supplement_roles": True,   # ss 首参
+        "do_supplement_parse_json": True,   # 含 ss
+        "do_supplement_synth": True,        # 含 ss（末参）
+        "do_supplement_export": True,       # 含 ss（末参）
+        "play_supplement_preview": True,    # 含 ss（��参）
+    }
+    for h, _ in expected.items():
+        fn = find_func(TREE, h)
+        assert fn is not None, f"未定义 {h}"
+        names = _arg_ids_with_vararg(fn)
+        assert "ss" in names, f"{h} 未接 ss（实际参数：{names}）"
+
+
+def test_nav_supplement_wired():
+    assert "nav_supplement.click(" in SRC, "nav_supplement ��接线"
+    assert "refresh_supplement_roles, [ss], [sup_role]" in SRC, \
+        "nav_supplement 点击后未懒刷新 sup_role"
+
+
+def test_parse_json_wired():
+    assert "do_supplement_parse_json" in SRC
+    assert "sup_json_parse.click(do_supplement_parse_json" in SRC, \
+        "小 JSON 解析按钮未接线到 do_supplement_parse_json"
+
+
+def test_synth_wired():
+    assert "sup_synth.click(do_supplement_synth" in SRC, \
+        "补合成按钮未接线到 do_supplement_synth"
+
+
+def test_export_wired():
+    assert "sup_export.click(do_supplement_export" in SRC, \
+        "导出按钮未接线到 do_supplement_export"
+
+
+def test_preview_wired():
+    assert "play_supplement_preview(" in SRC, "试听���调用 play_supplement_preview"
+    assert "sup_play_all.click(" in SRC and "sup_play_seg.click(" in SRC, \
+        "整段 / 逐句试听按钮未接线"

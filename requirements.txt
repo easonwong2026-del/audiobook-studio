@@ -1,0 +1,17 @@
+# 有声书合成工作台 — Python 依赖
+#
+# 运行依赖（由 audiobook-studio 的 venv 提供）：
+gradio
+pydub
+
+# 音频后处理 / 数值计算
+numpy
+scipy
+pyloudnorm        # D1 响度 LUFS-16 归一（纯 CPU/numpy）
+mutagen            # D2 ID3 / M4B 章节标签（纯 Python）
+
+# 说明：
+#   - torch / indextts / IndexTTS2 由 index-tts 的 venv 提供，不在此列出。
+#   - ffmpeg 是系统二进制，需自行下载并加入 PATH（不能通过 pip 安装）。
+#     下载：https://ffmpeg.org/download.html
+#     缺失时导出会回退为 WAV，并在 launcher.py 中给出明确警告。

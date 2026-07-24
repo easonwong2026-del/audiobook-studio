@@ -1,0 +1,51 @@
+classDiagram
+    class SessionState {
+        +str project
+        +Any script
+        +dict bindings
+        +SynthesisState synthesis
+        +set_project(name, script, bindings)
+    }
+    class SynthesisState {
+        +str task_id
+        +str project
+        +str status
+        +float progress
+        +int total / completed
+        +str current_segment
+        +list~str~ log_lines
+        +bool cancel
+        +bool paused
+        +list~dict~ segment_states
+        +append_log(line)
+        +snapshot_text() str
+    }
+    class SynthesisService {
+        +start(state, project, bindings, num_beams, emotion, emo_alpha, speech_rate) str
+        +cancel(state)
+        +pause(state)
+        +resume(state)
+        +get_segment_states(state) list~dict~
+        -_run(state, project, bindings, num_beams, emotion, emo_alpha, speech_rate)
+    }
+    class queue {
+        +synthesize_project(project_name, voice_bindings, cb_audio, cb_progress, cb_seg_state, num_beams, emotion, emo_alpha, speech_rate) Generator
+    }
+    class progress {
+        +build_segment_states(project) list~dict~
+        +update_segment_state(states, seg_id, status, progress, **meta)
+        +to_queue_rows(states) list~list~
+    }
+    class app {
+        +do_synthesis(ss, ...) generator
+        +pause_synthesis(ss) tuple
+        +resume_synthesis(ss) tuple
+        +refresh_queue_list(ss) list~list~
+    }
+
+    SynthesisService ..> queue : 驱动(生成器)
+    queue ..> progress : cb_seg_state 回调(可选,默认None)
+    SynthesisService ..> progress : update_segment_state
+    app ..> SynthesisService : start/pause/resume
+    app ..> progress : build_segment_states/to_queue_rows
+    app ..> SessionState : gr.State

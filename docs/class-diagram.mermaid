@@ -1,0 +1,69 @@
+classDiagram
+    class RepoError {
+        +str message
+    }
+    class ConfigData {
+        -str data_dir
+        -str model_dir
+        -str ffmpeg_path
+        -int cache_retention_days
+        -int sample_rate
+        -int channels
+        -str default_format
+        +to_dict() dict
+        +from_dict(data: dict) ConfigData
+    }
+    class TaskRecord {
+        -str task_id
+        -str task_type
+        -str project
+        -str status
+        -str artifact_dir
+        -str error_summary
+        -str created_at
+        +to_dict() dict
+        +from_dict(data: dict) TaskRecord
+    }
+
+    class ConfigRepository {
+        +load() ConfigData
+        +save(config: ConfigData) None
+        +set_data_dir(path: str) str
+        +set_model_dir(path: str) str
+        +get(key: str, default: Any) Any
+    }
+    class ProjectRepository {
+        +scan_projects() list[str]
+        +load_project(name: str) tuple[ProjectMeta, dict, dict]
+        +load_snapshot(name: str) ProjectSnapshot
+        +create_project(name: str, script_path: str) str
+        +delete_project(name: str) None
+        +get_project_dir(name: str) str
+        +update_segment_status(name: str, seg_id: str, status: str) None
+        +update_project_meta(name: str, **updates) None
+        +list_projects() list[dict]
+        +get_synthesis_overrides(name: str) dict
+        +set_synthesis_overrides(name: str, overrides: dict) None
+        +get_synthesis_selections(name: str) dict
+        +set_synthesis_selections(name: str, selections: dict) None
+        +load_bindings(project_dir: str) dict
+        +save_bindings(project_dir: str, bindings: dict) None
+    }
+    class BindingRepository {
+        +list_categories() list[str]
+        +copy_voice_file(source_path: str, name: str, category: str) str
+        +validate_bindings(project_dir: str) list[str]
+        +resolve_binding_path(path: str, project_dir: str) str
+    }
+    class TaskRepository {
+        +save_task(record: TaskRecord) None
+        +load_task(task_id: str) TaskRecord | None
+        +list_tasks(project: str, task_type: str) list[TaskRecord]
+        +delete_task(task_id: str) None
+        +cleanup_old_tasks(max_age_days: int) int
+    }
+
+    ConfigRepository --> ConfigData : returns
+    ProjectRepository --> ProjectMeta : returns
+    ProjectRepository --> ProjectSnapshot : returns
+    TaskRepository --> TaskRecord : returns
