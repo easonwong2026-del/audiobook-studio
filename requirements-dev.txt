@@ -1,0 +1,6 @@
+# Audiobook Studio — 开发 / CI 测试依赖
+#
+# 仅用于运行 tests/，不引入 torch / CUDA / IndexTTS2 / 模型权重。
+# 推理运行时（gradio / numpy / scipy / pyloudnorm / mutagen / pydub）见 requirements.txt。
+pytest>=8
+pytest-cov

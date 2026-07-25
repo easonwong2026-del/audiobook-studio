@@ -42,3 +42,10 @@ probe_*.txt
 
 # 半成品备份（手动创建的 WIP 快照，不入库）
 _bak*/
+
+# 测试运行时临时目录（tests/test_workspace_paths.py 等创建，不入库）
+tests/__test_ws*/
+
+# 本地交付物 / 原型（不入库）
+prototype/
+deliverables/
