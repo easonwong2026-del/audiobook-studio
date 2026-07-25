@@ -1,19 +1,21 @@
 """Launcher - activate venv and run app.py
 
-5.7£ºÈ¥³ýÈÎºÎ¸öÈËµçÄÔ¾ø¶ÔÂ·¾¶Ó²±àÂë¡£³ÌÐòÄ¿Â¼ÓÉ±¾ÎÄ¼þÎ»ÖÃÍÆµ¼£¨²Ö¿â¿ÉÕûÌåÒÆ¶¯£©£¬
-python ½âÊÍÆ÷ÓÅÏÈ¼¶£º»·¾³±äÁ¿ AUDIOBOOK_STUDIO_PYTHON > ²Ö¿âÍ¬¼¶ index-tts/.venv¡£
+5.7：去除任何个人电脑绝对路径硬编码。程序目录由本文件位置推导（仓库可整体移动），
+python 解释器优先级：环境变量 AUDIOBOOK_STUDIO_PYTHON > 仓库同级 index-tts/.venv。
 """
 import os
 import shutil
 import subprocess
 
-# ³ÌÐòÄ¿Â¼£º±¾ÎÄ¼þËùÔÚÄ¿Â¼£¨²Ö¿â¿ÉÕûÌåÒÆ¶¯£¬²»ÒÀÀµ¾ø¶ÔÂ·¾¶£©
+# 程序目录：本文件所在目录（仓库可整体移动，不依赖绝对路径）
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# python ½âÊÍÆ÷£º»·¾³±äÁ¿ÓÅÏÈ£¬·ñÔòÈ¡²Ö¿âÍ¬¼¶µÄ index-tts venv£¨Ïà¶ÔÂ·¾¶£¬¿ÉÒÆÖ²£©¡£
-# ²»ÔÙÓ²±àÂë¸öÈËµçÄÔ¾ø¶ÔÂ·¾¶£¬ÇÐ»»»úÆ÷ / ÒÆ¶¯²Ö¿âºóÎÞÐèÐÞ¸Ä±¾ÎÄ¼þ¡£
-PYTHON = os.environ.get("AUDIOBOOK_STUDIO_PYTHON") or os.path.join(
-    BASE_DIR, "..", "index-tts", ".venv", "Scripts", "python.exe"
+# python 解释器：环境变量优先，否则取仓库同级的 index-tts venv（相对路径，可移植）；
+# 最后回退到系统 PATH 中的 python。
+PYTHON = os.environ.get("AUDIOBOOK_STUDIO_PYTHON") or (
+    os.path.join(BASE_DIR, "..", "index-tts", ".venv", "Scripts", "python.exe")
+    if os.path.isfile(os.path.join(BASE_DIR, "..", "index-tts", ".venv", "Scripts", "python.exe"))
+    else "python"
 )
 
 
@@ -21,11 +23,11 @@ def main() -> None:
     """Entry point: prepare environment, run dependency check and start app."""
     os.chdir(BASE_DIR)
 
-    # Ë«»÷ºóµÄÊ×¸öÖÐÎÄ¼´Ê±·´À¡£¨ÓÉ Python Êä³ö£¬±ÜÃâ .bat ÖÐÎÄ±àÂëÂÒÂë£©
-    print("ÓÐÉùÊé¹¤×÷Ì¨Æô¶¯ÖÐ£¬ÇëÉÔºó...")
+    # 双击后的首个中文即时反馈（由 Python 输出，��免 .bat 中文编码乱码）
+    print("有声书工作台启动中，请稍后...")
 
-    # ¼ì²éÔËÐÐ»·¾³£¨ÒÀÀµ¼ì²é½ÏÂý£¬ÏÈ¸ø³öÌáÊ¾£¬±ÜÃâ¿ØÖÆÌ¨¿ÕÆÁ£©
-    print("ÕýÔÚ¼ì²éÔËÐÐ»·¾³£¬ÇëÉÔºò...")
+    # 检查运行环境（依赖检查较慢，先给出提示，避免控制台空屏）
+    print("正在检查运行环境，请稍候...")
 
     # Check dependency
     result = subprocess.run(
@@ -49,36 +51,36 @@ def main() -> None:
 
     # ffmpeg is a system binary (NOT a pip package). Exporting mp3/m4b needs it;
     # if it is missing we must warn loudly instead of silently degrading.
-    # 5.8£ºÈ±Ê§Ê±ÏÔÊ½±¨´í£¨µ¼³ö mp3/m4b »áÅ× ExportError£¬ÒÑÉú³ÉµÄÖÐ¼ä WAV ÈÔ±£Áô£©£¬
-    # ²»ÔÙ¡°¾²Ä¬»ØÍË WAV¡±¡£
+    # 5.8：缺失时显式报错（导出 mp3/m4b 会抛 ExportError，已生成的中间 WAV 仍保留），
+    # 不再"静默回退 WAV"。
     if shutil.which("ffmpeg") is None:
         print()
         print("=" * 50)
-        print("  ⚠ ¾¯¸æ£ºÎ´¼ì²âµ½ ffmpeg£¡")
-        print("  µ¼³ö mp3 / m4b ÐèÒª ffmpeg£¨ÏµÍ³¶þ½øÖÆ£¬²»Í¨¹ý pip °²×°£©¡£")
-        print("  È±Ê§Ê±µ¼³ö»áÏÔÊ½±¨´í£¨ÒÑÉú³ÉµÄÖÐ¼ä WAV ÈÔ±£Áô£©£¬")
-        print("  ÇëÏÂÔØ ffmpeg ²¢¼ÓÈë PATH£¬»ò¸ÄÓÃ WAV ¸ñÊ½µ¼³ö¡£")
-        print("  ÏÂÔØµØÖ·£ºhttps://ffmpeg.org/download.html")
+        print("  ⚠ 警告：未检测到 ffmpeg！")
+        print("  导出 mp3 / m4b 需要 ffmpeg（系统二进制，不通过 pip 安装）。")
+        print("  缺失时导出会显式报错（已生成的中间 WAV 仍保留），")
+        print("  请下载 ffmpeg 并加入 PATH，或改用 WAV 格式导出。")
+        print("  下载地址：https://ffmpeg.org/download.html")
         print("=" * 50)
         print()
 
     # Start app
     print()
     print("=" * 50)
-    print("       ÓÐÉùÊéºÏ³É¹¤×÷Ì¨ | Audiobook Studio v3.1.0")
+    print("       有声书合成工作台 | Audiobook Studio v3.1.0")
     print("=" * 50)
     print()
-    print("  ä¯ÀÀÆ÷·ÃÎÊµØÖ·:")
+    print("  浏览器访问地址:")
     print("  -->  http://localhost:7862  <--")
     print()
-    print("  Ê×´Î¼ÓÔØÄ£ÐÍÐèÒªµÈ´ý 10-30 Ãë")
-    print("  ¹Ø±Õ´Ë´°¿Ú¼´¿ÉÍ£Ö¹·þÎñ")
+    print("  首次加载模型需要等待 10-30 秒")
+    print("  关闭此窗口即可停止服务")
     print()
     print("=" * 50)
     print()
 
-    # ¼ÓÔØÓïÒôºÏ³ÉÒýÇæ£¨Ê×´ÎÔ¼ 10-30 Ãë£©£¬ÏÈ¸ø³öÌáÊ¾
-    print("ÕýÔÚ¼ÓÔØÓïÒôºÏ³ÉÒýÇæ£¬Ê×´ÎÔ¼ 10-30 Ãë...")
+    # 加载语音合成引擎（首次约 10-30 秒），先给出提示
+    print("正在加载语音合成引擎，首次约 10-30 秒...")
     subprocess.run([PYTHON, "app.py"], check=True)
 
 
