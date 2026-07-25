@@ -1,4 +1,4 @@
-# Audiobook Studio — 系统架构（v3.1.0）
+# Audiobook Studio — 系统架构（v3.1.1）
 
 > 本文档与代码同步维护。若发现与实现不符之处，以 `docs/system_design.md` 与源码为准。
 

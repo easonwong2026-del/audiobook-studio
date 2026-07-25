@@ -1,4 +1,4 @@
-# 有声书合成工作台 (Audiobook Studio) · v3.1.0
+# 有声书合成工作台 (Audiobook Studio) · v3.1.1
 
 [![Tests](https://github.com/easonwong2026-del/audiobook-studio/actions/workflows/tests.yml/badge.svg)](https://github.com/easonwong2026-del/audiobook-studio/actions/workflows/tests.yml)
 
@@ -12,7 +12,7 @@
 
 | 项 | 说明 |
 |----|------|
-| 当前版本 | **v3.1.0**（稳定化重构：UI 模块拆分、Repository 持久化层、ProjectSnapshot、统一错误处理与日志系统） |
+| 当前版本 | **v3.1.1**（发布修复：编码清理、测试恢复、版本统一） |
 | 产品定位 | 面向**本地 IndexTTS2 环境**的有声书**生产工作台** |
 | 是否独立安装软件 | **否** —— 不提供 Windows 安装包，也不内置模型 / Torch / CUDA / FFmpeg / IndexTTS2 本体 |
 | 部署方式 | **轻量工作台源码 + 外部推理环境**（IndexTTS2 仓库及其虚拟环境由用户单独准备） |
@@ -39,7 +39,7 @@
 
 ```text
 audiobook-studio/
-├── app.py                  # Gradio 接线 + 导航（不含业务实现）
+├── app.py                  # Gradio 应用入口、事件接线及部分 UI callback 编排
 ├── launcher.py             # 启动器：自动查找 Python 解释器
 ├── start.bat               # Windows 双击启动入口
 ├── config.json             # 本地配置（含数据目录路径，已 .gitignore）
@@ -48,7 +48,7 @@ audiobook-studio/
 ├── CHANGELOG.md            # 变更记录
 ├── ARCHITECTURE.md         # 系统架构
 ├── lib/                    # 领域工具
-│   ├── __init__.py         # 版本来源（__version__ = "3.1.0"）
+│   ├── __init__.py         # 版本来源（__version__ = "3.1.1"）
 │   ├── tts_engine.py       # IndexTTS2 推理封装（函数内 lazy import torch）
 │   ├── audio_pipeline.py   # 段拼接 / 导出 / ffmpeg 转码
 │   ├── audio_format.py     # WAV 加载 / 重采样 / 声道 / dtype 归一
@@ -60,7 +60,7 @@ audiobook-studio/
 │   ├── segment_cache.py    # 合成段缓存
 │   ├── voice_lib.py        # 音色库管理
 │   ├── progress.py         # 进度跟踪
-│   ├��─ logging_setup.py    # 日志系统（自动轮转）
+│   ├── logging_setup.py    # 日志系统（自动轮转）
 │   ├── project_manager.py  # 项目管理
 │   ├── queue.py            # 合成队列
 │   ├── metadata.py         # 音频元数据
@@ -72,7 +72,7 @@ audiobook-studio/
 ├── domain/                 # 领域类型
 ├── tests/                  # 测试
 ├── docs/                   # 设计文档
-│   └── releases/v3.1.0.md  # GitHub Release 说明
+│   └── releases/v3.1.1.md  # GitHub Release 说明
 └── 更新日志.txt             # 中文变更日志
 ```
 
@@ -96,7 +96,7 @@ workspace-root/
 - **操作系统**：Windows 10 / 11（推荐）。macOS / Linux 可运行 Gradio 界面，但 `start.bat`、`os.startfile()` 和 IndexTTS2 的 Windows 倾向可能影响体验。
 - **Python 版本**：由 IndexTTS2 虚拟环境提供。项目随附的 `index-tts/.venv` 使用 Python 3.10；请以 **IndexTTS2 官方要求的 Python 版本**为准。
 - **IndexTTS2 模型**：需从 IndexTTS2 官方渠道获取其模型 checkpoint，自行放置到 `index-tts/checkpoints/` 或 `AUDIOBOOK_STUDIO_MODEL_DIR` 指向的位置。
-- **GPU**：推��� **NVIDIA GPU 12 GB+ VRAM**。CUDA、cuDNN 由 IndexTTS2 的虚拟环境负责。
+- **GPU**：推荐 **NVIDIA GPU 12 GB+ VRAM**。CUDA、cuDNN 由 IndexTTS2 的虚拟环境负责。
 - **Torch**：由 IndexTTS2 的虚拟环境安装（GPU 版本），不通过本仓库的 pip 安装。
 - **FFmpeg**：导出 mp3 / m4b 需要 FFmpeg（系统级二进制，**不是** pip 包）。可选设置 `AUDIOBOOK_STUDIO_FFMPEG` 环境变量指向自定义路径；缺失时 launcher 会显式警告（可改用 WAV 导出）。
 - **本仓库 Python 依赖**：`requirements.txt`（gradio、numpy、scipy、pyloudnorm、mutagen、pydub）—— 这些**不依赖 GPU / CUDA**，可以用任何 Python 安装。
@@ -171,7 +171,7 @@ pip install -r requirements.txt
 ffmpeg -version
 ```
 
-若缺��，导出 mp3 / m4b 会显式报错（中间 WAV 仍保留），不影响 WAV 导出。
+若缺失，导出 mp3 / m4b 会显式报错（中间 WAV 仍保留），不影响 WAV 导出。
 
 ### 6. 启动应用
 
@@ -272,7 +272,7 @@ Gradio 界面和项目管理可在无 GPU 环境运行，但实际的 TTS 合成
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | V3.1 系统架构和测试策略 |
 | [`CHANGELOG.md`](CHANGELOG.md) | 完整变更记录 |
 | [`docs/system_design.md`](docs/system_design.md) | 系统详细设计 |
-| [`docs/releases/v3.1.0.md`](docs/releases/v3.1.0.md) | GitHub Release 说明 |
+| [`docs/releases/v3.1.1.md`](docs/releases/v3.1.1.md) | GitHub Release 说明 |
 | [`DESIGN.md`](DESIGN.md) | UI 设计系统（Stripe 浅色招牌风） |
 
 ---

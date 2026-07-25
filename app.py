@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audiobook Studio v3.1.0 -- Stripe 浅色风 UI（完整重做：左侧分组侧边栏 + 顶部状态条）
+"""Audiobook Studio v3.1.1 -- Stripe 浅色风 UI（完整重做：左侧分组侧边栏 + 顶部状态条）
 
 v3：基于设计稿（DESIGN.md / brand-spec.md）落地 Stripe 浅色招牌风：
 - 主题从暗色（gr.themes.Soft + 注入暗色 <style>）切换为 Stripe 浅色（gr.themes.Default + 浅色令牌）
@@ -981,7 +981,7 @@ def _open_chain_rest(event):
     return e
 
 
-with gr.Blocks(theme=THEME, title="Audiobook Studio v3.1.0") as app:
+with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     # 每会话独立的真相源（取代全局可变 S，多标签不再互相踩状态）
     ss = gr.State(SessionState())
 

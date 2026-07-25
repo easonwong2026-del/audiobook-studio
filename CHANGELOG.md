@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.1.1] - 2026-07-25
+
+### Fixed
+
+- **launcher.py 编码修复**：UTF-8 编码声明、U+FFFD 替换字符清理、中文注释和输出提示恢复。
+- **Python 解释器回退逻辑重构**：优先级 `AUDIOBOOK_STUDIO_PYTHON`（存在性校验）> 同级 `index-tts/.venv`（跨平台）> PATH；寻找失败时给出清晰错误说明。
+- **`start.bat` 简化**：解释器探测集中到 `launcher.py`，`start.bat` 仅负责调用。
+- **恢复路径安全验证**：`tests/qa_allowed_paths_test.py` 和 `qa_verify_export_safe_path.py` 恢复为有意义的测试，适配外置数据目录架构，消除硬编码绝对路径。
+- **清理空壳文件**：删除 `REFACTOR_PROGRESS.md`（从未有实质内容）；恢复 `REVIEW.md` 的完整架构评审内容。
+- **统一版本来源**：`lib/__init__.py` 为单一版本权威值 `"3.1.1"`；所有运行时标题从该值读取。
+- **README 乱码修复**：修复目录树字符 "──"、中文"推荐""缺失"等 7 处 U+FFFD 替换字符。
+- **app.py 描述更正**：从"导航"改为"Gradio 应用入口、事件接线及部分 UI callback 编排"。
+- **全项目编码扫描**：清理 16 个文件中的 U+FFFD 替换字符（修复关键文件，其余记录于未解决问题）。
+
 ## [3.1.0] - 2026-07-25
 
 ### Added
@@ -48,7 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
-- **399 passing, 19 skipped, 0 failing** (Python 3.13, no torch, no IndexTTS2 model, no GPU).
+- **测试数字更新**：399 passing, 20 skipped, 3 failed（3 个 TTS OOM 测试需要 IndexTTS2 模型环境，非 CI 可执行）。
 - All 19 skips are intentional: 18 parametrised path-integrity skips (only `launcher.py` is checked; others are dimension-tested once), 1 ffmpeg-present skip for a \"missing ffmpeg should warn\" case.
 - Added workflow integration tests: `test_data_dir_switch`, `test_export_mixed_audio`, `test_project_lifecycle`, `test_synthesis_lifecycle`.
 - Added CI workflow (`.github/workflows/tests.yml`): Ubuntu + Python 3.10, system `ffmpeg` binary, no torch/CUDA/model download.
