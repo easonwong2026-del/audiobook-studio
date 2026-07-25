@@ -1,8 +1,13 @@
+Set fso = CreateObject("Scripting.FileSystemObject")
+scriptDir = fso.GetParentFolderName(WScript.ScriptFullName)
+venvPath = fso.GetAbsolutePathName(fso.BuildPath(scriptDir, "..\index-tts\.venv\Scripts\python.exe"))
+launcherPath = fso.GetAbsolutePathName(fso.BuildPath(scriptDir, "launcher.py"))
+iconPath = fso.GetAbsolutePathName(fso.BuildPath(scriptDir, "icon.ico"))
 Set WShell = CreateObject("WScript.Shell")
 Set SC = WShell.CreateShortcut(WShell.ExpandEnvironmentStrings("%USERPROFILE%") & "\Desktop\有声书合成工作台.lnk")
-SC.TargetPath = "C:\Users\rakliang\WorkBuddy\2026-06-28-19-01-02\index-tts\.venv\Scripts\python.exe"
-SC.Arguments = "C:\Users\rakliang\WorkBuddy\2026-06-29-18-28-53\audiobook-studio\launcher.py"
-SC.WorkingDirectory = "C:\Users\rakliang\WorkBuddy\2026-06-29-18-28-53\audiobook-studio"
-SC.IconLocation = "C:\Users\rakliang\WorkBuddy\2026-06-29-18-28-53\audiobook-studio\icon.ico"
-SC.Description = "有声书合成工作台"
-SC.Save()
+SC.TargetPath = venvPath
+SC.Arguments = launcherPath
+SC.WorkingDirectory = fso.GetAbsolutePathName(scriptDir)
+SC.IconLocation = iconPath
+SC.Save
+WScript.Echo "Done"
