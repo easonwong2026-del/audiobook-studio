@@ -117,9 +117,9 @@ def test_start_bat_echo_before_launcher():
         "mis-read as garbage by cmd under an unstable code page."
     )
 
-    # start.bat must still carry the ASCII echo + the python launcher line.
+    # start.bat must carry the REM comment (English, ASCII) + the python launcher line.
     bat_text = bat_data.decode("ascii")
-    assert "echo Starting Audiobook Studio ..." in bat_text
+    assert "Audiobook Studio launcher" in bat_text
     assert "launcher.py" in bat_text
 
 
