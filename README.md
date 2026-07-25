@@ -1,8 +1,23 @@
-# 有声书合成工作台 (Audiobook Studio)
+# 有声书合成工作台 (Audiobook Studio) · v3.1.0
 
-本地化的**有声书合成工作台**：把一个结构化剧本 `structured_script.json`（角色 / 章节 / 段落，含情感标注）通过 [IndexTTS2](https://github.com/index-tts/index-tts) 逐段合成、拼接、响度归一、转码，最终导出整本有声书（mp3 / m4b）。基于 Gradio 的图形界面，本地运行、GPU 推理。
+[![Tests](https://github.com/easonwong2026-del/audiobook-studio/actions/workflows/tests.yml/badge.svg)](https://github.com/easonwong2026-del/audiobook-studio/actions/workflows/tests.yml)
 
-> 设计理念：**文本分析在前，机械合成在后**。角色识别、情感标注、多音字处理由 WorkBuddy 对话完成并产出 `structured_script.json`；本工作台只负责「加载 JSON + 绑定音色 → 调 IndexTTS2 → 拼接导出」。音色选择权完全归用户。
+本地化的**有声书合成工作台**：把一个结构化剧本 `structured_script.json`（角色 / 章节 / 段落，含情感标注）通过 [IndexTTS2](https://github.com/index-tts/index-tts) 逐段合成、拼接、响度归一、转码，最终导出整本有声书（mp3 / m4b / wav）。基于 Gradio 的图形界面，本地运行、GPU 推理。
+
+> **设计理念：文本分析在前，机械合成在后。** 角色识别、情感标注、多音字处理由前置工具（如 WorkBuddy 对话）完成并产出 `structured_script.json`；本工作台只负责「加载 JSON + 绑定音色 → 调 IndexTTS2 → 拼接导出」。音色选择权完全归用户。
+
+---
+
+## 版本与定位
+
+| 项 | 说明 |
+|----|------|
+| 当前版本 | **v3.1.0**（稳定化重构：UI 模块拆分、Repository 持久化层、ProjectSnapshot、统一错误处理与日志系统） |
+| 产品定位 | 面向**本地 IndexTTS2 环境**的有声书**生产工作台** |
+| 是否独立安装软件 | **否** —— 不提供 Windows 安装包，也不内置模型 / Torch / CUDA / FFmpeg / IndexTTS2 本体 |
+| 部署方式 | **轻量工作台源码 + 外部推理环境**（IndexTTS2 仓库及其虚拟环境由用户单独准备） |
+
+> 模型、Torch、CUDA、Python 虚拟环境、FFmpeg 等体积可能达到十几 GB 甚至几十 GB，因此一律作为**外部依赖**由用户准备，不打包进本仓库。详见下文「[为什么不提供一键安装包](#为什么不提供一键安装包)」。
 
 ---
 
@@ -13,166 +28,253 @@
 | 概览 | 项目书架 / 新建 / 打开项目的总入口 |
 | 项目 | 上传 `structured_script.json` 创建项目、项目管理 |
 | 音色资产 | 为每个角色绑定 / 录制 / 克隆参考音频（`voice_bindings.json`） |
-| 合成 | 整本书逐段队列合成，段落级 VRAM 管理、暂停 / 恢复 |
-| **补录合成** ⭐新增 | 打开项目后，给某个**已绑定音色**的角色单独补几句 / 补几段并**独立导出音频**，无需重传整本书（覆盖「缺音重合成」与「新增内容」两类场景） |
+| 合成 | 整本书逐段队列合成，段落级 VRAM 管理、暂停 / 恢复、断点续跑 |
 | 试听与质检 | 段落级试听、按参数重合成 |
-| 导出 | 章节拼接 → 均衡 → LUFS 归一 → 转码 mp3 / m4b |
+| 导出 | 章节拼接 → 均衡 → LUFS 归一 → 转码 mp3 / m4b / wav |
+| 角色补录 | 单独重合成某个角色的全部台词，不重新跑整本书 |
 
 ---
 
 ## 目录结构
 
-```
+```text
 audiobook-studio/
-├── app.py                  # Gradio 入口：7 个导航分区 + 全部 handler
-├── launcher.py             # start.bat 调用：打印中文提示后启动 app.py
-├── start.bat               # Windows 启动器（纯 ASCII，避免中文乱码）
-├── requirements.txt        # Python 依赖
-├── ARCHITECTURE.md         # 总体架构 + 数据模型（structured_script.json 规范）
-├── DESIGN.md / brand-spec.md  # UI 设计稿与品牌规范
-├── lib/                    # 核心库（无 Gradio 依赖，可单测）
-│   ├── script_loader.py    # 读取 / 校验 structured_script.json（含诊断式报错 + 别名容错）
-│   ├── types.py            # Script / VoiceInfo / Chapter / Segment 数据类
-│   ├── tts_engine.py       # IndexTTS2 单例封装：init_engine / synthesize_segment / empty_cache（全局 RLock 互斥）
-│   ├── audio_pipeline.py   # 拼接 + 静音 + 响度归一 + ffmpeg 转码；新增 export_supplement
-│   ├── queue.py            # 整本逐段串行合成、段状态表、缓存
-│   ├── project_manager.py  # 项目 / 角色下拉构造；新增 build_bound_role_choices
-│   ├── segment_cache.py    # 段级参数感知缓存
-│   ├── config.py           # 数据目录 / 预览目录
-│   ├── postprocess.py      # 响度归一（pyloudnorm）/ 均衡
-│   ├── metadata.py         # mp3/m4b 标签
-│   └── voice_lib.py / dataframe_style.py / progress.py / exceptions.py
-├── services/               # 业务编排层（无 Gradio 依赖）
-│   ├── project.py          # ProjectService：创建 / 打开项目、绑定音色
-│   ├── session.py          # SessionState（ss.project / ss.script / ss.bindings）
-│   ├── supplement.py       # ⭐ SupplementService：补录合成编排（拆句 / 校验 / 合成 / 导出路径）
-│   ├── synthesis.py        # 整本合成编排
-│   └── export.py           # 整本导出编排
-├── docs/                   # 设计文档 + Mermaid 图
-│   ├── system_design.md    # 完整系统设计
-│   ├── class-diagram.mermaid / sequence-diagram.mermaid
-│   ├── PRD_补录合成.md      # ⭐ 补录合成功能 PRD（见下）
-│   └── 设计_补录合成.md      # ⭐ 补录合成功能系统设计（见下）
-├── tests/                  # pytest 套件（monkeypatch 桩，无需 GPU）
-├── prototype/              # 早期原型
-├── workspace/              # ⚠️ 运行时用户数据（不入库：项目 / 合成 wav / 配置）
-└── voice_library/          # ⚠️ 用户参考音频（不入库）
+├── app.py                  # Gradio 接线 + 导航（不含业务实现）
+├── launcher.py             # 启动器：自动查找 Python 解释器
+├── start.bat               # Windows 双击启动入口
+├── config.json             # 本地配置（含数据目录路径，已 .gitignore）
+├── requirements.txt        # 运行时依赖
+├── requirements-dev.txt    # 测试 / CI 依赖（不含 torch）
+├── CHANGELOG.md            # 变更记录
+├── ARCHITECTURE.md         # 系统架构
+├── lib/                    # 领域工具
+│   ├── __init__.py         # 版本来源（__version__ = "3.1.0"）
+│   ├── tts_engine.py       # IndexTTS2 推理封装（函数内 lazy import torch）
+│   ├── audio_pipeline.py   # 段拼接 / 导出 / ffmpeg 转码
+│   ├── audio_format.py     # WAV 加载 / 重采样 / 声道 / dtype 归一
+│   ├── postprocess.py      # LUFS 响度归一 + 人声均衡
+│   ├── config.py           # 配置（环境变量 / config.json / 默认）
+│   ├── environment.py      # 运行环境探测
+│   ├── snapshot.py         # ProjectSnapshot
+│   ├── script_loader.py    # JSON 剧本加载
+│   ├── segment_cache.py    # 合成段缓存
+│   ├── voice_lib.py        # 音色库管理
+│   ├── progress.py         # 进度跟踪
+│   ├��─ logging_setup.py    # 日志系统（自动轮转）
+│   ├── project_manager.py  # 项目管理
+│   ├── queue.py            # 合成队列
+│   ├── metadata.py         # 音频元数据
+│   ├── exceptions.py       # 异常定义
+│   └── types.py            # 类型定义
+├── repositories/           # 持久化层（Repository + 原子 JSON 写入）
+├── services/               # 业务服务层
+├── ui/                     # UI 模块（ui/pages/*，7 个页面）
+├── domain/                 # 领域类型
+├── tests/                  # 测试
+├── docs/                   # 设计文档
+│   └── releases/v3.1.0.md  # GitHub Release 说明
+└── 更新日志.txt             # 中文变更日志
 ```
+
+> 注：`workspace/`（旧版项目数据）与 `voice_library/`（用户参考音频）属于本地 / 历史数据，已被 `.gitignore` 排除，**不入库**（见文末「不在仓库中的内容」）。V3.1 起项目与合成产物默认外置到**数据目录**（见「[如何切换数据目录](#如何切换数据目录)」）。
+
+---
+
+## 环境要求
+
+### 推荐部署方式
+
+```text
+workspace-root/
+├── audiobook-studio/      # 本仓库
+└── index-tts/             # IndexTTS2 主项目
+    └── .venv/             # 虚拟环境（Python 3.10 + torch + CUDA + TTS 推理依赖）
+```
+
+### 各组件详解
+
+- **操作系统**：Windows 10 / 11（推荐）。macOS / Linux 可运行 Gradio 界面，但 `start.bat`、`os.startfile()` 和 IndexTTS2 的 Windows 倾向可能影响体验。
+- **Python 版本**：由 IndexTTS2 虚拟环境提供。项目随附的 `index-tts/.venv` 使用 Python 3.10；请以 **IndexTTS2 官方要求的 Python 版本**为准。
+- **IndexTTS2 模型**：需从 IndexTTS2 官方渠道获取其模型 checkpoint，自行放置到 `index-tts/checkpoints/` 或 `AUDIOBOOK_STUDIO_MODEL_DIR` 指向的位置。
+- **GPU**：推��� **NVIDIA GPU 12 GB+ VRAM**。CUDA、cuDNN 由 IndexTTS2 的虚拟环境负责。
+- **Torch**：由 IndexTTS2 的虚拟环境安装（GPU 版本），不通过本仓库的 pip 安装。
+- **FFmpeg**：导出 mp3 / m4b 需要 FFmpeg（系统级二进制，**不是** pip 包）。可选设置 `AUDIOBOOK_STUDIO_FFMPEG` 环境变量指向自定义路径；缺失时 launcher 会显式警告（可改用 WAV 导出）。
+- **本仓库 Python 依赖**：`requirements.txt`（gradio、numpy、scipy、pyloudnorm、mutagen、pydub）—— 这些**不依赖 GPU / CUDA**，可以用任何 Python 安装。
+
+### `AUDIOBOOK_STUDIO_PYTHON` 环境变量
+
+`launcher.py` 按以下优先级查找 Python 解释器：
+
+1. **优先使用环境变量 `AUDIOBOOK_STUDIO_PYTHON`**（若已设置）。
+2. 否则检查仓库**同级目录**下的 `index-tts/.venv`（相对路径，仓库可整体移动）。
+3. 最后回退到系统 `PATH` 中的 `python`。
+
+```bash
+# Windows cmd
+set AUDIOBOOK_STUDIO_PYTHON=D:\path\to\index-tts\.venv\Scripts\python.exe
+
+# Windows PowerShell
+$env:AUDIOBOOK_STUDIO_PYTHON = "D:\path\to\index-tts\.venv\Scripts\python.exe"
+
+# macOS / Linux
+export AUDIOBOOK_STUDIO_PYTHON=/path/to/index-tts/.venv/bin/python
+```
+
+### 环境变量总表
+
+| 变量 | 用途 | 默认值 |
+|------|------|--------|
+| `AUDIOBOOK_STUDIO_PYTHON` | Python 解释器（启动本工作台） | 仓库同级 `index-tts/.venv` → PATH 中的 `python` |
+| `AUDIOBOOK_STUDIO_MODEL_DIR` | IndexTTS2 模型 checkpoint 位置 | 仓库同级 `index-tts/checkpoints` |
+| `AUDIOBOOK_STUDIO_DATA_DIR` | 外置数据目录（项目 / 合成产物 / 音色库） | `~/AudiobookStudio` |
+| `AUDIOBOOK_STUDIO_FFMPEG` | FFmpeg 二进制路径 | 搜索 `PATH` |
+| `AUDIOBOOK_STUDIO_LEGACY_DIR` | 旧版数据目录，迁移用 | 无 |
 
 ---
 
 ## 快速开始
 
-**环境前提**
-- Python 3.10（项目自带 `index-tts\.venv` 虚拟环境，含 torch / gradio / indextts）
-- 已下载 IndexTTS2 模型（默认路径 `C:\Users\rakliang\WorkBuddy\2026-06-28-19-01-02\index-tts`）
-- `ffmpeg` 系统二进制（用于 mp3 / m4b 转码；**缺失时导出 mp3 / m4b 会显式报错**，已生成的中间 WAV 仍保留，可改选 WAV 格式导出）
-- 安装依赖：`pip install -r requirements.txt`
+### 1. 克隆仓库
 
-**启动**
 ```bash
-# 方式一：Windows 双击
-start.bat
-# 方式二：直接运行（注意 -u 让 Gradio 日志实时输出）
-python -u app.py
-# 默认监听 http://0.0.0.0:7862
+git clone https://github.com/easonwong2026-del/audiobook-studio.git
+cd audiobook-studio
 ```
 
-**典型工作流**
-1. 「项目」分区上传由 WorkBuddy 生成的 `structured_script.json` → 创建项目。
-2. 「音色资产」分区为每个角色绑定参考音频。
-3. 「合成」分区启动整本逐段合成（支持暂停 / 恢复、段落级 VRAM 管理）。
-4. 「试听与质检」分区逐段试听 / 重合成。
-5. 「导出」分区拼接导出整本 mp3 / m4b。
-6. **「补录合成」分区**：打开项目后，选角色 + 粘贴几句 / 传小 JSON → 独立合成并导出音频（详见 `docs/PRD_补录合成.md`）。
+### 2. 准备 IndexTTS2
 
----
+从 [IndexTTS2 GitHub 仓库](https://github.com/IndexTeam/IndexTTS2) 克隆，安装依赖并下载模型 checkpoint。推荐与本仓库同级放置：
 
-## 架构概览（数据流）
-
-```
-structured_script.json
-   │  lib/script_loader.from_dict + validate_script（诊断式校验 + 别名容错）
-   ▼
-ProjectService.open_project → (meta, script, voice_bindings)
-   │  voice_bindings["bindings"][role] = 参考音频路径（音色唯一真相源）
-   ▼
-整本合成：lib/queue → 逐段 lib/tts_engine.synthesize_segment（全局 RLock 单例，互斥）
-   │           段级 VRAM 管理（段间 CUDA cleanup + OOM 自动拆段降级）
-   ▼
-lib/audio_pipeline.concat_for_preview / export_book
-   │  拼接 + SEG_SILENCE_SEC 静音 + int16 归一 + normalize_loudness(LUFS) + ffmpeg 转码
-   ▼
-导出 mp3 / m4b（best-effort 写标签）
-
-补录合成（独立路径，不进整本拼接）：
-   选角色 → 粘贴文本 / 上传小 JSON → SupplementService.synthesize_lines
-        → 逐段 tts_engine.synthesize_segment（同单例，自动互斥）
-        → audio_pipeline.export_supplement（拼接 + LUFS + 转码 → 独立文件）
-        → app._safe_path_for_file_component 落盘（Gradio allowed_paths 内）供 gr.File 下载
+```text
+workspace-root/
+├── audiobook-studio/      # 本仓库
+└── index-tts/             # IndexTTS2
+    ├── .venv/
+    └── checkpoints/
 ```
 
-**关键约束**
-- `tts_engine` 的 `init_engine` / `synthesize_segment` 整体包裹在模块级 `threading.RLock`（`_ENGINE_LOCK`）内，所有调用方（整本 / 整本重合成 / 补录）自动串行互斥，无需在 handler 层再加锁；用 `RLock` 是因其 OOM 时会递归调用自身。
-- 导出文件必须经 `app._safe_path_for_file_component` 落盘到 `config.get_data_dir()` 子树（已在 `app.launch(allowed_paths=[...])` 放行），否则 `gr.File` 报 `InvalidPathError`。
-- 补录中间产物隔离在 `supplement_cache/`，**不写** `segments/` 与 `project.json`，与整本断点续跑状态相互独立。
+### 3. 安装本仓库依赖
 
----
-
-## 补录合成（新增功能）
-
-针对「只给某个角色补几句 / 补几段」的高频诉求：无需重传整本书，打开项目后选已绑定音色角色，粘贴台词或上传小 JSON，用该角色音色独立合成并导出音频。
-
-- 产品需求（PRD）：[docs/PRD_补录合成.md](docs/PRD_补录合成.md)
-- 系统设计：[docs/设计_补录合成.md](docs/设计_补录合成.md)
-
-小 JSON 最小格式：
-```json
-{
-  "role": "旁白",
-  "lines": [
-    {"text": "你放心，我自有道理。", "emotion": "sad", "emo_alpha": 1.0, "speech_rate": 1.0},
-    {"text": "这可奇了。"}
-  ]
-}
-```
-`role` 必须命中项目 `voices`；缺 `text` 的段落会被前置诊断拦截，不再误报成功。
-
----
-
-## 测试
-
-纯 Python + `lib` 单测，**无需 GPU / 模型**（用 `monkeypatch` 把 `tts_engine.synthesize_segment` 替换成写哑 wav 的桩）：
 ```bash
-# 用项目自带 venv
-index-tts\.venv\Scripts\python.exe -m pytest tests/ -q
+pip install -r requirements.txt
 ```
-重点套件：`test_supplement.py`（补录编排 + 引擎锁 + export_supplement）、`test_supplement_wiring.py`（导航接线回归）、`test_script_loader_diagnostics.py`（校验诊断）、`test_project_service.py` / `test_project_manager.py`。
+
+> `requirements.txt` 不含 torch 或任何推理依赖，可以用系统的默认 Python 安装。
+
+### 4. 配置 Python 解释器
+
+若 `index-tts/.venv` 在仓库同级，可跳过；否则设置 `AUDIOBOOK_STUDIO_PYTHON`（见上）。
+
+### 5. 检查 FFmpeg
+
+```bash
+ffmpeg -version
+```
+
+若缺��，导出 mp3 / m4b 会显式报错（中间 WAV 仍保留），不影响 WAV 导出。
+
+### 6. 启动应用
+
+```bash
+python launcher.py
+```
+
+首次启动会依序完成：依赖检查（缺失时自动 pip install），FFmpeg 检测，然后加载 IndexTTS2 模型
+（首次约 10–30 秒），最后在 `http://localhost:7862` 打开工作台。
+
+### 7. 导入剧本
+
+在「项目」页面上传 `structured_script.json`。
+
+### 8. 绑定音色 → 合成 → 质检 → 导出
+
+各页面提供对应功能（见上文「核心能力」表）。
 
 ---
 
-## 文档索引
+## 为什么不提供一键安装包
+
+IndexTTS2 模型 + Torch + CUDA 运行时 + Python 虚拟环境的总体积可能达到**十几 GB 甚至几十 GB**，而且 GPU 环境与 CUDA 版本、Torch 版本强相关、因人而异。强行打包会形成：
+
+- 体积过大（十多 GB），下载和分发不现实
+- 对已经拥有 IndexTTS2 环境的用户造成大量重复下载和磁盘浪费
+- GPU 版本绑定（CUDA 11.x / 12.x / CPU-only）与用户实际环境不匹配
+
+因此**本仓库不提供包含模型或运行环境的 Windows 安装包、AppImage 或 Docker 镜像**。项目采用「**轻量工作台源码 + 外部推理环境**」的分发方式：
+
+- 工作台代码本身只有数百 KB，clone / 更新快速
+- 用户维护自己的 IndexTTS2 环境（含模型和 CUDA），按需运行
+- 两者只需满足目录约定或环境变量配置即可协作
+
+这是一个有意识的架构选择，而非项目缺陷。
+
+---
+
+## 常见问题
+
+### 找不到 Python 解释器怎么办
+
+检查 `AUDIOBOOK_STUDIO_PYTHON` 环境变量是否设置正确，或确认 `index-tts/.venv` 位于本仓库同级目录。
+
+### 模型放在哪里
+
+由 `AUDIOBOOK_STUDIO_MODEL_DIR` 环境变量控制，默认为本仓库同级 `index-tts/checkpoints`。
+
+### 找不到 FFmpeg 怎么办
+
+安装系统 FFmpeg（`winget install FFmpeg`、`brew install ffmpeg`、`apt install ffmpeg`），或设置 `AUDIOBOOK_STUDIO_FFMPEG` 指向其路径。缺失时仍可启动并导出 WAV。
+
+### 为什么不能直接导入 TXT 或 EPUB
+
+本工作台的输入是 `structured_script.json`——包含角色、章节、段落、情感标注的**结构化剧本**。TXT / EPUB 等纯文本格式需要外部工具先完成文本分析（角色识别、情感研判、段落拆分）再输出 JSON。
+
+### 为什么仓库里没有模型和音色文件
+
+模型与音色属于**外部依赖 / 用户资产**，体积大且具隐私性，按设计不入库（见 `.gitignore`）。模型由 IndexTTS2 侧准备；参考音色由用户在「音色资产」分区录制 / 上传 / 克隆，保存在外置数据目录。
+
+### 合成结果和项目文件保存在哪里
+
+默认在用户主目录下的 `~/AudiobookStudio/`（可通过 `AUDIOBOOK_STUDIO_DATA_DIR` 或 `config.json` 修改），在应用 UI 的「设置」分区也可在线切换。
+
+### MP3 或 M4B 导出失败怎么办
+
+确认 FFmpeg 已安装。失败时中间 WAV 文件仍保留在原位（不丢失），可改用 WAV 导出。
+
+### 是否支持无 GPU 环境
+
+Gradio 界面和项目管理可在无 GPU 环境运行，但实际的 TTS 合成需要 CUDA GPU。合成按钮在加载引擎失败时会明确报错，不静默回退。
+
+### 是否提供 Windows 安装包
+
+不提供。原因见上文「[为什么不提供一键安装包](#为什么不提供一键安装包)」。本工作台以源码形式分发，配合用户自备的 IndexTTS2 推理环境使用。
+
+---
+
+## 不在仓库中的内容
+
+以下内容**不在 git 跟踪**中，用户需自行准备 / 配置：
+
+- `index-tts/`：IndexTTS2 项目（含 `.venv` 和模型 checkpoint）—— 外部依赖。
+- `config.json`：本地配置（含数据目录绝对路径）—— 已被 `.gitignore` 排除。
+- `workspace/`：旧版项目数据 + 合成产物（不入库；V3.1 起默认外置到数据目录）。
+- `voice_library/`：用户参考音频 / 克隆音色（不入库）。
+- `*.wav`、`*.mp3`、`*.m4b`：运行时音频输出（*.wav 已 gitignore；mp3 / m4b 默认在外置数据目录）。
+- `*.log`、`probe_*.txt`：运行时日志 / 探针文件（默认在外置数据目录；本地日志已 gitignore）。
+- `backups/`：本地备份归档。
+- 模型检查点（checkpoint 文件，GB ~ 几十 GB 级）：由用户从 IndexTTS2 官方渠道获取。
+
+---
+
+## 相关文档
 
 | 文档 | 内容 |
 |------|------|
-| `ARCHITECTURE.md` | 总体架构、`structured_script.json` 规范、ADR 决策记录 |
-| `DESIGN.md` / `brand-spec.md` | UI 设计稿与品牌规范（浅色 Stripe 风） |
-| `docs/system_design.md` | 完整系统设计 + Mermaid 类图 / 时序图 |
-| `docs/PRD_补录合成.md` | 补录合成功能 PRD |
-| `docs/设计_补录合成.md` | 补录合成功能系统设计 |
-| `docs/PRD_UI_Redesign.md` | UI 浅色重设计 PRD |
-| `增量设计_O3队列列表+O12暂停恢复.md` 等 | 各增量迭代的设计文档 |
-| `调研报告_*.md` | 功能 / 前端结构对比、开源方案调研 |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | V3.1 系统架构和测试策略 |
+| [`CHANGELOG.md`](CHANGELOG.md) | 完整变更记录 |
+| [`docs/system_design.md`](docs/system_design.md) | 系统详细设计 |
+| [`docs/releases/v3.1.0.md`](docs/releases/v3.1.0.md) | GitHub Release 说明 |
+| [`DESIGN.md`](DESIGN.md) | UI 设计系统（Stripe 浅色招牌风） |
 
 ---
 
-## 不在仓库中的内容（已被 .gitignore 排除）
-
-- `workspace/`：用户项目数据 + 合成产物（约 300M wav），含 `projects/<书名>/structured_script.json`、`segments/`、`output/`
-- `config.json`：含数据目录绝对路径的本地配置
-- `voice_library/`：用户参考音频
-- `*.bak*`：工程师临时备份（含 `app.py.bak-<时间戳>` 这类后缀变体）
-- `*.log` / `tests/run_log.txt`：运行日志
-- `*.wav`：合成音频
-
-> 仓库只保留**源码 + 文档 + 示例 JSON + 测试**，便于他人克隆后基于 WorkBuddy 产出的剧本快速复现。
+*Built with Gradio · IndexTTS2 · Python 3.10*
