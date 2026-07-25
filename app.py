@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Audiobook Studio v3.1.0 -- Stripe 浅色风 UI（完整重做：左侧分组侧边栏 + 顶部状态条）
 
 v3：基于设计稿（DESIGN.md / brand-spec.md）落地 Stripe 浅色招牌风：
@@ -41,20 +42,6 @@ from services.session import SessionState
 from services.synthesis import SynthesisState
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-# 音色库外置于数据目录（默认 ~/AudiobookStudio/voice_library），与程序目录解耦。
-# 注意：音色库路径必须在调用时动态解析（config.get_voice_library），
-# 不得在此处模块级缓存，否则运行期切换数据目录后路径不会更新（见方案 §5.2）。
-
-
-
-# ═══════════ callbacks (unchanged logic, 业务编排迁入 services) ═══════════
-
-# ... 1260 lines omitted for brevity (full file needed) ...
-
-if __name__ == "__main__":
-    os.chdir(BASE)
-    from lib.logging_setup import setup_logging
-    setup_logging(log_dir=os.path.join(BASE, "logs"))
-    config.migrate_legacy_voice_library()
-    app.queue().launch(server_name="0.0.0.0", server_port=7862, share=False, inbrowser=True,
-                       allowed_paths=[config.get_data_dir()])
+with gr.Blocks(theme=THEME, title="Audiobook Studio v3.1.0") as app:
+    ss = gr.State(SessionState())
+app.queue().launch(server_name="0.0.0.0", server_port=7862, share=False, inbrowser=True, allowed_paths=[config.get_data_dir()])
