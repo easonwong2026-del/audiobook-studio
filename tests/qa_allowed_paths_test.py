@@ -121,9 +121,13 @@ def test_none_returns_none(safe_path_func, isolated_data_dir):
 
 
 def test_path_traversal_handled_as_external(safe_path_func, isolated_data_dir):
-    """路径穿越（../../）应被视作外部路径并复制到 tempdir。"""
+    """路径穿越（../）应被视作外部路径并复制到 tempdir。
+
+    注意：只向上跳一级（../），避免在 Linux CI 上跳到
+    根目录 / 导致 PermissionError。
+    """
     traversal = os.path.normpath(
-        os.path.join(isolated_data_dir, "..", "..", "outside.wav")
+        os.path.join(isolated_data_dir, "..", "outside.wav")
     )
     parent = os.path.dirname(traversal)
     os.makedirs(parent, exist_ok=True)
