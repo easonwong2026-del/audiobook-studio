@@ -119,9 +119,9 @@ def test_production_stage_has_internal_navigation_and_check():
     production = _text("ui/components/production_nav.py")
     app = _text("app.py")
     assert '"production-nav"' in navigation
-    assert '"合成中心", "synth"' in production
-    assert '"试听质检", "review"' in production
-    assert '"角色补录", "supplement"' in production
+    assert '"🎛 合成中心", "synth"' in production
+    assert '"🔍 试听质检", "review"' in production
+    assert '"🎤 角色补录", "supplement"' in production
     assert "def refresh_production_check" in app
     assert "production_stage.change(_goto" in app
     tree = ast.parse(app)
@@ -177,7 +177,7 @@ def test_launcher_icon_assets_are_available_in_png_and_multisize_ico():
 def test_theme_keeps_text_readable_and_voice_layout_compact():
     theme = _text("ui/theme.py")
     voice = _text("ui/pages/voice_page.py")
-    assert 'body_background_fill="#edf2ec"' in theme
+    assert 'body_background_fill=SURFACE' in theme
     assert '[data-testid="block-label"]' in theme
     assert ".sidebar .nav-btn" in theme
     assert ".voice-workspace { gap:16px!important;" in theme
