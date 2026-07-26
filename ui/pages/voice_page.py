@@ -24,29 +24,46 @@ def create_voice_page() -> dict:
         v_table = gr.Markdown("<div class='inline-empty'>打开项目后显示角色绑定清单。</div>")
 
         with gr.Group(elem_classes=["binding-workspace"]):
-            gr.Markdown("#### 为角色配置声音")
-            gr.Markdown("从音色库选择、上传文件或直接录制；试听无误后确认绑定。")
-            with gr.Row(equal_height=True):
-                with gr.Column(scale=3):
+            gr.Markdown("#### 角色声音配置流程")
+            gr.Markdown(
+                "<div class='voice-flow-steps'>"
+                "<span><b>①</b> 选择角色</span><span><b>②</b> 选择声音</span>"
+                "<span><b>③</b> 试听确认</span><span><b>④</b> 保存绑定</span>"
+                "</div>"
+            )
+            with gr.Row(equal_height=True, elem_classes=["voice-binding-steps"]):
+                with gr.Column(scale=1, elem_classes=["voice-step-card"]):
+                    gr.Markdown("##### ① 选择角色")
+                    gr.Markdown("先选定要配置声音的角色。")
+                    v_role = gr.Dropdown(
+                        label="角色", choices=[], interactive=True,
+                        info="显示为“角色（声线描述）”",
+                    )
+                with gr.Column(scale=2, elem_classes=["voice-step-card"]):
+                    gr.Markdown("##### ② 选择声音")
+                    gr.Markdown("从音色库选择，或上传 / 录制新的参考音频。")
+                    v_lib = gr.Dropdown(
+                        label="从音色库选择", choices=_builder_lib_voices(), interactive=True,
+                    )
                     v_audio = gr.Audio(
                         label="上传或录制参考音频",
                         type="filepath",
                         sources=["upload", "microphone"],
                     )
-                    v_current = gr.Markdown("当前参考音频：未选择")
-                with gr.Column(scale=2):
-                    v_role = gr.Dropdown(label="角色", choices=[], interactive=True)
+                with gr.Column(scale=1, elem_classes=["voice-step-card"]):
+                    gr.Markdown("##### ③ 试听确认")
+                    gr.Markdown("试听当前选择的声音，确认音质和人设。")
+                    v_preview_btn = gr.Button("试听当前声音", variant="secondary", size="sm")
+                    v_preview_audio = gr.Audio(label="试听结果", type="filepath", interactive=False)
+                with gr.Column(scale=1, elem_classes=["voice-step-card"]):
+                    gr.Markdown("##### ④ 保存绑定")
+                    gr.Markdown("确认无误后，保存到当前角色。")
                     v_bind_category = gr.Dropdown(
                         label="音色分类（可选）", choices=[], value=None, interactive=True,
                     )
-                    v_lib = gr.Dropdown(
-                        label="从音色库选择", choices=_builder_lib_voices(), interactive=True,
-                    )
-                    with gr.Row():
-                        v_preview_btn = gr.Button("试听已绑定声音", size="sm")
-                        v_bind = gr.Button("确认绑定", variant="primary")
+                    v_bind = gr.Button("确认绑定", variant="primary")
             v_bind_msg = gr.Markdown("")
-            v_preview_audio = gr.Audio(label="声音试听", type="filepath", interactive=False)
+            v_current = gr.Markdown("当前参考音频：未选择")
 
         with gr.Accordion("管理声音资产", open=False, elem_classes=["asset-accordion"]):
             gr.Markdown("上传、录制和整理可复用的参考音频；这些操作不会改变当前项目的绑定，直到你点击“确认绑定”。")
