@@ -27,7 +27,9 @@ def test_runtime_version_has_one_current_source():
 
 def test_gradio_runtime_stays_on_supported_major_version():
     requirements = _text("requirements.txt")
-    assert "gradio>=4.44.1,<5" in requirements
+    assert "gradio>=5.50,<6" in requirements
+    assert "huggingface-hub" not in requirements
+    assert "pydantic" not in requirements
 
 
 def test_role_choices_include_description_without_changing_value():
