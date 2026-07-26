@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Audiobook Studio v3.1.1 -- Stripe 浅色风 UI（完整重做：左侧分组侧边栏 + 顶部状态条）
+"""Audiobook Studio v3.2 UI -- 有声书生产工作台。
 
-v3：基于设计稿（DESIGN.md / brand-spec.md）落地 Stripe 浅色招牌风：
-- 主题从暗色（gr.themes.Soft + 注入暗色 <style>）切换为 Stripe 浅色（gr.themes.Default + 浅色令牌）
-- 布局从「顶部 4 Tab」重构为「左侧分组侧边栏（6 分类）+ 右侧主工作区 + 顶部常驻状态条」
-- 业务逻辑（handlers）完全沿用 v2，未改动。
+本次重构把模块式导航改为「工作台 → 项目 → 角色与声音 → 生产与质检 → 交付」
+的生产流程。页面 Builder 负责布局，既有 handler 继续委托给 Service；不改变 TTS、
+队列、持久化或数据协议。
 """
 from __future__ import annotations
 import logging
@@ -17,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ui.theme import THEME, LIGHT_CSS
 from ui.navigation import _goto, _GROUPS, create_nav_buttons
 from ui.shared import create_status_bar
+from ui.components import empty_dashboard_html, project_dashboard_html
 from ui.pages import (
     create_overview_page,
     create_project_page,
@@ -567,7 +567,7 @@ def refresh_supplement_roles(ss):
 
     约定：补录角色下拉 ``sup_role`` 只列「已绑定音色角色」，用
     ``project_manager.build_bound_role_choices(script, bindings)``；刷新时机为
-    ``nav_supplement.click`` 时懒刷新；刷新时机与打开项目链路解耦（阶段三重构后已无 22 元组契约）。
+    进入“生产与质检”阶段时懒刷新；刷新时机与打开项目链路解耦（阶段三重构后已无 22 元组契约）。
     """
     if not ss or not ss.project or not ss.script:
         return gr.update(interactive=False, choices=[], value=None,
@@ -831,7 +831,7 @@ def refresh_bookshelf():
     )
 
 
-def select_project_from_bookshelf(evt, rows):
+def select_project_from_bookshelf(rows, evt: gr.SelectData):
     """点选书架某行 → 回填 p_sel（项目页 Dropdown，唯一项目选择真相源）。"""
     if evt is None or evt.index is None:
         return gr.update()
@@ -897,7 +897,7 @@ def refresh_voice_lib(search, category):
     return df_style.style_dataframe(rows, df_style.VOICE_HEADERS, status_col=None), gr.update(choices=cats, value=category)
 
 
-def select_voice_from_browser(evt, rows):
+def select_voice_from_browser(rows, evt: gr.SelectData):
     """点选音色库某行 → 回填 v_lib（触发既有 v_lib.change 自动试听）+ 喂共享试听器。"""
     if evt is None or evt.index is None:
         return gr.update(), None
@@ -951,9 +951,90 @@ def refresh_categories():
     )
 
 
+def _dashboard_snapshot(ss):
+    """将现有项目快照整理为工作台展示数据。
+
+    这里只读取 ``SessionState`` / ``ProjectSnapshot`` 并决定下一步 UI 文案，不改变
+    项目、队列或任何持久化状态；业务操作仍由既有 Service 和 handler 负责。
+    """
+    if not ss or not ss.project:
+        return empty_dashboard_html()
+
+    try:
+        snap = _snap(ss)
+        if snap is None:
+            return empty_dashboard_html()
+        script, meta = snap.script, snap.meta
+        title = script.get("meta", {}).get("title", ss.project)
+        chapters = script.get("chapters", [])
+        total_chapters = len(chapters)
+        total_segments = getattr(meta, "total_segments", 0)
+        completed_segments = getattr(meta, "completed_count", 0)
+        failed_segments = getattr(meta, "failed_count", 0)
+        statuses = getattr(meta, "segments_status", {}) or {}
+        completed_chapters = sum(
+            1 for chapter in chapters
+            if chapter.get("segments")
+            and all(statuses.get(segment.get("id")) == "done" for segment in chapter["segments"])
+        )
+        roles = script.get("voices", {}) or {}
+        role_total = len(roles)
+        roles_bound = sum(1 for role in roles if ss.bindings.get(role))
+
+        issues: list[tuple[str, str]] = []
+        unbound = role_total - roles_bound
+        if unbound:
+            issues.append(("warning", f"还有 {unbound} 个角色未绑定声音"))
+        if failed_segments:
+            issues.append(("error", f"有 {failed_segments} 个段落需要检查或重新合成"))
+        remaining = max(total_segments - completed_segments, 0)
+        if not unbound and remaining:
+            issues.append(("info", f"还有 {remaining} 个段落等待完成"))
+
+        if unbound:
+            next_step = "配置角色声音"
+            next_detail = "所有角色完成绑定后，才能开始整本书的生产。"
+        elif failed_segments or remaining:
+            next_step = "开始或继续生产"
+            next_detail = "已有结果会自动保留，可随时进入队列继续合成与质检。"
+        else:
+            next_step = "交付成品"
+            next_detail = "章节已全部完成，可导出有声书和字幕文件。"
+
+        state = getattr(ss, "synthesis", None)
+        if state is not None:
+            task_label = f"生产任务 · {getattr(state, 'status', 'unknown')}"
+            task_detail = f"已完成 {getattr(state, 'completed', 0)}/{getattr(state, 'total', 0)} 段"
+        elif completed_segments:
+            task_label = "最近一次生产结果"
+            task_detail = f"项目已完成 {completed_segments}/{total_segments} 段，可继续质检或交付。"
+        else:
+            task_label = "尚未开始生产"
+            task_detail = "完成角色声音配置后，即可按剧本开始合成。"
+
+        return project_dashboard_html(
+            title=title,
+            project_name=ss.project,
+            chapters_done=completed_chapters,
+            chapters_total=total_chapters,
+            segments_done=completed_segments,
+            segments_total=total_segments,
+            roles_bound=roles_bound,
+            roles_total=role_total,
+            task_label=task_label,
+            task_detail=task_detail,
+            next_step=next_step,
+            next_detail=next_detail,
+            issues=issues,
+        )
+    except Exception as exc:
+        logger.warning("刷新工作台状态失败: %s", exc)
+        return empty_dashboard_html()
+
+
 def refresh_overview(ss):
-    """刷新概览页顶栏状态 + 书架。"""
-    return refresh_top_status(ss), refresh_bookshelf()
+    """刷新工作台的项目状态、生产摘要、待办和项目书架。"""
+    return (*_dashboard_snapshot(ss), refresh_bookshelf())
 
 
 def refresh_p_sel(name):
@@ -976,7 +1057,10 @@ def _open_chain_rest(event):
     e = e.then(render_preview, [ss], [s_preview_df, s_chapters_sel])
     e = e.then(refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
     e = e.then(refresh_categories, [], [v_bind_category, v_save_category])
-    e = e.then(refresh_overview, [ss], [ov_status, ov_bookshelf])
+    e = e.then(
+        refresh_overview, [ss],
+        [ov_status, ov_progress, ov_task, ov_issues, ov_bookshelf],
+    )
     e = e.then(refresh_p_sel, [p_sel], [p_sel])
     return e
 
@@ -999,9 +1083,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         nav_project = nav["nav_project"]
         nav_voices = nav["nav_voices"]
         nav_synth = nav["nav_synth"]
-        nav_review = nav["nav_review"]
         nav_export = nav["nav_export"]
-        nav_supplement = nav["nav_supplement"]
 
         # ═══ 右侧主工作区 ═══
         with gr.Column(scale=1, elem_classes=["main-area"]) as main_col:
@@ -1010,8 +1092,12 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             ov_page = create_overview_page()
             grp_overview = ov_page["group"]
             ov_status = ov_page["ov_status"]
+            ov_progress = ov_page["ov_progress"]
+            ov_task = ov_page["ov_task"]
+            ov_issues = ov_page["ov_issues"]
             ov_bookshelf = ov_page["ov_bookshelf"]
             ov_open = ov_page["ov_open"]
+            ov_voices = ov_page["ov_voices"]
             ov_synth = ov_page["ov_synth"]
             ov_export = ov_page["ov_export"]
 
@@ -1145,7 +1231,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     nav_overview.click(
         lambda: _goto("overview"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-overview')?.classList.add('active'); }").then(
-        lambda s: (refresh_top_status(s), refresh_bookshelf()), [ss], [ov_status, ov_bookshelf])
+        refresh_overview, [ss], [ov_status, ov_progress, ov_task, ov_issues, ov_bookshelf])
     nav_project.click(
         lambda: _goto("project"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-project')?.classList.add('active'); }")
@@ -1161,21 +1247,14 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
     nav_synth.click(
         lambda: _goto("synth"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-synth')?.classList.add('active'); }")
-    nav_review.click(
-        lambda: _goto("review"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-review')?.classList.add('active'); }").then(
+        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-synth')?.classList.add('active'); }").then(
         preview_chapters, [ss], [e_chapter_table, e_seg_audio, e_seg_sel]).then(
-        preview_chapter_options, [ss], [e_chapter_sel])
+        preview_chapter_options, [ss], [e_chapter_sel]).then(
+        refresh_queue_list, [ss], [s_queue_list]).then(
+        refresh_supplement_roles, [ss], [sup_role])
     nav_export.click(
         lambda: _goto("export"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-export')?.classList.add('active'); }").then(
-        preview_chapters, [ss], [e_chapter_table, e_seg_audio, e_seg_sel]).then(
-        preview_chapter_options, [ss], [e_chapter_sel])
-    nav_supplement.click(
-        lambda: _goto("supplement"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-supplement')?.classList.add('active'); }").then(
-        refresh_supplement_roles, [ss], [sup_role])
+        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-export')?.classList.add('active'); }")
 
     # ── 概览页：书架点选 → 回填 p_sel → open_project 首步 → 打开链刷新 → 切页 ──
     chain = ov_bookshelf.select(
@@ -1191,14 +1270,24 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         lambda: _goto("project"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-project')?.classList.add('active'); }"    ).then(open_project, [p_sel, ss], [p_summary, v_table, v_role, v_lib, s_log, v_status])
     _open_chain_rest(chain)
+    ov_voices.click(
+        lambda: _goto("voices"), None, _GROUPS,
+        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-voices')?.classList.add('active'); }").then(
+        lambda: (gr.update(choices=voice_lib.list_categories() or ["未分类"]),
+                 gr.update(choices=voice_lib.list_categories() or ["未分类"], value=None),
+                 gr.update(choices=(voice_lib.list_categories() or []) + ["— 新建 —"] if voice_lib.list_categories() else ["未分类", "— 新建 —"], value="未分类")),
+        [], [v_bind_category, v_lib_category, v_save_category]).then(
+        refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
     ov_synth.click(
         lambda: _goto("synth"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-synth')?.classList.add('active'); }")
+        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-synth')?.classList.add('active'); }").then(
+        preview_chapters, [ss], [e_chapter_table, e_seg_audio, e_seg_sel]).then(
+        preview_chapter_options, [ss], [e_chapter_sel]).then(
+        refresh_queue_list, [ss], [s_queue_list]).then(
+        refresh_supplement_roles, [ss], [sup_role])
     ov_export.click(
         lambda: _goto("export"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-export')?.classList.add('active'); }").then(
-        preview_chapters, [ss], [e_chapter_table, e_seg_audio, e_seg_sel]).then(
-        preview_chapter_options, [ss], [e_chapter_sel])
+        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-export')?.classList.add('active'); }")
 
     # ═══════════ events（业务接线，沿用 v2） ═══════════
     p_refresh.click(refresh_projects_full, [], [p_sel])
