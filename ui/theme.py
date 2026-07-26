@@ -263,6 +263,19 @@ button[aria-label*="Play"] { border-radius:999px!important; background:#d4f56a!i
 .stage-row { gap:16px; }.stage-card { background:#fbfcfb; border:1px solid #e7ece7; border-radius:14px; padding:4px 16px 16px; }
 .binding-workspace,.production-command,.review-workspace,.delivery-workspace { border:1px solid #e5ebe5!important; box-shadow:none!important; background:#fbfcfb!important; }
 .production-command { border-color:#dbe9cc!important; background:#fcfef9!important; }
+.voice-flow-steps { display:flex; flex-wrap:wrap; gap:8px; margin:4px 0 14px; }
+.voice-flow-steps span { display:inline-flex; align-items:center; gap:5px; padding:7px 11px; border-radius:999px; background:#f0f6e8; color:#43553e; font-size:12px; font-weight:600; }
+.voice-flow-steps b { color:#6d8d1d; }
+.voice-binding-steps { gap:10px!important; align-items:stretch!important; }
+.voice-step-card { background:#ffffff!important; border:1px solid #e7ece7!important; border-radius:12px!important; padding:4px 12px 12px!important; min-height:214px!important; }
+.voice-step-card h5 { margin-bottom:4px!important; }
+.voice-step-card .gr-markdown { color:#6b746d!important; font-size:12px!important; }
+.production-tabs { margin:8px 0 12px!important; }
+.production-tabs .wrap { display:flex!important; gap:8px!important; border:0!important; background:transparent!important; }
+.production-tabs label { flex:1!important; border:1px solid #dce6d8!important; border-radius:999px!important; background:#ffffff!important; color:#526052!important; padding:9px 14px!important; text-align:center!important; cursor:pointer!important; }
+.production-tabs label:has(input:checked) { background:#d4f56a!important; border-color:#d4f56a!important; color:#0a0a0a!important; }
+.production-check { margin-top:10px!important; padding:12px 14px!important; border:1px solid #e4ebe1!important; border-radius:12px!important; background:#fbfdf9!important; }
+.export-default-hint { color:#5f6c61!important; font-size:12px!important; margin:5px 0 10px!important; }
 .advanced-settings,.asset-accordion,.settings-accordion,.supplement-accordion,.run-log { border:1px solid #e6ebe6!important; border-radius:12px!important; margin-top:12px!important; }
 .run-log textarea { background:#151b16!important; color:#dce6dc!important; border-color:#263126!important; }
 #grp-review { margin-top:16px!important; } #grp-supplement { margin-top:8px!important; }

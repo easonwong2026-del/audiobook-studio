@@ -1,10 +1,16 @@
 """项目阶段 UI builder。"""
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import gradio as gr
 
 from lib import config
 from services import ProjectService
+
+
+_EXAMPLE_SCRIPT_PATH = str(Path(__file__).resolve().parents[2] / "structured_script.example.json")
 
 
 def create_project_page() -> dict:
@@ -17,6 +23,13 @@ def create_project_page() -> dict:
             with gr.Column(scale=1, elem_classes=["stage-card"]):
                 gr.Markdown("#### 新建项目")
                 gr.Markdown("导入由前置脚本工具生成的 `structured_script.json`。")
+                gr.Markdown("第一次使用？先下载示例，查看角色、章节和段落的格式。")
+                gr.DownloadButton(
+                    "下载示例 structured_script.json",
+                    value=_EXAMPLE_SCRIPT_PATH,
+                    variant="secondary",
+                    size="sm",
+                )
                 p_name = gr.Textbox(label="项目名称", placeholder="例如：甲方来了")
                 p_script = gr.File(label="结构化书稿", file_types=[".json"])
                 p_create = gr.Button("创建项目", variant="primary")
@@ -41,7 +54,7 @@ def create_project_page() -> dict:
             gr.Markdown("项目、音色和产物默认保存在独立数据目录；更改后会立即应用到本会话。")
             data_dir_box = gr.Textbox(
                 label="数据保存位置",
-                value=config.get_data_dir(),
+                value=os.path.normpath(config.get_data_dir()),
                 placeholder="例如：D:\\AudiobookStudio",
             )
             with gr.Row():

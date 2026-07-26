@@ -17,6 +17,10 @@ def create_export_page() -> dict:
                 e_fmt = gr.Dropdown(label="格式", choices=["mp3", "m4b", "wav"], value="wav")
                 e_br = gr.Dropdown(label="比特率", choices=["128k", "192k", "320k"], value="192k")
             e_save_dir = gr.Textbox(label="保存位置（留空使用项目默认目录）", placeholder="例如：D:\\有声书\\输出")
+            e_save_dir_hint = gr.Markdown(
+                "项目默认目录：打开项目后显示。留空保存位置即可使用该目录。",
+                elem_classes=["export-default-hint"],
+            )
             e_go = gr.Button("导出成品", variant="primary")
             e_out = gr.File(label="下载成品", interactive=False)
             e_path = gr.Textbox(label="导出状态", interactive=False)
@@ -41,6 +45,7 @@ def create_export_page() -> dict:
         "e_fmt": e_fmt,
         "e_br": e_br,
         "e_save_dir": e_save_dir,
+        "e_save_dir_hint": e_save_dir_hint,
         "e_go": e_go,
         "e_out": e_out,
         "e_path": e_path,

@@ -1,0 +1,32 @@
+{
+  "meta": {
+    "title": "示例有声书",
+    "author": "Audiobook Studio"
+  },
+  "voices": {
+    "旁白": {
+      "description": "沉稳男中音"
+    },
+    "小雨": {
+      "description": "清亮女声"
+    }
+  },
+  "chapters": [
+    {
+      "id": 1,
+      "title": "第一章 示例",
+      "segments": [
+        {
+          "id": "1-001",
+          "role": "旁白",
+          "text": "这是一个结构化有声书剧本示例。"
+        },
+        {
+          "id": "1-002",
+          "role": "小雨",
+          "text": "选择角色和声音后，就可以开始试听。"
+        }
+      ]
+    }
+  ]
+}

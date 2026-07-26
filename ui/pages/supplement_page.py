@@ -50,7 +50,12 @@ def create_supplement_page() -> dict:
                     sup_emo_alpha = gr.Slider(label="情绪强度", minimum=0.0, maximum=1.0, value=1.0, step=0.1)
                     sup_rate = gr.Slider(label="语速", minimum=0.7, maximum=1.5, value=1.0, step=0.1)
                 with gr.Row():
-                    sup_quality = gr.Dropdown(label="质量 / 速度", choices=[1, 2, 3], value=2)
+                    sup_quality = gr.Dropdown(
+                        label="合成质量",
+                        choices=[("快速", 1), ("标准", 2), ("高质量", 3)],
+                        value=2,
+                        info="快速更省时，标准适合日常生产，高质量更慢但更稳。",
+                    )
                     sup_voice = gr.Dropdown(label="临时替换声音（可选）", choices=_browse_voices(), value=None, scale=2)
 
             sup_mode = gr.Radio(label="输入来源", value="paste", choices=[("粘贴台词", "paste"), ("小 JSON", "json")])

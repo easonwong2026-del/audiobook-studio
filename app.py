@@ -1094,10 +1094,11 @@ def refresh_p_sel(name):
 
 
 def _open_chain_rest(event):
-    """把打开项目后的 10 步刷新接到 event 的 .then 链上（3 入口复用）。
+    """把打开项目后的统一刷新接到 event 的 .then 链上（3 入口复用）。
 
     顺序与原 22 元组全量刷新契约一致，覆盖：顶栏 / 章节表 / 章节试听
-    选项 / 队列列表 / 章节树 / 合成预览 / 音色库 / 分类下拉 / 概览 / 项目下拉。
+    选项 / 队列列表 / 章节树 / 合成预览 / 音色库 / 分类下拉 / 生产检查 /
+    默认导出目录 / 概览 / 项目下拉。
     """
     e = event
     e = e.then(refresh_top_status, [ss], [top_status])
