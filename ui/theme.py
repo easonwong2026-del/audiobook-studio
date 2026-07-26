@@ -253,6 +253,23 @@ button:hover, .gr-button:hover {{ transform:translateY(-1px)!important; }}
 button[aria-label*="Play"] {{ border-radius:999px!important; background:{ACCENT}!important; color:{TEXT_PRIMARY}!important; }}
 .play-round {{ border-radius:999px!important; background:{ACCENT}!important; }}
 
+/* ===== 音频来源选择图标按钮（复位全局 button 样式） ===== */
+.source-selection .icon {{
+  background:transparent!important; border:none!important; padding:4px!important;
+  width:22px!important; height:22px!important; border-radius:6px!important;
+  color:var(--neutral-400)!important; cursor:pointer!important;
+}}
+.source-selection .icon:hover,
+.source-selection .icon:focus {{
+  color:var(--color-accent)!important;
+}}
+.source-selection .icon.selected {{
+  color:var(--color-accent)!important;
+}}
+.source-selection .icon svg {{
+  width:18px!important; height:18px!important; display:block!important;
+}}
+
 /* ===== 细滚动条 ===== */
 ::-webkit-scrollbar {{ width:8px; height:8px; }}
 ::-webkit-scrollbar-thumb {{ background:#c5c5c5; border-radius:4px; }}
@@ -299,11 +316,12 @@ button[aria-label*="Play"] {{ border-radius:999px!important; background:{ACCENT}
 .binding-workspace,.production-command,.review-workspace,.delivery-workspace {{ border:1px solid {BORDER}!important; box-shadow:none!important; background:{PANEL}!important; }}
 .production-command {{ border-color:#dbe9cc!important; background:#fcfef9!important; }}
 .voice-flow-steps {{ display:flex; flex-wrap:wrap; gap:8px; margin:4px 0 14px; }}
-.voice-flow-steps span {{ display:inline-flex; align-items:center; gap:5px; padding:7px 11px; border-radius:999px; background:#f0f6e8; color:#43553e; font-size:12px; font-weight:600; }}
-.voice-flow-steps b {{ color:#6d8d1d; }}
+.voice-flow-steps span {{ display:inline-flex; align-items:center; gap:5px; padding:8px 12px; border-radius:999px; background:{PANEL}; color:{TEXT_MUTED}; font-size:12px; font-weight:600; }}
+.voice-flow-steps span.is-active {{ background:{ACCENT_SOFT}; color:{ACCENT_DEEP}; }}
+.voice-flow-steps b {{ color:{ACCENT_DEEP}; }}
 .voice-workspace {{ gap:16px!important; align-items:start!important; flex-wrap:nowrap!important; }}
 .role-list-panel,.voice-config-panel {{ min-width:0!important; align-self:start!important; }}
-.voice-workspace > .role-list-panel {{ flex:0 0 340px!important; }}
+.voice-workspace > .role-list-panel {{ flex:0 0 277px!important; }}
 .role-list-panel {{ padding:16px!important; border:1px solid {BORDER}!important; border-radius:14px!important; background:{PANEL}!important; }}
 .role-list-panel > .gr-markdown:first-child h3 {{ margin-top:0!important; margin-bottom:6px!important; }}
 .role-list-panel > .gr-markdown:nth-child(2) {{ color:{TEXT_MUTED}!important; font-size:12px!important; margin:0 0 10px!important; }}
@@ -311,7 +329,7 @@ button[aria-label*="Play"] {{ border-radius:999px!important; background:{ACCENT}
 .role-list-search input {{ background:{CARD}!important; }}
 .role-management-list {{ max-height:560px!important; overflow:auto!important; border:1px solid {BORDER}!important; border-radius:12px!important; background:{CARD}!important; padding:4px!important; }}
 .role-management-list .wrap {{ display:flex!important; flex-direction:column!important; width:100%!important; max-height:550px!important; overflow:auto!important; }}
-.role-management-list label {{ display:flex!important; align-items:flex-start!important; width:100%!important; box-sizing:border-box!important; min-height:64px!important; padding:10px 12px!important; margin:0!important; border-bottom:1px solid #edf0ed!important; border-radius:9px!important; background:{CARD}!important; white-space:pre-line!important; line-height:1.35!important; color:{TEXT_PRIMARY}!important; cursor:pointer!important; transition:background .12s ease,border-color .12s ease!important; }}
+.role-management-list label {{ display:flex!important; align-items:flex-start!important; width:100%!important; box-sizing:border-box!important; min-height:46px!important; padding:10px 12px!important; margin:0!important; border-bottom:1px solid #edf0ed!important; border-radius:9px!important; background:{CARD}!important; white-space:pre-line!important; line-height:1.35!important; color:{TEXT_PRIMARY}!important; cursor:pointer!important; transition:background .12s ease,border-color .12s ease!important; }}
 .role-management-list label:hover {{ background:#eef6e7!important; }}
 .role-management-list label:has(input:checked) {{ background:{ACCENT_SOFT}!important; border-left:3px solid {ACCENT_DEEP}!important; color:{TEXT_PRIMARY}!important; }}
 .role-management-list label span {{ white-space:pre-line!important; }}
@@ -319,11 +337,15 @@ button[aria-label*="Play"] {{ border-radius:999px!important; background:{ACCENT}
 .role-list-panel > .gr-markdown:last-child {{ color:{TEXT_MUTED}!important; font-size:12px!important; margin:8px 0 0!important; }}
 .voice-config-panel > .gr-markdown:first-child h3 {{ margin-top:4px!important; margin-bottom:12px!important; }}
 .voice-config-steps {{ display:flex!important; flex-direction:column!important; gap:10px!important; }}
+.voice-binding-layout {{ gap:12px!important; align-items:start!important; flex-wrap:nowrap!important; }}
+.voice-choice-card {{ flex:1 1 auto!important; min-width:0!important; }}
+.voice-save-card {{ flex:0 0 134px!important; min-width:134px!important; }}
+.voice-save-card .gr-button {{ width:100%!important; min-height:153px!important; height:153px!important; }}
 .voice-config-footer {{ gap:10px!important; align-items:start!important; }}
 .voice-config-footer > * {{ min-width:0!important; }}
 .voice-binding-steps {{ display:grid!important; grid-template-columns:1fr!important; gap:10px!important; align-items:start!important; }}
 .voice-step-card {{ width:auto!important; min-width:0!important; background:{CARD}!important; border:1px solid {BORDER}!important; border-radius:12px!important; padding:4px 12px 12px!important; min-height:0!important; align-self:start!important; }}
-.voice-reference-upload .audio-container button.boundedheight {{ height:176px!important; min-height:176px!important; }}
+.voice-reference-upload .audio-container button.boundedheight {{ height:150px!important; min-height:150px!important; }}
 .voice-step-card h5 {{ margin-bottom:4px!important; color:{TEXT_PRIMARY}!important; }}
 .voice-step-card .gr-markdown {{ color:{TEXT_MUTED}!important; font-size:12px!important; }}
 .production-tabs {{ margin:8px 0 12px!important; }}
@@ -338,6 +360,13 @@ button[aria-label*="Play"] {{ border-radius:999px!important; background:{ACCENT}
 #grp-review > :first-child {{ font-size:20px!important; margin-bottom:2px!important; }}
 #grp-review > :nth-child(2) {{ margin-bottom:14px!important; }}
 
+
+/* ===== 生产内部导航 (Pencil 三级 tab) ===== */
+#grp-production-nav {{ margin-top:0!important; padding:8px 0 4px!important; background:transparent!important; border:none!important; box-shadow:none!important; }}
+#grp-production-nav .production-tabs {{ margin:0!important; }}
+.quick-actions {{ gap:8px!important; }}
+.quick-actions .gr-button {{ margin-top:0!important; }}
+
 @media (max-width: 900px) {{
   .gradio-container {{ padding:12px!important; }}
   .sidebar {{ min-width:100%!important; margin:0 0 12px!important;
@@ -347,6 +376,8 @@ button[aria-label*="Play"] {{ border-radius:999px!important; background:{ACCENT}
   .workbench-hero {{ padding:22px; }}.hero-progress {{ display:none; }}
   .main-area {{ padding:8px 12px 20px!important; }}
   .voice-workspace {{ flex-wrap:wrap!important; }}
+  .voice-binding-layout {{ flex-wrap:wrap!important; }}
+  .voice-save-card {{ flex:1 1 100%!important; min-width:100%!important; }}
   .voice-config-footer {{ flex-wrap:wrap!important; }}
   .voice-config-footer > * {{ min-width:100%!important; }}
   .voice-binding-steps {{ grid-template-columns:1fr!important; }}

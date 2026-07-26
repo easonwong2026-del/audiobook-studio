@@ -1,4 +1,4 @@
-"""工作台状态卡的纯展示层。"""
+"""工作台状态卡的纯展示层 — 对齐 Pencil 工作台画板。"""
 from __future__ import annotations
 
 from html import escape
@@ -28,7 +28,7 @@ def _issues_html(issues: Iterable[tuple[str, str]]) -> str:
 
 
 def empty_dashboard_html() -> tuple[str, str, str, str]:
-    """返回尚未选择项目时的四个工作台展示块。"""
+    """返回尚未选择项目时的四个工作台展示块 (Pencil 空状态)。"""
     return (
         """
         <section class="workbench-hero empty-state">
@@ -72,7 +72,7 @@ def project_dashboard_html(
     next_detail: str,
     issues: Iterable[tuple[str, str]],
 ) -> tuple[str, str, str, str]:
-    """把工作台所需的摘要数据渲染为四个独立 HTML 区块。"""
+    """把工作台所需的摘要数据渲染为四个独立 HTML 区块 (Pencil 对齐版)。"""
     safe_title = escape(title)
     safe_project = escape(project_name)
     safe_task_label = escape(task_label)
@@ -81,30 +81,46 @@ def project_dashboard_html(
     safe_next_detail = escape(next_detail)
     segment_percent = round((segments_done / segments_total * 100) if segments_total else 0)
     voice_percent = round((roles_bound / roles_total * 100) if roles_total else 0)
+
     header = f"""
     <section class="workbench-hero">
       <div>
-        <span class="eyebrow">当前项目 · {safe_project}</span>
+        <span class="eyebrow">{safe_project}</span>
         <h2>{safe_title}</h2>
-        <p>查看生产状态，并从下一步操作继续制作。</p>
+        <p>查看生产状态，从下一步继续制作。</p>
       </div>
       <div class="hero-progress"><span>{segment_percent}%</span><small>段落完成度</small></div>
     </section>
     """
     status = f"""
     <div class="dashboard-metrics">
-      <div class="metric-card"><span>完成章节</span><strong>{chapters_done}<i>/</i>{chapters_total}</strong><small>章节全部段落已完成</small></div>
-      <div class="metric-card"><span>合成进度</span><strong>{segments_done}<i>/</i>{segments_total}</strong><div class="metric-track"><b style="width:{segment_percent}%"></b></div></div>
-      <div class="metric-card"><span>角色绑定</span><strong>{roles_bound}<i>/</i>{roles_total}</strong><div class="metric-track voices"><b style="width:{voice_percent}%"></b></div></div>
+      <div class="metric-card">
+        <span>完成章节</span>
+        <strong>{chapters_done}<i>/</i>{chapters_total}</strong>
+        <small>章节全部段落已完成</small>
+      </div>
+      <div class="metric-card">
+        <span>合成进度</span>
+        <strong>{segments_done}<i>/</i>{segments_total}</strong>
+        <div class="metric-track"><b style="width:{segment_percent}%"></b></div>
+      </div>
+      <div class="metric-card">
+        <span>角色绑定</span>
+        <strong>{roles_bound}<i>/</i>{roles_total}</strong>
+        <div class="metric-track voices"><b style="width:{voice_percent}%"></b></div>
+      </div>
     </div>
     <div class="workbench-card next-step-card">
-      <div class="card-eyebrow">下一步</div><strong>{safe_next_step}</strong><p>{safe_next_detail}</p>
+      <div class="card-eyebrow">下一步</div>
+      <strong>{safe_next_step}</strong>
+      <p>{safe_next_detail}</p>
     </div>
     """
     task = f"""
     <div class="workbench-card task-card">
       <div class="card-eyebrow">最近任务</div>
-      <strong>{safe_task_label}</strong><p>{safe_task_detail}</p>
+      <strong>{safe_task_label}</strong>
+      <p>{safe_task_detail}</p>
     </div>
     """
     return header, status, task, _issues_html(issues)

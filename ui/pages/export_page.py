@@ -1,4 +1,4 @@
-"""交付阶段 UI builder。"""
+"""交付阶段 UI builder — 对齐 Pencil 交付·导出成品画板。"""
 from __future__ import annotations
 
 import gradio as gr
@@ -7,17 +7,17 @@ import gradio as gr
 def create_export_page() -> dict:
     """创建成品与字幕交付页面。"""
     with gr.Group(visible=False, elem_id="grp-export") as grp_export:
-        gr.Markdown("### 交付设置")
-
         with gr.Group(elem_classes=["delivery-workspace"]):
-            gr.Markdown("#### 导出有声书")
-            gr.Markdown("导出前请确认章节试听无误。WAV 无需转码，MP3 和 M4B 需要可用的 FFmpeg。")
+            gr.Markdown("##### 导出有声书")
             with gr.Row():
                 e_fmt = gr.Dropdown(label="格式", choices=["mp3", "m4b", "wav"], value="wav")
                 e_br = gr.Dropdown(label="比特率", choices=["128k", "192k", "320k"], value="192k")
-            e_save_dir = gr.Textbox(label="保存位置（留空使用项目默认目录）", placeholder="例如：D:\\有声书\\输出")
+            e_save_dir = gr.Textbox(
+                label="保存位置",
+                placeholder="留空使用项目默认目录",
+            )
             e_save_dir_hint = gr.Markdown(
-                "项目默认目录：打开项目后显示。留空保存位置即可使用该目录。",
+                "项目默认目录在打开项目后显示。留空即使用该目录。",
                 elem_classes=["export-default-hint"],
             )
             e_go = gr.Button("导出成品", variant="primary")
@@ -25,8 +25,7 @@ def create_export_page() -> dict:
             e_path = gr.Textbox(label="导出状态", interactive=False)
 
         with gr.Group(elem_classes=["delivery-workspace"]):
-            gr.Markdown("#### 字幕文件")
-            gr.Markdown("字幕可独立生成，不会重新合成音频。")
+            gr.Markdown("##### 字幕文件")
             with gr.Row():
                 e_subtitle = gr.Radio(
                     label="字幕格式",

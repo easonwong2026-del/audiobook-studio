@@ -1,14 +1,13 @@
-"""生产阶段中的角色补录 UI builder。"""
+"""生产阶段中的角色补录 UI builder — 对齐 Pencil 角色补录画板。"""
 from __future__ import annotations
 
 import gradio as gr
 
 
 def create_supplement_page() -> dict:
-    """创建非主流程的角色补录工具，默认收纳以避免干扰常规生产。"""
+    """创建角色补录工具。"""
     with gr.Group(visible=False, elem_id="grp-supplement") as grp_supplement:
         with gr.Accordion("角色补录（可选）", open=False, elem_classes=["supplement-accordion"]):
-            gr.Markdown("为已绑定声音的角色补录额外台词。补录音频不会写入整本书的自动拼接。")
             with gr.Row():
                 sup_role = gr.Dropdown(
                     label="角色", choices=[], value=None, interactive=False, scale=4,
@@ -19,18 +18,17 @@ def create_supplement_page() -> dict:
             with gr.Tabs():
                 with gr.Tab("粘贴台词"):
                     sup_text = gr.Textbox(
-                        label="每行一句", lines=6, placeholder="第一句\n第二句\n第三句",
+                        label="每行一句", lines=6,
+                        placeholder="第一句\n第二句\n第三句",
                     )
-                    sup_split_punct = gr.Checkbox(label="按标点拆分长段", value=True)
-                with gr.Tab("导入小 JSON"):
-                    sup_json = gr.File(
-                        label="单角色小 JSON", file_types=[".json"],
-                    )
+                    sup_split_punct = gr.Checkbox(label="按标点拆分", value=True)
+                with gr.Tab("导入 JSON"):
+                    sup_json = gr.File(label="单角色小 JSON", file_types=[".json"])
                     sup_json_parse = gr.Button("解析内容", size="sm")
                     sup_json_role = gr.State("")
                     sup_json_lines = gr.State([])
 
-            with gr.Accordion("补录高级设置", open=False):
+            with gr.Accordion("补录设置", open=False):
                 with gr.Row():
                     sup_emotion = gr.Dropdown(
                         label="情感", value="(按默认)",
@@ -44,7 +42,6 @@ def create_supplement_page() -> dict:
                         label="合成质量",
                         choices=[("快速", 1), ("标准", 2), ("高质量", 3)],
                         value=2,
-                        info="快速更省时，标准适合日常生产，高质量更慢但更稳。",
                     )
                     sup_voice = gr.Dropdown(label="临时替换声音（可选）", choices=[], value=None, scale=2)
 
@@ -62,7 +59,7 @@ def create_supplement_page() -> dict:
             with gr.Row():
                 sup_format = gr.Dropdown(label="格式", choices=["wav", "mp3", "m4b"], value="mp3")
                 sup_bitrate = gr.Dropdown(label="比特率", choices=["128k", "192k", "320k"], value="192k")
-                sup_export = gr.Button("导出补录音频", variant="secondary")
+                sup_export = gr.Button("导出", variant="secondary")
             sup_out = gr.File(label="下载补录音频", interactive=False)
             sup_path = gr.Textbox(label="文件路径", interactive=False)
 
