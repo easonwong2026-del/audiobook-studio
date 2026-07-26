@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audiobook Studio v3.2 UI -- 有声书生产工作台。
+"""Audiobook Studio v3.2.0 UI -- 有声书生产工作台。
 
 本次重构把模块式导航改为「工作台 → 项目 → 角色与声音 → 生产与质检 → 交付」
 的生产流程。页面 Builder 负责布局，既有 handler 继续委托给 Service；不改变 TTS、
@@ -16,7 +16,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ui.theme import THEME, LIGHT_CSS
 from ui.navigation import _goto, _GROUPS, create_nav_buttons
 from ui.shared import create_status_bar
-from ui.components import empty_dashboard_html, project_dashboard_html
+from ui.components import (
+    empty_dashboard_html,
+    create_production_navigation,
+    format_bound_role_choices,
+    format_role_choices,
+    format_role_label,
+    project_dashboard_html,
+)
 from ui.pages import (
     create_overview_page,
     create_project_page,
@@ -96,7 +103,7 @@ def open_project(name, ss):
         ss.set_project(name, snap.script, snap.bindings)
         ss.set_snapshot(snap)
         role_categories = snap.role_categories
-        choices = _pm.build_role_choices(snap.script, ss.bindings, role_categories)
+        choices = format_role_choices(snap.script, ss.bindings, role_categories)
         roles = list(snap.script.get("voices",{}).keys())
         vcount = len(roles)
         bound = sum(1 for v in ss.bindings.values() if v)
@@ -113,14 +120,14 @@ def open_project(name, ss):
         existing = scan_existing_raw(snap, seg_dir)
         log_init = "\n".join(existing[-15:]) if existing else "等待音色配置完成后开始合成..."
 
-        vtable = "| 角色 | 声线 | 音频 |\n|------|------|------|\n"
+        vtable = "| 角色（声线） | 绑定状态 |\n|------|------|\n"
         for n,i in snap.script.get("voices",{}).items():
             a = ss.bindings.get(n)
             s = f"<span class='status-ok'>✅</span> {os.path.basename(a)}" if a else "<span class='status-warn'>⚠ 待绑定</span>"
-            vtable += f"| {n} | {i.get('description','')} | {s} |\n"
+            vtable += f"| {format_role_label(n, i)} | {s} |\n"
 
         return (info,
-                gr.update(visible=True, value=vtable),
+        gr.update(visible=True, value=vtable),
                 gr.update(choices=choices,value=choices[0][1] if choices else None),
                 gr.update(choices=_lib_voices(),value=None),
                 log_init,
@@ -161,7 +168,7 @@ def apply_data_dir(new_dir):
     if not new_dir or not new_dir.strip():
         return "⚠ 请填写保存位置", config.get_data_dir()
     try:
-        d = ProjectService.set_data_dir(new_dir.strip())
+        d = os.path.normpath(ProjectService.set_data_dir(new_dir.strip()))
         return f"✅ 数据目录已设置为：{d}（本会话立即生效）", d
     except Exception as e:
         return f"❌ 设置失败：{e}", config.get_data_dir()
@@ -180,8 +187,10 @@ def open_data_dir():
 def _voice_status(s,b):
     rows=[]
     for n,i in s.get("voices",{}).items():
-        a=b.get(n);rows.append(f"|{n}|{i.get('description','')}|{'<span class=status-ok>✅</span>' if a else '<span class=status-warn>⚠</span>'}")
-    return "|角色|声线|状态|\n|------|------|------|\n"+"\n".join(rows)
+        a=b.get(n)
+        status = '<span class=status-ok>✅ 已绑定</span>' if a else '<span class=status-warn>⚠ 待绑定</span>'
+        rows.append(f"|{format_role_label(n, i)}|{status}|")
+    return "|角色（声线）|状态|\n|------|------|\n"+"\n".join(rows)
 
 def _lib_voices():
     vlib = config.get_voice_library()
@@ -209,19 +218,19 @@ def bind_voice(role, audio_file, from_lib, ss):
     ss.set_snapshot(snap)
     ss.bindings = snap.bindings
     rc = snap.role_categories
-    rchoices = _pm.build_role_choices(snap.script, ss.bindings, rc)
-    return f"{role} 已绑定", _voice_status(snap.script, ss.bindings), gr.update(), gr.update(choices=rchoices, value=role)
+    rchoices = format_role_choices(snap.script, ss.bindings, rc)
+    return f"{format_role_label(role, snap.script.get('voices', {}).get(role))} 已绑定", _voice_status(snap.script, ss.bindings), gr.update(), gr.update(choices=rchoices, value=role)
 
-def preview_bound_voice(role, ss):
-    """试听 Tab1 当前所选角色已绑定的参考音色（D4 完善）。
+def preview_bound_voice(role, audio_file, from_lib, ss):
+    """试听当前选择的声音，未选择候选声音时回退到已绑定声音。
 
-    取 ss.bindings[role] 作为参考音频；若存在且文件存在，则初始化引擎后用三句测试句
-    （陈述 / 疑问 / 感叹）试音，把三句拼接成一段连续音频返回，便于用单一 ``gr.Audio``
-    组件完整播放。否则返回 None。
+    新绑定流程在保存前就提供试听，确保用户试听的是当前上传/音色库候选音频，
+    而不是误把上一次已经绑定的声音当成待确认声音。
     """
-    if not role:
+    if not role or not ss:
         return None
-    audio = ss.bindings.get(role)
+    audio = _lib_path(from_lib) if from_lib else audio_file
+    audio = audio or ss.bindings.get(role)
     if not audio or not os.path.isfile(audio):
         return None
     try:
@@ -572,7 +581,7 @@ def refresh_supplement_roles(ss):
     if not ss or not ss.project or not ss.script:
         return gr.update(interactive=False, choices=[], value=None,
                          info="请先打开项目并绑定角色音色")
-    choices = _pm.build_bound_role_choices(ss.script, ss.bindings)
+    choices = format_bound_role_choices(ss.script, ss.bindings)
     if not choices:
         return gr.update(interactive=False, choices=[], value=None,
                          info="请先打开项目并绑定角色音色")
@@ -951,6 +960,48 @@ def refresh_categories():
     )
 
 
+def refresh_production_check(ss):
+    """进入生产阶段时主动展示剧本和角色绑定检查（只提示，不阻断）。"""
+    if not ss or not ss.project:
+        return "#### 生产检查\n请先打开项目，系统会在这里显示剧本和角色声音状态。"
+    try:
+        snap = _snap(ss)
+        if snap is None:
+            return "#### 生产检查\n请先打开项目。"
+        errors = script_loader.validate_script(snap.script)
+        roles = snap.script.get("voices", {}) or {}
+        missing = [role for role in roles if not snap.bindings.get(role)]
+        lines = ["#### 生产检查"]
+        if errors:
+            lines.append(f"⚠ 剧本需要检查（{len(errors)} 项提示），请先回到项目页确认书稿。")
+        else:
+            lines.append("✅ 剧本有效")
+        if missing:
+            lines.append(
+                f"⚠ {len(missing)} 个角色未绑定声音：{', '.join(format_role_label(r, roles.get(r)) for r in missing)}。"
+            )
+            lines.append("建议先完成角色声音配置；这里不会阻断你查看队列或质检。")
+        else:
+            lines.append("✅ 所有角色已绑定声音，可以开始生产。")
+        return "\n".join(lines)
+    except Exception as exc:
+        logger.warning("刷新生产检查失败: %s", exc)
+        return f"#### 生产检查\n⚠ 状态读取失败：{exc}"
+
+
+def refresh_export_default_dir(ss):
+    """显示当前项目的动态默认导出目录，避免用户猜路径。"""
+    if not ss or not ss.project:
+        return "项目默认目录：打开项目后显示。留空保存位置即可使用该目录。"
+    try:
+        project_dir = os.path.normpath(ProjectService.get_project_dir(ss.project))
+        output_dir = os.path.normpath(os.path.join(project_dir, "output"))
+        return f"项目默认目录：`{output_dir}`\n留空保存位置即可导出到该目录。"
+    except Exception as exc:
+        logger.warning("读取默认导出目录失败: %s", exc)
+        return "项目默认目录：暂时无法读取，请打开项目后重试。"
+
+
 def _dashboard_snapshot(ss):
     """将现有项目快照整理为工作台展示数据。
 
@@ -1043,10 +1094,11 @@ def refresh_p_sel(name):
 
 
 def _open_chain_rest(event):
-    """把打开项目后的 10 步刷新接到 event 的 .then 链上（3 入口复用）。
+    """把打开项目后的统一刷新接到 event 的 .then 链上（3 入口复用）。
 
     顺序与原 22 元组全量刷新契约一致，覆盖：顶栏 / 章节表 / 章节试听
-    选项 / 队列列表 / 章节树 / 合成预览 / 音色库 / 分类下拉 / 概览 / 项目下拉。
+    选项 / 队列列表 / 章节树 / 合成预览 / 音色库 / 分类下拉 / 生产检查 /
+    默认导出目录 / 概览 / 项目下拉。
     """
     e = event
     e = e.then(refresh_top_status, [ss], [top_status])
@@ -1057,6 +1109,8 @@ def _open_chain_rest(event):
     e = e.then(render_preview, [ss], [s_preview_df, s_chapters_sel])
     e = e.then(refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
     e = e.then(refresh_categories, [], [v_bind_category, v_save_category])
+    e = e.then(refresh_production_check, [ss], [production_check])
+    e = e.then(refresh_export_default_dir, [ss], [e_save_dir_hint])
     e = e.then(
         refresh_overview, [ss],
         [ov_status, ov_progress, ov_task, ov_issues, ov_bookshelf],
@@ -1144,6 +1198,12 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             v_lib_category = vce_page["v_lib_category"]
             v_lib_browser = vce_page["v_lib_browser"]
 
+            # ───────── 生产阶段内部导航 ─────────
+            production_nav = create_production_navigation()
+            grp_production_nav = production_nav["group"]
+            production_stage = production_nav["stage"]
+            production_check = production_nav["production_check"]
+
             # ───────── 合成 ─────────
             syn_page = create_synthesis_page()
             grp_synth = syn_page["group"]
@@ -1184,6 +1244,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             e_fmt = export_page["e_fmt"]
             e_br = export_page["e_br"]
             e_save_dir = export_page["e_save_dir"]
+            e_save_dir_hint = export_page["e_save_dir_hint"]
             e_go = export_page["e_go"]
             e_out = export_page["e_out"]
             e_path = export_page["e_path"]
@@ -1222,7 +1283,16 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             sup_path = supplement_page["sup_path"]
 
     # 填充 _GROUPS（运行时装载，供 navigation._goto 使用）
-    _GROUPS[:] = [grp_overview, grp_project, grp_voices, grp_synth, grp_review, grp_export, grp_supplement]
+    _GROUPS[:] = [
+        grp_overview,
+        grp_project,
+        grp_voices,
+        grp_production_nav,
+        grp_synth,
+        grp_review,
+        grp_export,
+        grp_supplement,
+    ]
 
     # ═══════════ 侧边栏导航切换 ═══════════
 
@@ -1248,13 +1318,21 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     nav_synth.click(
         lambda: _goto("synth"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-synth')?.classList.add('active'); }").then(
+        lambda: gr.update(value="synth"), None, [production_stage]).then(
+        refresh_production_check, [ss], [production_check]).then(
         preview_chapters, [ss], [e_chapter_table, e_seg_audio, e_seg_sel]).then(
         preview_chapter_options, [ss], [e_chapter_sel]).then(
         refresh_queue_list, [ss], [s_queue_list]).then(
         refresh_supplement_roles, [ss], [sup_role])
     nav_export.click(
         lambda: _goto("export"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-export')?.classList.add('active'); }")
+        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-export')?.classList.add('active'); }").then(
+        refresh_export_default_dir, [ss], [e_save_dir_hint])
+
+    # ── 生产阶段内部导航：合成中心 / 试听质检 / 角色补录 ──
+    production_stage.change(_goto, [production_stage], _GROUPS).then(
+        refresh_production_check, [ss], [production_check]
+    )
 
     # ── 概览页：书架点选 → 回填 p_sel → open_project 首步 → 打开链刷新 → 切页 ──
     chain = ov_bookshelf.select(
@@ -1281,13 +1359,16 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     ov_synth.click(
         lambda: _goto("synth"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-synth')?.classList.add('active'); }").then(
+        lambda: gr.update(value="synth"), None, [production_stage]).then(
+        refresh_production_check, [ss], [production_check]).then(
         preview_chapters, [ss], [e_chapter_table, e_seg_audio, e_seg_sel]).then(
         preview_chapter_options, [ss], [e_chapter_sel]).then(
         refresh_queue_list, [ss], [s_queue_list]).then(
         refresh_supplement_roles, [ss], [sup_role])
     ov_export.click(
         lambda: _goto("export"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-export')?.classList.add('active'); }")
+        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-export')?.classList.add('active'); }").then(
+        refresh_export_default_dir, [ss], [e_save_dir_hint])
 
     # ═══════════ events（业务接线，沿用 v2） ═══════════
     p_refresh.click(refresh_projects_full, [], [p_sel])
@@ -1317,7 +1398,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     e_regenerate.click(regenerate_segment, [e_seg_sel, e_emo, e_alpha, e_rate, e_voice, ss], [e_seg_audio, e_regenerate_msg])
     e_go.click(do_export, [e_fmt, e_br, e_save_dir, ss], [e_out, e_path])
     e_subtitle_btn.click(do_export_subtitles, [ss, e_subtitle], [e_subtitle_out, e_subtitle_msg])
-    v_preview_btn.click(preview_bound_voice, [v_role, ss], v_preview_audio)
+    v_preview_btn.click(preview_bound_voice, [v_role, v_audio, v_lib, ss], v_preview_audio)
 
     # ── 角色单独补录 / 补合成导出 ──
     sup_refresh.click(refresh_supplement_roles, [ss], [sup_role])

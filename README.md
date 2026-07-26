@@ -1,4 +1,4 @@
-# 有声书合成工作台 (Audiobook Studio) · v3.1.1
+# 有声书合成工作台 (Audiobook Studio) · v3.2.0
 
 [![Tests](https://github.com/easonwong2026-del/audiobook-studio/actions/workflows/tests.yml/badge.svg)](https://github.com/easonwong2026-del/audiobook-studio/actions/workflows/tests.yml)
 
@@ -12,7 +12,7 @@
 
 | 项 | 说明 |
 |----|------|
-| 当前版本 | **v3.1.1**（发布修复：编码清理、测试恢复、版本统一） |
+| 当前版本 | **v3.2.0**（生产工作台 UI/UX 重构） |
 | 产品定位 | 面向**本地 IndexTTS2 环境**的有声书**生产工作台** |
 | 是否独立安装软件 | **否** —— 不提供 Windows 安装包，也不内置模型 / Torch / CUDA / FFmpeg / IndexTTS2 本体 |
 | 部署方式 | **轻量工作台源码 + 外部推理环境**（IndexTTS2 仓库及其虚拟环境由用户单独准备） |
@@ -21,17 +21,15 @@
 
 ---
 
-## 核心能力（7 个导航分区）
+## 核心能力（5 个生产阶段）
 
 | 分区 | 职责 |
 |------|------|
-| 概览 | 项目书架 / 新建 / 打开项目的总入口 |
+| 工作台 | 当前项目、章节进度、角色绑定、最近任务和待处理问题 |
 | 项目 | 上传 `structured_script.json` 创建项目、项目管理 |
-| 音色资产 | 为每个角色绑定 / 录制 / 克隆参考音频（`voice_bindings.json`） |
-| 合成 | 整本书逐段队列合成，段落级 VRAM 管理、暂停 / 恢复、断点续跑 |
-| 试听与质检 | 段落级试听、按参数重合成 |
-| 导出 | 章节拼接 → 均衡 → LUFS 归一 → 转码 mp3 / m4b / wav |
-| 角色补录 | 单独重合成某个角色的全部台词，不重新跑整本书 |
+| 角色与声音 | 按“选择角色 → 选择声音 → 试听 → 确认绑定”配置 `voice_bindings.json` |
+| 生产与质检 | 内含合成中心、试听质检、角色补录；支持队列、暂停 / 恢复、断点续跑 |
+| 交付 | 章节拼接 → 均衡 → LUFS 归一 → 转码 mp3 / m4b / wav，并生成字幕 |
 
 ---
 
@@ -45,10 +43,11 @@ audiobook-studio/
 ├── config.json             # 本地配置（含数据目录路径，已 .gitignore）
 ├── requirements.txt        # 运行时依赖
 ├── requirements-dev.txt    # 测试 / CI 依赖（不含 torch）
+├── structured_script.example.json # 项目创建页可下载的最小示例
 ├── CHANGELOG.md            # 变更记录
 ├── ARCHITECTURE.md         # 系统架构
 ├── lib/                    # 领域工具
-│   ├── __init__.py         # 版本来源（__version__ = "3.1.1"）
+│   ├── __init__.py         # 唯一版本来源（__version__）
 │   ├── tts_engine.py       # IndexTTS2 推理封装（函数内 lazy import torch）
 │   ├── audio_pipeline.py   # 段拼接 / 导出 / ffmpeg 转码
 │   ├── audio_format.py     # WAV 加载 / 重采样 / 声道 / dtype 归一
@@ -72,7 +71,7 @@ audiobook-studio/
 ├── domain/                 # 领域类型
 ├── tests/                  # 测试
 ├── docs/                   # 设计文档
-│   └── releases/v3.1.1.md  # GitHub Release 说明
+│   └── releases/v3.2.0.md  # GitHub Release 说明
 └── 更新日志.txt             # 中文变更日志
 ```
 
@@ -269,10 +268,10 @@ Gradio 界面和项目管理可在无 GPU 环境运行，但实际的 TTS 合成
 
 | 文档 | 内容 |
 |------|------|
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | V3.1 系统架构和测试策略 |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | V3.2 系统架构和测试策略 |
 | [`CHANGELOG.md`](CHANGELOG.md) | 完整变更记录 |
 | [`docs/system_design.md`](docs/system_design.md) | 系统详细设计 |
-| [`docs/releases/v3.1.1.md`](docs/releases/v3.1.1.md) | GitHub Release 说明 |
+| [`docs/releases/v3.2.0.md`](docs/releases/v3.2.0.md) | GitHub Release 说明 |
 | [`DESIGN.md`](DESIGN.md) | UI 设计系统（Stripe 浅色招牌风） |
 
 ---

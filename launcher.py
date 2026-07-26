@@ -89,7 +89,8 @@ def _read_version() -> str:
         from lib import __version__  # type: ignore[import]
         return __version__
     except Exception:
-        return "3.1.1"
+        # 版本的权威值只存在于 lib.__version__；导入异常时不要复制旧版本号。
+        return "unknown"
 
 
 VERSION = _read_version()
