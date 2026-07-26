@@ -6,16 +6,16 @@ import gradio as gr
 def create_status_bar() -> dict:
     """创建顶部全局状态栏。
 
-    包含工作台标题和动态项目状态文本，
+    包含产品标识和动态项目状态文本，
     在 ``with gr.Blocks()`` 上下文内调用。
 
     Returns:
         ``{"top_status": gr.Markdown}``
     """
     with gr.Row(elem_classes=["top-status-bar"]):
-        with gr.Column(scale=4):
-            gr.Markdown("# 🎧 有声书合成工作台")
-        with gr.Column(scale=6):
+        with gr.Column(scale=3):
+            gr.HTML("<div class='top-brand'><span>AUDIOBOOK STUDIO</span><strong>生产工作台</strong></div>")
+        with gr.Column(scale=7):
             top_status = gr.Markdown("*等待打开项目…*")
     return {"top_status": top_status}
 

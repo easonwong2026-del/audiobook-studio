@@ -31,5 +31,7 @@ def test_open_chain_wires_all_pages():
     assert ".then(refresh_queue_list, [ss], [s_queue_list])" in SRC, "缺失 refresh_queue_list 接线"
     assert ".then(render_preview, [ss]" in SRC, "缺失 render_preview 接线"
     assert ".then(refresh_voice_lib, [v_lib_search, v_lib_category]" in SRC, "缺失 refresh_voice_lib 接线"
-    assert ".then(refresh_overview, [ss], [ov_status, ov_bookshelf])" in SRC, "缺失 refresh_overview 接线"
+    assert ".then(\n        refresh_overview, [ss]," in SRC, "缺失 refresh_overview 接线"
+    for component in ("ov_status", "ov_progress", "ov_task", "ov_issues", "ov_bookshelf"):
+        assert component in SRC, f"工作台刷新未覆盖 {component}"
     assert ".then(refresh_p_sel, [p_sel], [p_sel])" in SRC, "缺失 refresh_p_sel 接线"

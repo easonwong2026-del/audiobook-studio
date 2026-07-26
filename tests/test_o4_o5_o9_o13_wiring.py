@@ -134,13 +134,11 @@ def test_o13_chapter_preview_components_defined():
         assert find_func(fn) is not None, f"O13 handler 未定义: {fn}"
 
 
-def test_o13_export_tab_select_appends_preview_chapter_options():
-    assert "nav_export.click(" in SRC, \
-        "导出导航按钮缺失 nav_export.click 接线"
-    assert "nav_review.click(" in SRC, \
-        "审听导航按钮缺失 nav_review.click 接线"
+def test_o13_production_stage_refreshes_chapter_preview_options():
+    assert "nav_synth.click(" in SRC, \
+        "生产与质检导航缺失 nav_synth.click 接线"
     assert "preview_chapter_options, [ss], [e_chapter_sel])" in SRC, \
-        "导出/审听导航后未追加 preview_chapter_options 接线"
+        "进入生产与质检后未追加 preview_chapter_options 接线"
 
 
 def test_o13_chapter_sel_change_preview_chapter():

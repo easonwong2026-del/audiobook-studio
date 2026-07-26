@@ -1,7 +1,7 @@
 """补录页接线 AST 回归（无需 import gradio，与 test_app_wiring.py 同风格）。
 
 验证：
-  - 左侧新增「角色补录」导航按钮（ui/navigation.py 中 NAV_ITEMS + app.py nav["nav_supplement"]）。
+  - 「角色补录」被收纳到顶级「生产与质检」阶段，而非单独导航按钮。
   - 新增 grp-supplement 分组（ui/pages/supplement_page.py 中 elem_id="grp-supplement"）。
   - _GROUPS 在 app.py 运行时装填 7 项。
   - _goto 定义在 ui/navigation.py 中，返回 7 个 gr.update。
@@ -50,13 +50,11 @@ def _arg_ids_with_vararg(fn):
     return names
 
 
-def test_nav_supplement_button_present():
-    # 导航按钮由 create_nav_buttons() 在 ui/navigation.py 中动态创建
-    # 检查 NAV_ITEMS 中包含 "nav-supplement"
-    assert '"nav-supplement"' in NAV_SRC, "navigation.py 缺少 nav-supplement elem_id"
-    # 检查 app.py 中通过 nav["nav_supplement"] 引用
-    assert 'nav_supplement = nav["nav_supplement"]' in SRC, \
-        "app.py 缺少 nav_supplement = nav[...]"
+def test_supplement_belongs_to_production_stage():
+    assert '"nav-synth"' in NAV_SRC, "navigation.py 缺少生产与质检入口"
+    assert '"nav-supplement"' not in NAV_SRC, "补录不应继续作为顶级导航"
+    assert 'which == "synth" and page_id in {"review", "supplement"}' in NAV_SRC, \
+        "生产阶段应同时展示质检和补录工具"
 
 
 def test_grp_supplement_present():
@@ -82,9 +80,9 @@ def test_groups_tuple_has_seven_items():
     raise AssertionError("未找到 _GROUPS[:] = [...] 赋值")
 
 
-def test_goto_returns_seven_updates():
+def test_goto_returns_internal_group_updates_for_five_stage_navigation():
     # _goto 定��在 ui/navigation.py 中，返回 tuple(GeneratorExp)
-    # 实际返回 7 个 gr.update，因为 NAV_ITEMS 包含 7 项
+    # 实际返回 7 个 gr.update，覆盖 5 个顶级阶段下的 7 个内部 Group。
     # 验证 _goto 存在且返回 tuple(...) 调用
     fn = find_func(NAV_TREE, "_goto")
     assert fn is not None, "navigation.py 中未定义 _goto"
@@ -95,15 +93,15 @@ def test_goto_returns_seven_updates():
                 has_tuple_return = True
                 break
     assert has_tuple_return, "_goto 未返回 tuple(...) 调用"
-    # 验证 NAV_ITEMS 有 7 项
+    # 验证 NAV_ITEMS 是五阶段工作流。
     for node in ast.walk(NAV_TREE):
         if isinstance(node, ast.Assign):
             for t in node.targets:
                 if isinstance(t, ast.Name) and t.id == "NAV_ITEMS":
                     assert isinstance(node.value, (ast.List, ast.Tuple)), \
                         "NAV_ITEMS 应为列表"
-                    assert len(node.value.elts) == 7, \
-                        f"NAV_ITEMS 应为 7 项（实际 {len(node.value.elts)}）"
+                    assert len(node.value.elts) == 5, \
+                        f"NAV_ITEMS 应为 5 项（实际 {len(node.value.elts)}）"
                     return
     raise AssertionError("未找到 NAV_ITEMS 定义")
 
@@ -123,10 +121,10 @@ def test_supplement_handlers_defined_and_take_ss():
         assert "ss" in names, f"{h} 未接 ss（实际参数：{names}）"
 
 
-def test_nav_supplement_wired():
-    assert "nav_supplement.click(" in SRC, "nav_supplement ��接线"
+def test_supplement_refresh_wired_to_production_stage():
+    assert "nav_synth.click(" in SRC, "生产与质检入口缺接线"
     assert "refresh_supplement_roles, [ss], [sup_role]" in SRC, \
-        "nav_supplement 点击后未懒刷新 sup_role"
+        "进入生产与质检后未懒刷新补录角色"
 
 
 def test_parse_json_wired():
