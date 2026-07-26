@@ -98,7 +98,7 @@ workspace-root/
 - **GPU**：推荐 **NVIDIA GPU 12 GB+ VRAM**。CUDA、cuDNN 由 IndexTTS2 的虚拟环境负责。
 - **Torch**：由 IndexTTS2 的虚拟环境安装（GPU 版本），不通过本仓库的 pip 安装。
 - **FFmpeg**：导出 mp3 / m4b 需要 FFmpeg（系统级二进制，**不是** pip 包）。可选设置 `AUDIOBOOK_STUDIO_FFMPEG` 环境变量指向自定义路径；缺失时 launcher 会显式警告（可改用 WAV 导出）。
-- **本仓库 Python 依赖**：`requirements.txt`（gradio、numpy、scipy、pyloudnorm、mutagen、pydub）—— 这些**不依赖 GPU / CUDA**，可以用任何 Python 安装。
+- **本仓库 Python 依赖**：`requirements.txt`（Gradio 5.50–5.x、numpy、scipy、pyloudnorm、mutagen）—— 这些**不依赖 GPU / CUDA**，使用 Python 3.10+ 安装。
 
 ### `AUDIOBOOK_STUDIO_PYTHON` 环境变量
 
