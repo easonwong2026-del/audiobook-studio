@@ -14,7 +14,6 @@
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -24,9 +23,7 @@ import uuid
 from dataclasses import dataclass, field
 
 from lib import script_loader
-from lib import tts_engine
 from lib import config
-from lib import audio_pipeline
 from repositories.task_repo import TaskRepository, TaskRecord
 
 logger = logging.getLogger(__name__)
@@ -391,6 +388,8 @@ class SupplementService:
             'status': 'ok'|'failed', 'error': str}``。失败的 ``error`` 形如
             ``❌ 句N: <错误前120字>``。
         """
+        from lib import tts_engine
+
         overrides = overrides or {}
         emotion = overrides.get("emotion")
         emo_alpha = overrides.get("emo_alpha", 1.0)

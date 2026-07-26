@@ -16,8 +16,7 @@ _EXAMPLE_SCRIPT_PATH = str(Path(__file__).resolve().parents[2] / "structured_scr
 def create_project_page() -> dict:
     """创建项目导入、切换与工作区设置页面。"""
     with gr.Group(visible=False, elem_id="grp-project") as grp_project:
-        gr.Markdown("### 项目")
-        gr.Markdown("导入书稿、打开已有项目，并确认章节结构是否可进入角色配置。")
+        gr.Markdown("### 项目列表")
 
         with gr.Row(equal_height=True, elem_classes=["stage-row"]):
             with gr.Column(scale=1, elem_classes=["stage-card"]):

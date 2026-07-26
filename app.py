@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audiobook Studio v3.2.0 UI -- 有声书生产工作台。
+"""Audiobook Studio v3.2.1 UI -- 有声书生产工作台。
 
 本次重构把模块式导航改为「工作台 → 项目 → 角色与声音 → 生产与质检 → 交付」
 的生产流程。页面 Builder 负责布局，既有 handler 继续委托给 Service；不改变 TTS、
@@ -33,13 +33,11 @@ from ui.pages import (
     create_voice_page,
     create_synthesis_page,
 )
-from lib import tts_engine
 from lib import script_loader
 from lib import segment_cache
 from lib import config
 from lib import project_manager as _pm
 from lib import progress as synth_progress
-from lib import audio_pipeline
 from lib import voice_lib
 from lib import dataframe_style as df_style
 from lib import __version__
@@ -52,6 +50,18 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 # 音色库外置于数据目录（默认 ~/AudiobookStudio/voice_library），与程序目录解耦。
 # 注意：音色库路径必须在调用时动态解析（config.get_voice_library），
 # 不得在此处模块级缓存，否则运行期切换数据目录后路径不会更新（见方案 §5.2）。
+
+
+def _tts_engine():
+    """按需加载数值计算与 TTS 适配层，缩短 UI 首次构建路径。"""
+    from lib import tts_engine
+    return tts_engine
+
+
+def _audio_pipeline():
+    """按需加载音频后处理模块，仅在试听、修复或导出时付出开销。"""
+    from lib import audio_pipeline
+    return audio_pipeline
 
 
 
@@ -152,7 +162,8 @@ def refresh_top_status(ss):
         done = getattr(meta, "completed_count", 0)
         total = getattr(meta, "total_segments", 0)
         title = script.get("meta", {}).get("title", ss.project)
-        engine_state = "已加载" if getattr(tts_engine, "_tts", None) is not None else "未加载"
+        engine_module = sys.modules.get("lib.tts_engine")
+        engine_state = "已加载" if getattr(engine_module, "_tts", None) is not None else "未加载"
         return (f"📖 **{title}** · {chapters} 章 · {done}/{total} 段 · "
                 f"引擎: {engine_state}")
     except Exception as exc:
@@ -193,9 +204,7 @@ def _voice_status(s,b):
     return "|角色（声线）|状态|\n|------|------|\n"+"\n".join(rows)
 
 def _lib_voices():
-    vlib = config.get_voice_library()
-    os.makedirs(vlib, exist_ok=True)
-    return [f for f in os.listdir(vlib) if f.endswith(('.wav', '.mp3'))]
+    return voice_lib.voice_names()
 def _lib_path(n):
     vlib = config.get_voice_library()
     return os.path.join(vlib, n) if n else None
@@ -234,14 +243,15 @@ def preview_bound_voice(role, audio_file, from_lib, ss):
     if not audio or not os.path.isfile(audio):
         return None
     try:
-        tts_engine.init_engine()
-        parts = tts_engine.test_voice(audio)
+        tts = _tts_engine()
+        tts.init_engine()
+        parts = tts.test_voice(audio)
         if not parts or not all(os.path.isfile(p) for p in parts):
             return None
         # 把三句测试句拼接为一段连续音频，供单一 gr.Audio 播放
         out_dir = config.get_preview_dir()
         out = os.path.join(out_dir, f"preview_{_safe_name(role)}.wav")
-        tts_engine._concat_wavs(parts, out)
+        tts._concat_wavs(parts, out)
         return out if os.path.isfile(out) else None
     except Exception:
         return None
@@ -265,7 +275,7 @@ def do_synthesis(ss, num_beams=2, progress=gr.Progress(),
         yield (f"以下角色未绑定: {', '.join(missing)}", [])
         return
     try:
-        tts_engine.init_engine()
+        _tts_engine().init_engine()
     except Exception as e:
         yield (f"模型加载失败: {e}", [])
         return
@@ -533,7 +543,8 @@ def regenerate_segment(choices, emotion, emo_alpha, speech_rate, voice_choice, s
     # 阶段三：复用会话态快照的剧本 dict。
     script = _snap(ss).script
     proj_dir=ProjectService.get_project_dir(ss.project)
-    tts_engine.init_engine(); seg_dir=os.path.join(proj_dir,"segments")
+    tts = _tts_engine()
+    tts.init_engine(); seg_dir=os.path.join(proj_dir,"segments")
     os.makedirs(seg_dir,exist_ok=True); results=[]
     # 如果选了音色库音频，覆盖绑定
     override_voice = _lib_path(voice_choice) if voice_choice else None
@@ -547,7 +558,7 @@ def regenerate_segment(choices, emotion, emo_alpha, speech_rate, voice_choice, s
                 try:
                     # B7：重合成写入参数感知缓存键路径，与批量链路命名一致
                     out=segment_cache.segment_wav_path(seg_dir, sid, emotion, emo_alpha, speech_rate, seg.get("pinyin_hints"))
-                    tts_engine.synthesize_segment(text=seg["text"],speaker_audio=speaker,
+                    tts.synthesize_segment(text=seg["text"],speaker_audio=speaker,
                         emotion=emotion, emo_alpha=emo_alpha, speech_rate=speech_rate,
                         pinyin_hints=seg.get("pinyin_hints"), output_path=out)
                     ProjectService.update_segment_status(ss.project,sid,"done"); results.append(f"✅ {sid}")
@@ -564,7 +575,7 @@ def regenerate_segment(choices, emotion, emo_alpha, speech_rate, voice_choice, s
                 break
         if first_fp: break
     # 2.4 M-3：批量重合成结束后释放碎片化显存（不卸载模型）
-    tts_engine.empty_cache()
+    tts.empty_cache()
     # 段状态已写盘（ProjectService.update_segment_status），使快照失效以便下次读取重载
     ss.invalidate_snapshot()
     return (first_fp, "\n".join(results))
@@ -687,19 +698,20 @@ def do_supplement_synth(sup_role, sup_mode, sup_text, sup_json_role, sup_json_li
     except Exception:  # pylint: disable=broad-except
         pass
 
-    tts_engine.init_engine()
+    tts = _tts_engine()
+    tts.init_engine()
     try:
         results = SupplementService.synthesize_lines(
             role=role, lines=lines, speaker_audio=speaker,
             overrides=overrides, num_beams=num_beams, task=task,
         )
     except Exception as e:
-        tts_engine.empty_cache()
+        tts.empty_cache()
         task.status = "error"
         return [], f"❌ 补合成异常：{str(e)[:200]}"
     finally:
         # 2.4 M-3：补合成结束后释放碎片化显存（不卸载模型，与 regenerate_segment 同策略）。
-        tts_engine.empty_cache()
+        tts.empty_cache()
 
     # 写 manifest.json（任务隔离产物清单，便于回放 / 调试）
     try:
@@ -765,7 +777,7 @@ def do_supplement_export(sup_format, sup_bitrate, sup_wavs, sup_role, ss):
     title = f"{meta.get('title', 'audiobook')} - {role} 补录" if meta else None
     artist = meta.get("author") if meta else None
     try:
-        final = audio_pipeline.export_supplement(
+        final = _audio_pipeline().export_supplement(
             paths=wavs, out_path=out_path, format=sup_format, bitrate=sup_bitrate,
             title=title, artist=artist,
         )
@@ -787,7 +799,7 @@ def play_supplement_preview(which, sup_wavs, ss):
         out = os.path.join(config.get_preview_dir(),
                            f"supplement_preview_{int(time.time() * 1000)}.wav")
         try:
-            return audio_pipeline.export_supplement(paths=wavs, out_path=out, format="wav")
+            return _audio_pipeline().export_supplement(paths=wavs, out_path=out, format="wav")
         except Exception:
             return wavs[0]
     # 逐句：返回第一段
@@ -814,8 +826,7 @@ def save_to_lib(recorded, uploaded, name, category, ss):
 
 def filter_vlib_by_category(category):
     """按分类筛选音色库 → 返回可选音色列表（供绑定区 v_lib 使用）。"""
-    voices = voice_lib.scan_voice_library(category=category or None)
-    return gr.update(choices=[v["name"] for v in voices])
+    return gr.update(choices=voice_lib.voice_names(category or None), value=None)
 
 def open_segments_folder(ss):
     if not ss.project: return "请先打开项目"
@@ -939,7 +950,7 @@ def preview_chapter(ss, chapter_id):
     proj_dir = ProjectService.get_project_dir(ss.project)
     out_path = os.path.join(config.get_preview_dir(), f"chapter_{chapter_id}.wav")
     try:
-        return audio_pipeline.concat_for_preview(proj_dir, chapter_id, out_path)
+        return _audio_pipeline().concat_for_preview(proj_dir, chapter_id, out_path)
     except Exception:
         return None
 
@@ -958,6 +969,24 @@ def refresh_categories():
             value="未分类",
         ),
     )
+
+
+def refresh_voice_filters():
+    """一次扫描结果刷新绑定筛选、资产筛选和新声音分类。"""
+    cats = voice_lib.list_categories()
+    filter_choices = cats or ["未分类"]
+    save_choices = cats + ["— 新建 —"] if cats else ["未分类", "— 新建 —"]
+    return (
+        gr.update(choices=filter_choices, value=None),
+        gr.update(choices=filter_choices, value=None),
+        gr.update(choices=save_choices, value="未分类"),
+    )
+
+
+def refresh_production_voice_choices():
+    """进入生产区时按需刷新临时替换声音，避免启动时重复扫描音色目录。"""
+    choices = voice_lib.voice_names()
+    return gr.update(choices=choices, value=None), gr.update(choices=choices, value=None)
 
 
 def refresh_production_check(ss):
@@ -1109,6 +1138,7 @@ def _open_chain_rest(event):
     e = e.then(render_preview, [ss], [s_preview_df, s_chapters_sel])
     e = e.then(refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
     e = e.then(refresh_categories, [], [v_bind_category, v_save_category])
+    e = e.then(refresh_production_voice_choices, [], [e_voice, sup_voice])
     e = e.then(refresh_production_check, [ss], [production_check])
     e = e.then(refresh_export_default_dir, [ss], [e_save_dir_hint])
     e = e.then(
@@ -1308,17 +1338,14 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     nav_voices.click(
         lambda: _goto("voices"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-voices')?.classList.add('active'); }").then(
-        lambda: (gr.update(choices=voice_lib.list_categories() or ["未分类"]),
-                 gr.update(choices=voice_lib.list_categories() or ["未分类"],
-                           value=None),
-                 gr.update(choices=(voice_lib.list_categories() or []) + ["— 新建 —"] if voice_lib.list_categories() else ["未分类", "— 新建 —"],
-                           value="未分类")),
+        refresh_voice_filters,
         [], [v_bind_category, v_lib_category, v_save_category]).then(
         refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
     nav_synth.click(
         lambda: _goto("synth"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-synth')?.classList.add('active'); }").then(
         lambda: gr.update(value="synth"), None, [production_stage]).then(
+        refresh_production_voice_choices, [], [e_voice, sup_voice]).then(
         refresh_production_check, [ss], [production_check]).then(
         preview_chapters, [ss], [e_chapter_table, e_seg_audio, e_seg_sel]).then(
         preview_chapter_options, [ss], [e_chapter_sel]).then(
@@ -1351,15 +1378,14 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     ov_voices.click(
         lambda: _goto("voices"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-voices')?.classList.add('active'); }").then(
-        lambda: (gr.update(choices=voice_lib.list_categories() or ["未分类"]),
-                 gr.update(choices=voice_lib.list_categories() or ["未分类"], value=None),
-                 gr.update(choices=(voice_lib.list_categories() or []) + ["— 新建 —"] if voice_lib.list_categories() else ["未分类", "— 新建 —"], value="未分类")),
+        refresh_voice_filters,
         [], [v_bind_category, v_lib_category, v_save_category]).then(
         refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
     ov_synth.click(
         lambda: _goto("synth"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-synth')?.classList.add('active'); }").then(
         lambda: gr.update(value="synth"), None, [production_stage]).then(
+        refresh_production_voice_choices, [], [e_voice, sup_voice]).then(
         refresh_production_check, [ss], [production_check]).then(
         preview_chapters, [ss], [e_chapter_table, e_seg_audio, e_seg_sel]).then(
         preview_chapter_options, [ss], [e_chapter_sel]).then(

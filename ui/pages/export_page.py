@@ -7,8 +7,7 @@ import gradio as gr
 def create_export_page() -> dict:
     """创建成品与字幕交付页面。"""
     with gr.Group(visible=False, elem_id="grp-export") as grp_export:
-        gr.Markdown("### 交付")
-        gr.Markdown("完成生产和质检后，在这里导出可分享的有声书与字幕文件。")
+        gr.Markdown("### 交付设置")
 
         with gr.Group(elem_classes=["delivery-workspace"]):
             gr.Markdown("#### 导出有声书")

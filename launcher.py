@@ -113,14 +113,14 @@ def main() -> None:
     # 检查运行环境（依赖检查较慢，先给出提示，避免控制台空屏）
     print("正在检查运行环境，请稍候...")
 
-    # 依赖检查与自动安装（Gradio + pydub）
+    # UI 依赖检查
     result = subprocess.run(
         [PYTHON, "-c", "import gradio"],
         capture_output=True, text=True,
     )
     if result.returncode != 0:
-        print("-> 正在安装 gradio / pydub ...")
-        subprocess.run([PYTHON, "-m", "pip", "install", "gradio", "pydub"], check=True)
+        print("-> 正在安装 gradio ...")
+        subprocess.run([PYTHON, "-m", "pip", "install", "gradio"], check=True)
 
     # 科学计算 / 音频后处理依赖
     result = subprocess.run(

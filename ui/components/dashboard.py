@@ -32,9 +32,9 @@ def empty_dashboard_html() -> tuple[str, str, str, str]:
     return (
         """
         <section class="workbench-hero empty-state">
-          <div><span class="eyebrow">有声书生产工作台</span>
-          <h2>从一个项目开始</h2>
-          <p>导入结构化书稿后，按项目、角色、生产、交付的顺序完成整本有声书。</p></div>
+          <div><span class="eyebrow">当前项目状态</span>
+          <h2>选择项目后开始制作</h2>
+          <p>打开已有项目，或创建项目并导入结构化书稿。</p></div>
           <span class="hero-icon">🎧</span>
         </section>
         """,
@@ -86,7 +86,7 @@ def project_dashboard_html(
       <div>
         <span class="eyebrow">当前项目 · {safe_project}</span>
         <h2>{safe_title}</h2>
-        <p>以项目状态为中心，继续完成角色配置、生产质检与最终交付。</p>
+        <p>查看生产状态，并从下一步操作继续制作。</p>
       </div>
       <div class="hero-progress"><span>{segment_percent}%</span><small>段落完成度</small></div>
     </section>

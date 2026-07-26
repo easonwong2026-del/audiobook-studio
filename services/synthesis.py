@@ -16,14 +16,13 @@ from __future__ import annotations
 
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, Future
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import ClassVar, Optional, Any
 
 from lib import project_manager as pm
 from lib import queue as synth_queue
 from lib import progress as _progress
-from lib import tts_engine
 from repositories.task_repo import TaskRepository, TaskRecord
 
 logger = logging.getLogger(__name__)
