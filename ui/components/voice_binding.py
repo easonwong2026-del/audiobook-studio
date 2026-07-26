@@ -17,6 +17,53 @@ def format_role_label(role: str, voice: dict | None = None) -> str:
     return f"{role}（{description}）"
 
 
+def build_role_management_rows(
+    script: dict | None,
+    bindings: dict | None,
+    search: str = "",
+) -> list[list[str]]:
+    """构建角色管理列表行，不改变剧本或绑定数据。
+
+    每行固定包含角色名、剧本中的声线描述和绑定状态，供角色管理列表转换为
+    可滚动的单列选择器。搜索只过滤展示行，不参与任何持久化操作。
+    """
+    voices = (script or {}).get("voices", {}) or {}
+    current_bindings = bindings or {}
+    query = str(search or "").strip().casefold()
+    rows: list[list[str]] = []
+    for role, voice in voices.items():
+        description = str((voice or {}).get("description") or (voice or {}).get("name") or "").strip()
+        if query and query not in f"{role} {description}".casefold():
+            continue
+        rows.append([
+            str(role),
+            description or "未填写角色描述",
+            "✅ 已绑定" if current_bindings.get(role) else "⚠ 待绑定",
+        ])
+    return rows
+
+
+def format_role_management_summary(script: dict | None, bindings: dict | None) -> str:
+    """返回角色列表顶部的简洁统计，不暴露文件路径。"""
+    roles = (script or {}).get("voices", {}) or {}
+    current_bindings = bindings or {}
+    total = len(roles)
+    bound = sum(1 for role in roles if current_bindings.get(role))
+    return f"共 **{total}** 个角色 · **{bound}** 已绑定 · **{total - bound}** 待绑定"
+
+
+def build_role_management_choices(
+    script: dict | None,
+    bindings: dict | None,
+    search: str = "",
+) -> list[tuple[str, str]]:
+    """把角色管理行转换为单列 Radio 选项（显示值，实际值）。"""
+    return [
+        (f"{role}\n{description}\n{status}", role)
+        for role, description, status in build_role_management_rows(script, bindings, search)
+    ]
+
+
 def format_role_choices(
     script: dict,
     bindings: dict,

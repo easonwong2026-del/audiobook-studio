@@ -281,6 +281,27 @@ button[aria-label*="Play"] { border-radius:999px!important; background:#d4f56a!i
 .voice-flow-steps { display:flex; flex-wrap:wrap; gap:8px; margin:4px 0 14px; }
 .voice-flow-steps span { display:inline-flex; align-items:center; gap:5px; padding:7px 11px; border-radius:999px; background:#f0f6e8; color:#43553e; font-size:12px; font-weight:600; }
 .voice-flow-steps b { color:#6d8d1d; }
+.voice-workspace { gap:16px!important; align-items:start!important; flex-wrap:nowrap!important; }
+.role-list-panel,.voice-config-panel { min-width:0!important; align-self:start!important; }
+.voice-workspace > .role-list-panel { flex:0 0 340px!important; }
+.role-list-panel { padding:16px!important; border:1px solid #dfe7e0!important; border-radius:14px!important; background:#f8fbf8!important; }
+.role-list-panel > .gr-markdown:first-child h3 { margin-top:0!important; margin-bottom:6px!important; }
+.role-list-panel > .gr-markdown:nth-child(2) { color:#647067!important; font-size:12px!important; margin:0 0 10px!important; }
+.role-list-search { margin-bottom:8px!important; }
+.role-list-search input { background:#ffffff!important; }
+.role-management-list { max-height:560px!important; overflow:auto!important; border:1px solid #dfe7e0!important; border-radius:12px!important; background:#ffffff!important; padding:4px!important; }
+.role-management-list .wrap { display:flex!important; flex-direction:column!important; width:100%!important; max-height:550px!important; overflow:auto!important; }
+.role-management-list label { display:flex!important; align-items:flex-start!important; width:100%!important; box-sizing:border-box!important; min-height:64px!important; padding:10px 12px!important; margin:0!important; border-bottom:1px solid #edf0ed!important; border-radius:9px!important; background:#ffffff!important; white-space:pre-line!important; line-height:1.35!important; color:#18221c!important; cursor:pointer!important; transition:background .12s ease,border-color .12s ease!important; }
+.role-management-list label:last-child { border-bottom:0!important; }
+.role-management-list label:hover { background:#eef6e7!important; }
+.role-management-list label:has(input:checked) { background:#e5f5bd!important; border-left:3px solid #9cc52e!important; color:#18221c!important; }
+.role-management-list label span { white-space:pre-line!important; }
+.role-management-list input { accent-color:#7d9f23!important; margin-top:4px!important; }
+.role-list-panel > .gr-markdown:last-child { color:#6b746d!important; font-size:12px!important; margin:8px 0 0!important; }
+.voice-config-panel > .gr-markdown:first-child h3 { margin-top:4px!important; margin-bottom:12px!important; }
+.voice-config-steps { display:flex!important; flex-direction:column!important; gap:10px!important; }
+.voice-config-footer { gap:10px!important; align-items:start!important; }
+.voice-config-footer > * { min-width:0!important; }
 .voice-binding-steps { display:grid!important; grid-template-columns:1fr!important; gap:10px!important; align-items:start!important; }
 .voice-step-card { width:auto!important; min-width:0!important; background:#ffffff!important; border:1px solid #dfe7e0!important; border-radius:12px!important; padding:4px 12px 12px!important; min-height:0!important; align-self:start!important; }
 .voice-reference-upload .audio-container button.boundedheight { height:176px!important; min-height:176px!important; }
@@ -304,6 +325,9 @@ button[aria-label*="Play"] { border-radius:999px!important; background:#d4f56a!i
   .dashboard-metrics { grid-template-columns:1fr; }
   .workbench-hero { padding:22px; }.hero-progress { display:none; }
   .main-area { padding:8px 12px 20px!important; }
+  .voice-workspace { flex-wrap:wrap!important; }
+  .voice-config-footer { flex-wrap:wrap!important; }
+  .voice-config-footer > * { min-width:100%!important; }
   .voice-binding-steps { grid-template-columns:1fr!important; }
   .workbench-main-row > *, .stage-row > *, .voice-step-card { min-width:100%!important; }
 }
