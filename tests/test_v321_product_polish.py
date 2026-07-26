@@ -25,6 +25,11 @@ def test_runtime_version_has_one_current_source():
     assert 'return "3.1.1"' not in launcher
 
 
+def test_gradio_runtime_stays_on_supported_major_version():
+    requirements = _text("requirements.txt")
+    assert "gradio>=4.44.1,<5" in requirements
+
+
 def test_role_choices_include_description_without_changing_value():
     script = {
         "voices": {

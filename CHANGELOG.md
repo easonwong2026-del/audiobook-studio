@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - 音色库和音频处理模块改为按需加载，减少启动期目录扫描和 NumPy/SciPy 初始化。
 - 移除未使用的 `pydub` 运行依赖，并合并重复的音色分类刷新逻辑。
+- 将 Gradio 限定为兼容的 4.44.1–4.x 范围，避免安装 Gradio 6 导致 UI 参数不兼容。
 
 ## [3.2.0] - 2026-07-26
 

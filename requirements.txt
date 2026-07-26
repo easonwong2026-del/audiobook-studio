@@ -1,7 +1,7 @@
 # 有声书合成工作台 — Python 依赖
 #
 # 运行依赖（由 audiobook-studio 的 venv 提供）：
-gradio
+gradio>=4.44.1,<5
 # Gradio 4.x 仍使用 HfFolder；huggingface-hub 1.x 已移除该 API。
 huggingface-hub<1.0
 # Gradio 4.44 的客户端 schema 转换不兼容 Pydantic 2.11+ 的布尔 additionalProperties。
