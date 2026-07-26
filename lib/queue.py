@@ -7,7 +7,6 @@ from typing import Generator, Optional
 
 from . import script_loader
 from . import project_manager as pm
-from . import tts_engine
 from . import segment_cache
 
 logger = logging.getLogger(__name__)
@@ -61,6 +60,9 @@ def synthesize_project(
     cb_seg_state=None,
     selected_chapters: Optional[list] = None,
 ) -> Generator[str, None, None]:
+    # NumPy / SciPy 随 TTS 适配层按需加载，不进入应用启动热路径。
+    from . import tts_engine
+
     project_dir = pm.get_project_dir(project_name)
     # P2 提速：open_project 已把剧本读入内存（dict），直接用 from_dict 构造 Script，
     # 避免对同一个 structured_script.json 做第二次磁盘读取。
@@ -144,7 +146,7 @@ def synthesize_project(
                         output_path=seg_path,
                         num_beams=num_beams,
                     )
-                    yield f"[/] vram_clean"
+                    yield "[/] vram_clean"
 
                 elapsed = time.time() - seg_start
                 pm.update_segment_status(project_name, seg.id, "done")

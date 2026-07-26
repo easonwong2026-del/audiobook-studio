@@ -1,17 +1,7 @@
 """生产阶段中的角色补录 UI builder。"""
 from __future__ import annotations
 
-import os
-
 import gradio as gr
-
-from lib import config as _cfg
-
-
-def _browse_voices() -> list[str]:
-    vlib = _cfg.get_voice_library()
-    os.makedirs(vlib, exist_ok=True)
-    return [f for f in os.listdir(vlib) if f.endswith((".wav", ".mp3"))]
 
 
 def create_supplement_page() -> dict:
@@ -56,7 +46,7 @@ def create_supplement_page() -> dict:
                         value=2,
                         info="快速更省时，标准适合日常生产，高质量更慢但更稳。",
                     )
-                    sup_voice = gr.Dropdown(label="临时替换声音（可选）", choices=_browse_voices(), value=None, scale=2)
+                    sup_voice = gr.Dropdown(label="临时替换声音（可选）", choices=[], value=None, scale=2)
 
             sup_mode = gr.Radio(label="输入来源", value="paste", choices=[("粘贴台词", "paste"), ("小 JSON", "json")])
             sup_synth = gr.Button("生成补录音频", variant="primary")

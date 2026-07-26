@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import gradio as gr
 
+from ui.components.dashboard import empty_dashboard_html
+
 
 def create_overview_page() -> dict:
     """创建以项目状态和下一步行动为中心的工作台。
@@ -10,20 +12,19 @@ def create_overview_page() -> dict:
     返回的 HTML 组件由 ``app.py`` 读取现有 ``SessionState`` 后刷新；页面本身不读盘、
     不调用 Service，保持 UI 与业务编排分离。
     """
+    initial_status, initial_progress, initial_task, initial_issues = empty_dashboard_html()
     with gr.Group(visible=True, elem_id="grp-overview") as grp_overview:
-        gr.Markdown("### 工作台")
-        gr.Markdown("当前项目的生产状态、待处理问题与下一步行动。")
-        ov_status = gr.HTML(elem_classes=["workbench-status"])
+        ov_status = gr.HTML(value=initial_status, elem_classes=["workbench-status"])
 
         with gr.Row(equal_height=True, elem_classes=["workbench-main-row"]):
             with gr.Column(scale=3):
-                ov_progress = gr.HTML()
+                ov_progress = gr.HTML(value=initial_progress)
             with gr.Column(scale=2):
-                ov_task = gr.HTML()
+                ov_task = gr.HTML(value=initial_task)
 
         with gr.Row(equal_height=True, elem_classes=["workbench-main-row"]):
             with gr.Column(scale=3):
-                ov_issues = gr.HTML()
+                ov_issues = gr.HTML(value=initial_issues)
             with gr.Column(scale=2):
                 gr.Markdown("#### 继续生产")
                 gr.Markdown("系统会根据项目状态把你带到正确的阶段。")

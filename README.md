@@ -1,4 +1,4 @@
-# 有声书合成工作台 (Audiobook Studio) · v3.2.0
+# 有声书合成工作台 (Audiobook Studio) · v3.2.1
 
 [![Tests](https://github.com/easonwong2026-del/audiobook-studio/actions/workflows/tests.yml/badge.svg)](https://github.com/easonwong2026-del/audiobook-studio/actions/workflows/tests.yml)
 
@@ -12,7 +12,7 @@
 
 | 项 | 说明 |
 |----|------|
-| 当前版本 | **v3.2.0**（生产工作台 UI/UX 重构） |
+| 当前版本 | **v3.2.1**（产品体验优化与代码瘦身） |
 | 产品定位 | 面向**本地 IndexTTS2 环境**的有声书**生产工作台** |
 | 是否独立安装软件 | **否** —— 不提供 Windows 安装包，也不内置模型 / Torch / CUDA / FFmpeg / IndexTTS2 本体 |
 | 部署方式 | **轻量工作台源码 + 外部推理环境**（IndexTTS2 仓库及其虚拟环境由用户单独准备） |
@@ -71,7 +71,7 @@ audiobook-studio/
 ├── domain/                 # 领域类型
 ├── tests/                  # 测试
 ├── docs/                   # 设计文档
-│   └── releases/v3.2.0.md  # GitHub Release 说明
+│   └── releases/v3.2.1.md  # GitHub Release 说明
 └── 更新日志.txt             # 中文变更日志
 ```
 
@@ -271,7 +271,8 @@ Gradio 界面和项目管理可在无 GPU 环境运行，但实际的 TTS 合成
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | V3.2 系统架构和测试策略 |
 | [`CHANGELOG.md`](CHANGELOG.md) | 完整变更记录 |
 | [`docs/system_design.md`](docs/system_design.md) | 系统详细设计 |
-| [`docs/releases/v3.2.0.md`](docs/releases/v3.2.0.md) | GitHub Release 说明 |
+| [`docs/releases/v3.2.1.md`](docs/releases/v3.2.1.md) | GitHub Release 说明 |
+| [`icon.png`](icon.png) / [`icon.ico`](icon.ico) | 快捷方式与启动器图标（PNG 256px / ICO 7 种尺寸） |
 | [`DESIGN.md`](DESIGN.md) | UI 设计系统（Stripe 浅色招牌风） |
 
 ---

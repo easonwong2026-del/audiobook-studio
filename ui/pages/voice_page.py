@@ -1,25 +1,13 @@
 """角色与声音阶段 UI builder。"""
 from __future__ import annotations
 
-import os
-
 import gradio as gr
-
-from lib import config
-
-
-def _builder_lib_voices() -> list[str]:
-    """扫描音色库目录，返回文件名列表（替代 app.py 的 _lib_voices）。"""
-    vlib = config.get_voice_library()
-    os.makedirs(vlib, exist_ok=True)
-    return [f for f in os.listdir(vlib) if f.endswith((".wav", ".mp3"))]
 
 
 def create_voice_page() -> dict:
     """创建以角色绑定为主、声音资产管理为辅的页面。"""
     with gr.Group(visible=False, elem_id="grp-voices") as grp_voices:
-        gr.Markdown("### 角色与声音")
-        gr.Markdown("先为每个角色确认声音。所有角色完成绑定后，即可进入生产。")
+        gr.Markdown("### 角色列表")
         v_status = gr.Markdown("")
         v_table = gr.Markdown("<div class='inline-empty'>打开项目后显示角色绑定清单。</div>")
 
@@ -31,7 +19,7 @@ def create_voice_page() -> dict:
                 "<span><b>③</b> 试听确认</span><span><b>④</b> 保存绑定</span>"
                 "</div>"
             )
-            with gr.Row(equal_height=True, elem_classes=["voice-binding-steps"]):
+            with gr.Row(equal_height=False, elem_classes=["voice-binding-steps"]):
                 with gr.Column(scale=1, elem_classes=["voice-step-card"]):
                     gr.Markdown("##### ① 选择角色")
                     gr.Markdown("先选定要配置声音的角色。")
@@ -41,14 +29,19 @@ def create_voice_page() -> dict:
                     )
                 with gr.Column(scale=2, elem_classes=["voice-step-card"]):
                     gr.Markdown("##### ② 选择声音")
-                    gr.Markdown("从音色库选择，或上传 / 录制新的参考音频。")
+                    gr.Markdown("先筛选音色分类，再选择、上传或录制参考音频。")
+                    v_bind_category = gr.Dropdown(
+                        label="音色分类", choices=[], value=None, interactive=True,
+                        info="用于筛选下方音色列表",
+                    )
                     v_lib = gr.Dropdown(
-                        label="从音色库选择", choices=_builder_lib_voices(), interactive=True,
+                        label="音色列表", choices=[], interactive=True,
                     )
                     v_audio = gr.Audio(
                         label="上传或录制参考音频",
                         type="filepath",
                         sources=["upload", "microphone"],
+                        elem_classes=["voice-reference-upload"],
                     )
                 with gr.Column(scale=1, elem_classes=["voice-step-card"]):
                     gr.Markdown("##### ③ 试听确认")
@@ -58,9 +51,6 @@ def create_voice_page() -> dict:
                 with gr.Column(scale=1, elem_classes=["voice-step-card"]):
                     gr.Markdown("##### ④ 保存绑定")
                     gr.Markdown("确认无误后，保存到当前角色。")
-                    v_bind_category = gr.Dropdown(
-                        label="音色分类（可选）", choices=[], value=None, interactive=True,
-                    )
                     v_bind = gr.Button("确认绑定", variant="primary")
             v_bind_msg = gr.Markdown("")
             v_current = gr.Markdown("当前参考音频：未选择")

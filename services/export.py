@@ -7,9 +7,6 @@ from __future__ import annotations
 
 import logging
 
-from lib import audio_pipeline
-from lib.exceptions import ExportError
-
 logger = logging.getLogger(__name__)
 
 
@@ -34,6 +31,8 @@ class ExportService:
             ExportError: ffmpeg 缺失 / 转码失败（由 ``audio_pipeline`` 抛出，原样透传）。
             RuntimeError: 存在未合成段落（由 ``audio_pipeline`` 抛出）。
         """
+        from lib import audio_pipeline
+
         return audio_pipeline.export_book(
             project_dir, format=fmt, bitrate=bitrate, output_dir=output_dir
         )
@@ -51,6 +50,8 @@ class ExportService:
         Returns:
             生成的字幕文件路径列表（按请求格式）。
         """
+        from lib import audio_pipeline
+
         return audio_pipeline.generate_subtitles(
             project_dir, formats=formats, output_dir=output_dir
         )

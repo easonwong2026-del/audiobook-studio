@@ -1,17 +1,7 @@
 """生产阶段中的质检与局部修复 UI builder。"""
 from __future__ import annotations
 
-import os
-
 import gradio as gr
-
-from lib import config as _cfg
-
-
-def _browse_voices() -> list[str]:
-    vlib = _cfg.get_voice_library()
-    os.makedirs(vlib, exist_ok=True)
-    return [f for f in os.listdir(vlib) if f.endswith((".wav", ".mp3"))]
 
 
 def create_review_page() -> dict:
@@ -41,7 +31,7 @@ def create_review_page() -> dict:
                     e_alpha = gr.Slider(label="情绪强度", minimum=0.0, maximum=1.0, value=1.0, step=0.1)
                     e_rate = gr.Slider(label="语速", minimum=0.7, maximum=1.5, value=1.0, step=0.1)
                 with gr.Row():
-                    e_voice = gr.Dropdown(label="临时替换声音（可选）", choices=_browse_voices(), value=None, scale=2)
+                    e_voice = gr.Dropdown(label="临时替换声音（可选）", choices=[], value=None, scale=2)
                     e_regenerate = gr.Button("重合成所选段落", variant="primary", scale=1)
                 e_regenerate_msg = gr.Markdown("")
 

@@ -1,13 +1,8 @@
 """导航系统（从 app.py 抽离）。"""
 from __future__ import annotations
-from pathlib import Path
-
 import gradio as gr
 
-
-_BRAND_MARK_PATH = str(
-    Path(__file__).resolve().parents[1] / "assets" / "brand" / "audiobook-studio-logo-mark-v1.png"
-)
+from ui.components.brand_logo import create_brand_logo
 
 # 顶级导航只呈现用户生产流程，而不是内部功能模块。
 # 元数据： (页面 ID, 按钮标签, elem_id)
@@ -70,17 +65,7 @@ def create_nav_buttons() -> dict[str, gr.Button]:
     """
     buttons: dict[str, gr.Button] = {}
     with gr.Column(scale=0, min_width=248, elem_classes=["sidebar"]):
-        with gr.Row(equal_height=True, elem_classes=["brand-lockup"]):
-            gr.Image(
-                value=_BRAND_MARK_PATH,
-                show_label=False,
-                interactive=False,
-                container=False,
-                width=46,
-                height=46,
-                elem_classes=["brand-mark"],
-            )
-            gr.Markdown("<div class='logo-bar'><span>AUDIOBOOK</span>有声书工作台</div>")
+        create_brand_logo()
         gr.Markdown("<div class='sidebar-caption'>从剧本到可交付音频</div>")
         for page_id, label, elem_id in NAV_ITEMS:
             btn = gr.Button(label, elem_classes=["nav-btn"], elem_id=elem_id)

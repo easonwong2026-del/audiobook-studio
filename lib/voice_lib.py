@@ -94,3 +94,8 @@ def list_categories() -> list[str]:
             continue
         cats.add(_category_of(name))
     return sorted(cats)
+
+
+def voice_names(category: str | None = None) -> list[str]:
+    """返回下拉框使用的音色文件名，复用统一扫描与扩展名规则。"""
+    return [item["name"] for item in scan_voice_library(category=category)]
