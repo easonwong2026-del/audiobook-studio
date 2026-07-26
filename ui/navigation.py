@@ -67,7 +67,6 @@ def create_nav_buttons() -> dict[str, gr.Button]:
             gr.Image(
                 value=_BRAND_MARK_PATH,
                 show_label=False,
-                show_download_button=False,
                 interactive=False,
                 container=False,
                 width=46,
