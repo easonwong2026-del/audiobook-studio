@@ -25,6 +25,7 @@ GROUP_ITEMS = [
     "overview",
     "project",
     "voices",
+    "production-nav",
     "synth",
     "review",
     "export",
@@ -36,16 +37,22 @@ _GROUPS: list[gr.Group] = []
 
 
 def _goto(which: str) -> tuple:
-    """导航切换：返回 7 个 gr.update(visible=...) 元组。
+    """导航切换：返回 8 个 gr.update(visible=...) 元组。
 
     Args:
         which: 顶级目标页面 ID（与 NAV_ITEMS 中的 page_id 对应）。
 
     Returns:
-        7 元素组，每个为 ``gr.update(visible=...)``，顺序与 GROUP_ITEMS / _GROUPS 一致。
+        8 元素组，每个为 ``gr.update(visible=...)``，顺序与 GROUP_ITEMS / _GROUPS 一致。
     """
+    production = which in {"synth", "review", "supplement"}
     return tuple(
-        gr.update(visible=(page_id == which or (which == "synth" and page_id in {"review", "supplement"})))
+        gr.update(
+            visible=(
+                page_id == which
+                or (production and page_id == "production-nav")
+            )
+        )
         for page_id in GROUP_ITEMS
     )
 

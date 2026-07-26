@@ -3,8 +3,8 @@
 验证：
   - 「角色补录」被收纳到顶级「生产与质检」阶段，而非单独导航按钮。
   - 新增 grp-supplement 分组（ui/pages/supplement_page.py 中 elem_id="grp-supplement"）。
-  - _GROUPS 在 app.py 运行时装填 7 项。
-  - _goto 定义在 ui/navigation.py 中，返回 7 个 gr.update。
+  - _GROUPS 在 app.py 运行时装填 8 项（含生产阶段内部导航）。
+  - _goto 定义在 ui/navigation.py 中，返回 8 个 gr.update。
   - 新增 handler 均定义且接 ss（首参或含 ss），并已接线。
 """
 from __future__ import annotations
@@ -53,8 +53,9 @@ def _arg_ids_with_vararg(fn):
 def test_supplement_belongs_to_production_stage():
     assert '"nav-synth"' in NAV_SRC, "navigation.py 缺少生产与质检入口"
     assert '"nav-supplement"' not in NAV_SRC, "补录不应继续作为顶级导航"
-    assert 'which == "synth" and page_id in {"review", "supplement"}' in NAV_SRC, \
-        "生产阶段应同时展示质检和补录工具"
+    assert '"production-nav"' in NAV_SRC, "缺少生产阶段内部导航分组"
+    assert 'which in {"synth", "review", "supplement"}' in NAV_SRC, \
+        "生产阶段内部页面应由同一导航控制"
 
 
 def test_grp_supplement_present():
@@ -62,9 +63,9 @@ def test_grp_supplement_present():
     assert 'elem_id="grp-supplement"' in SUP_SRC, "缺少 grp-supplement 分组"
 
 
-def test_groups_tuple_has_seven_items():
+def test_groups_tuple_has_eight_items():
     # _GROUPS 声明在 ui/navigation.py 中（空列表占位），
-    # 实际填充在 app.py 运行时：_GROUPS[:] = [7 个 group]
+    # 实际填充在 app.py 运行时：_GROUPS[:] = [8 个 group]
     # app.py 中的赋值使用 _GROUPS[:] 下标（ast.Subscript）
     for node in ast.walk(TREE):
         if isinstance(node, ast.Assign):
@@ -74,15 +75,15 @@ def test_groups_tuple_has_seven_items():
                         val = node.value
                         assert isinstance(val, (ast.List, ast.Tuple)), \
                             f"_GROUPS[:] 赋值应为列表/元组（实际 {type(val).__name__}）"
-                        assert len(val.elts) == 7, \
-                            f"_GROUPS[:] 应为 7 项（实际 {len(val.elts)}）"
+                        assert len(val.elts) == 8, \
+                                f"_GROUPS[:] 应为 8 项（实际 {len(val.elts)}）"
                         return
     raise AssertionError("未找到 _GROUPS[:] = [...] 赋值")
 
 
 def test_goto_returns_internal_group_updates_for_five_stage_navigation():
     # _goto 定��在 ui/navigation.py 中，返回 tuple(GeneratorExp)
-    # 实际返回 7 个 gr.update，覆盖 5 个顶级阶段下的 7 个内部 Group。
+    # 实际返回 8 个 gr.update，覆盖 5 个顶级阶段下的内部 Group。
     # 验证 _goto 存在且返回 tuple(...) 调用
     fn = find_func(NAV_TREE, "_goto")
     assert fn is not None, "navigation.py 中未定义 _goto"

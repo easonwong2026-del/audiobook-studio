@@ -9,8 +9,8 @@ from lib import progress as synth_progress
 def create_synthesis_page() -> dict:
     """创建以生产状态和可恢复控制为中心的合成界面。"""
     with gr.Group(visible=False, elem_id="grp-synth") as grp_synth:
-        gr.Markdown("### 生产与质检")
-        gr.Markdown("按剧本合成、追踪队列，并在同一阶段完成试听、局部修复和补录。")
+        gr.Markdown("#### 合成中心")
+        gr.Markdown("按剧本合成并追踪队列；试听质检和角色补录可从上方生产阶段导航进入。")
 
         with gr.Group(elem_classes=["production-command"]):
             with gr.Row(equal_height=True):
@@ -48,7 +48,13 @@ def create_synthesis_page() -> dict:
                 with gr.Row():
                     s_alpha = gr.Slider(label="情绪强度", minimum=0.0, maximum=1.0, value=1.0, step=0.1)
                     s_rate = gr.Slider(label="语速", minimum=0.7, maximum=1.5, value=1.0, step=0.1)
-                    s_beam = gr.Dropdown(label="质量 / 速度", choices=[1, 2, 3], value=2, interactive=True)
+                    s_beam = gr.Dropdown(
+                        label="合成质量",
+                        choices=[("快速", 1), ("标准", 2), ("高质量", 3)],
+                        value=2,
+                        interactive=True,
+                        info="快速更省时，标准适合日常生产，高质量更慢但更稳。",
+                    )
 
         gr.Markdown("#### 生产队列")
         s_queue_list = gr.Dataframe(
