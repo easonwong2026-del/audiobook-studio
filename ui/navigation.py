@@ -64,7 +64,7 @@ def create_nav_buttons() -> dict[str, gr.Button]:
            "nav_export": gr.Button}``
     """
     buttons: dict[str, gr.Button] = {}
-    with gr.Column(scale=0, min_width=248, elem_classes=["sidebar"]):
+    with gr.Column(scale=0, min_width=236, elem_classes=["sidebar"]):
         create_brand_logo()
         gr.Markdown("<div class='sidebar-caption'>从剧本到可交付音频</div>")
         for page_id, label, elem_id in NAV_ITEMS:

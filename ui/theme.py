@@ -193,7 +193,7 @@ button:hover, .gr-button:hover {{ transform:translateY(-1px)!important; }}
 .prose tr:last-child td {{ border-bottom:none!important; }}
 
 /* ===== 侧边栏（深绿背景） ===== */
-.sidebar {{ background:{SIDEBAR}!important; border:1px solid #2c3a30!important; border-radius:20px!important; padding:22px 14px!important; min-width:260px!important; margin-right:8px!important; align-self:flex-start!important; height:auto!important; flex-grow:0!important; }}
+.sidebar {{ background:{SIDEBAR}!important; border:1px solid #2c3a30!important; border-radius:20px!important; padding:22px 14px!important; width:236px!important; flex:0 0 auto!important; align-self:flex-start!important; height:auto!important; }}
 .brand-lockup {{ align-items:center!important; gap:12px!important; margin:0 4px!important; }}
 .sidebar .brand-mark {{ flex:0 0 52px!important; min-width:52px!important; width:52px!important; }}
 .sidebar .brand-mark img {{
@@ -369,7 +369,7 @@ button[aria-label*="Play"] {{ border-radius:999px!important; background:{ACCENT}
 
 @media (max-width: 900px) {{
   .gradio-container {{ padding:12px!important; }}
-  .sidebar {{ min-width:100%!important; margin:0 0 12px!important;
+  .sidebar {{ width:100%!important; margin:0 0 12px!important;
     border-radius:20px!important;
   }}
   .dashboard-metrics {{ grid-template-columns:1fr; }}
