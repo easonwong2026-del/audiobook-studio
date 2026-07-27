@@ -180,7 +180,7 @@ def test_theme_keeps_text_readable_and_voice_layout_compact():
     assert 'body_background_fill=SURFACE' in theme
     assert '[data-testid="block-label"]' in theme
     assert ".sidebar .nav-btn" in theme
-    assert ".voice-workspace { gap:16px!important;" in theme
+    assert ".voice-workspace {{ gap:16px!important;" in theme
     assert ".role-management-list label:has(input:checked)" in theme
     assert ".voice-config-footer" in theme
     assert ".voice-reference-upload .audio-container button.boundedheight" in theme
