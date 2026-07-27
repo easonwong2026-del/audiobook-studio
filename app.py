@@ -19,9 +19,10 @@ from ui.shared import create_status_bar
 from ui.components import (
     empty_dashboard_html,
     create_production_navigation,
+    build_role_management_choices,
     format_bound_role_choices,
-    format_role_choices,
     format_role_label,
+    format_role_management_summary,
     project_dashboard_html,
 )
 from ui.pages import (
@@ -106,14 +107,17 @@ def _snap(ss):
     return None
 
 def open_project(name, ss):
-    if not name: return "📖 等待打开项目",gr.update(),gr.update(choices=[]),gr.update(),"",""
+    if not name:
+        return (
+            "📖 等待打开项目", gr.update(choices=[], value=None), None,
+            "### 当前角色配置\n请从左侧角色列表选择角色。",
+            gr.update(choices=[]), "", "打开项目后显示角色绑定状态。",
+        )
     try:
         # 业务委托 ProjectService.open_project_as_snapshot（包 pm.load_snapshot）
         snap = ProjectService.open_project_as_snapshot(name)
         ss.set_project(name, snap.script, snap.bindings)
         ss.set_snapshot(snap)
-        role_categories = snap.role_categories
-        choices = format_role_choices(snap.script, ss.bindings, role_categories)
         roles = list(snap.script.get("voices",{}).keys())
         vcount = len(roles)
         bound = sum(1 for v in ss.bindings.values() if v)
@@ -130,20 +134,21 @@ def open_project(name, ss):
         existing = scan_existing_raw(snap, seg_dir)
         log_init = "\n".join(existing[-15:]) if existing else "等待音色配置完成后开始合成..."
 
-        vtable = "| 角色（声线） | 绑定状态 |\n|------|------|\n"
-        for n,i in snap.script.get("voices",{}).items():
-            a = ss.bindings.get(n)
-            s = f"<span class='status-ok'>✅</span> {os.path.basename(a)}" if a else "<span class='status-warn'>⚠ 待绑定</span>"
-            vtable += f"| {format_role_label(n, i)} | {s} |\n"
+        role_choices = build_role_management_choices(snap.script, ss.bindings)
 
         return (info,
-        gr.update(visible=True, value=vtable),
-                gr.update(choices=choices,value=choices[0][1] if choices else None),
+        gr.update(choices=role_choices, value=None),
+                None,
+                "### 当前角色配置\n请从左侧角色列表选择角色。",
                 gr.update(choices=_lib_voices(),value=None),
                 log_init,
-                gr.update(visible=True))
+                format_role_management_summary(snap.script, ss.bindings))
     except Exception as e:
-        return f"### 打开失败\n{e}",gr.update(),gr.update(),gr.update(),"",gr.update()
+        return (
+            f"### 打开失败\n{e}", gr.update(), None,
+            "### 当前角色配置\n请从左侧角色列表选择角色。",
+            gr.update(), "", "打开项目后显示角色绑定状态.",
+        )
 
 
 
@@ -195,13 +200,48 @@ def open_data_dir():
         logger.warning("打开数据目录失败: %s", exc)
     return ""
 
-def _voice_status(s,b):
-    rows=[]
-    for n,i in s.get("voices",{}).items():
-        a=b.get(n)
-        status = '<span class=status-ok>✅ 已绑定</span>' if a else '<span class=status-warn>⚠ 待绑定</span>'
-        rows.append(f"|{format_role_label(n, i)}|{status}|")
-    return "|角色（声线）|状态|\n|------|------|\n"+"\n".join(rows)
+def refresh_role_list(search, current_role, ss):
+    """按搜索词刷新角色管理列表，同时保留仍可见的当前角色。"""
+    if not ss or not ss.project:
+        return gr.update(choices=[], value=None)
+    snap = _snap(ss)
+    if not snap:
+        return gr.update(choices=[], value=None)
+    choices = build_role_management_choices(snap.script, snap.bindings, search)
+    selected = current_role if any(value == current_role for _, value in choices) else None
+    return gr.update(choices=choices, value=selected)
+
+
+def _role_config_title(role, voice, binding):
+    """生成右侧当前角色标题，避免再次提供角色选择控件。"""
+    if not role:
+        return "### 当前角色配置\n请从左侧角色列表选择角色。"
+    description = str((voice or {}).get("description") or (voice or {}).get("name") or "").strip()
+    detail = f"\n{description}" if description else ""
+    status = "✅ 已绑定" if binding else "⚠ 待绑定"
+    return f"### 当前角色：{role}{detail}\n{status}"
+
+
+def select_role_from_list(role, ss):
+    """选择角色列表项后加载该角色的绑定状态和右侧配置。"""
+    if not ss or not ss.project or not role:
+        return gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
+    role = str(role)
+    snap = _snap(ss)
+    if not snap or role not in (snap.script.get("voices", {}) or {}):
+        return gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
+    binding = snap.bindings.get(role)
+    voice = snap.script.get("voices", {}).get(role, {})
+    current = f"当前绑定音频：{os.path.basename(binding)}" if binding else "当前绑定音频：未选择"
+    return (
+        role,
+        _role_config_title(role, voice, binding),
+        gr.update(value=binding),
+        gr.update(value=None),
+        f"*{current}*",
+        None,
+        "",
+    )
 
 def _lib_voices():
     return voice_lib.voice_names()
@@ -214,9 +254,11 @@ def _safe_name(s):
     return re.sub(r'[\\/:*?"<>|]', '_', s)
 
 def bind_voice(role, audio_file, from_lib, ss):
-    if not ss.project or not role: return "请先打开项目", gr.update(), gr.update(), gr.update()
+    if not ss or not ss.project or not role:
+        return "请先从左侧角色列表选择角色", gr.update(), gr.update(), role, gr.update(), gr.update()
     src = _lib_path(from_lib) if from_lib else audio_file
-    if not src: return "请上传音频、录制或从音色库选择", gr.update(), gr.update(), gr.update()
+    if not src:
+        return "请上传音频、录制或从音色库选择", gr.update(), gr.update(), role, gr.update(), gr.update()
     # 业务委托 ProjectService.bind_voice（拷贝 + 写 voice_bindings.json），返回 dest
     cat = voice_lib._category_of(os.path.basename(src)) if from_lib else "未分类"
     dest = ProjectService.bind_voice(ss.project, role, src, category=cat)
@@ -226,9 +268,18 @@ def bind_voice(role, audio_file, from_lib, ss):
     snap = ProjectService.open_project_as_snapshot(ss.project)
     ss.set_snapshot(snap)
     ss.bindings = snap.bindings
-    rc = snap.role_categories
-    rchoices = format_role_choices(snap.script, ss.bindings, rc)
-    return f"{format_role_label(role, snap.script.get('voices', {}).get(role))} 已绑定", _voice_status(snap.script, ss.bindings), gr.update(), gr.update(choices=rchoices, value=role)
+    voice = snap.script.get("voices", {}).get(role, {})
+    return (
+        f"{format_role_label(role, voice)} 已绑定",
+        gr.update(
+            choices=build_role_management_choices(snap.script, ss.bindings),
+            value=role,
+        ),
+        gr.update(),
+        role,
+        _role_config_title(role, voice, dest),
+        f"*当前绑定音频：{os.path.basename(dest)}*",
+    )
 
 def preview_bound_voice(role, audio_file, from_lib, ss):
     """试听当前选择的声音，未选择候选声音时回退到已绑定声音。
@@ -997,7 +1048,9 @@ def refresh_production_check(ss):
         snap = _snap(ss)
         if snap is None:
             return "#### 生产检查\n请先打开项目。"
-        errors = script_loader.validate_script(snap.script)
+        # ProjectSnapshot stores the raw structured_script dict; validation
+        # expects the parsed Script model used by the loader/service layer.
+        errors = script_loader.validate_script(script_loader.from_dict(snap.script))
         roles = snap.script.get("voices", {}) or {}
         missing = [role for role in roles if not snap.bindings.get(role)]
         lines = ["#### 生产检查"]
@@ -1209,6 +1262,8 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             grp_voices = vce_page["group"]
             v_status = vce_page["v_status"]
             v_table = vce_page["v_table"]
+            v_role_search = vce_page["v_role_search"]
+            v_role_title = vce_page["v_role_title"]
             v_bind_category = vce_page["v_bind_category"]
             v_audio = vce_page["v_audio"]
             v_role = vce_page["v_role"]
@@ -1338,6 +1393,8 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     nav_voices.click(
         lambda: _goto("voices"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-voices')?.classList.add('active'); }").then(
+        refresh_role_list,
+        [v_role_search, v_role, ss], [v_table]).then(
         refresh_voice_filters,
         [], [v_bind_category, v_lib_category, v_save_category]).then(
         refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
@@ -1364,7 +1421,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     # ── 概览页：书架点选 → 回填 p_sel → open_project 首步 → 打开链刷新 → 切页 ──
     chain = ov_bookshelf.select(
         select_project_from_bookshelf, [ov_bookshelf], [p_sel]
-    ).then(open_project, [p_sel, ss], [p_summary, v_table, v_role, v_lib, s_log, v_status])
+    ).then(open_project, [p_sel, ss], [p_summary, v_table, v_role, v_role_title, v_lib, s_log, v_status])
     _open_chain_rest(chain).then(
         lambda: _goto("project"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-project')?.classList.add('active'); }"
@@ -1373,11 +1430,13 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     # ── 概览页快捷操作：「打开项目」切页 → open_project 首步 → 打开链刷新 ──
     chain = ov_open.click(
         lambda: _goto("project"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-project')?.classList.add('active'); }"    ).then(open_project, [p_sel, ss], [p_summary, v_table, v_role, v_lib, s_log, v_status])
+        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-project')?.classList.add('active'); }"    ).then(open_project, [p_sel, ss], [p_summary, v_table, v_role, v_role_title, v_lib, s_log, v_status])
     _open_chain_rest(chain)
     ov_voices.click(
         lambda: _goto("voices"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-voices')?.classList.add('active'); }").then(
+        refresh_role_list,
+        [v_role_search, v_role, ss], [v_table]).then(
         refresh_voice_filters,
         [], [v_bind_category, v_lib_category, v_save_category]).then(
         refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
@@ -1399,12 +1458,22 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     # ═══════════ events（业务接线，沿用 v2） ═══════════
     p_refresh.click(refresh_projects_full, [], [p_sel])
     p_create.click(create_project, [p_name, p_script, ss], [p_name, p_script, p_create_msg, p_sel])
-    chain = p_open.click(open_project, [p_sel, ss], [p_summary, v_table, v_role, v_lib, s_log, v_status])
+    chain = p_open.click(open_project, [p_sel, ss], [p_summary, v_table, v_role, v_role_title, v_lib, s_log, v_status])
     _open_chain_rest(chain)
     p_del.click(delete_project, p_sel, p_sel)
     data_apply.click(apply_data_dir, [data_dir_box], [data_dir_msg, data_dir_box])
     data_open.click(open_data_dir, [], [data_dir_msg])
-    v_bind.click(bind_voice, [v_role, v_audio, v_lib, ss], [v_bind_msg, v_table, v_lib, v_role])
+    v_table.change(
+        select_role_from_list,
+        [v_table, ss],
+        [v_role, v_role_title, v_audio, v_lib, v_current, v_preview_audio, v_bind_msg],
+    )
+    v_role_search.change(refresh_role_list, [v_role_search, v_role, ss], [v_table])
+    v_bind.click(
+        bind_voice,
+        [v_role, v_audio, v_lib, ss],
+        [v_bind_msg, v_table, v_lib, v_role, v_role_title, v_current],
+    )
     v_lib.change(play_lib_voice, v_lib, v_audio)
     v_lib.change(lambda c: f"*当前参考音频: 音色库/{c}*" if c else "*当前参考音频: 未选择*", v_lib, v_current)
     v_audio.change(lambda f: f"*当前参考音频: {os.path.basename(f) if f else '未选择'}*", v_audio, v_current)

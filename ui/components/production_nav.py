@@ -1,20 +1,18 @@
-"""生产与质检阶段的内部导航 UI。"""
+"""生产与质检阶段的内部导航 UI — 对齐 Pencil 三级 tab 设计。"""
 from __future__ import annotations
 
 import gradio as gr
 
 
 def create_production_navigation() -> dict:
-    """创建生产阶段内部导航，不引入业务逻辑或额外顶级入口。"""
+    """创建生产阶段内部导航，三 tab 对应合成、质检、补录。"""
     with gr.Group(visible=False, elem_id="grp-production-nav") as group:
-        gr.Markdown("### 生产与质检")
-        gr.Markdown("在同一生产阶段内按顺序完成合成、试听质检和角色补录。")
         stage = gr.Radio(
             label="生产阶段",
             choices=[
-                ("合成中心", "synth"),
-                ("试听质检", "review"),
-                ("角色补录", "supplement"),
+                ("🎛 合成中心", "synth"),
+                ("🔍 试听质检", "review"),
+                ("🎤 角色补录", "supplement"),
             ],
             value="synth",
             interactive=True,

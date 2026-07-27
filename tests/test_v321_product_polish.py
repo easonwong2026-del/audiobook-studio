@@ -4,9 +4,15 @@ from __future__ import annotations
 import ast
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from lib import __version__
-from ui.components.voice_binding import format_bound_role_choices, format_role_choices
+from ui.components.voice_binding import (
+    build_role_management_choices,
+    build_role_management_rows,
+    format_bound_role_choices,
+    format_role_choices,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,14 +52,76 @@ def test_role_choices_include_description_without_changing_value():
     assert [value for _, value in format_bound_role_choices(script, {"小雨": "/tmp/x.wav"})] == ["小雨"]
 
 
+def test_role_management_rows_scale_and_filter_without_mutating_bindings():
+    roles = {
+        f"角色{i:02d}": {"description": f"声线描述 {i:02d}"}
+        for i in range(55)
+    }
+    bindings = {"角色00": "/tmp/role00.wav", "角色42": "/tmp/role42.wav"}
+    rows = build_role_management_rows({"voices": roles}, bindings)
+    choices = build_role_management_choices({"voices": roles}, bindings)
+    assert len(rows) == 55
+    assert len(choices) == 55
+    assert rows[0] == ["角色00", "声线描述 00", "✅ 已绑定"]
+    assert rows[42][2] == "✅ 已绑定"
+    assert rows[54][2] == "⚠ 待绑定"
+    filtered = build_role_management_rows({"voices": roles}, bindings, "42")
+    assert filtered == [["角色42", "声线描述 42", "✅ 已绑定"]]
+    assert bindings["角色00"] == "/tmp/role00.wav"
+
+
+def test_role_management_choices_keep_role_value_and_multiline_summary():
+    choices = build_role_management_choices(
+        {"voices": {"妈妈": {"description": "温柔女声，30岁"}}},
+        {"妈妈": None},
+    )
+    assert choices == [("妈妈\n温柔女声，30岁\n⚠ 待绑定", "妈妈")]
+
+
+def test_role_list_selection_loads_right_hand_configuration(monkeypatch):
+    import app
+
+    snapshot = SimpleNamespace(
+        script={"voices": {"旁白": {"description": "沉稳男中音"}, "妈妈": {"description": "温柔女声"}}},
+        bindings={"旁白": "/tmp/narrator.wav", "妈妈": None},
+    )
+    session = SimpleNamespace(project="demo", bindings=snapshot.bindings)
+    monkeypatch.setattr(app, "_snap", lambda _session: snapshot)
+    result = app.select_role_from_list("妈妈", session)
+    assert result[0] == "妈妈"
+    assert "当前角色：妈妈" in result[1]
+    assert result[2]["value"] is None
+    assert result[4] == "*当前绑定音频：未选择*"
+
+
+def test_production_check_parses_snapshot_raw_script(monkeypatch):
+    import app
+
+    snapshot = SimpleNamespace(
+        script={
+            "meta": {"title": "验收书"},
+            "voices": {"旁白": {"description": "沉稳男中音"}},
+            "chapters": [{"id": 1, "title": "第一章", "segments": [
+                {"id": "1-001", "role": "旁白", "text": "测试"},
+            ]}],
+        },
+        bindings={"旁白": None},
+    )
+    session = SimpleNamespace(project="demo")
+    monkeypatch.setattr(app, "_snap", lambda _session: snapshot)
+    result = app.refresh_production_check(session)
+    assert "✅ 剧本有效" in result
+    assert "未绑定声音" in result
+
+
 def test_production_stage_has_internal_navigation_and_check():
     navigation = _text("ui/navigation.py")
     production = _text("ui/components/production_nav.py")
     app = _text("app.py")
     assert '"production-nav"' in navigation
-    assert '"合成中心", "synth"' in production
-    assert '"试听质检", "review"' in production
-    assert '"角色补录", "supplement"' in production
+    assert '"🎛 合成中心", "synth"' in production
+    assert '"🔍 试听质检", "review"' in production
+    assert '"🎤 角色补录", "supplement"' in production
     assert "def refresh_production_check" in app
     assert "production_stage.change(_goto" in app
     tree = ast.parse(app)
@@ -109,10 +177,12 @@ def test_launcher_icon_assets_are_available_in_png_and_multisize_ico():
 def test_theme_keeps_text_readable_and_voice_layout_compact():
     theme = _text("ui/theme.py")
     voice = _text("ui/pages/voice_page.py")
-    assert 'body_background_fill="#edf2ec"' in theme
+    assert 'body_background_fill=SURFACE' in theme
     assert '[data-testid="block-label"]' in theme
     assert ".sidebar .nav-btn" in theme
-    assert ".voice-binding-steps { display:grid!important; grid-template-columns:1fr!important;" in theme
+    assert ".voice-workspace {{ gap:16px!important;" in theme
+    assert ".role-management-list label:has(input:checked)" in theme
+    assert ".voice-config-footer" in theme
     assert ".voice-reference-upload .audio-container button.boundedheight" in theme
     assert 'elem_classes=["voice-reference-upload"]' in voice
 
@@ -125,8 +195,13 @@ def test_dashboard_and_page_titles_do_not_repeat_navigation():
     assert "empty_dashboard_html()" in overview
     assert "有声书生产工作台" not in dashboard
     assert "选择项目后开始制作" in dashboard
-    assert 'gr.Markdown("### 角色列表")' in voice
-    assert 'gr.Markdown("### 角色与声音")' not in voice
+    assert 'gr.Markdown("### 角色与声音")' in voice
+    assert 'label="搜索角色"' in voice
+    assert 'v_role = gr.State' in voice
+    assert 'v_role = gr.Dropdown' not in voice
+    assert '##### ① 选择角色' not in voice
+    assert 'v_table.change(' in _text("app.py")
+    assert 'select_role_from_list' in _text("app.py")
 
 
 def test_voice_category_filters_before_voice_selection():
