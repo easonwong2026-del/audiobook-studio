@@ -410,13 +410,26 @@ def update_provider_config_fields(provider: str) -> tuple:
         f"或设置环境变量 <code>{env_var}</code>。</p>"
     )
     config = AiSettingsService.get_provider_config()
-    saved_key = AiSettingsService.get_api_key(provider)
     saved_base = config.get(f"{provider}_base_url", "")
     return (
-        info,
-        gr.update(visible=True, value=saved_key or ""),
+        AiSettingsService.api_key_status(provider),
+        gr.update(visible=True, value=""),
         gr.update(visible=True, value=saved_base or default_base),
     )
+
+
+def load_ai_settings() -> tuple:
+    """Load saved non-sensitive settings without returning the API key."""
+    cfg = AiSettingsService.get_provider_config()
+    provider = str(cfg.get("default_provider", "local"))
+    model = cfg.get(f"{provider}_model", "")
+    base = cfg.get(f"{provider}_base_url", "")
+    timeout = cfg.get("timeout", 180)
+    if provider == "local":
+        status = "<p>本地离线基线无需配置密钥。</p>"
+        return provider, model, gr.update(visible=False, value=""), timeout, status, gr.update(visible=False), gr.update(value="")
+    default_base = "https://api.openai.com/v1" if provider == "openai" else "https://api.deepseek.com"
+    return provider, model, gr.update(visible=True, value=base or default_base), timeout, AiSettingsService.api_key_status(provider), gr.update(visible=True), gr.update(value="")
 
 
 def save_ai_settings(provider, model, api_key, base_url, timeout) -> str:
@@ -449,10 +462,10 @@ def save_ai_settings(provider, model, api_key, base_url, timeout) -> str:
         return f"❌ 保存失败：{html.escape(str(exc))}"
 
 
-def test_ai_connection(provider: str) -> str:
+def test_ai_connection(provider: str, model: str = "", api_key: str = "", base_url: str = "", timeout: float = 30) -> str:
     """测试 Provider 连接。"""
     try:
-        result = AiSettingsService.check_connection(str(provider or "local"))
+        result = AiSettingsService.check_connection(str(provider or "local"), api_key, base_url, timeout)
         return result
     except Exception as exc:
         logger.exception("测试 AI 连接失败")
@@ -479,11 +492,11 @@ def open_data_dir() -> str:
     try:
         import subprocess
         if sys.platform == "win32":
-            os.startfile(d)  # Windows 资源管理器
+            os.startfile(d)
         elif sys.platform == "darwin":
             subprocess.Popen(["open", d])
         else:
             subprocess.Popen(["xdg-open", d])
-    except Exception:
-        pass
-    return ""
+    except Exception as exc:
+        return f"❌ 打开数据目录失败：{html.escape(str(exc))}"
+    return f"✅ 已打开数据目录：`{d}`"

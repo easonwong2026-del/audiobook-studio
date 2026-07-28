@@ -15,3 +15,4 @@ keyring            # AI Provider API Key 安全存储
 #   - ffmpeg 是系统二进制，需自行下载并加入 PATH（不能通过 pip 安装）。
 #     下载：https://ffmpeg.org/download.html
 #     缺失时导出会回退为 WAV，并在 launcher.py 中给出明确警告。
+keyring>=24.0

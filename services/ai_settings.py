@@ -83,6 +83,19 @@ def _set_secret(service: str, username: str, password: str) -> None:
         ) from None
 
 
+def _delete_secret(service: str, username: str) -> None:
+    try:
+        import keyring
+        try:
+            keyring.delete_password(service, username)
+        except keyring.errors.PasswordDeleteError:
+            pass
+        except Exception:
+            pass
+    except ImportError:
+        pass
+
+
 class AiSettingsService:
     """AI Provider 配置的读写和有效配置计算。"""
 
@@ -108,11 +121,43 @@ class AiSettingsService:
         return None
 
     @staticmethod
+    def has_api_key(provider: str) -> bool:
+        """仅返回是否已配置 Key，不泄露密钥内容。"""
+        return AiSettingsService.get_api_key(provider) is not None
+
+    @staticmethod
+    def api_key_status(provider: str) -> str:
+        """返回用户可读的密钥状态 HTML。"""
+        for_source = f"环境变量 `{provider.upper()}_API_KEY`"
+        if provider == "openai":
+            for_source = "环境变量 `OPENAI_API_KEY`"
+        elif provider == "deepseek":
+            for_source = "环境变量 `DEEPSEEK_API_KEY`"
+        has = AiSettingsService.has_api_key(provider)
+        if has:
+            return (
+                f"<p style='color:#16a34a'>✅ API Key 已配置</p>"
+                f"<p style='color:#666;font-size:0.85em'>来源：Keyring 或 {for_source}</p>"
+            )
+        return (
+            f"<p style='color:#d97706'>⚠ API Key 尚未配置</p>"
+            f"<p style='color:#666;font-size:0.85em'>输入新密钥并保存，"
+            f"或设置 {for_source}</p>"
+        )
+
+    @staticmethod
     def set_api_key(provider: str, api_key: str) -> None:
         if provider == "openai":
             _set_secret(KEYRING_SERVICE, KEYRING_OPENAI_KEY, api_key)
         elif provider == "deepseek":
             _set_secret(KEYRING_SERVICE, KEYRING_DEEPSEEK_KEY, api_key)
+
+    @staticmethod
+    def delete_api_key(provider: str) -> None:
+        if provider == "openai":
+            _delete_secret(KEYRING_SERVICE, KEYRING_OPENAI_KEY)
+        elif provider == "deepseek":
+            _delete_secret(KEYRING_SERVICE, KEYRING_DEEPSEEK_KEY)
 
     @staticmethod
     def get_effective_provider_config(provider: Optional[str] = None) -> dict[str, Any]:
@@ -127,39 +172,56 @@ class AiSettingsService:
         }
 
     @staticmethod
-    def check_connection(provider: str) -> str:
+    def check_connection(
+        provider: str,
+        api_key: str = "",
+        base_url: str = "",
+        timeout: float = 30.0,
+    ) -> str:
+        """测试 Provider 连接，使用提供的参数（优先）而非已保存配置。
+
+        Args:
+            provider: Provider 名称。
+            api_key: 当前表单输入的 Key；空则回退已保存 Key。
+            base_url: 当前表单输入的 URL；空则使用默认地址。
+            timeout: 超时秒数。
+
+        Returns:
+            用户可读的测试结果 Markdown。
+        """
         if provider == "local":
             return "✅ 本地离线基线无需网络连接。"
 
-        api_key = AiSettingsService.get_api_key(provider)
-        if not api_key:
-            env_var = "OPENAI_API_KEY" if provider == "openai" else "DEEPSEEK_API_KEY"
+        effective_key = api_key.strip() if api_key and api_key.strip() else (
+            AiSettingsService.get_api_key(provider) or ""
+        )
+        if not effective_key:
             return (
                 f"⚠ **{provider.title()} API Key 尚未配置**。\n\n"
-                f"请前往「设置 → AI 模型」保存密钥，或设置环境变量 `{env_var}`。"
+                f"请输入密钥并保存，或设置环境变量。"
             )
 
-        config = AiSettingsService.get_provider_config()
-        base_url = config.get(f"{provider}_base_url", "")
-        timeout = min(config.get("timeout", 180), 30)
+        effective_url = base_url.strip() if base_url and base_url.strip() else (
+            "https://api.openai.com/v1"
+            if provider == "openai"
+            else "https://api.deepseek.com"
+        )
+        effective_timeout = min(max(float(timeout), 5), 60)
 
         try:
             import urllib.request
             import urllib.error
-            base_url = base_url or (
-                "https://api.openai.com/v1"
-                if provider == "openai"
-                else "https://api.deepseek.com"
-            )
-            endpoint = f"{base_url.rstrip('/')}/models"
+            endpoint = f"{effective_url.rstrip('/')}/models"
             headers = {
-                "Authorization": f"Bearer {api_key}",
+                "Authorization": f"Bearer {effective_key}",
                 "Content-Type": "application/json",
             }
             req = urllib.request.Request(endpoint, headers=headers, method="GET")
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                resp.read()  # 仅确认不解析响应体
-            return f"✅ **{provider.title()}** 连接成功。"
+            with urllib.request.urlopen(req, timeout=effective_timeout) as resp:
+                resp.read()
+            return f"✅ **{provider.title()}** 连接成功。Endpoint：`{effective_url}`"
         except Exception as exc:
             msg = str(exc)[:200]
-            return f"❌ 连接失败：{msg}"
+            # 不要在错误信息中泄露 API Key
+            safe_msg = msg.replace(effective_key, "***") if effective_key in msg else msg
+            return f"❌ 连接失败：{safe_msg}"

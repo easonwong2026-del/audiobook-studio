@@ -14,6 +14,7 @@ import logging
 import os
 import shutil
 import time
+import uuid
 from typing import ClassVar, Optional
 
 from lib.types import ProjectMeta
@@ -224,47 +225,31 @@ class ProjectRepository:
         project_dir = os.path.join(ws, name)
         if os.path.exists(project_dir):
             raise FileExistsError(f"项目 '{name}' 已存在")
-
-        os.makedirs(os.path.join(project_dir, "voices"))
-        os.makedirs(os.path.join(project_dir, "segments"))
-        os.makedirs(os.path.join(project_dir, "chapters"))
-        os.makedirs(os.path.join(project_dir, "output"))
-
-        # 复制剧本 JSON
-        shutil.copy2(script_path, os.path.join(project_dir, "structured_script.json"))
-
-        # 统计段数
-        with open(script_path, encoding="utf-8") as f:
-            script = json.load(f)
-        total_segments = 0
-        for ch in script.get("chapters", []):
-            total_segments += len(ch.get("segments", []))
-
-        # 空 voice_bindings（原子写）
-        voice_bindings = {
-            "bindings": {name: None for name in script.get("voices", {})},
-            "bound_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "verified": [],
-        }
-        ProjectRepository.save_bindings(project_dir, voice_bindings)
-
-        # project.json（原子写）
-        meta = ProjectMeta(
-            project_name=name,
-            created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
-            updated_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
-            total_chapters=len(script.get("chapters", [])),
-            total_segments=total_segments,
-            pending_count=total_segments,
-            segments_status={
-                seg["id"]: "pending"
-                for ch in script.get("chapters", [])
-                for seg in ch.get("segments", [])
-            },
-        )
-        ProjectRepository._save_meta(project_dir, meta)
-
-        return name
+        os.makedirs(ws, exist_ok=True)
+        tmp_dir = os.path.join(ws, f".tmp_{name}_{uuid.uuid4().hex}")
+        try:
+            for sub in ("voices", "segments", "chapters", "output"):
+                os.makedirs(os.path.join(tmp_dir, sub), exist_ok=True)
+            shutil.copy2(script_path, os.path.join(tmp_dir, "structured_script.json"))
+            with open(script_path, encoding="utf-8") as f:
+                script = json.load(f)
+            total_segments = sum(len(ch.get("segments", [])) for ch in script.get("chapters", []))
+            bindings = {"bindings": {n: None for n in script.get("voices", {})},
+                        "bound_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "verified": []}
+            ProjectRepository.save_bindings(tmp_dir, bindings)
+            meta = ProjectMeta(project_name=name, created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                               updated_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                               total_chapters=len(script.get("chapters", [])), total_segments=total_segments,
+                               pending_count=total_segments,
+                               segments_status={seg["id"]: "pending" for ch in script.get("chapters", []) for seg in ch.get("segments", [])})
+            ProjectRepository._save_meta(tmp_dir, meta)
+            if os.path.exists(project_dir):
+                raise FileExistsError(f"项目 '{name}' 已存在")
+            os.replace(tmp_dir, project_dir)
+            return name
+        except Exception:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise
 
     @staticmethod
     def delete_project(name: str) -> None:

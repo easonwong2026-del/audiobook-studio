@@ -1426,6 +1426,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         s_timeout = set_page["s_timeout"]
         s_save = set_page["s_save"]
         s_test = set_page["s_test"]
+        s_clear_key = set_page["s_clear_key"]
         s_status = set_page["s_status"]
         s_data_dir = set_page["s_data_dir"]
         s_data_apply = set_page["s_data_apply"]
@@ -1465,7 +1466,8 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         create_ui.refresh_config_summary, [], [cp_config_summary])
     nav_settings.click(
         lambda: _goto("settings"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-settings')?.classList.add('active'); }")
+        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-settings')?.classList.add('active'); }").then(
+        director_ui.load_ai_settings, [], [s_provider, s_model, s_base_url, s_timeout, s_provider_config, s_api_key, s_clear_key])
     nav_voices.click(
         lambda: _goto("voices"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-voices')?.classList.add('active'); }").then(
@@ -1575,8 +1577,14 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     )
     s_test.click(
         director_ui.test_ai_connection,
-        [s_provider],
+        [s_provider, s_model, s_api_key, s_base_url, s_timeout],
         [s_status],
+    )
+    s_clear_key.click(
+        lambda provider: (director_ui.AiSettingsService.delete_api_key(str(provider or "local")),
+                          director_ui.AiSettingsService.api_key_status(str(provider or "local")),
+                          gr.update(value=""), gr.update(visible=False))[1:],
+        [s_provider], [s_provider_config, s_api_key, s_clear_key, s_status],
     )
     s_data_apply.click(director_ui.apply_data_dir, [s_data_dir], [s_data_msg, s_data_dir])
     s_data_open.click(director_ui.open_data_dir, [], [s_data_msg])
