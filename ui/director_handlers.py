@@ -483,7 +483,7 @@ def clear_ai_api_key(provider: str) -> tuple:
         AiSettingsService.delete_api_key(provider)
         return (AiSettingsService.api_key_status(provider), gr.update(value=""), gr.update(visible=False, value="清除已保存密钥"), "✅ 已清除系统密钥环中保存的 API Key。")
     except Exception as exc:
-        return (AiSettingsService.api_key_status(provider), gr.update(value=""), gr.update(visible=AiSettingsService.has_stored_api_key(provider), value="清除已保存密钥"), f"❌ 清除 API Key 失败：{html.escape(str(exc))}")
+        return (AiSettingsService.api_key_status(provider), gr.update(value=""), gr.update(visible=AiSettingsService.has_stored_api_key(provider), value="清除已保存密钥"), "❌ 清除 API Key 失败，请检查密钥环权限。")
 
 
 def apply_data_dir(new_dir: str) -> tuple:

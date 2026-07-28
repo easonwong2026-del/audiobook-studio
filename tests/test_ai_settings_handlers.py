@@ -148,7 +148,7 @@ class TestLoadSettings:
         provider, model, url_upd, timeout, status, key_upd, btn_upd = load_ai_settings()
         assert provider == "openai"
         assert model == "gpt-4-turbo"
-        assert "custom.openai.com" in str(url_upd["value"])
+        assert "custom.openai.com" in str(url_upd)
         assert timeout == 90
         assert key_upd["value"] == "", "API Key 输入框必须为空"
 
