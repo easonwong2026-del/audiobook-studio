@@ -148,20 +148,20 @@ def test_ai_provider_param_passthrough():
     assert p.timeout == 120.0
 
 
-def test_settings_save_and_read():
-    """AiSettingsService 保存/读取非敏感配置往返一致。"""
-    from services.ai_settings import AiSettingsService
+def test_settings_save_and_read(monkeypatch, tmp_path):
+    """AiSettingsService 保存/读取非敏感配置往返一致。（使用隔离配置文件）"""
+    import services.ai_settings
 
-    original = AiSettingsService.get_provider_config()
-    try:
-        cfg = {"default_provider": "local", "local_model": "", "timeout": 120}
-        AiSettingsService.save_provider_config(cfg)
+    # 使用临时配置文件，避免修改真实 config.json
+    temp_config = tmp_path / "config.json"
+    monkeypatch.setattr(services.ai_settings, "_CONFIG_PATH", str(temp_config))
 
-        read_back = AiSettingsService.get_provider_config()
-        assert read_back["default_provider"] == "local"
-        assert read_back["timeout"] == 120
-    finally:
-        AiSettingsService.save_provider_config(original)
+    cfg = {"default_provider": "local", "local_model": "", "timeout": 120}
+    services.ai_settings.AiSettingsService.save_provider_config(cfg)
+
+    read_back = services.ai_settings.AiSettingsService.get_provider_config()
+    assert read_back["default_provider"] == "local"
+    assert read_back["timeout"] == 120
 
 
 def test_create_from_structured_script(tmp_path, monkeypatch):
