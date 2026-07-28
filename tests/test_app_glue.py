@@ -7,9 +7,9 @@
   - D4: preview_bound_voice 函数被定义，且 v_preview_btn.click(preview_bound_voice, ...) 接线
   - B12: from lib import script_loader 已 import；create_project 内调用 load_script / validate_script
 """
-import sys
-import os
 import ast
+import os
+import sys
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
@@ -19,6 +19,15 @@ APP_PATH = os.path.join(PROJECT_ROOT, "app.py")
 with open(APP_PATH, encoding="utf-8") as f:
     SRC = f.read()
 TREE = ast.parse(SRC)
+
+
+def has_import_from(module, name):
+    return any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == module
+        and any(alias.name == name for alias in node.names)
+        for node in TREE.body
+    )
 
 
 def find_func(name):
@@ -136,7 +145,7 @@ def test_preview_bound_voice_uses_full_three_sentences():
 
 
 def test_script_loader_import_and_validate_wired():
-    assert "from lib import script_loader" in SRC, "app.py 未 import script_loader（B12 缺失）"
+    assert has_import_from("lib", "script_loader"), "app.py 未 import script_loader（B12 缺失）"
     fn = find_func("create_project")
     assert fn is not None
     calls = [n.func.attr for n in ast.walk(fn)

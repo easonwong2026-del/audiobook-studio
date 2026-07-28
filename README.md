@@ -1,4 +1,4 @@
-# 有声书合成工作台 (Audiobook Studio) · v3.2.1
+# 有声书合成工作台 (Audiobook Studio) · v3.3.0
 
 [![Tests](https://github.com/easonwong2026-del/audiobook-studio/actions/workflows/tests.yml/badge.svg)](https://github.com/easonwong2026-del/audiobook-studio/actions/workflows/tests.yml)
 
@@ -12,7 +12,7 @@
 
 | 项 | 说明 |
 |----|------|
-| 当前版本 | **v3.2.1**（产品体验优化与代码瘦身） |
+| 当前版本 | **v3.3.0**（AI 剧本导演与智能预处理） |
 | 产品定位 | 面向**本地 IndexTTS2 环境**的有声书**生产工作台** |
 | 是否独立安装软件 | **否** —— 不提供 Windows 安装包，也不内置模型 / Torch / CUDA / FFmpeg / IndexTTS2 本体 |
 | 部署方式 | **轻量工作台源码 + 外部推理环境**（IndexTTS2 仓库及其虚拟环境由用户单独准备） |
@@ -128,6 +128,11 @@ export AUDIOBOOK_STUDIO_PYTHON=/path/to/index-tts/.venv/bin/python
 | `AUDIOBOOK_STUDIO_DATA_DIR` | 外置数据目录（项目 / 合成产物 / 音色库） | `~/AudiobookStudio` |
 | `AUDIOBOOK_STUDIO_FFMPEG` | FFmpeg 二进制路径 | 搜索 `PATH` |
 | `AUDIOBOOK_STUDIO_LEGACY_DIR` | 旧版数据目录，迁移用 | 无 |
+| `OPENAI_API_KEY` | OpenAI 剧本导演密钥 | 无 |
+| `DEEPSEEK_API_KEY` | DeepSeek 剧本导演密钥 | 无 |
+| `AUDIOBOOK_STUDIO_OPENAI_MODEL` | OpenAI 导演模型 | `gpt-5.6` |
+| `AUDIOBOOK_STUDIO_DEEPSEEK_MODEL` | DeepSeek 导演模型 | `deepseek-v4-pro` |
+| `AUDIOBOOK_STUDIO_AI_MAX_INPUT_CHARS` | 远程分析单批最大字符数 | `50000` |
 
 ---
 
@@ -185,6 +190,35 @@ python launcher.py
 
 在「项目」页面上传 `structured_script.json`。
 
+v3.3 可以在命令行把 TXT、DOCX 或 EPUB 转换为 v3 剧本：
+
+```bash
+python script_director_cli.py novel.epub \
+  --provider deepseek \
+  --title "作品名" \
+  --author "作者" \
+  -o structured_script.json
+```
+
+`--provider` 支持 `local`、`openai` 和 `deepseek`。Local 可离线运行；
+OpenAI 和 DeepSeek 分别读取 `OPENAI_API_KEY` 与 `DEEPSEEK_API_KEY`。
+产物包含角色、情绪、速度、强度、停顿和呼吸 metadata，并保留现有 TTS 链所需的兼容字段。
+
+也可以直接在「项目」页面使用“AI 剧本导演”面板。分析完成后，生成的 JSON 会自动
+回填到新建项目区域；系统不会未经确认自动创建项目。生成后可在 Segment 导演表中
+人工修改角色、文本、情绪、速度、强度、呼吸和停顿，并可撤销最近一次保存。
+
+导演台还会根据角色描述、主要情绪与音色文件名 / 分类标签生成可解释的声音候选。
+推荐结果不会自动绑定；用户选择声音和 segment 后，可以主动生成带情绪、语速、
+强度及精确停顿的单段导演试听。相同文本、音色和参数会复用试听缓存。
+试听后可以提交“太快 / 太慢、太强 / 太弱、停顿太长 / 太短、呼吸太重 / 不足”
+反馈。系统只对当前 segment 做有边界的小步调整，清空旧试听并要求重新生成；
+每次反馈都可以通过“撤销上次保存”恢复。
+
+structured_script v3 的内部停顿与前后留白同时进入正式整书合成。v3 段音频已包含
+导演设计的时序，因此导出、章节试听和字幕不会再叠加旧版固定静音；v2 项目仍维持
+原来的 300ms 段间和 800ms 章间间隔。
+
 ### 8. 绑定音色 → 合成 → 质检 → 导出
 
 各页面提供对应功能（见上文「核心能力」表）。
@@ -223,9 +257,10 @@ IndexTTS2 模型 + Torch + CUDA 运行时 + Python 虚拟环境的总体积可�
 
 安装系统 FFmpeg（`winget install FFmpeg`、`brew install ffmpeg`、`apt install ffmpeg`），或设置 `AUDIOBOOK_STUDIO_FFMPEG` 指向其路径。缺失时仍可启动并导出 WAV。
 
-### 为什么不能直接导入 TXT 或 EPUB
+### 是否支持 TXT、DOCX 或 EPUB
 
-本工作台的输入是 `structured_script.json`——包含角色、章节、段落、情感标注的**结构化剧本**。TXT / EPUB 等纯文本格式需要外部工具先完成文本分析（角色识别、情感研判、段落拆分）再输出 JSON。
+支持。v3.3 的项目页面和命令行导演 Pipeline 均可导入 TXT、DOCX 与 EPUB，再生成
+`structured_script.json`。TXT 支持 UTF-8 和 GB18030；EPUB 按 spine 阅读顺序提取正文。
 
 ### 为什么仓库里没有模型和音色文件
 

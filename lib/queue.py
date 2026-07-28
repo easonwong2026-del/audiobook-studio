@@ -1,13 +1,13 @@
 """合成队列 + 断点续跑 + 段级缓存（B7：缓存键含合成参数内容哈希）"""
 from __future__ import annotations
+
 import logging
 import os
 import time
 from typing import Generator, Optional
 
-from . import script_loader
 from . import project_manager as pm
-from . import segment_cache
+from . import script_loader, segment_cache
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,7 @@ def _seg_cache_key(seg, emotion: str = None, emo_alpha: float = None,
         emo_alpha,
         speech_rate,
         getattr(seg, "pinyin_hints", None),
+        segment_cache.director_metadata_for(seg),
     )
 
 
@@ -136,8 +137,9 @@ def synthesize_project(
                     # O3/O12：段「运行」点回调（内存态 running，不写 meta）
                     if cb_seg_state:
                         cb_seg_state(seg.id, "running", 0.0)
-                    tts_engine.synthesize_segment(
-                        text=seg.text,
+                    from . import directed_synthesis
+                    directed_synthesis.synthesize(
+                        segment=seg,
                         speaker_audio=speaker,
                         emotion=emotion_eff,
                         emo_alpha=emo_alpha_eff,
@@ -145,6 +147,7 @@ def synthesize_project(
                         pinyin_hints=getattr(seg, 'pinyin_hints', None),
                         output_path=seg_path,
                         num_beams=num_beams,
+                        engine=tts_engine,
                     )
                     yield "[/] vram_clean"
 

@@ -9,6 +9,7 @@ import gradio as gr
 from lib import config
 from services import ProjectService
 
+from .director_page import create_director_panel
 
 _EXAMPLE_SCRIPT_PATH = str(Path(__file__).resolve().parents[2] / "structured_script.example.json")
 
@@ -16,6 +17,8 @@ _EXAMPLE_SCRIPT_PATH = str(Path(__file__).resolve().parents[2] / "structured_scr
 def create_project_page() -> dict:
     """创建项目导入、切换与工作区设置页面。"""
     with gr.Group(visible=False, elem_id="grp-project") as grp_project:
+        director = create_director_panel()
+
         with gr.Row(equal_height=True, elem_classes=["stage-row"]):
             with gr.Column(scale=1, elem_classes=["stage-card"]):
                 gr.Markdown("#### 新建项目")
@@ -62,6 +65,7 @@ def create_project_page() -> dict:
 
     return {
         "group": grp_project,
+        **director,
         "p_name": p_name,
         "p_script": p_script,
         "p_create": p_create,

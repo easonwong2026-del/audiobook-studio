@@ -12,12 +12,15 @@
 """
 from __future__ import annotations
 
-from .session import SessionState
 from lib.snapshot import ProjectSnapshot
-from .synthesis import SynthesisState, SynthesisService
-from .project import ProjectService
+
 from .export import ExportService
+from .project import ProjectService
+from .script_director import ScriptDirectorService
+from .session import SessionState
 from .supplement import SupplementService, SupplementTaskState
+from .synthesis import SynthesisService, SynthesisState
+from .voice_director import DirectorAuditionService, VoiceDirectorService
 
 __all__ = [
     "SessionState",
@@ -28,4 +31,7 @@ __all__ = [
     "ExportService",
     "SupplementService",
     "SupplementTaskState",
+    "ScriptDirectorService",
+    "DirectorAuditionService",
+    "VoiceDirectorService",
 ]

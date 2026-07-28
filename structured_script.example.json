@@ -1,4 +1,5 @@
 {
+  "version": "3.0",
   "meta": {
     "title": "示例有声书",
     "author": "Audiobook Studio"
@@ -18,13 +19,47 @@
       "segments": [
         {
           "id": "1-001",
+          "speaker": "旁白",
           "role": "旁白",
-          "text": "这是一个结构化有声书剧本示例。"
+          "text": "这是一个结构化有声书剧本示例。",
+          "emotion": "neutral",
+          "emotion_strength": 0.4,
+          "emo_alpha": 0.4,
+          "speech_rate": 1.0,
+          "delivery": {
+            "speed": 1.0,
+            "pitch": 0,
+            "intensity": 0.4,
+            "breath": "light"
+          },
+          "pause_before": 0,
+          "pause_after": 600,
+          "pauses": []
         },
         {
           "id": "1-002",
+          "speaker": "小雨",
           "role": "小雨",
-          "text": "选择角色和声音后，就可以开始试听。"
+          "text": "选择角色和声音后，就可以开始试听。",
+          "emotion": "happy",
+          "emotion_strength": 0.6,
+          "emo_alpha": 0.6,
+          "speech_rate": 1.05,
+          "delivery": {
+            "speed": 1.05,
+            "pitch": 1,
+            "intensity": 0.6,
+            "breath": "light"
+          },
+          "pause_before": 200,
+          "pause_after": 800,
+          "pauses": [
+            {
+              "position": 8,
+              "duration": 400,
+              "type": "pause_short"
+            }
+          ]
         }
       ]
     }

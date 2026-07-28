@@ -1,6 +1,7 @@
 """段缓存键推导（B7：缓存键改内容哈希）。
 
-把「段标识 + 合成参数（emotion / emo_alpha / speech_rate / pinyin_hints）」
+把「段标识 + 合成参数（emotion / emo_alpha / speech_rate / pinyin_hints /
+director_metadata）」
 组合哈希，得到 ``segments/`` 目录下唯一的 wav 文件名。
 
 设计要点：
@@ -15,6 +16,7 @@ from __future__ import annotations
 
 import glob
 import hashlib
+import json
 import os
 from collections import OrderedDict
 from typing import Any, Optional
@@ -26,6 +28,7 @@ def segment_cache_key(
     emo_alpha: float = 1.0,
     speech_rate: float = 1.0,
     pinyin_hints: Any = None,
+    director_metadata: Any = None,
 ) -> str:
     """由段标识 + 合成参数派生稳定缓存键（不含扩展名）。
 
@@ -35,6 +38,8 @@ def segment_cache_key(
         emo_alpha: 情绪强度，默认 1.0。
         speech_rate: 语速，默认 1.0。
         pinyin_hints: 多音字提示 dict，默认 None。
+        director_metadata: v3 停顿、呼吸和音高 metadata；v2 缺省为 None，
+            保持旧缓存键完全不变。
 
     Returns:
         ``{seg_id}_{md5前8位}`` 形式的缓存键。
@@ -48,7 +53,18 @@ def segment_cache_key(
     # 归一化：缺省 pinyin_hints 的 {} 与 None 必须等价
     if not pinyin_hints:
         pinyin_hints = None
+    if not director_metadata:
+        director_metadata = None
+    elif not isinstance(director_metadata, str):
+        director_metadata = json.dumps(
+            director_metadata,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
     params = f"{emotion}|{emo_alpha}|{speech_rate}|{pinyin_hints}"
+    if director_metadata is not None:
+        params += f"|director={director_metadata}"
     digest = hashlib.md5(params.encode("utf-8")).hexdigest()[:8]
     return f"{seg_id}_{digest}"
 
@@ -60,9 +76,12 @@ def segment_wav_path(
     emo_alpha: float = 1.0,
     speech_rate: float = 1.0,
     pinyin_hints: Any = None,
+    director_metadata: Any = None,
 ) -> str:
     """返回参数感知的 wav 绝对路径（缓存键命名）。"""
-    key = segment_cache_key(seg_id, emotion, emo_alpha, speech_rate, pinyin_hints)
+    key = segment_cache_key(
+        seg_id, emotion, emo_alpha, speech_rate, pinyin_hints, director_metadata
+    )
     return os.path.join(segments_dir, f"{key}.wav")
 
 
@@ -75,6 +94,7 @@ def find_segment_wav(
     emo_alpha: float = 1.0,
     speech_rate: float = 1.0,
     pinyin_hints: Any = None,
+    director_metadata: Any = None,
 ) -> Optional[str]:
     """查找某段已合成的 wav。
 
@@ -86,7 +106,9 @@ def find_segment_wav(
         wav 路径；都未命中时返回 None。
     """
     # 1) 参数感知的缓存键文件
-    ck = segment_cache_key(seg_id, emotion, emo_alpha, speech_rate, pinyin_hints)
+    ck = segment_cache_key(
+        seg_id, emotion, emo_alpha, speech_rate, pinyin_hints, director_metadata
+    )
     fp = os.path.join(segments_dir, f"{ck}.wav")
     if os.path.isfile(fp):
         return fp
@@ -104,6 +126,7 @@ def has_segment_wav(
     emo_alpha: float = 1.0,
     speech_rate: float = 1.0,
     pinyin_hints: Any = None,
+    director_metadata: Any = None,
 ) -> bool:
     """某段是否已存在对应 wav（参数感知文件 / 旧版裸文件 / 任意参数变体均可）。
 
@@ -113,7 +136,9 @@ def has_segment_wav(
     2) 旧版裸 ``{seg_id}.wav``；
     3) 任意 ``{seg_id}_*.wav`` 变体（参数未知时也能识别）。
     """
-    ck = segment_cache_key(seg_id, emotion, emo_alpha, speech_rate, pinyin_hints)
+    ck = segment_cache_key(
+        seg_id, emotion, emo_alpha, speech_rate, pinyin_hints, director_metadata
+    )
     if os.path.isfile(os.path.join(segments_dir, f"{ck}.wav")):
         return True
     if os.path.isfile(os.path.join(segments_dir, f"{seg_id}.wav")):
@@ -197,3 +222,29 @@ def effective_params(seg, overrides: dict) -> tuple:
         emo_alpha = getattr(seg, "emo_alpha", 1.0)
         speech_rate = getattr(seg, "speech_rate", 1.0)
     return emotion, emo_alpha, speech_rate
+
+
+def director_metadata_for(seg) -> dict | None:
+    """返回会影响 v3 音频结果、但不在旧缓存键中的导演字段。"""
+    if isinstance(seg, dict):
+        get = seg.get
+        delivery = seg.get("delivery") if isinstance(seg.get("delivery"), dict) else {}
+    else:
+        get = lambda name, default=None: getattr(seg, name, default)
+        delivery = {}
+    metadata = {
+        "pitch": delivery.get("pitch", get("pitch", 0.0)),
+        "breath": delivery.get("breath", get("breath", "none")),
+        "pause_before": get("pause_before", 0),
+        "pause_after": get("pause_after", 0),
+        "pauses": get("pauses", []) or [],
+    }
+    if (
+        not metadata["pitch"]
+        and metadata["breath"] in (None, "", "none")
+        and not metadata["pause_before"]
+        and not metadata["pause_after"]
+        and not metadata["pauses"]
+    ):
+        return None
+    return metadata
