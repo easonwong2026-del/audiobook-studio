@@ -40,10 +40,16 @@ def _patch_provider(monkeypatch):
 
 
 def _setup_test_data_dir(monkeypatch, data_dir):
+    """设置隔离的数据目录，不 reload 全局模块以免污染其他测试。"""
+    proj_root = str(data_dir / "projects")
     monkeypatch.setenv("AUDIOBOOK_STUDIO_DATA_DIR", str(data_dir))
-    import importlib
-    import lib.config as _cfg
-    importlib.reload(_cfg)
+    # 直接设定 ProjectRepository 的工作区根目录
+    from repositories.project_repo import ProjectRepository
+    ProjectRepository.WORKSPACE_ROOT = proj_root
+    # 确保 config 相关函数返回隔离路径
+    monkeypatch.setattr("lib.config.get_data_dir", lambda: str(data_dir))
+    monkeypatch.setattr("lib.config.get_projects_root", lambda: proj_root)
+    monkeypatch.setattr("lib.config.get_preview_dir", lambda: str(data_dir / "preview"))
 
 
 def test_create_txt_project_and_open(tmp_path, monkeypatch):
