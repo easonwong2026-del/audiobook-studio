@@ -22,8 +22,8 @@ def _text(relative: str) -> str:
 
 
 def test_runtime_version_has_one_current_source():
-    assert __version__ == "3.3.0"
-    assert '__version__ = "3.3.0"' in _text("lib/__init__.py")
+    assert __version__ == "3.3.1"
+    assert '__version__ = "3.3.1"' in _text("lib/__init__.py")
     assert 'title=f"Audiobook Studio v{__version__}"' in _text("app.py")
     launcher = _text("launcher.py")
     assert "from lib import __version__" in launcher
@@ -130,17 +130,17 @@ def test_production_stage_has_internal_navigation_and_check():
         and any(isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)
                 and target.value.id == "_GROUPS" for target in node.targets)
     ]
-    assert assignments and len(assignments[0].value.elts) == 8
+    assert assignments and len(assignments[0].value.elts) == 10
 
 
 def test_project_onboarding_and_user_facing_quality_labels_exist():
     example = json.loads(_text("structured_script.example.json"))
     assert set(example["voices"]) == {"旁白", "小雨"}
-    project_page = _text("ui/pages/project_page.py")
+    create_page = _text("ui/pages/create_project_page.py")
     synthesis_page = _text("ui/pages/synthesis_page.py")
     export_page = _text("ui/pages/export_page.py")
-    assert "gr.DownloadButton" in project_page
-    assert "structured_script.example.json" in project_page
+    assert "gr.File" in create_page
+    assert "TXT/DOCX/EPUB" in create_page
     assert '("快速", 1)' in synthesis_page
     assert '("标准", 2)' in synthesis_page
     assert '("高质量", 3)' in synthesis_page

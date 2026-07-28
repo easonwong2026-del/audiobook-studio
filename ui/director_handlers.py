@@ -308,3 +308,176 @@ def apply_director_audition_feedback(script_file, segment_id, feedback, chapter_
             gr.update(),
             f"❌ {html.escape(str(exc))}",
         )
+
+
+# ═══════════════════════════════════════════════════════════════
+# v3.3.1：新入口基于项目名而非临时文件路径
+# ═══════════════════════════════════════════════════════════════
+
+
+def _project_script_path(project_name: str) -> str:
+    """根据项目名找到 structured_script.json 路径。"""
+    from repositories.project_repo import ProjectRepository
+    project_dir = ProjectRepository.get_project_dir(project_name)
+    return os.path.join(project_dir, "structured_script.json")
+
+
+def refresh_director_editor_for_project(project_name, chapter_id):
+    """基于项目名的章节编辑器刷新。"""
+    name = _file_value_path(project_name) or str(project_name or "")
+    if not name:
+        return []
+    try:
+        return refresh_director_editor(_project_script_path(name), chapter_id)
+    except Exception:
+        return []
+
+
+def apply_director_edits_for_project(project_name, rows, chapter_id):
+    """基于项目名保存人工调整。"""
+    name = _file_value_path(project_name) or str(project_name or "")
+    if not name:
+        return (
+            "### ⚠ 请先打开项目",
+            gr.update(),
+            "",
+        )
+    try:
+        path = _project_script_path(name)
+        script, backup, changed = ScriptDirectorService.save_segment_edits(path, rows)
+        return (
+            f"### ✅ 已保存人工调整\n更新 {changed} 个 segment，可撤销。",
+            ScriptDirectorService.editor_rows(script, str(chapter_id)),
+            backup,
+        )
+    except Exception as exc:
+        logger.exception("保存人工导演调整失败")
+        return (
+            f"### ❌ 保存失败\n{html.escape(str(exc))}",
+            gr.update(),
+            gr.update(),
+        )
+
+
+def undo_director_edits_for_project(project_name, backup_path, chapter_id):
+    """基于项目名撤销人工调整。"""
+    name = _file_value_path(project_name) or str(project_name or "")
+    if not name or not backup_path:
+        return (
+            "### ⚠ 没有可撤销的人工调整",
+            gr.update(),
+            "",
+        )
+    try:
+        path = _project_script_path(name)
+        script = ScriptDirectorService.undo_segment_edits(path, str(backup_path))
+        return (
+            "### ↩️ 已撤销上次人工调整",
+            ScriptDirectorService.editor_rows(script, str(chapter_id)),
+            "",
+        )
+    except Exception as exc:
+        logger.exception("撤销人工导演调整失败")
+        return (
+            f"### ❌ 撤销失败\n{html.escape(str(exc))}",
+            gr.update(),
+            gr.update(),
+        )
+
+
+# ═══════════════════════════════════════════════════════════════
+# v3.3.1：设置页面回调
+# ═══════════════════════════════════════════════════════════════
+
+
+from services.ai_settings import AiSettingsService  # noqa: E402
+
+
+def update_provider_config_fields(provider: str) -> tuple:
+    """切换 Provider 时更新可见字段。"""
+    provider = str(provider or "local")
+    if provider == "local":
+        return (
+            "<p>本地离线基线无需配置 API Key。</p>",
+            gr.update(visible=False, value=""),
+            gr.update(visible=False, value=""),
+        )
+    is_openai = provider == "openai"
+    env_var = "OPENAI_API_KEY" if is_openai else "DEEPSEEK_API_KEY"
+    default_base = "https://api.openai.com/v1" if is_openai else "https://api.deepseek.com"
+    info = (
+        f"<p><b>{provider.title()}</b> 密钥可通过密钥环保存，"
+        f"或设置环境变量 <code>{env_var}</code>。</p>"
+    )
+    config = AiSettingsService.get_provider_config()
+    saved_key = AiSettingsService.get_api_key(provider)
+    saved_base = config.get(f"{provider}_base_url", "")
+    return (
+        info,
+        gr.update(visible=True, value=saved_key or ""),
+        gr.update(visible=True, value=saved_base or default_base),
+    )
+
+
+def save_ai_settings(provider, model, api_key, base_url, timeout) -> str:
+    """保存 AI 配置和密钥。"""
+    try:
+        provider = str(provider or "local")
+        config = AiSettingsService.get_provider_config()
+        config["default_provider"] = provider
+        if model and model.strip():
+            config[f"{provider}_model"] = model.strip()
+        elif f"{provider}_model" in config:
+            del config[f"{provider}_model"]
+        if base_url and base_url.strip():
+            config[f"{provider}_base_url"] = base_url.strip()
+        elif f"{provider}_base_url" in config:
+            del config[f"{provider}_base_url"]
+        config["timeout"] = int(timeout) if timeout else 180
+        AiSettingsService.save_provider_config(config)
+
+        # 保存密钥到 Keyring（非空时）
+        if api_key and api_key.strip():
+            try:
+                AiSettingsService.set_api_key(provider, api_key.strip())
+            except Exception as keyring_err:
+                return f"⚠ 配置已保存，但密钥保存失败：{keyring_err}"
+
+        return f"✅ **{provider.title()}** 配置已保存。"
+    except Exception as exc:
+        logger.exception("保存 AI 配置失败")
+        return f"❌ 保存失败：{html.escape(str(exc))}"
+
+
+def test_ai_connection(provider: str) -> str:
+    """测试 Provider 连接。"""
+    try:
+        result = AiSettingsService.check_connection(str(provider or "local"))
+        return result
+    except Exception as exc:
+        logger.exception("测试 AI 连接失败")
+        return f"❌ 连接测试异常：{html.escape(str(exc))}"
+
+
+def apply_data_dir(new_dir: str) -> tuple:
+    """应用数据目录变更。"""
+    if not new_dir or not new_dir.strip():
+        return "⚠ 请填写保存位置", ""
+    try:
+        from services import ProjectService
+        d = os.path.normpath(ProjectService.set_data_dir(new_dir.strip()))
+        return f"✅ 数据目录已设置为：{d}（本会话立即生效）", d
+    except Exception as e:
+        return f"❌ 设置失败：{e}", ""
+
+
+def open_data_dir() -> str:
+    """打开数据目录。"""
+    d = config.get_data_dir()
+    os.makedirs(d, exist_ok=True)
+    try:
+        import subprocess
+        subprocess.Popen(["open", d])  # macOS
+    except Exception:
+        pass
+    return ""

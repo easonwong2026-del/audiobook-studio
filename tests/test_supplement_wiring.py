@@ -9,9 +9,9 @@
 """
 from __future__ import annotations
 
+import ast
 import os
 import sys
-import ast
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
@@ -64,9 +64,7 @@ def test_grp_supplement_present():
 
 
 def test_groups_tuple_has_eight_items():
-    # _GROUPS 声明在 ui/navigation.py 中（空列表占位），
-    # 实际填充在 app.py 运行时：_GROUPS[:] = [8 个 group]
-    # app.py 中的赋值使用 _GROUPS[:] 下标（ast.Subscript）
+    # v3.3.1: _GROUPS[:] = [10 个 group]（新增 create_project、settings）
     for node in ast.walk(TREE):
         if isinstance(node, ast.Assign):
             for t in node.targets:
@@ -75,16 +73,13 @@ def test_groups_tuple_has_eight_items():
                         val = node.value
                         assert isinstance(val, (ast.List, ast.Tuple)), \
                             f"_GROUPS[:] 赋值应为列表/元组（实际 {type(val).__name__}）"
-                        assert len(val.elts) == 8, \
-                                f"_GROUPS[:] 应为 8 项（实际 {len(val.elts)}）"
+                        assert len(val.elts) == 10, \
+                                f"_GROUPS[:] 应为 10 项（实际 {len(val.elts)}）"
                         return
     raise AssertionError("未找到 _GROUPS[:] = [...] 赋值")
 
 
 def test_goto_returns_internal_group_updates_for_five_stage_navigation():
-    # _goto 定��在 ui/navigation.py 中，返回 tuple(GeneratorExp)
-    # 实际返回 8 个 gr.update，覆盖 5 个顶级阶段下的内部 Group。
-    # 验证 _goto 存在且返回 tuple(...) 调用
     fn = find_func(NAV_TREE, "_goto")
     assert fn is not None, "navigation.py 中未定义 _goto"
     has_tuple_return = False
@@ -98,12 +93,20 @@ def test_goto_returns_internal_group_updates_for_five_stage_navigation():
     for node in ast.walk(NAV_TREE):
         if isinstance(node, ast.Assign):
             for t in node.targets:
-                if isinstance(t, ast.Name) and t.id == "NAV_ITEMS":
+                if isinstance(t, ast.Name) and t.id == "GROUP_ITEMS":
                     assert isinstance(node.value, (ast.List, ast.Tuple)), \
-                        "NAV_ITEMS 应为列表"
-                    assert len(node.value.elts) == 5, \
-                        f"NAV_ITEMS 应为 5 项（实际 {len(node.value.elts)}）"
-                    return
+                        "GROUP_ITEMS 应为列表"
+                    # v3.3.1: 10 items (+create_project, +settings)
+                    assert len(node.value.elts) == 10, \
+                        f"GROUP_ITEMS 应为 10 项（实际 {len(node.value.elts)}）"
+                    break
+    # 验证还有一个 _SETTINGS_ITEM 常量
+    for node in ast.walk(NAV_TREE):
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name) and t.id == "_SETTINGS_ITEM":
+                    return  # Found
+    raise AssertionError("未找到 _SETTINGS_ITEM 定义")
     raise AssertionError("未找到 NAV_ITEMS 定义")
 
 
