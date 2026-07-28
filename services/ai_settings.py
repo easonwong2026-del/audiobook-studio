@@ -144,7 +144,8 @@ class AiSettingsService:
         timeout = min(config.get("timeout", 180), 30)
 
         try:
-            from ai.providers._remote import _default_transport
+            import urllib.request
+            import urllib.error
             base_url = base_url or (
                 "https://api.openai.com/v1"
                 if provider == "openai"
@@ -155,7 +156,9 @@ class AiSettingsService:
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             }
-            _default_transport(endpoint, headers, {}, timeout)
+            req = urllib.request.Request(endpoint, headers=headers, method="GET")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                resp.read()  # 仅确认不解析响应体
             return f"✅ **{provider.title()}** 连接成功。"
         except Exception as exc:
             msg = str(exc)[:200]

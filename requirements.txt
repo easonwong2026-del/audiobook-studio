@@ -8,6 +8,7 @@ numpy
 scipy
 pyloudnorm        # D1 响度 LUFS-16 归一（纯 CPU/numpy）
 mutagen            # D2 ID3 / M4B 章节标签（纯 Python）
+keyring            # AI Provider API Key 安全存储
 
 # 说明：
 #   - torch / indextts / IndexTTS2 由 index-tts 的 venv 提供，不在此列出。
