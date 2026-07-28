@@ -1,7 +1,7 @@
 """数据结构定义"""
 from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 @dataclass
@@ -13,6 +13,11 @@ class Segment:
     emo_alpha: float = 1.0 # 情绪强度 0.0~1.0
     speech_rate: float = 1.0
     pinyin_hints: dict = field(default_factory=dict)
+    pitch: float = 0.0
+    breath: str = "none"
+    pause_before: int = 0
+    pause_after: int = 0
+    pauses: list[dict] = field(default_factory=list)
 
 
 @dataclass

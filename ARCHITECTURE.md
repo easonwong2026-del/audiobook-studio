@@ -1,4 +1,4 @@
-# Audiobook Studio — 系统架构（v3.2.0）
+# Audiobook Studio — 系统架构（v3.3.0）
 
 > 本文档与代码同步维护。若发现与实现不符之处，以 `docs/system_design.md` 与源码为准。
 
@@ -15,9 +15,14 @@
 ## 2. 分层架构
 
 ```
-app.py                      # Gradio 接线 + 导航（不含业务实现）
-├── ui/                     # UI 页面与组件（ui/pages/*）
-├── services/               # 业务服务层：project / synthesis / supplement / session / export
+app.py                      # Gradio 接线 + 导航（不含导演业务实现）
+├── ai/providers/           # AI Provider 抽象：Local / OpenAI / DeepSeek
+├── ui/                     # UI 页面、组件与轻量事件编排
+│   ├── pages/director_page # AI 剧本导演页面
+│   └── director_handlers   # 导演 UI 回调，避免 app.py 继续膨胀
+├── services/               # 业务服务层
+│   ├── script_director     # 分析、规范化、分章编辑与历史快照
+│   └── voice_director      # 音色推荐、试听与反馈
 ├── repositories/           # 持久化边界（Repository Pattern，原子 JSON 写）
 ├── lib/                    # 领域工具
 │   ├── tts_engine          # IndexTTS2 推理封装（函数内 lazy import torch / indextts）
@@ -26,6 +31,8 @@ app.py                      # Gradio 接线 + 导航（不含业务实现）
 │   ├── postprocess         # D1 响度 LUFS 归一 + D3 人声均衡（纯 CPU）
 │   ├── config / environment# 配置与运行环境探测
 │   ├── snapshot            # ProjectSnapshot 构建
+│   ├── text_importer       # TXT / DOCX / EPUB 安全导入
+│   ├── directed_synthesis  # 导演停顿进入试听与正式生产
 │   ├── script_loader / segment_cache / voice_lib / progress
 │   ├── dataframe_style / logging_setup / exceptions
 ├── domain/                 # 领域类型（如 results.py）
@@ -45,6 +52,10 @@ docs/                       # 设计文档（system_design.md 等）
   仓库同级 `index-tts/.venv` → PATH 中的 `python`，不绑定个人绝对路径。
 - **数据目录外置**：经 `AUDIOBOOK_STUDIO_DATA_DIR` 环境变量或 `config.json` 配置，
   项目与产物与程序目录分离。
+- **长篇剧本按章编辑**：导演台只向浏览器传输当前章节，不再序列化整本小说；保存使用
+  流式 JSON 原子替换，规范化过程只复制实际输出字段，降低长篇项目的峰值内存。
+- **AI Provider 隔离**：OpenAI、DeepSeek 和离线 Local Provider 共享统一接口；
+  远程模型按章节/语义批次分析，Provider 不侵入 UI 与生产链路。
 
 ## 3. 测试策略
 

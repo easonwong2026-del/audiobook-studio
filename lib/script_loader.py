@@ -10,8 +10,10 @@
   所有字段解析逻辑与旧版完全一致；别名仅在规范 key 缺失时才生效。
 """
 from __future__ import annotations
+
 import json
-from .types import Script, VoiceInfo, Chapter, Segment
+
+from .types import Chapter, Script, Segment, VoiceInfo
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 顶层 key 别名映射（仅在规范 key 缺失、且存在可明确映射的别名时生效）。
@@ -92,14 +94,23 @@ def from_dict(raw: dict) -> Script:
             for i, seg in enumerate(ch.get("segments", [])):
                 seg = seg if isinstance(seg, dict) else {}
                 seg_id = seg.get("id") or f"{ch.get('id', '?')}-{str(i + 1).zfill(3)}"
+                delivery = seg.get("delivery") if isinstance(seg.get("delivery"), dict) else {}
                 segments.append(Segment(
                     id=seg_id,
-                    role=seg.get("role", ""),
+                    role=seg.get("role") or seg.get("speaker", ""),
                     emotion=seg.get("emotion", "neutral"),
                     text=seg.get("text", ""),
-                    emo_alpha=seg.get("emo_alpha", 1.0),
-                    speech_rate=seg.get("speech_rate", 1.0),
+                    emo_alpha=seg.get(
+                        "emo_alpha",
+                        seg.get("emotion_strength", delivery.get("intensity", 1.0)),
+                    ),
+                    speech_rate=seg.get("speech_rate", delivery.get("speed", 1.0)),
                     pinyin_hints=seg.get("pinyin_hints", {}),
+                    pitch=delivery.get("pitch", seg.get("pitch", 0.0)),
+                    breath=delivery.get("breath", seg.get("breath", "none")),
+                    pause_before=seg.get("pause_before", 0),
+                    pause_after=seg.get("pause_after", 0),
+                    pauses=seg.get("pauses", []) if isinstance(seg.get("pauses"), list) else [],
                 ))
             chapters.append(Chapter(
                 id=ch.get("id"),

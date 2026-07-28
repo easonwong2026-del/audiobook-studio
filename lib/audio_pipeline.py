@@ -16,8 +16,8 @@ from typing import Any
 import numpy as np
 from scipy.io import wavfile
 
-from . import segment_cache
 from . import audio_format as af
+from . import segment_cache
 from .exceptions import ExportError
 
 logger = logging.getLogger(__name__)
@@ -26,6 +26,11 @@ logger = logging.getLogger(__name__)
 # 单一真相源，保证字幕时间戳与导出拼接的静音规则一致。
 SEG_SILENCE_SEC = 0.3
 CH_SILENCE_SEC = 0.8
+
+
+def _uses_director_timing(script: dict) -> bool:
+    """v3 段音频已内嵌导演停顿，导出时不得重复插入固定静音。"""
+    return str(script.get("version") or "").startswith("3")
 
 
 def export_book(project_dir: str, format: str = "mp3", bitrate: str = "192k",
@@ -77,6 +82,7 @@ def export_book(project_dir: str, format: str = "mp3", bitrate: str = "192k",
                 seg.get("emo_alpha", 1.0),
                 seg.get("speech_rate", 1.0),
                 seg.get("pinyin_hints"),
+                segment_cache.director_metadata_for(seg),
             )
             if fp:
                 if canonical_rate is None:
@@ -105,8 +111,15 @@ def export_book(project_dir: str, format: str = "mp3", bitrate: str = "192k",
     rate = canonical_rate
 
     # 静音间隔：段间 SEG_SILENCE_SEC、章首（首章除外）CH_SILENCE_SEC（统一常量）
-    seg_silence = np.zeros(int(rate * SEG_SILENCE_SEC), dtype=np.int16)
-    ch_silence = np.zeros(int(rate * CH_SILENCE_SEC), dtype=np.int16)
+    director_timing = _uses_director_timing(script)
+    seg_silence = np.zeros(
+        0 if director_timing else int(rate * SEG_SILENCE_SEC),
+        dtype=np.int16,
+    )
+    ch_silence = np.zeros(
+        0 if director_timing else int(rate * CH_SILENCE_SEC),
+        dtype=np.int16,
+    )
 
     # 拼接并记录章节起点（采样点），供 m4b 章节标签推算（B8 静音仍生效）
     chapter_markers: list = []   # (chapter_index, start_sample)
@@ -243,14 +256,16 @@ def _build_chapters(script: dict, chapter_markers: list, rate: int) -> list:
 
 def _find_segment(segments_dir: str, seg_id: str, text: str, role: str, emotion: str,
                   emo_alpha: float = 1.0, speech_rate: float = 1.0,
-                  pinyin_hints: Any = None) -> str | None:
+                  pinyin_hints: Any = None,
+                  director_metadata: Any = None) -> str | None:
     """查找某段已合成 wav：参数感知缓存键优先，旧版裸文件回退（B7 兼容）。
 
     委托给 ``segment_cache.find_segment_wav``，保持导出链路在 B7 文件名
     变更后仍完整：既命中新写入的 ``{seg_id}_{hash}.wav``，也兼容历史裸文件。
     """
     return segment_cache.find_segment_wav(
-        segments_dir, seg_id, text, role, emotion, emo_alpha, speech_rate, pinyin_hints
+        segments_dir, seg_id, text, role, emotion, emo_alpha, speech_rate,
+        pinyin_hints, director_metadata,
     )
 
 
@@ -300,6 +315,7 @@ def generate_subtitles(project_dir: str, formats=("srt", "lrc"), output_dir: str
                 seg.get("emo_alpha", 1.0),
                 seg.get("speech_rate", 1.0),
                 seg.get("pinyin_hints"),
+                segment_cache.director_metadata_for(seg),
             )
             if not fp:
                 # 缺段则跳过（导出会单独报错），字幕不阻断
@@ -309,17 +325,28 @@ def generate_subtitles(project_dir: str, formats=("srt", "lrc"), output_dir: str
                 rate = r
             dur_ms = int(len(data) / r * 1000) if r else 0
             # 段前静音间隔：首段 0；新章首（非首章）CH_SILENCE_SEC；其余 SEG_SILENCE_SEC
-            if prev_ch is None:
+            if _uses_director_timing(script):
                 gap_ms = 0
-            elif ch_idx != prev_ch:
-                gap_ms = int(CH_SILENCE_SEC * 1000)
+                pause_before = int(seg.get("pause_before") or 0)
+                pause_after = int(seg.get("pause_after") or 0)
+                start_ms = cursor_ms + pause_before
+                end_ms = max(start_ms, cursor_ms + dur_ms - pause_after)
             else:
-                gap_ms = int(SEG_SILENCE_SEC * 1000)
-            start_ms = cursor_ms + gap_ms
-            end_ms = start_ms + dur_ms
+                if prev_ch is None:
+                    gap_ms = 0
+                elif ch_idx != prev_ch:
+                    gap_ms = int(CH_SILENCE_SEC * 1000)
+                else:
+                    gap_ms = int(SEG_SILENCE_SEC * 1000)
+                start_ms = cursor_ms + gap_ms
+                end_ms = start_ms + dur_ms
             seg_index += 1
             rows.append((seg_index, start_ms, end_ms, seg.get("text", "")))
-            cursor_ms = end_ms
+            cursor_ms = (
+                cursor_ms + dur_ms
+                if _uses_director_timing(script)
+                else end_ms
+            )
             prev_ch = ch_idx
 
     if not rows:
@@ -415,6 +442,7 @@ def concat_for_preview(project_dir: str, chapter_id, output_path: str) -> str | 
             seg.get("emo_alpha", 1.0),
             seg.get("speech_rate", 1.0),
             seg.get("pinyin_hints"),
+            segment_cache.director_metadata_for(seg),
         )
         if not fp:
             # 失败段跳过
@@ -439,7 +467,10 @@ def concat_for_preview(project_dir: str, chapter_id, output_path: str) -> str | 
 
     rate = canonical_rate
     # 段间静音（单章内部用段间短静音）
-    seg_silence = np.zeros(int(rate * SEG_SILENCE_SEC), dtype=np.int16)
+    seg_silence = np.zeros(
+        0 if _uses_director_timing(script) else int(rate * SEG_SILENCE_SEC),
+        dtype=np.int16,
+    )
     parts: list = []
     for i, data in enumerate(loaded):
         if i > 0:
