@@ -432,9 +432,9 @@ def load_ai_settings() -> tuple:
     timeout = cfg.get("timeout", 180)
     if provider == "local":
         status = "<p>本地离线基线无需配置密钥。</p>"
-        return provider, model, gr.update(visible=False, value=""), timeout, status, gr.update(visible=False), gr.update(visible=False, value="清除已保存密钥")
+        return provider, model, gr.update(visible=False, value=""), timeout, status, gr.update(visible=False, value=""), gr.update(visible=False, value="清除已保存密钥")
     default_base = "https://api.openai.com/v1" if provider == "openai" else "https://api.deepseek.com"
-    return provider, model, gr.update(visible=True, value=base or default_base), timeout, AiSettingsService.api_key_status(provider), gr.update(visible=True), gr.update(visible=AiSettingsService.has_stored_api_key(provider), value="清除已保存密钥")
+    return provider, model, gr.update(visible=True, value=base or default_base), timeout, AiSettingsService.api_key_status(provider), gr.update(visible=True, value=""), gr.update(visible=AiSettingsService.has_stored_api_key(provider), value="清除已保存密钥")
 
 
 def save_ai_settings(provider, model, api_key, base_url, timeout) -> tuple:
