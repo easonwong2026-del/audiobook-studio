@@ -1568,12 +1568,12 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     s_provider.change(
         director_ui.update_provider_config_fields,
         [s_provider],
-        [s_provider_config, s_api_key, s_base_url],
+        [s_provider_config, s_model, s_api_key, s_base_url, s_clear_key],
     )
     s_save.click(
         director_ui.save_ai_settings,
         [s_provider, s_model, s_api_key, s_base_url, s_timeout],
-        [s_status],
+        [s_status, s_provider_config, s_api_key, s_clear_key],
     )
     s_test.click(
         director_ui.test_ai_connection,
@@ -1581,9 +1581,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         [s_status],
     )
     s_clear_key.click(
-        lambda provider: (director_ui.AiSettingsService.delete_api_key(str(provider or "local")),
-                          director_ui.AiSettingsService.api_key_status(str(provider or "local")),
-                          gr.update(value=""), gr.update(visible=False))[1:],
+        director_ui.clear_ai_api_key,
         [s_provider], [s_provider_config, s_api_key, s_clear_key, s_status],
     )
     s_data_apply.click(director_ui.apply_data_dir, [s_data_dir], [s_data_msg, s_data_dir])

@@ -90,10 +90,10 @@ def _delete_secret(service: str, username: str) -> None:
             keyring.delete_password(service, username)
         except keyring.errors.PasswordDeleteError:
             pass
-        except Exception:
-            pass
+        except Exception as exc:
+            raise SecretStoreUnavailableError(f"删除系统密钥失败：{exc}") from exc
     except ImportError:
-        pass
+        raise SecretStoreUnavailableError("Keyring 库未安装，无法删除系统密钥。") from None
 
 
 class AiSettingsService:
@@ -126,6 +126,18 @@ class AiSettingsService:
         return AiSettingsService.get_api_key(provider) is not None
 
     @staticmethod
+    def has_stored_api_key(provider: str) -> bool:
+        username = {"openai": KEYRING_OPENAI_KEY, "deepseek": KEYRING_DEEPSEEK_KEY}.get(provider)
+        return bool(username and _get_secret(KEYRING_SERVICE, username))
+
+    @staticmethod
+    def get_api_key_source(provider: str) -> str:
+        if AiSettingsService.has_stored_api_key(provider):
+            return "keyring"
+        env = {"openai": "OPENAI_API_KEY", "deepseek": "DEEPSEEK_API_KEY"}.get(provider)
+        return "environment" if env and os.getenv(env) else "none"
+
+    @staticmethod
     def api_key_status(provider: str) -> str:
         """返回用户可读的密钥状态 HTML。"""
         for_source = f"环境变量 `{provider.upper()}_API_KEY`"
@@ -135,6 +147,9 @@ class AiSettingsService:
             for_source = "环境变量 `DEEPSEEK_API_KEY`"
         has = AiSettingsService.has_api_key(provider)
         if has:
+            source = AiSettingsService.get_api_key_source(provider)
+            if source == "environment":
+                return "<p style='color:#16a34a'>✅ API Key 已通过环境变量配置</p>"
             return (
                 f"<p style='color:#16a34a'>✅ API Key 已配置</p>"
                 f"<p style='color:#666;font-size:0.85em'>来源：Keyring 或 {for_source}</p>"
