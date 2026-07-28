@@ -5,7 +5,6 @@ import html
 import logging
 import os
 
-from lib import voice_lib
 from services import (
     ScriptDirectorService,
     VoiceDirectorService,
@@ -37,9 +36,6 @@ def recommend_voice(project_name, role) -> tuple:
         if not recommendations:
             return [], "⚠ 音色库为空，请先添加声音"
 
-        # 自动选中第一个推荐到声音下拉（但不绑定）
-        names = voice_lib.voice_names()
-        first = recommendations[0]["voice_name"] if recommendations else None
 
         return (
             rows,

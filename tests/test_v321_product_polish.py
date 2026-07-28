@@ -22,8 +22,8 @@ def _text(relative: str) -> str:
 
 
 def test_runtime_version_has_one_current_source():
-    assert __version__ == "3.3.0"
-    assert '__version__ = "3.3.0"' in _text("lib/__init__.py")
+    assert __version__ == "3.3.1"
+    assert '__version__ = "3.3.1"' in _text("lib/__init__.py")
     assert 'title=f"Audiobook Studio v{__version__}"' in _text("app.py")
     launcher = _text("launcher.py")
     assert "from lib import __version__" in launcher
