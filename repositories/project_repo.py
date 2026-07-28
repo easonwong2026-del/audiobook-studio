@@ -15,6 +15,7 @@ import os
 import shutil
 import time
 import uuid
+import time as _time
 from typing import ClassVar, Optional
 
 from lib.types import ProjectMeta
@@ -159,11 +160,65 @@ class ProjectRepository:
         lg = ProjectRepository.LEGACY_ROOT or ""
         for root in (ws, lg):
             if root and os.path.isdir(root):
+                ProjectRepository._cleanup_stale_tmp_dirs(root)
                 names.update(
                     d for d in os.listdir(root)
-                    if os.path.isdir(os.path.join(root, d))
+                    if ProjectRepository._is_valid_project_dir(os.path.join(root, d))
                 )
         return sorted(names)
+
+    @staticmethod
+    def _is_valid_project_dir(project_dir: str) -> bool:
+        """检查目录是否为合法项目（排除 .tmp_ 目录，检查三个必需文件）。"""
+        if not os.path.isdir(project_dir):
+            return False
+        name = os.path.basename(project_dir)
+        if name.startswith(".tmp_"):
+            return False
+        for marker in ("project.json", "structured_script.json", "voice_bindings.json"):
+            if not os.path.isfile(os.path.join(project_dir, marker)):
+                return False
+        return True
+
+    @staticmethod
+    def cleanup_stale_project_temp_dirs(max_age_seconds: int = 86400) -> int:
+        """清理 WORKSPACE_ROOT 下过期的 .tmp_ 临时项目目录。
+
+        Args:
+            max_age_seconds: 过期阈值，默认 24 小时。
+
+        Returns:
+            成功删除的目录数量。
+        """
+        ProjectRepository._ensure_roots()
+        ws = ProjectRepository.WORKSPACE_ROOT or ""
+        return ProjectRepository._cleanup_stale_tmp_dirs(ws, max_age_seconds)
+
+    @staticmethod
+    def _cleanup_stale_tmp_dirs(root: str, max_age_seconds: int = 86400) -> int:
+        """清理指定根目录下过期的 .tmp_ 临时目录。"""
+        removed = 0
+        if not root or not os.path.isdir(root):
+            return 0
+        now = _time.time()
+        for name in os.listdir(root):
+            if not name.startswith(".tmp_"):
+                continue
+            tmp_dir = os.path.join(root, name)
+            if not os.path.isdir(tmp_dir):
+                continue
+            try:
+                age = now - os.path.getmtime(tmp_dir)
+            except OSError:
+                logger.debug("跳过无法读取修改时间的临时目录: %s", tmp_dir)
+                continue
+            if age >= max_age_seconds:
+                try:
+                    shutil.rmtree(tmp_dir, ignore_errors=False)
+                    removed += 1
+                except OSError as exc:
+                    logger.warning("清理临时目录失败: %s (%s)", tmp_dir, exc)
+        return removed
 
     @staticmethod
     def load_project(name: str) -> tuple[ProjectMeta, dict, dict]:
