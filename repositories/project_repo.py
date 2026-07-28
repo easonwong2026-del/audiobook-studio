@@ -14,6 +14,8 @@ import logging
 import os
 import shutil
 import time
+import uuid
+import time as _time
 from typing import ClassVar, Optional
 
 from lib.types import ProjectMeta
@@ -158,11 +160,65 @@ class ProjectRepository:
         lg = ProjectRepository.LEGACY_ROOT or ""
         for root in (ws, lg):
             if root and os.path.isdir(root):
+                ProjectRepository._cleanup_stale_tmp_dirs(root)
                 names.update(
                     d for d in os.listdir(root)
-                    if os.path.isdir(os.path.join(root, d))
+                    if ProjectRepository._is_valid_project_dir(os.path.join(root, d))
                 )
         return sorted(names)
+
+    @staticmethod
+    def _is_valid_project_dir(project_dir: str) -> bool:
+        """检查目录是否为合法项目（排除 .tmp_ 目录，检查三个必需文件）。"""
+        if not os.path.isdir(project_dir):
+            return False
+        name = os.path.basename(project_dir)
+        if name.startswith(".tmp_"):
+            return False
+        for marker in ("project.json", "structured_script.json", "voice_bindings.json"):
+            if not os.path.isfile(os.path.join(project_dir, marker)):
+                return False
+        return True
+
+    @staticmethod
+    def cleanup_stale_project_temp_dirs(max_age_seconds: int = 86400) -> int:
+        """清理 WORKSPACE_ROOT 下过期的 .tmp_ 临时项目目录。
+
+        Args:
+            max_age_seconds: 过期阈值，默认 24 小时。
+
+        Returns:
+            成功删除的目录数量。
+        """
+        ProjectRepository._ensure_roots()
+        ws = ProjectRepository.WORKSPACE_ROOT or ""
+        return ProjectRepository._cleanup_stale_tmp_dirs(ws, max_age_seconds)
+
+    @staticmethod
+    def _cleanup_stale_tmp_dirs(root: str, max_age_seconds: int = 86400) -> int:
+        """清理指定根目录下过期的 .tmp_ 临时目录。"""
+        removed = 0
+        if not root or not os.path.isdir(root):
+            return 0
+        now = _time.time()
+        for name in os.listdir(root):
+            if not name.startswith(".tmp_"):
+                continue
+            tmp_dir = os.path.join(root, name)
+            if not os.path.isdir(tmp_dir):
+                continue
+            try:
+                age = now - os.path.getmtime(tmp_dir)
+            except OSError:
+                logger.debug("跳过无法读取修改时间的临时目录: %s", tmp_dir)
+                continue
+            if age >= max_age_seconds:
+                try:
+                    shutil.rmtree(tmp_dir, ignore_errors=False)
+                    removed += 1
+                except OSError as exc:
+                    logger.warning("清理临时目录失败: %s (%s)", tmp_dir, exc)
+        return removed
 
     @staticmethod
     def load_project(name: str) -> tuple[ProjectMeta, dict, dict]:
@@ -224,47 +280,31 @@ class ProjectRepository:
         project_dir = os.path.join(ws, name)
         if os.path.exists(project_dir):
             raise FileExistsError(f"项目 '{name}' 已存在")
-
-        os.makedirs(os.path.join(project_dir, "voices"))
-        os.makedirs(os.path.join(project_dir, "segments"))
-        os.makedirs(os.path.join(project_dir, "chapters"))
-        os.makedirs(os.path.join(project_dir, "output"))
-
-        # 复制剧本 JSON
-        shutil.copy2(script_path, os.path.join(project_dir, "structured_script.json"))
-
-        # 统计段数
-        with open(script_path, encoding="utf-8") as f:
-            script = json.load(f)
-        total_segments = 0
-        for ch in script.get("chapters", []):
-            total_segments += len(ch.get("segments", []))
-
-        # 空 voice_bindings（原子写）
-        voice_bindings = {
-            "bindings": {name: None for name in script.get("voices", {})},
-            "bound_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "verified": [],
-        }
-        ProjectRepository.save_bindings(project_dir, voice_bindings)
-
-        # project.json（原子写）
-        meta = ProjectMeta(
-            project_name=name,
-            created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
-            updated_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
-            total_chapters=len(script.get("chapters", [])),
-            total_segments=total_segments,
-            pending_count=total_segments,
-            segments_status={
-                seg["id"]: "pending"
-                for ch in script.get("chapters", [])
-                for seg in ch.get("segments", [])
-            },
-        )
-        ProjectRepository._save_meta(project_dir, meta)
-
-        return name
+        os.makedirs(ws, exist_ok=True)
+        tmp_dir = os.path.join(ws, f".tmp_{name}_{uuid.uuid4().hex}")
+        try:
+            for sub in ("voices", "segments", "chapters", "output"):
+                os.makedirs(os.path.join(tmp_dir, sub), exist_ok=True)
+            shutil.copy2(script_path, os.path.join(tmp_dir, "structured_script.json"))
+            with open(script_path, encoding="utf-8") as f:
+                script = json.load(f)
+            total_segments = sum(len(ch.get("segments", [])) for ch in script.get("chapters", []))
+            bindings = {"bindings": {n: None for n in script.get("voices", {})},
+                        "bound_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "verified": []}
+            ProjectRepository.save_bindings(tmp_dir, bindings)
+            meta = ProjectMeta(project_name=name, created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                               updated_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                               total_chapters=len(script.get("chapters", [])), total_segments=total_segments,
+                               pending_count=total_segments,
+                               segments_status={seg["id"]: "pending" for ch in script.get("chapters", []) for seg in ch.get("segments", [])})
+            ProjectRepository._save_meta(tmp_dir, meta)
+            if os.path.exists(project_dir):
+                raise FileExistsError(f"项目 '{name}' 已存在")
+            os.replace(tmp_dir, project_dir)
+            return name
+        except Exception:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise
 
     @staticmethod
     def delete_project(name: str) -> None:

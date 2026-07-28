@@ -311,3 +311,316 @@ class TestProjectRepository:
         finally:
             ProjectRepository.WORKSPACE_ROOT = orig_ws
             ProjectRepository.LEGACY_ROOT = orig_lg
+
+
+# ═══════════════════════════════════════════════════════════════
+# 临时目录排除与项目扫描验证
+# ═══════════════════════════════════════════════════════════════
+
+class TestProjectScanFiltering:
+    def test_tmp_dir_not_in_scan(self, tmp_path, monkeypatch):
+        """.tmp_ 目录即使包含项目文件也不出现在扫描结果中。"""
+        from repositories.project_repo import ProjectRepository
+        orig_ws = ProjectRepository.WORKSPACE_ROOT
+        orig_lg = ProjectRepository.LEGACY_ROOT
+        try:
+            ws = str(tmp_path / "projects")
+            ProjectRepository.WORKSPACE_ROOT = ws
+            ProjectRepository.LEGACY_ROOT = str(tmp_path / "legacy")
+
+            # 创建看似合法的 .tmp_ 目录
+            tmp_proj = os.path.join(ws, ".tmp_demo_abc")
+            os.makedirs(os.path.join(tmp_proj, "voices"))
+            for fname in ("project.json", "structured_script.json", "voice_bindings.json"):
+                with open(os.path.join(tmp_proj, fname), "w") as f:
+                    f.write("{}")
+
+            # 创建一个真正合法的项目
+            real_proj = os.path.join(ws, "real_book")
+            os.makedirs(os.path.join(real_proj, "voices"))
+            for fname in ("project.json", "structured_script.json", "voice_bindings.json"):
+                with open(os.path.join(real_proj, fname), "w") as f:
+                    f.write("{}")
+
+            names = ProjectRepository.scan_projects()
+            assert ".tmp_demo_abc" not in names
+            assert "real_book" in names
+        finally:
+            ProjectRepository.WORKSPACE_ROOT = orig_ws
+            ProjectRepository.LEGACY_ROOT = orig_lg
+
+    def test_plain_directory_not_in_scan(self, tmp_path, monkeypatch):
+        """无项目文件的普通目录不出现在扫描结果中。"""
+        from repositories.project_repo import ProjectRepository
+        orig_ws = ProjectRepository.WORKSPACE_ROOT
+        orig_lg = ProjectRepository.LEGACY_ROOT
+        try:
+            ws = str(tmp_path / "projects")
+            ProjectRepository.WORKSPACE_ROOT = ws
+            ProjectRepository.LEGACY_ROOT = str(tmp_path / "legacy")
+
+            # 普通目录，无项目文件
+            os.makedirs(os.path.join(ws, "random_folder"))
+            os.makedirs(os.path.join(ws, "cache"))
+
+            names = ProjectRepository.scan_projects()
+            assert "random_folder" not in names
+            assert "cache" not in names
+        finally:
+            ProjectRepository.WORKSPACE_ROOT = orig_ws
+            ProjectRepository.LEGACY_ROOT = orig_lg
+
+    @pytest.mark.parametrize("missing_file", [
+        "project.json",
+        "structured_script.json",
+        "voice_bindings.json",
+    ])
+    def test_missing_required_file(self, tmp_path, monkeypatch, missing_file):
+        """缺少任一必需项目文件时不被识别。"""
+        from repositories.project_repo import ProjectRepository
+        orig_ws = ProjectRepository.WORKSPACE_ROOT
+        orig_lg = ProjectRepository.LEGACY_ROOT
+        try:
+            ws = str(tmp_path / "projects")
+            ProjectRepository.WORKSPACE_ROOT = ws
+            ProjectRepository.LEGACY_ROOT = str(tmp_path / "legacy")
+
+            proj = os.path.join(ws, "incomplete")
+            os.makedirs(os.path.join(proj, "voices"))
+            for fname in ("project.json", "structured_script.json", "voice_bindings.json"):
+                if fname != missing_file:
+                    with open(os.path.join(proj, fname), "w") as f:
+                        f.write("{}")
+
+            names = ProjectRepository.scan_projects()
+            assert "incomplete" not in names
+        finally:
+            ProjectRepository.WORKSPACE_ROOT = orig_ws
+            ProjectRepository.LEGACY_ROOT = orig_lg
+
+
+class TestTempDirCleanup:
+    def test_cleanup_stale_temp_dirs(self, tmp_path, monkeypatch):
+        """过期临时目录被清理，返回正确删除数量。"""
+        from repositories.project_repo import ProjectRepository
+        orig_ws = ProjectRepository.WORKSPACE_ROOT
+        orig_lg = ProjectRepository.LEGACY_ROOT
+        try:
+            ws = str(tmp_path / "projects")
+            ProjectRepository.WORKSPACE_ROOT = ws
+            ProjectRepository.LEGACY_ROOT = str(tmp_path / "legacy")
+
+            # 创建过期的临时目录（修改时间为 7 天前）
+            stale_dir = os.path.join(ws, ".tmp_stale_xxx")
+            os.makedirs(stale_dir)
+            stale_time = time.time() - 7 * 86400
+            os.utime(stale_dir, (stale_time, stale_time))
+
+            # 创建合法项目
+            valid_dir = os.path.join(ws, "valid_book")
+            os.makedirs(os.path.join(valid_dir, "voices"))
+            for fname in ("project.json", "structured_script.json", "voice_bindings.json"):
+                with open(os.path.join(valid_dir, fname), "w") as f:
+                    f.write("{}")
+
+            removed = ProjectRepository.cleanup_stale_project_temp_dirs(max_age_seconds=3600)
+            assert removed == 1, f"应删除 1 个过期目录，实际 {removed}"
+            assert not os.path.isdir(stale_dir), "过期临时目录应已被删除"
+            assert os.path.isdir(valid_dir), "合法项目不受影响"
+
+            # 第二次调用时不再有可删除目录
+            assert ProjectRepository.cleanup_stale_project_temp_dirs(max_age_seconds=3600) == 0
+        finally:
+            ProjectRepository.WORKSPACE_ROOT = orig_ws
+            ProjectRepository.LEGACY_ROOT = orig_lg
+
+    def test_fresh_temp_dir_not_cleaned(self, tmp_path, monkeypatch):
+        """新创建的 .tmp_ 目录不会被默认清理。"""
+        from repositories.project_repo import ProjectRepository
+        orig_ws = ProjectRepository.WORKSPACE_ROOT
+        orig_lg = ProjectRepository.LEGACY_ROOT
+        try:
+            ws = str(tmp_path / "projects")
+            ProjectRepository.WORKSPACE_ROOT = ws
+            ProjectRepository.LEGACY_ROOT = str(tmp_path / "legacy")
+
+            fresh_dir = os.path.join(ws, ".tmp_fresh_yyy")
+            os.makedirs(fresh_dir)
+            # 不修改时间，保持当前时间
+
+            removed = ProjectRepository.cleanup_stale_project_temp_dirs(max_age_seconds=86400)
+            assert removed == 0
+            assert os.path.isdir(fresh_dir), "新临时目录不应被清理"
+        finally:
+            ProjectRepository.WORKSPACE_ROOT = orig_ws
+            ProjectRepository.LEGACY_ROOT = orig_lg
+
+    def test_no_tmp_after_successful_create(self, tmp_path, monkeypatch):
+        """成功创建项目后不残留 .tmp_ 目录。"""
+        from repositories.project_repo import ProjectRepository
+        orig_ws = ProjectRepository.WORKSPACE_ROOT
+        orig_lg = ProjectRepository.LEGACY_ROOT
+        try:
+            ws = str(tmp_path / "projects")
+            ProjectRepository.WORKSPACE_ROOT = ws
+            ProjectRepository.LEGACY_ROOT = str(tmp_path / "legacy")
+
+            script_path = str(tmp_path / "script.json")
+            script = {
+                "meta": {"title": "T", "total_segments": 1},
+                "voices": {"旁白": {}},
+                "chapters": [{"id": 1, "title": "第一章",
+                              "segments": [{"id": "1-001", "speaker": "旁白",
+                                            "role": "旁白", "text": "开始",
+                                            "emotion": "neutral", "emotion_strength": 0.4,
+                                            "emo_alpha": 0.4, "speech_rate": 1.0,
+                                            "delivery": {"speed": 1.0, "pitch": 0,
+                                                         "intensity": 0.4, "breath": "light"},
+                                            "pause_before": 0, "pause_after": 600, "pauses": []}]}],
+            }
+            with open(script_path, "w", encoding="utf-8") as f:
+                json.dump(script, f, ensure_ascii=False)
+
+            ProjectRepository.create_project("clean_proj", script_path)
+            tmp_names = [d for d in os.listdir(ws) if d.startswith(".tmp_")]
+            assert len(tmp_names) == 0, f"残留临时目录: {tmp_names}"
+        finally:
+            ProjectRepository.WORKSPACE_ROOT = orig_ws
+            ProjectRepository.LEGACY_ROOT = orig_lg
+
+
+# ═══════════════════════════════════════════════════════════════
+# 原子创建失败清理测试
+# ═══════════════════════════════════════════════════════════════
+
+class TestAtomicCreateFailure:
+    SCRIPT = {
+        "meta": {"title": "T", "total_segments": 2},
+        "voices": {"旁白": {}, "小明": {}},
+        "chapters": [{"id": 1, "title": "第一章",
+                      "segments": [
+                          {"id": "1-001", "speaker": "旁白", "role": "旁白",
+                           "text": "开始", "emotion": "neutral", "emotion_strength": 0.4,
+                           "emo_alpha": 0.4, "speech_rate": 1.0,
+                           "delivery": {"speed": 1.0, "pitch": 0, "intensity": 0.4,
+                                        "breath": "light"},
+                           "pause_before": 0, "pause_after": 600, "pauses": []},
+                          {"id": "1-002", "speaker": "小明", "role": "小明",
+                           "text": "你好", "emotion": "happy", "emotion_strength": 0.6,
+                           "emo_alpha": 0.6, "speech_rate": 1.05,
+                           "delivery": {"speed": 1.05, "pitch": 0, "intensity": 0.6,
+                                        "breath": "light"},
+                           "pause_before": 200, "pause_after": 800, "pauses": []},
+                      ]}],
+    }
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, tmp_path):
+        from repositories.project_repo import ProjectRepository
+        self._orig_ws = ProjectRepository.WORKSPACE_ROOT
+        self._orig_lg = ProjectRepository.LEGACY_ROOT
+        self._orig_init = ProjectRepository._INITIALIZED
+        self.ws = str(tmp_path / "projects")
+        ProjectRepository.WORKSPACE_ROOT = self.ws
+        ProjectRepository.LEGACY_ROOT = str(tmp_path / "legacy")
+        ProjectRepository._INITIALIZED = True  # prevent ensure_roots from overriding
+        os.makedirs(self.ws, exist_ok=True)
+        self.script_path = str(tmp_path / "script.json")
+        with open(self.script_path, "w", encoding="utf-8") as f:
+            json.dump(self.SCRIPT, f, ensure_ascii=False)
+        yield
+        ProjectRepository.WORKSPACE_ROOT = self._orig_ws
+        ProjectRepository.LEGACY_ROOT = self._orig_lg
+        ProjectRepository._INITIALIZED = self._orig_init
+
+    def _assert_no_project_left(self, name):
+        from repositories.project_repo import ProjectRepository
+        project_dir = os.path.join(ProjectRepository.WORKSPACE_ROOT, name)
+        assert not os.path.isdir(project_dir), f"项目目录不应存在：{project_dir}"
+        # 验证无残留 .tmp_ 目录
+        if ProjectRepository.WORKSPACE_ROOT and os.path.isdir(ProjectRepository.WORKSPACE_ROOT):
+            tmp_dirs = [d for d in os.listdir(ProjectRepository.WORKSPACE_ROOT)
+                        if d.startswith(f".tmp_{name}_")]
+            assert len(tmp_dirs) == 0, f"残留临时目录：{tmp_dirs}"
+
+    def _assert_valid_project(self, name):
+        from repositories.project_repo import ProjectRepository
+        project_dir = os.path.join(ProjectRepository.WORKSPACE_ROOT, name)
+        assert os.path.isdir(project_dir)
+        for marker in ("project.json", "structured_script.json", "voice_bindings.json"):
+            assert os.path.isfile(os.path.join(project_dir, marker))
+        for sub in ("voices", "segments", "chapters", "output"):
+            assert os.path.isdir(os.path.join(project_dir, sub))
+
+    def test_copy2_failure(self, monkeypatch):
+        """shutil.copy2 失败时清理临时目录，原异常继续抛出。"""
+        from repositories.project_repo import ProjectRepository
+        import shutil
+        monkeypatch.setattr(shutil, "copy2",
+                            lambda *a, **kw: (_ for _ in ()).throw(OSError("copy2 failed")))
+        with pytest.raises(OSError):
+            ProjectRepository.create_project("copy_fail", self.script_path)
+        self._assert_no_project_left("copy_fail")
+        monkeypatch.undo()
+        ProjectRepository.create_project("copy_fail", self.script_path)
+        self._assert_valid_project("copy_fail")
+
+    def test_save_bindings_failure(self, monkeypatch):
+        """save_bindings 失败时清理临时目录。"""
+        from repositories.project_repo import ProjectRepository
+        monkeypatch.setattr(ProjectRepository, "save_bindings",
+                            lambda *a, **kw: (_ for _ in ()).throw(OSError("bindings failed")))
+        with pytest.raises(OSError):
+            ProjectRepository.create_project("bind_fail", self.script_path)
+        self._assert_no_project_left("bind_fail")
+        monkeypatch.undo()
+        ProjectRepository.create_project("bind_fail", self.script_path)
+        self._assert_valid_project("bind_fail")
+
+    def test_save_meta_failure(self, monkeypatch):
+        """_save_meta 失败时清理临时目录。"""
+        from repositories.project_repo import ProjectRepository
+        monkeypatch.setattr(ProjectRepository, "_save_meta",
+                            lambda *a, **kw: (_ for _ in ()).throw(OSError("meta failed")))
+        with pytest.raises(OSError):
+            ProjectRepository.create_project("meta_fail", self.script_path)
+        self._assert_no_project_left("meta_fail")
+        monkeypatch.undo()
+        ProjectRepository.create_project("meta_fail", self.script_path)
+        self._assert_valid_project("meta_fail")
+
+    def test_os_replace_failure(self, monkeypatch):
+        """os.replace 失败时清理临时目录。"""
+        from repositories.project_repo import ProjectRepository
+        import repositories._atomic as atomic_mod
+        call_count = [0]
+        orig_replace = os.replace
+        def counting_replace(src, dst):
+            call_count[0] += 1
+            # Let the first N calls (file-level atomic writes) succeed,
+            # fail on the final directory-level os.replace
+            if call_count[0] >= 3:
+                raise OSError("final replace failed")
+            return orig_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", counting_replace)
+        from repositories.exceptions import AtomicWriteError
+        with pytest.raises((OSError, AtomicWriteError)):
+            ProjectRepository.create_project("replace_fail", self.script_path)
+        self._assert_no_project_left("replace_fail")
+        # Retry with working os.replace
+        monkeypatch.undo()
+        ProjectRepository.create_project("replace_fail", self.script_path)
+        self._assert_valid_project("replace_fail")
+
+    def test_duplicate_name_does_not_create_temp(self, monkeypatch):
+        """项目已存在时直接抛出，不创建临时目录。"""
+        from repositories.project_repo import ProjectRepository
+        ProjectRepository.create_project("dup_test", self.script_path)
+        with pytest.raises(FileExistsError):
+            ProjectRepository.create_project("dup_test", self.script_path)
+        # 不应有残留临时目录
+        ws_dir = ProjectRepository.WORKSPACE_ROOT
+        if ws_dir and os.path.isdir(ws_dir):
+            tmp_dirs = [d for d in os.listdir(ws_dir) if d.startswith(".tmp_")]
+            assert len(tmp_dirs) == 0, f"重复创建后残留临时目录：{tmp_dirs}"

@@ -33,12 +33,12 @@ def create_settings_page() -> dict:
                     s_api_key = gr.Textbox(
                         label="API Key",
                         type="password",
-                        placeholder="留空则使用环境变量",
+                        placeholder="输入新密钥以替换已有密钥，留空保留已有密钥",
                         visible=False,
                     )
                     s_base_url = gr.Textbox(
                         label="Base URL（可选）",
-                        placeholder="图顶 API 地址",
+                        placeholder="自定义 API 地址，留空使用默认地址",
                         visible=False,
                     )
 
@@ -52,7 +52,8 @@ def create_settings_page() -> dict:
 
                     with gr.Row():
                         s_save = gr.Button("保存配置", variant="primary")
-                        s_test = gr.Button("测试连接", variant="secondary")
+                        s_test = gr.Button("测试当前配置", variant="secondary")
+                        s_clear_key = gr.Button("清除已保存密钥", variant="stop", size="sm", visible=False)
 
                     s_status = gr.Markdown("")
 
@@ -86,6 +87,7 @@ def create_settings_page() -> dict:
         "s_timeout": s_timeout,
         "s_save": s_save,
         "s_test": s_test,
+        "s_clear_key": s_clear_key,
         "s_status": s_status,
         "s_data_dir": s_data_dir,
         "s_data_apply": s_data_apply,
