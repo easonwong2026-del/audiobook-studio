@@ -473,11 +473,17 @@ def apply_data_dir(new_dir: str) -> tuple:
 
 def open_data_dir() -> str:
     """打开数据目录。"""
+    import sys
     d = config.get_data_dir()
     os.makedirs(d, exist_ok=True)
     try:
         import subprocess
-        subprocess.Popen(["open", d])  # macOS
+        if sys.platform == "win32":
+            os.startfile(d)  # Windows 资源管理器
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", d])
+        else:
+            subprocess.Popen(["xdg-open", d])
     except Exception:
         pass
     return ""

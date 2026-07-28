@@ -31,8 +31,12 @@ def create_project_page() -> dict:
         # 高级：剧本导演校正（默认折叠）
         with gr.Accordion("高级：剧本导演校正", open=False, elem_classes=["director-editor-accordion"]):
             gr.Markdown(
-                "按章节加载 Segment，可直接修改角色、文本、情绪、速度、强度、"
-                "呼吸和前后停顿。保存时重新执行质量守卫。"
+                "AI 导演分析后的精细调整工具。逐章查看每个说话单元（Segment），"
+                "手动修改角色分配、情绪标注、语速、表达强度、呼吸感和前后停顿。"
+                "\n\n**适用场景**：AI 自动分析后个别段情绪不准、语速不合适、"
+                "停顿太长或太短。非必选步骤——AI 分析结果可直接用于后续生产。"
+                "\n\n**操作**：选用章节 → 在表格中修改 → 点「保存人工调整」。"
+                "每次保存会生成撤销快照，可用「撤销上次保存」恢复。"
             )
             d_edit_chapter = gr.Dropdown(
                 label="编辑章节",

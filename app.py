@@ -1467,6 +1467,8 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         lambda: _goto("settings"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-settings')?.classList.add('active'); }")
     nav_voices.click(
+        lambda: _goto("voices"), None, _GROUPS,
+        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-voices')?.classList.add('active'); }").then(
         refresh_role_list,
         [v_role_search, v_role, ss], [v_table]).then(
         refresh_voice_filters,
