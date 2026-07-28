@@ -3,10 +3,22 @@
 颜色与间距引用自 ui/tokens.py，确保与 Pencil 设计源一致。
 """
 from __future__ import annotations
+
 import gradio as gr
+
 from ui.tokens import (
-    ACCENT, ACCENT_DEEP, ACCENT_SOFT, SURFACE, SIDEBAR, CARD, PANEL,
-    BORDER, TEXT_PRIMARY, TEXT_MUTED, RADIUS_INPUT, SHADOW_CARD,
+    ACCENT,
+    ACCENT_DEEP,
+    ACCENT_SOFT,
+    BORDER,
+    CARD,
+    PANEL,
+    RADIUS_INPUT,
+    SHADOW_CARD,
+    SIDEBAR,
+    SURFACE,
+    TEXT_MUTED,
+    TEXT_PRIMARY,
 )
 
 THEME = gr.themes.Default(

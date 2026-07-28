@@ -1,5 +1,6 @@
 """跨页面共享组件（从 app.py 抽离）。"""
 from __future__ import annotations
+
 import gradio as gr
 
 

@@ -1,15 +1,10 @@
-"""角色与声音阶段 UI builder — 对齐 Pencil 角色与声音画板。"""
+"""角色与声音阶段 UI builder — 包含角色配置、AI 声音推荐与导演试听。"""
 from __future__ import annotations
 
 import gradio as gr
 
 
 def create_voice_page() -> dict:
-    """创建以角色列表驱动声音配置的页面。
-
-    左侧：纵向可滚动角色列表
-    右侧：当前角色的声音配置流程
-    """
     with gr.Group(visible=False, elem_id="grp-voices") as grp_voices:
         with gr.Row(equal_height=False, elem_classes=["voice-workspace"]):
             with gr.Column(scale=0, min_width=277, elem_classes=["role-list-panel"]):
@@ -60,17 +55,56 @@ def create_voice_page() -> dict:
                                 sources=["upload", "microphone"],
                                 elem_classes=["voice-reference-upload"],
                             )
+
+                            # AI 声音建议
+                            with gr.Accordion("AI 声音建议", open=False):
+                                v_recommend = gr.Button("刷新推荐", variant="secondary", size="sm")
+                                v_recommendations = gr.Dataframe(
+                                    headers=["voice_name", "category", "score", "reasons"],
+                                    datatype=["str", "str", "number", "str"],
+                                    row_count=(0, "dynamic"),
+                                    col_count=(4, "fixed"),
+                                    interactive=False,
+                                    wrap=True,
+                                    label="推荐候选",
+                                )
+                                v_recommend_status = gr.Markdown("选择角色后点击「刷新推荐」")
+
                         with gr.Column(elem_classes=["voice-step-card", "voice-save-card"]):
                             gr.Markdown("##### 保存绑定")
                             gr.Markdown("确认无误后，保存到当前角色。")
                             v_bind = gr.Button("确认绑定", variant="primary")
+                            # 导演试听
+                            with gr.Accordion("导演试听", open=False):
+                                gr.Markdown("使用当前选定声音和角色的一个代表 Segment 试听。")
+                                v_audition = gr.Button("生成导演试听", variant="secondary", size="sm")
+                                v_audition_audio = gr.Audio(
+                                    label="导演试听", type="filepath"
+                                )
+                                v_audition_status = gr.Markdown("")
+                                v_feedback = gr.Dropdown(
+                                    label="试听反馈",
+                                    choices=[
+                                        ("语速太快 → 放慢", "slower"),
+                                        ("语速太慢 → 加快", "faster"),
+                                        ("表达太弱 → 加强", "stronger"),
+                                        ("表达太强 → 减弱", "softer"),
+                                        ("停顿太短 → 延长", "longer_pauses"),
+                                        ("停顿太长 → 缩短", "shorter_pauses"),
+                                        ("呼吸感不足 → 增加", "more_breath"),
+                                        ("呼吸感太重 → 减少", "less_breath"),
+                                    ],
+                                )
+                                v_feedback_apply = gr.Button(
+                                    "应用反馈到当前 Segment", variant="secondary", size="sm"
+                                )
+
                     v_bind_msg = gr.Markdown("")
                     v_current = gr.Markdown("当前参考音频：未选择")
 
         v_role = gr.State(value=None)
 
-        # 试听回调仍保留，作为隐藏兼容组件，避免破坏既有业务接线；
-        # 最新 Pencil 设计已移除可见的试听卡片和播放器。
+        # 隐藏兼容组件
         v_preview_btn = gr.Button("试听当前声音", visible=False)
         v_preview_audio = gr.Audio(
             label="试听结果", type="filepath", interactive=False, visible=False,
@@ -114,6 +148,14 @@ def create_voice_page() -> dict:
         "v_bind_msg": v_bind_msg,
         "v_preview_btn": v_preview_btn,
         "v_preview_audio": v_preview_audio,
+        "v_recommend": v_recommend,
+        "v_recommendations": v_recommendations,
+        "v_recommend_status": v_recommend_status,
+        "v_audition": v_audition,
+        "v_audition_audio": v_audition_audio,
+        "v_audition_status": v_audition_status,
+        "v_feedback": v_feedback,
+        "v_feedback_apply": v_feedback_apply,
         "v_record": v_record,
         "v_upload_clone": v_upload_clone,
         "v_save_name": v_save_name,

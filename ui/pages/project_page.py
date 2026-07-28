@@ -1,44 +1,20 @@
-"""项目阶段 UI builder — 对齐 Pencil 项目·导入与切换画板。"""
+"""项目管理阶段 UI builder — 项目切换、查看与高级剧本校正。"""
 from __future__ import annotations
-
-import os
-from pathlib import Path
 
 import gradio as gr
 
-from lib import config
 from services import ProjectService
-
-from .director_page import create_director_panel
-
-_EXAMPLE_SCRIPT_PATH = str(Path(__file__).resolve().parents[2] / "structured_script.example.json")
 
 
 def create_project_page() -> dict:
-    """创建项目导入、切换与工作区设置页面。"""
+    """创建项目管理页面（不含新建项目入口）。"""
     with gr.Group(visible=False, elem_id="grp-project") as grp_project:
-        director = create_director_panel()
-
         with gr.Row(equal_height=True, elem_classes=["stage-row"]):
             with gr.Column(scale=1, elem_classes=["stage-card"]):
-                gr.Markdown("#### 新建项目")
-                p_name = gr.Textbox(label="项目名称", placeholder="例如：甲方来了")
-                p_script = gr.File(label="结构化书稿", file_types=[".json"])
-                with gr.Row():
-                    p_create = gr.Button("创建项目", variant="primary")
-                    gr.DownloadButton(
-                        "下载示例",
-                        value=_EXAMPLE_SCRIPT_PATH,
-                        variant="secondary",
-                        size="sm",
-                    )
-                p_create_msg = gr.Markdown("")
-
-            with gr.Column(scale=1, elem_classes=["stage-card"]):
-                gr.Markdown("#### 继续已有项目")
+                gr.Markdown("#### 选择项目")
                 with gr.Row():
                     p_sel = gr.Dropdown(
-                        label="选择项目",
+                        label="项目",
                         choices=ProjectService.scan_projects(),
                         scale=4,
                     )
@@ -52,24 +28,41 @@ def create_project_page() -> dict:
         p_summary = gr.Markdown("打开项目后显示书名、角色与合成概览。")
         p_chapter_tree = gr.HTML(value="<div class='inline-empty'>打开项目后在这里查看章节结构。</div>")
 
-        with gr.Accordion("工作区设置", open=False, elem_classes=["settings-accordion"]):
-            data_dir_box = gr.Textbox(
-                label="数据保存位置",
-                value=os.path.normpath(config.get_data_dir()),
-                placeholder="例如：~/AudiobookStudio",
+        # 高级：剧本导演校正（默认折叠）
+        with gr.Accordion("高级：剧本导演校正", open=False, elem_classes=["director-editor-accordion"]):
+            gr.Markdown(
+                "按章节加载 Segment，可直接修改角色、文本、情绪、速度、强度、"
+                "呼吸和前后停顿。保存时重新执行质量守卫。"
+            )
+            d_edit_chapter = gr.Dropdown(
+                label="编辑章节",
+                choices=[],
+                info="按章节加载 Segment，避免长篇小说一次传输整本表格。",
+            )
+            d_editor = gr.Dataframe(
+                headers=[
+                    "id", "speaker", "text", "emotion",
+                    "speed", "intensity", "breath",
+                    "pause_before", "pause_after",
+                ],
+                datatype=[
+                    "str", "str", "str", "str",
+                    "number", "number", "str",
+                    "number", "number",
+                ],
+                row_count=(0, "dynamic"),
+                col_count=(9, "fixed"),
+                interactive=True,
+                wrap=True,
+                label="Segment 导演表",
             )
             with gr.Row():
-                data_apply = gr.Button("应用", variant="secondary")
-                data_open = gr.Button("打开数据文件夹")
-            data_dir_msg = gr.Markdown("")
+                d_apply = gr.Button("保存人工调整", variant="primary")
+                d_undo = gr.Button("撤销上次保存", variant="secondary")
+            d_history = gr.State("")
 
     return {
         "group": grp_project,
-        **director,
-        "p_name": p_name,
-        "p_script": p_script,
-        "p_create": p_create,
-        "p_create_msg": p_create_msg,
         "p_sel": p_sel,
         "p_refresh": p_refresh,
         "p_open": p_open,
@@ -77,8 +70,9 @@ def create_project_page() -> dict:
         "p_open_msg": p_open_msg,
         "p_summary": p_summary,
         "p_chapter_tree": p_chapter_tree,
-        "data_dir_box": data_dir_box,
-        "data_apply": data_apply,
-        "data_open": data_open,
-        "data_dir_msg": data_dir_msg,
+        "d_edit_chapter": d_edit_chapter,
+        "d_editor": d_editor,
+        "d_apply": d_apply,
+        "d_undo": d_undo,
+        "d_history": d_history,
     }

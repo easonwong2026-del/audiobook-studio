@@ -9,7 +9,6 @@ from pathlib import Path
 
 import gradio as gr
 
-
 BRAND_MARK_PATH = str(
     Path(__file__).resolve().parents[2]
     / "assets"

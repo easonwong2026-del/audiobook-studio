@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audiobook Studio v3.3.0 UI -- 有声书生产工作台。
+"""Audiobook Studio v3.3.1 UI -- 有声书生产工作台。
 
 本次重构把模块式导航改为「工作台 → 项目 → 角色与声音 → 生产与质检 → 交付」
 的生产流程。页面 Builder 负责布局，既有 handler 继续委托给 Service；不改变 TTS、
@@ -33,7 +33,9 @@ from services import (
 )
 from services.session import SessionState
 from services.synthesis import SynthesisState
+from ui import create_project_handlers as create_ui
 from ui import director_handlers as director_ui
+from ui import voice_handlers as voice_ui
 from ui.components import (
     build_role_management_choices,
     create_production_navigation,
@@ -45,10 +47,12 @@ from ui.components import (
 )
 from ui.navigation import _GROUPS, _goto, create_nav_buttons
 from ui.pages import (
+    create_create_project_page,
     create_export_page,
     create_overview_page,
     create_project_page,
     create_review_page,
+    create_settings_page,
     create_supplement_page,
     create_synthesis_page,
     create_voice_page,
@@ -1243,6 +1247,8 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         nav_voices = nav["nav_voices"]
         nav_synth = nav["nav_synth"]
         nav_export = nav["nav_export"]
+        nav_create_project = nav["nav_create_project"]
+        nav_settings = nav["nav_settings"]
 
         # ═══ 右侧主工作区 ═══
         with gr.Column(scale=1, elem_classes=["main-area"]) as main_col:
@@ -1260,37 +1266,31 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             ov_synth = ov_page["ov_synth"]
             ov_export = ov_page["ov_export"]
 
+            # ───────── 新建项目 ─────────
+            cr_page = create_create_project_page()
+            grp_create_project = cr_page["group"]
+            cp_name = cr_page["cp_name"]
+            cp_source = cr_page["cp_source"]
+            cp_title = cr_page["cp_title"]
+            cp_author = cr_page["cp_author"]
+            cp_config_summary = cr_page["cp_config_summary"]
+            cp_create = cr_page["cp_create"]
+            cp_status = cr_page["cp_status"]
+            cp_result = cr_page["cp_result"]
+            cp_json_name = cr_page["cp_json_name"]
+            cp_json_file = cr_page["cp_json_file"]
+            cp_json_status = cr_page["cp_json_status"]
+            cp_json_create = cr_page["cp_json_create"]
+            cp_json_result = cr_page["cp_json_result"]
+
             # ───────── 项目 ─────────
             prj_page = create_project_page()
             grp_project = prj_page["group"]
-            d_txt = prj_page["d_txt"]
-            d_provider = prj_page["d_provider"]
-            d_model = prj_page["d_model"]
-            d_title = prj_page["d_title"]
-            d_author = prj_page["d_author"]
-            d_analyze = prj_page["d_analyze"]
-            d_status = prj_page["d_status"]
-            d_preview = prj_page["d_preview"]
-            d_output = prj_page["d_output"]
             d_edit_chapter = prj_page["d_edit_chapter"]
             d_editor = prj_page["d_editor"]
             d_apply = prj_page["d_apply"]
             d_undo = prj_page["d_undo"]
             d_history = prj_page["d_history"]
-            d_voice_role = prj_page["d_voice_role"]
-            d_recommend = prj_page["d_recommend"]
-            d_voice = prj_page["d_voice"]
-            d_recommendations = prj_page["d_recommendations"]
-            d_segment = prj_page["d_segment"]
-            d_audition = prj_page["d_audition"]
-            d_audition_audio = prj_page["d_audition_audio"]
-            d_audition_status = prj_page["d_audition_status"]
-            d_feedback = prj_page["d_feedback"]
-            d_feedback_apply = prj_page["d_feedback_apply"]
-            p_name = prj_page["p_name"]
-            p_script = prj_page["p_script"]
-            p_create = prj_page["p_create"]
-            p_create_msg = prj_page["p_create_msg"]
             p_sel = prj_page["p_sel"]
             p_refresh = prj_page["p_refresh"]
             p_open = prj_page["p_open"]
@@ -1298,10 +1298,6 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             p_open_msg = prj_page["p_open_msg"]
             p_summary = prj_page["p_summary"]
             p_chapter_tree = prj_page["p_chapter_tree"]
-            data_dir_box = prj_page["data_dir_box"]
-            data_apply = prj_page["data_apply"]
-            data_open = prj_page["data_open"]
-            data_dir_msg = prj_page["data_dir_msg"]
 
             # ───────── 音色资产 ─────────
             vce_page = create_voice_page()
@@ -1328,6 +1324,14 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             v_lib_search = vce_page["v_lib_search"]
             v_lib_category = vce_page["v_lib_category"]
             v_lib_browser = vce_page["v_lib_browser"]
+            v_recommend = vce_page["v_recommend"]
+            v_recommendations = vce_page["v_recommendations"]
+            v_recommend_status = vce_page["v_recommend_status"]
+            v_audition = vce_page["v_audition"]
+            v_audition_audio = vce_page["v_audition_audio"]
+            v_audition_status = vce_page["v_audition_status"]
+            v_feedback = vce_page["v_feedback"]
+            v_feedback_apply = vce_page["v_feedback_apply"]
 
             # ───────── 生产阶段内部导航 ─────────
             production_nav = create_production_navigation()
@@ -1412,10 +1416,28 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             sup_export = supplement_page["sup_export"]
             sup_out = supplement_page["sup_out"]
             sup_path = supplement_page["sup_path"]
+        set_page = create_settings_page()
+        grp_settings = set_page["group"]
+        s_provider = set_page["s_provider"]
+        s_model = set_page["s_model"]
+        s_provider_config = set_page["s_provider_config"]
+        s_api_key = set_page["s_api_key"]
+        s_base_url = set_page["s_base_url"]
+        s_timeout = set_page["s_timeout"]
+        s_save = set_page["s_save"]
+        s_test = set_page["s_test"]
+        s_status = set_page["s_status"]
+        s_data_dir = set_page["s_data_dir"]
+        s_data_apply = set_page["s_data_apply"]
+        s_data_open = set_page["s_data_open"]
+        s_data_msg = set_page["s_data_msg"]
+
+        # ───────── 设置 ─────────
 
     # 填充 _GROUPS（运行时装载，供 navigation._goto 使用）
     _GROUPS[:] = [
         grp_overview,
+        grp_create_project,
         grp_project,
         grp_voices,
         grp_production_nav,
@@ -1423,6 +1445,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         grp_review,
         grp_export,
         grp_supplement,
+        grp_settings,
     ]
 
     # ═══════════ 侧边栏导航切换 ═══════════
@@ -1436,9 +1459,14 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     nav_project.click(
         lambda: _goto("project"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-project')?.classList.add('active'); }")
+    nav_create_project.click(
+        lambda: _goto("create_project"), None, _GROUPS,
+        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-create-project')?.classList.add('active'); }").then(
+        create_ui.refresh_config_summary, [], [cp_config_summary])
+    nav_settings.click(
+        lambda: _goto("settings"), None, _GROUPS,
+        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-settings')?.classList.add('active'); }")
     nav_voices.click(
-        lambda: _goto("voices"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-voices')?.classList.add('active'); }").then(
         refresh_role_list,
         [v_role_search, v_role, ss], [v_table]).then(
         refresh_voice_filters,
@@ -1502,91 +1530,76 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         refresh_export_default_dir, [ss], [e_save_dir_hint])
 
     # ═══════════ events（业务接线，沿用 v2） ═══════════
-    director_event = d_analyze.click(
-        director_ui.analyze_director_file,
-        [d_txt, d_provider, d_model, d_title, d_author],
-        [
-            d_status,
-            d_preview,
-            d_output,
-            p_script,
-            p_name,
-            d_editor,
-            d_history,
-            d_edit_chapter,
-        ],
+
+    # ═══════════ 新建项目页面 ═══════════
+    cp_create.click(
+        create_ui.create_from_source,
+        [cp_name, cp_source, cp_title, cp_author],
+        [cp_status, cp_result, p_sel, cp_json_result],
     )
-    director_event.then(
-        director_ui.refresh_director_voice_controls,
-        [d_output],
-        [d_voice_role, d_segment, d_voice],
+    cp_json_create.click(
+        create_ui.create_from_json,
+        [cp_json_name, cp_json_file],
+        [cp_json_result, p_sel, cp_result],
     )
-    director_edit_event = d_apply.click(
-        director_ui.apply_director_edits,
-        [d_output, d_editor, d_edit_chapter],
-        [d_status, d_preview, d_output, p_script, d_editor, d_history],
-    )
-    director_edit_event.then(
-        director_ui.refresh_director_voice_controls,
-        [d_output],
-        [d_voice_role, d_segment, d_voice],
-    )
-    director_undo_event = d_undo.click(
-        director_ui.undo_director_edits,
-        [d_output, d_history, d_edit_chapter],
-        [d_status, d_preview, d_output, p_script, d_editor, d_history],
-    )
-    director_undo_event.then(
-        director_ui.refresh_director_voice_controls,
-        [d_output],
-        [d_voice_role, d_segment, d_voice],
-    )
+
+    # ═══════════ 项目管理（人工校正） ═══════════
     d_edit_chapter.change(
-        director_ui.refresh_director_editor,
-        [d_output, d_edit_chapter],
+        director_ui.refresh_director_editor_for_project,
+        [p_sel, d_edit_chapter],
         [d_editor],
     )
-    d_voice_role.change(
-        director_ui.refresh_director_segments,
-        [d_output, d_voice_role],
-        [d_segment],
+    d_apply.click(
+        director_ui.apply_director_edits_for_project,
+        [p_sel, d_editor, d_edit_chapter],
+        [p_summary, d_editor, d_history],
     )
-    d_recommend.click(
-        director_ui.recommend_director_voice,
-        [d_output, d_voice_role],
-        [d_recommendations, d_voice, d_audition_status],
+    d_undo.click(
+        director_ui.undo_director_edits_for_project,
+        [p_sel, d_history, d_edit_chapter],
+        [p_summary, d_editor, d_history],
     )
-    d_audition.click(
-        director_ui.audition_director_segment,
-        [d_output, d_segment, d_voice],
-        [d_audition_audio, d_audition_status],
+
+    # ═══════════ 设置页面 ═══════════
+    s_provider.change(
+        director_ui.update_provider_config_fields,
+        [s_provider],
+        [s_provider_config, s_api_key, s_base_url],
     )
-    director_feedback_event = d_feedback_apply.click(
-        director_ui.apply_director_audition_feedback,
-        [d_output, d_segment, d_feedback, d_edit_chapter],
-        [
-            d_status,
-            d_preview,
-            d_output,
-            p_script,
-            d_editor,
-            d_history,
-            d_audition_audio,
-            d_audition_status,
-        ],
+    s_save.click(
+        director_ui.save_ai_settings,
+        [s_provider, s_model, s_api_key, s_base_url, s_timeout],
+        [s_status],
     )
-    director_feedback_event.then(
-        director_ui.refresh_director_voice_controls,
-        [d_output],
-        [d_voice_role, d_segment, d_voice],
+    s_test.click(
+        director_ui.test_ai_connection,
+        [s_provider],
+        [s_status],
     )
+    s_data_apply.click(director_ui.apply_data_dir, [s_data_dir], [s_data_msg, s_data_dir])
+    s_data_open.click(director_ui.open_data_dir, [], [s_data_msg])
+
+    # ═══════════ 角色与声音页面 ═══════════
+    v_recommend.click(
+        voice_ui.recommend_voice,
+        [p_sel, v_role],
+        [v_recommendations, v_recommend_status],
+    )
+    v_audition.click(
+        voice_ui.audition_director_segment,
+        [p_sel, v_role, v_lib],
+        [v_audition_audio, v_audition_status],
+    )
+    v_feedback_apply.click(
+        voice_ui.apply_feedback,
+        [p_sel, v_feedback, v_role],
+        [v_audition_audio, v_audition_status],
+    )
+
     p_refresh.click(refresh_projects_full, [], [p_sel])
-    p_create.click(create_project, [p_name, p_script, ss], [p_name, p_script, p_create_msg, p_sel])
     chain = p_open.click(open_project, [p_sel, ss], [p_summary, v_table, v_role, v_role_title, v_lib, s_log, v_status])
     _open_chain_rest(chain)
     p_del.click(delete_project, p_sel, p_sel)
-    data_apply.click(apply_data_dir, [data_dir_box], [data_dir_msg, data_dir_box])
-    data_open.click(open_data_dir, [], [data_dir_msg])
     v_table.change(
         select_role_from_list,
         [v_table, ss],

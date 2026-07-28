@@ -1,5 +1,6 @@
 """导航系统（从 app.py 抽离）。"""
 from __future__ import annotations
+
 import gradio as gr
 
 from ui.components.brand_logo import create_brand_logo
@@ -8,16 +9,19 @@ from ui.components.brand_logo import create_brand_logo
 # 元数据： (页面 ID, 按钮标签, elem_id)
 NAV_ITEMS = [
     ("overview", "🏠 工作台", "nav-overview"),
-    ("project", "① 项目", "nav-project"),
-    ("voices", "② 角色与声音", "nav-voices"),
-    ("synth", "③ 生产与质检", "nav-synth"),
-    ("export", "④ 交付", "nav-export"),
+    ("create_project", "① 新建项目", "nav-create-project"),
+    ("project", "② 项目管理", "nav-project"),
+    ("voices", "③ 角色与声音", "nav-voices"),
+    ("synth", "④ 生产与质检", "nav-synth"),
+    ("export", "⑤ 交付", "nav-export"),
 ]
 
-# 内部 Group 与顶级导航的映射。质检和补录在“生产与质检”阶段连续呈现，
-# 既保留已有页面组件和事件接线，也不再让用户从顶级导航判断该选哪个功能。
+_SETTINGS_ITEM = ("settings", "⚙ 设置", "nav-settings")
+
+# 内部 Group 与顶级导航的映射。
 GROUP_ITEMS = [
     "overview",
+    "create_project",
     "project",
     "voices",
     "production-nav",
@@ -25,21 +29,15 @@ GROUP_ITEMS = [
     "review",
     "export",
     "supplement",
+    "settings",
 ]
 
-# 页面 Group 列表（运行时由 app.py 填充，顺序与 GROUP_ITEMS 一致）
+# 页面 Group 列表（运行时由 app.py 填充）
 _GROUPS: list[gr.Group] = []
 
 
 def _goto(which: str) -> tuple:
-    """导航切换：返回 8 个 gr.update(visible=...) 元组。
-
-    Args:
-        which: 顶级目标页面 ID（与 NAV_ITEMS 中的 page_id 对应）。
-
-    Returns:
-        8 元素组，每个为 ``gr.update(visible=...)``，顺序与 GROUP_ITEMS / _GROUPS 一致。
-    """
+    """导航切换：返回 ``len(GROUP_ITEMS)`` 个 gr.update(visible=...)。"""
     production = which in {"synth", "review", "supplement"}
     return tuple(
         gr.update(
@@ -53,16 +51,7 @@ def _goto(which: str) -> tuple:
 
 
 def create_nav_buttons() -> dict[str, gr.Button]:
-    """创建侧边栏导航按钮（在 ``with gr.Blocks()`` 上下文内调用）。
-
-    包含侧边栏 Column（黑色背景）和所有工作流导航按钮，
-    每个按钮的 elem_id 与 NAV_ITEMS 定义一致。
-
-    Returns:
-        ``{"nav_overview": gr.Button, "nav_project": gr.Button,
-           "nav_voices": gr.Button, "nav_synth": gr.Button,
-           "nav_export": gr.Button}``
-    """
+    """创建侧边栏导航按钮。"""
     buttons: dict[str, gr.Button] = {}
     with gr.Column(scale=0, min_width=248, elem_classes=["sidebar"]):
         create_brand_logo()
@@ -70,4 +59,12 @@ def create_nav_buttons() -> dict[str, gr.Button]:
         for page_id, label, elem_id in NAV_ITEMS:
             btn = gr.Button(label, elem_classes=["nav-btn"], elem_id=elem_id)
             buttons[f"nav_{page_id}"] = btn
+
+        # 底部设置
+        gr.Markdown("<div style='flex:1'></div>")
+        settings_btn = gr.Button(
+            _SETTINGS_ITEM[1], elem_classes=["nav-btn", "nav-settings-btn"],
+            elem_id=_SETTINGS_ITEM[2],
+        )
+        buttons["nav_settings"] = settings_btn
     return buttons

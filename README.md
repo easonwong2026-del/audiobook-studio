@@ -1,4 +1,4 @@
-# 有声书合成工作台 (Audiobook Studio) · v3.3.0
+# 有声书合成工作台 (Audiobook Studio) · v3.3.1
 
 [![Tests](https://github.com/easonwong2026-del/audiobook-studio/actions/workflows/tests.yml/badge.svg)](https://github.com/easonwong2026-del/audiobook-studio/actions/workflows/tests.yml)
 
@@ -12,7 +12,7 @@
 
 | 项 | 说明 |
 |----|------|
-| 当前版本 | **v3.3.0**（AI 剧本导演与智能预处理） |
+| 当前版本 | **v3.3.1**（AI 剧本导演工作流重构） |
 | 产品定位 | 面向**本地 IndexTTS2 环境**的有声书**生产工作台** |
 | 是否独立安装软件 | **否** —— 不提供 Windows 安装包，也不内置模型 / Torch / CUDA / FFmpeg / IndexTTS2 本体 |
 | 部署方式 | **轻量工作台源码 + 外部推理环境**（IndexTTS2 仓库及其虚拟环境由用户单独准备） |

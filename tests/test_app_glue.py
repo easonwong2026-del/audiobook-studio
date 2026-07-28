@@ -67,8 +67,24 @@ def test_create_project_returns_4tuple():
 
 
 def test_create_project_click_wiring():
-    node = find_click("p_create")
-    assert node is not None, "未找到 p_create.click"
+    """B5/B13: 新建项目页面通过 cp_create 触发创建，cp_json_create 触发 JSON 创建。"""
+    node = find_click("cp_create")
+    assert node is not None, "未找到 cp_create.click（新建项目入口）"
+    assert len(node.args) >= 2, "cp_create.click 参数不足"
+    inputs = node.args[1]
+    assert isinstance(inputs, ast.List)
+    ids = _arg_ids(inputs)
+    print(f"[B13] cp_create.click inputs = {ids}")
+    assert len(ids) >= 2, f"inputs 应包含项目名和源文件，实际 {len(ids)}"
+
+    node2 = find_click("cp_json_create")
+    assert node2 is not None, "未找到 cp_json_create.click（JSON 高级导入）"
+    assert len(node2.args) >= 2, "cp_json_create.click 参数不足"
+    outputs = node.args[2]
+    assert isinstance(outputs, ast.List)
+    ids = _arg_ids(outputs)
+    print(f"[B13] cp_create.click outputs = {ids}")
+    assert len(ids) >= 2, f"outputs 应包含状态和结果，实际 {len(ids)}"
     assert len(node.args) >= 3, "p_create.click 参数不足"
     outputs = node.args[2]
     assert isinstance(outputs, ast.List)
