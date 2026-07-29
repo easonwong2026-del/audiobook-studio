@@ -35,6 +35,7 @@ from services.session import SessionState
 from services.synthesis import SynthesisState
 from ui import create_project_handlers as create_ui
 from ui import director_handlers as director_ui
+from ui import v4_workspace_handlers as v4_ui
 from ui.wiring.settings_wiring import wire_settings_page
 from ui.wiring.voice_wiring import wire_voice_page
 from ui.components import (
@@ -57,6 +58,7 @@ from ui.pages import (
     create_supplement_page,
     create_synthesis_page,
     create_voice_page,
+    create_v4_workspace_page,
 )
 from ui.shared import create_status_bar
 from ui.theme import LIGHT_CSS, THEME
@@ -1249,6 +1251,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         nav_synth = nav["nav_synth"]
         nav_export = nav["nav_export"]
         nav_create_project = nav["nav_create_project"]
+        nav_v4 = nav["nav_v4"]
         nav_settings = nav["nav_settings"]
 
         # ═══ 右侧主工作区 ═══
@@ -1287,6 +1290,34 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             cp_json_cleanup = cr_page["cp_json_cleanup"]
             cp_json_create = cr_page["cp_json_create"]
             cp_json_result = cr_page["cp_json_result"]
+
+            # ───────── v4 Source-first 工作流 ─────────
+            v4_page = create_v4_workspace_page()
+            grp_v4 = v4_page["group"]
+            v4_project = v4_page["project"]
+            v4_refresh_projects = v4_page["refresh_projects"]
+            v4_open = v4_page["open_project"]
+            v4_summary = v4_page["summary"]
+            v4_review = v4_page["review"]
+            v4_segment_ids = v4_page["segment_ids"]
+            v4_voice_speaker = v4_page["voice_speaker"]
+            v4_voice_file = v4_page["voice_file"]
+            v4_bind_voice = v4_page["bind_voice"]
+            v4_voice_status = v4_page["voice_status"]
+            v4_profile = v4_page["profile"]
+            v4_plan = v4_page["plan"]
+            v4_plan_status = v4_page["plan_status"]
+            v4_queue = v4_page["queue"]
+            v4_chapter = v4_page["chapter"]
+            v4_chapter_audio = v4_page["chapter_audio"]
+            v4_export_format = v4_page["export_format"]
+            v4_bitrate = v4_page["bitrate"]
+            v4_export = v4_page["export"]
+            v4_export_file = v4_page["export_file"]
+            v4_export_status = v4_page["export_status"]
+            v4_v3_project = v4_page["v3_project"]
+            v4_migrate = v4_page["migrate"]
+            v4_migration_status = v4_page["migration_status"]
 
             # ───────── 项目 ─────────
             prj_page = create_project_page()
@@ -1431,6 +1462,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     _GROUPS[:] = [
         grp_overview,
         grp_create_project,
+        grp_v4,
         grp_project,
         grp_voices,
         grp_production_nav,
@@ -1455,7 +1487,21 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     nav_create_project.click(
         lambda: _goto("create_project"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-create-project')?.classList.add('active'); }").then(
-        create_ui.refresh_config_summary, [], [cp_config_summary])
+        lambda: (
+            "##### v4 创建边界\n本地导入、规则切分并立即创建；"
+            "远程 AI 仅在后续角色识别阶段使用。"
+        ), [], [cp_config_summary])
+    nav_v4.click(
+        lambda: _goto("v4"), None, _GROUPS,
+        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-v4')?.classList.add('active'); }"
+    ).then(
+        lambda: (
+            gr.update(choices=v4_ui.scan_v4_projects()),
+            gr.update(choices=ProjectService.scan_projects()),
+        ),
+        None,
+        [v4_project, v4_v3_project],
+    )
     nav_settings.click(
         lambda: _goto("settings"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-settings')?.classList.add('active'); }").then(
@@ -1548,11 +1594,138 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         [cp_slot_status, cp_cleanup],
     )
     cp_create.click(
-        create_ui.create_from_source,
+        v4_ui.create_v4_from_source,
         [cp_name, cp_source, cp_title, cp_author],
-        [cp_status, cp_result, p_sel, cp_json_result],
+        [cp_status, cp_result, v4_project, cp_json_result],
         concurrency_limit=1,
         concurrency_id="project-creation",
+    ).then(
+        lambda: _goto("v4"), None, _GROUPS
+    )
+    v4_refresh_projects.click(
+        lambda: gr.update(choices=v4_ui.scan_v4_projects()),
+        None,
+        [v4_project],
+    )
+    v4_open.click(
+        v4_ui.open_v4_project,
+        [v4_project],
+        [
+            v4_summary,
+            v4_review["table"],
+            v4_review["speaker"],
+            v4_voice_speaker,
+            v4_review["merge_source"],
+            v4_review["merge_target"],
+            v4_plan["table"],
+            v4_queue["table"],
+            v4_profile,
+            v4_chapter,
+        ],
+    )
+    v4_review["route"].click(
+        v4_ui.route_v4_speakers,
+        [v4_project],
+        [v4_review["status"]],
+        concurrency_limit=1,
+        concurrency_id="v4-speaker-routing",
+    ).then(
+        v4_ui.open_v4_project,
+        [v4_project],
+        [
+            v4_summary,
+            v4_review["table"],
+            v4_review["speaker"],
+            v4_voice_speaker,
+            v4_review["merge_source"],
+            v4_review["merge_target"],
+            v4_plan["table"],
+            v4_queue["table"],
+            v4_profile,
+            v4_chapter,
+        ],
+    )
+    v4_review["stop_route"].click(
+        v4_ui.stop_v4_routing,
+        [v4_project],
+        [v4_review["status"]],
+    )
+    v4_review["assign"].click(
+        v4_ui.assign_v4_speaker,
+        [
+            v4_project,
+            v4_segment_ids,
+            v4_review["speaker"],
+            v4_review["new_speaker"],
+            v4_review["lock_speaker"],
+        ],
+        [v4_review["status"]],
+    ).then(
+        v4_ui.open_v4_project,
+        [v4_project],
+        [
+            v4_summary,
+            v4_review["table"],
+            v4_review["speaker"],
+            v4_voice_speaker,
+            v4_review["merge_source"],
+            v4_review["merge_target"],
+            v4_plan["table"],
+            v4_queue["table"],
+            v4_profile,
+            v4_chapter,
+        ],
+    )
+    v4_review["merge"].click(
+        v4_ui.merge_v4_speakers,
+        [
+            v4_project,
+            v4_review["merge_source"],
+            v4_review["merge_target"],
+        ],
+        [v4_review["status"]],
+    )
+    v4_bind_voice.click(
+        v4_ui.bind_v4_voice,
+        [v4_project, v4_voice_speaker, v4_voice_file],
+        [v4_voice_status],
+    )
+    v4_plan["generate"].click(
+        v4_ui.generate_v4_plan,
+        [v4_project],
+        [v4_plan["table"], v4_plan_status, v4_queue["table"]],
+    )
+    v4_queue["start"].click(
+        v4_ui.run_v4_synthesis,
+        [v4_project],
+        [v4_queue["status"], v4_queue["table"], v4_chapter],
+        concurrency_limit=1,
+        concurrency_id="v4-synthesis",
+    )
+    v4_queue["cancel"].click(
+        v4_ui.cancel_v4_synthesis,
+        [v4_project],
+        [v4_queue["status"], v4_queue["table"]],
+    )
+    v4_queue["refresh"].click(
+        v4_ui.refresh_v4_queue,
+        [v4_project],
+        [v4_queue["table"]],
+    )
+    v4_chapter.change(
+        v4_ui.chapter_audio,
+        [v4_project, v4_chapter],
+        [v4_chapter_audio],
+    )
+    v4_export.click(
+        v4_ui.export_v4,
+        [v4_project, v4_export_format, v4_bitrate],
+        [v4_export_file, v4_export_status],
+    )
+    v4_migrate.click(
+        v4_ui.migrate_v3_project,
+        [v4_v3_project],
+        [v4_migration_status, v4_project],
     )
     cp_json_file.change(
         create_ui.derive_json_project_name,

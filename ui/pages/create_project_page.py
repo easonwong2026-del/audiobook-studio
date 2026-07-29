@@ -11,7 +11,7 @@ import gradio as gr
 
 def create_create_project_page() -> dict:
     with gr.Group(visible=False, elem_id="grp-create-project") as grp:
-        gr.Markdown("### 从原始书稿创建")
+        gr.Markdown("### 创建 v4 Source-first 项目")
 
         with gr.Row(equal_height=True, elem_classes=["stage-row"]):
             with gr.Column(scale=1, elem_classes=["stage-card"]):
@@ -38,18 +38,18 @@ def create_create_project_page() -> dict:
 
         with gr.Row():
             cp_config_summary = gr.Markdown(
-                "##### 当前 AI 配置\n"
-                "默认 Provider：**Local**（离线分析）\n\n"
-                "前往 *设置 → AI 模型* 配置远程 Provider。"
+                "##### v4 创建边界\n"
+                "本地导入并保存唯一原文，规则切分后立即创建；"
+                "未识别角色不会阻止创建，远程角色路由可稍后继续。"
             )
 
         with gr.Row():
-            cp_create = gr.Button("AI 分析并创建项目", variant="primary")
+            cp_create = gr.Button("创建 v4 项目", variant="primary")
 
         cp_status = gr.Markdown("")
         cp_result = gr.Markdown("")
 
-        with gr.Accordion("高级：从结构化剧本创建", open=False):
+        with gr.Accordion("旧版兼容：从 v3 结构化剧本创建", open=False):
             with gr.Row(equal_height=True, elem_classes=["stage-row"]):
                 with gr.Column(scale=1, elem_classes=["stage-card"]):
                     cp_json_name = gr.Textbox(label="项目名称", placeholder="例如：甲方来了")
