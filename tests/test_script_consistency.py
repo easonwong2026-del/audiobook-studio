@@ -45,6 +45,17 @@ def test_duplicate_segment_is_error():
     assert check_script_consistency(raw)["status"] == "error"
 
 
+def test_v3_intensity_pause_and_empty_id_boundaries():
+    raw = script(voices={"旁白": {}}, segments=[
+        {"id": "", "role": "旁白", "text": "空 ID", "emo_alpha": 0.5},
+        {"id": "1-002", "role": "旁白", "text": "强度", "emo_alpha": 1.01},
+        {"id": "1-003", "role": "旁白", "text": "停顿", "pause_after": 3001},
+    ])
+    result = check_script_consistency(raw)
+    assert {"empty_segment_id", "invalid_emotion", "invalid_pause"} <= types(result)
+    assert result["status"] == "error"
+
+
 def test_warning_does_not_block_project_creation(monkeypatch, tmp_path):
     from services.project_creation import ProjectCreationService
     import json

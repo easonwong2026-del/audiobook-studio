@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from lib import config, script_loader
+from lib import config, script_loader, segment_cache
 from services.ai_settings import AiSettingsService
 from services.environment_diagnostics import diagnostics_to_markdown, run_environment_diagnostics
 from services.script_consistency import check_script_consistency
@@ -27,6 +27,26 @@ def check_environment() -> tuple[int, dict]:
 def _project_dir(name: str) -> Path:
     from repositories.project_repo import ProjectRepository
     return Path(ProjectRepository.get_project_dir(name))
+
+
+def find_existing_segment_audio(
+    segments_dir: Path,
+    segment: dict,
+) -> Path | None:
+    """按正式导出链路的缓存参数查找当前 segment 音频。"""
+    delivery = segment.get("delivery") if isinstance(segment.get("delivery"), dict) else {}
+    found = segment_cache.find_segment_wav(
+        str(segments_dir),
+        str(segment.get("id", "")),
+        str(segment.get("text", "")),
+        str(segment.get("role") or segment.get("speaker") or ""),
+        str(segment.get("emotion") or "neutral"),
+        segment.get("emo_alpha", segment.get("emotion_strength", delivery.get("intensity", 1.0))),
+        segment.get("speech_rate", delivery.get("speed", 1.0)),
+        segment.get("pinyin_hints"),
+        segment_cache.director_metadata_for(segment),
+    )
+    return Path(found) if found else None
 
 
 def check_project(name: str) -> tuple[int, dict]:
@@ -56,16 +76,19 @@ def check_project(name: str) -> tuple[int, dict]:
             bindings = bindings_raw.get("bindings", bindings_raw)
             bound = sorted(role for role in roles if bindings.get(role))
             missing_voices = sorted(roles - set(bound))
-            audio_ids = {
-                path.stem for path in (project / "segments").glob("*.wav")
-            } if (project / "segments").is_dir() else set()
+            segments_dir = project / "segments"
+            found_audio = {
+                str(seg.get("id", ""))
+                for seg in segments
+                if find_existing_segment_audio(segments_dir, seg)
+            }
             segment_ids = {str(seg.get("id", "")) for seg in segments}
-            missing_audio = sorted(segment_ids - audio_ids)
+            missing_audio = sorted(segment_ids - found_audio)
             report.update({
                 "segment_count": len(segments),
                 "bound_role_count": len(bound),
                 "missing_voice_roles": missing_voices,
-                "synthesized_segment_count": len(segment_ids & audio_ids),
+                "synthesized_segment_count": len(found_audio),
                 "missing_audio_segments": missing_audio,
                 "export_ready": not report["errors"] and not missing_voices and not missing_audio,
             })
@@ -89,6 +112,7 @@ def check_provider(provider: str, allow_real_request: bool, timeout: float) -> t
     report = {
         "provider": provider,
         "model": cfg.get("model") or "Provider 默认模型",
+        "base_url": cfg.get("base_url") or "Provider 默认地址",
         "key_configured": configured,
         "key_source": AiSettingsService.get_api_key_source(provider),
         "real_request_sent": False,
@@ -99,10 +123,22 @@ def check_provider(provider: str, allow_real_request: bool, timeout: float) -> t
         report.update(status="ok", message="配置存在；未传 --allow-real-request，因此未发送网络请求")
     else:
         print(
-            f"即将调用 {provider} / {report['model']}，固定短测试请求可能产生少量 API 费用。",
+            f"即将对 {provider} / {report['model']} 执行连接与认证检查；"
+            "不验证具体模型推理能力。",
             file=sys.stderr,
         )
-        result = AiSettingsService.check_connection(provider, timeout=timeout)
+        api_key = cfg.get("api_key", "")
+        try:
+            result = AiSettingsService.check_connection(
+                provider,
+                api_key=api_key,
+                base_url=cfg.get("base_url", ""),
+                timeout=timeout,
+            )
+        except Exception as exc:
+            result = f"❌ 连接失败：{type(exc).__name__}: {exc}"
+        if api_key:
+            result = result.replace(api_key, "***")
         report.update(
             status="ok" if result.startswith("✅") else "error",
             message=result,

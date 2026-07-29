@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from lib import config
+from lib.environment import resolve_python_interpreter
 from services.ai_settings import AiSettingsService
 
 
@@ -98,12 +99,15 @@ def run_environment_diagnostics() -> dict[str, Any]:
     add("IndexTTS2 项目目录", lambda: _path_state(index_dir))
 
     def python_check():
-        executable = config.get_python_path()
-        found = executable if Path(executable).is_file() else shutil.which(executable)
+        resolution = resolve_python_interpreter()
         return {
-            "status": "ok" if found else "error",
-            "message": "解释器存在" if found else "解释器不存在",
-            "details": {"configured": executable},
+            "status": "ok" if resolution.executable else "error",
+            "message": "解释器存在" if resolution.executable else "解释器不存在",
+            "details": {
+                "executable": resolution.executable,
+                "source": resolution.source,
+                "warnings": resolution.warnings,
+            },
             "suggestion": "设置 AUDIOBOOK_STUDIO_PYTHON 指向 IndexTTS2 虚拟环境的 Python。",
         }
     add("IndexTTS2 Python", python_check)

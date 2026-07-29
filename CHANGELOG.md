@@ -27,8 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Quality
 
 - 覆盖环境诊断、验收脚本、剧本一致性、AI 设置、原子创建和文档一致性的自动测试。
-- macOS / Python 3.12 / Gradio 5.50 验证结果：528 passed、25 skipped，`lib` /
-  `services` / `repositories` 合计覆盖率 83%；CI 不运行真实 GPU 推理。
+- macOS / Python 3.12 / Gradio 5.50 验证结果：545 passed、25 skipped，`lib` /
+  `services` / `repositories` 合计覆盖率 84%；CI 不运行真实 GPU 推理。
 - Gradio 继续固定在 `>=5.50,<6`。
 
 ## [3.2.1] - 2026-07-27

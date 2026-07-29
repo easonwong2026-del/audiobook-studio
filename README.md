@@ -262,8 +262,8 @@ python scripts/acceptance_check.py --provider openai
 python scripts/acceptance_check.py --export-check "项目名"
 ```
 
-Provider 验收默认只检查配置。只有显式追加 `--allow-real-request` 才会发送最小
-连接请求，并在调用前提示 Provider、模型及可能产生的费用。
+Provider 验收默认只检查配置。只有显式追加 `--allow-real-request` 才会向当前
+Base URL 发送连接与认证检查；该检查不调用具体模型，也不验证模型推理能力。
 
 ---
 

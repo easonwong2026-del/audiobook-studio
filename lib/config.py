@@ -172,12 +172,9 @@ def get_model_dir() -> str:
 
 
 def get_python_path() -> str:
-    """返回用于启动子进程的 Python 解释器路径（环境变量 > 默认 ``python``）。
-
-    层级启动器（launcher.py / start.bat）借 ``AUDIOBOOK_STUDIO_PYTHON`` 指向项目自带
-    venv，未设置时回退到 PATH 中的 ``python``，保证仓库移动到任意目录仍可启动。
-    """
-    return os.environ.get(ENV_PYTHON) or "python"
+    """返回共享解析器选择的 Python；保留 ``python`` 作为缺失时兼容回退。"""
+    from .environment import resolve_python_interpreter
+    return resolve_python_interpreter().executable or "python"
 
 
 def get_ffmpeg_path() -> str:

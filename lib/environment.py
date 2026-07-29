@@ -10,10 +10,45 @@ import logging
 import os
 import shutil
 from dataclasses import dataclass
+from pathlib import Path
 
 from . import config as _cfg
 
 logger = logging.getLogger(__name__)
+PROGRAM_DIR = Path(__file__).resolve().parents[1]
+
+
+@dataclass(frozen=True)
+class PythonResolution:
+    """无副作用的 Python 解释器解析结果。"""
+
+    executable: str | None
+    source: str
+    warnings: list[str]
+
+
+def resolve_python_interpreter() -> PythonResolution:
+    """按 launcher 顺序解析解释器，不打印、不退出、不启动进程。"""
+    warnings: list[str] = []
+    configured = os.environ.get("AUDIOBOOK_STUDIO_PYTHON")
+    if configured:
+        if os.path.isfile(configured):
+            return PythonResolution(configured, "environment", warnings)
+        warnings.append(f"AUDIOBOOK_STUDIO_PYTHON 指向的文件不存在：{configured}")
+
+    venv = PROGRAM_DIR.parent / "index-tts" / ".venv"
+    for candidate in (
+        venv / "Scripts" / "python.exe",
+        venv / "bin" / "python",
+    ):
+        if candidate.is_file():
+            return PythonResolution(str(candidate), "sibling_venv", warnings)
+
+    for command in ("python", "python3"):
+        found = shutil.which(command)
+        if found:
+            return PythonResolution(found, "path", warnings)
+    return PythonResolution(None, "missing", warnings)
 
 
 @dataclass

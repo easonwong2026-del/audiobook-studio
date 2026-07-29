@@ -35,6 +35,8 @@ def check_script_consistency(script: dict[str, Any]) -> dict[str, Any]:
             text = str(seg.get("text", "")).strip()
             role = str(seg.get("role") or seg.get("speaker") or "").strip()
             chapter_roles[cid].add(role)
+            if not sid.strip():
+                issues.append(_issue("empty_segment_id", "error", "段落 ID 为空"))
             if not text:
                 issues.append(_issue("empty_text", "error", f"段落 {sid or '（无 ID）'} 文本为空"))
             elif len(text) > 500:
@@ -54,15 +56,15 @@ def check_script_consistency(script: dict[str, Any]) -> dict[str, Any]:
                 issues.append(_issue("invalid_speech_rate", "warning", f"段落 {sid} 语速无效"))
             try:
                 emotion = float(seg.get("emo_alpha", seg.get("emotion_strength", seg.get("delivery", {}).get("intensity", 1.0))))
-                if not 0 <= emotion <= 1.5:
-                    issues.append(_issue("invalid_emotion", "warning", f"段落 {sid} 情绪强度超出 0–1.5"))
+                if not 0 <= emotion <= 1.0:
+                    issues.append(_issue("invalid_emotion", "warning", f"段落 {sid} 情绪强度超出 0–1"))
             except (TypeError, ValueError, AttributeError):
                 issues.append(_issue("invalid_emotion", "warning", f"段落 {sid} 情绪强度无效"))
             for field in ("pause_before", "pause_after"):
                 try:
                     pause = int(seg.get(field, 0))
-                    if not 0 <= pause <= 10000:
-                        issues.append(_issue("invalid_pause", "warning", f"段落 {sid} 的 {field} 超出 0–10000ms"))
+                    if not 0 <= pause <= 3000:
+                        issues.append(_issue("invalid_pause", "warning", f"段落 {sid} 的 {field} 超出 0–3000ms"))
                 except (TypeError, ValueError):
                     issues.append(_issue("invalid_pause", "warning", f"段落 {sid} 的 {field} 无效"))
 

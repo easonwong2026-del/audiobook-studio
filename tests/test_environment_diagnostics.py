@@ -1,6 +1,8 @@
 import json
 
 from services import environment_diagnostics as diagnostics
+from lib import environment
+import launcher
 
 
 def _item(report, name):
@@ -61,3 +63,76 @@ def test_single_check_exception_isolated(monkeypatch):
     report = diagnostics.run_environment_diagnostics()
     assert _item(report, "操作系统")["status"] == "error"
     assert _item(report, "Python")["message"]
+
+
+def _disable_path(monkeypatch):
+    monkeypatch.setattr(environment.shutil, "which", lambda _: None)
+
+
+def test_python_resolution_environment(monkeypatch, tmp_path):
+    executable = tmp_path / "custom-python"
+    executable.write_text("", encoding="utf-8")
+    monkeypatch.setenv("AUDIOBOOK_STUDIO_PYTHON", str(executable))
+    result = environment.resolve_python_interpreter()
+    assert result.executable == str(executable)
+    assert result.source == "environment"
+
+
+def test_invalid_environment_falls_back_to_unix_sibling(monkeypatch, tmp_path):
+    monkeypatch.setenv("AUDIOBOOK_STUDIO_PYTHON", str(tmp_path / "missing"))
+    monkeypatch.setattr(environment, "PROGRAM_DIR", tmp_path / "studio")
+    executable = tmp_path / "index-tts" / ".venv" / "bin" / "python"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("", encoding="utf-8")
+    _disable_path(monkeypatch)
+    result = environment.resolve_python_interpreter()
+    assert result.executable == str(executable)
+    assert result.source == "sibling_venv"
+    assert result.warnings
+
+
+def test_windows_sibling_venv(monkeypatch, tmp_path):
+    monkeypatch.delenv("AUDIOBOOK_STUDIO_PYTHON", raising=False)
+    monkeypatch.setattr(environment, "PROGRAM_DIR", tmp_path / "studio")
+    executable = tmp_path / "index-tts" / ".venv" / "Scripts" / "python.exe"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("", encoding="utf-8")
+    _disable_path(monkeypatch)
+    result = environment.resolve_python_interpreter()
+    assert result.executable == str(executable)
+    assert result.source == "sibling_venv"
+
+
+def test_python_and_python3_path_fallback(monkeypatch, tmp_path):
+    monkeypatch.delenv("AUDIOBOOK_STUDIO_PYTHON", raising=False)
+    monkeypatch.setattr(environment, "PROGRAM_DIR", tmp_path / "studio")
+    for available in ("python", "python3"):
+        monkeypatch.setattr(
+            environment.shutil,
+            "which",
+            lambda command, selected=available: f"/bin/{command}" if command == selected else None,
+        )
+        result = environment.resolve_python_interpreter()
+        assert result.executable == f"/bin/{available}"
+        assert result.source == "path"
+
+
+def test_python_resolution_missing(monkeypatch, tmp_path):
+    monkeypatch.delenv("AUDIOBOOK_STUDIO_PYTHON", raising=False)
+    monkeypatch.setattr(environment, "PROGRAM_DIR", tmp_path / "studio")
+    _disable_path(monkeypatch)
+    result = environment.resolve_python_interpreter()
+    assert result.executable is None
+    assert result.source == "missing"
+
+
+def test_launcher_and_diagnostics_share_resolver(monkeypatch, tmp_path):
+    executable = tmp_path / "python"
+    executable.write_text("", encoding="utf-8")
+    resolution = environment.PythonResolution(str(executable), "environment", [])
+    monkeypatch.setattr(launcher, "resolve_python_interpreter", lambda: resolution)
+    monkeypatch.setattr(diagnostics, "resolve_python_interpreter", lambda: resolution)
+    assert launcher._resolve_python() == str(executable)
+    item = _item(diagnostics.run_environment_diagnostics(), "IndexTTS2 Python")
+    assert item["details"]["executable"] == str(executable)
+    assert item["details"]["source"] == "environment"
