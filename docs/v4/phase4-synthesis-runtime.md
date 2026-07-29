@@ -8,9 +8,13 @@
 
 ## 事务队列
 
-runtime schema v4 在 synthesis task 中保存 voice、actual text、输入指纹、测量长度和失败长度。claim 使用 `BEGIN IMMEDIATE` 原子地把一条 pending 改为 running。完成、失败、OOM 拆分、缓存写入和章节成品记录均使用事务。
+runtime schema v5 在 synthesis task 中保存 voice、actual text、输入指纹、测量长度和失败长度，并在独立 `synthesis_metrics` 表保存不含原文的每次执行指标。claim 使用 `BEGIN IMMEDIATE` 原子地把一条 pending 改为 running。完成、失败、OOM 拆分、缓存写入、指标和章节成品记录均使用事务。
 
 异常退出遗留 running 会恢复为 pending；completed 不重跑；cancel 在 claim 前停止；每个任务独立失败。
+
+每次任务记录 task ID、字符/Token 数、voice、自动情绪、耗时、音频时长、缓存命中、错误类型，以及 torch/CUDA 可用时的任务前后 allocated/reserved、峰值和空闲显存。指标不保存完整文本、API Key 或音色内容。
+
+Worker 只在任务结束边界重启。触发条件包括：任务数达到阈值且显存高于初始化基线、显存增长超过 profile 阈值、空闲显存低于安全值、不可恢复 CUDA 错误或连续两次可恢复 CUDA 错误。模型关闭后执行 GC/CUDA cache 清理；SQLite 状态和磁盘缓存不受影响。
 
 ## OOM 与可恢复错误
 
@@ -33,4 +37,4 @@ assembler 按 plan task 顺序递归解析 completed OOM leaf outputs，统一�
 
 ## 测试与实机边界
 
-自动测试覆盖常驻引擎、签名过滤、cache 命中/损坏、断点恢复、取消、OOM 递归上限、父子任务、不同 WAV 格式装配和章节指纹。真实 RTX 5070 Ti Laptop 12GB 性能、VRAM 与音质只在目标 Windows 环境通过 benchmark harness 验收。
+自动测试覆盖常驻引擎、签名过滤、cache 命中/损坏、断点恢复、取消、OOM 递归上限、父子任务、无原文运行指标、显存阈值 Worker 重启、不同 WAV 格式装配和章节指纹。真实 RTX 5070 Ti Laptop 12GB 性能、VRAM 与音质只在目标 Windows 环境通过 benchmark harness 验收。
