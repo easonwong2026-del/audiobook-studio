@@ -12,10 +12,11 @@
 | segment/task 解耦 | `SynthesisPlanner`/PlanTask | one→many、many→one tests |
 | 可配置长度与安全拆分 | TTS profile + TextMeasurer | punctuation/Chinese/metric tests |
 | 局部失效 | stable task ID/input fingerprint/runtime sync | voice/text/performance/profile reuse tests |
-| SQLite 事务恢复 | runtime migrations/claim/recover | v1→v4 migration、running recovery tests |
+| SQLite 事务恢复 | runtime migrations/claim/recover | v1→v5 migration、running recovery tests |
 | cache 校验 | AudioCacheRepository | hit/corruption/SHA tests |
 | OOM 仅拆当前 task | SynthesisExecutor parent/child | bounded depth/leaf resolve tests |
 | 常驻 IndexTTS2 | signature-aware adapter/RLock | one-engine fake signature tests |
+| 无敏感文本运行监控 | `synthesis_metrics` + RuntimeMonitor | metric/cache/VRAM restart tests |
 | 章节装配 | ChapterAssembler | sample rate/channel/pause/fingerprint tests |
 | v3 copy migration | V3ToV4MigrationService | backup/fidelity/idempotency/failure tests |
 | v4 默认 UI 与 v3 回滚 | app v4 shell + legacy pages | glue/page/compatibility tests |
