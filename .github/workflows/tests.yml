@@ -48,6 +48,8 @@ jobs:
         run: git diff --check
 
       - name: Lint (ruff)
+        # 只校验 v4/Phase 6 模块；app.py 等旧 v3 代码已由 deprecation-inventory.md 记录，
+        # 不在此处重开旧发现。
         run: |
           ruff check \
             --output-format=github \
@@ -62,7 +64,6 @@ jobs:
             ui/pages/v4_speaker_review_page.py \
             ui/pages/v4_plan_page.py \
             ui/pages/v4_queue_page.py \
-            app.py \
             tests/v4
 
       - name: Run tests
