@@ -2,15 +2,17 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "audiobook-tts-profile-v1",
   "type": "object",
-  "required": ["schema_version", "profile_id", "status", "engine", "hardware", "options", "limits", "emotion", "runtime"],
+  "required": ["schema_version", "revision", "profile_id", "status", "engine", "hardware", "options", "limits", "splitting", "emotion", "runtime"],
   "properties": {
     "schema_version": {"const": "audiobook-tts-profile-v1"},
+    "revision": {"type": "integer", "minimum": 1},
     "profile_id": {"type": "string"},
     "status": {"type": "string"},
     "engine": {"const": "indextts2"},
     "hardware": {"type": "object"},
     "options": {"type": "object"},
     "limits": {"type": "object"},
+    "splitting": {"type": "object"},
     "emotion": {"type": "object"},
     "runtime": {"type": "object"}
   }

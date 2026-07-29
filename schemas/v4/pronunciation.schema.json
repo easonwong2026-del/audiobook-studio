@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "audiobook-pronunciation-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "revision", "global", "segments"],
+  "properties": {
+    "schema_version": {"const": "audiobook-pronunciation-v1"},
+    "revision": {"type": "integer", "minimum": 1},
+    "global": {"type": "object", "additionalProperties": {"type": "string"}},
+    "segments": {"type": "object"}
+  }
+}
