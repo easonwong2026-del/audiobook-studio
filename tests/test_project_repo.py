@@ -16,9 +16,13 @@ import time
 
 import pytest
 
+from domain.v4 import ProjectManifest, SourceMetadata
+from domain.v4.models import source_sha256
 from lib.types import ProjectMeta
-from repositories.project_repo import ProjectRepository
 from repositories.exceptions import ProjectNotFoundError
+from repositories.project_repo import ProjectRepository
+from repositories.project_v4_repository import ProjectV4Repository
+from services.source_segmenter import SourceSegmenter
 
 
 # 辅助：创建最小的剧本 JSON
@@ -649,6 +653,34 @@ class TestProjectSlotInspection:
             ProjectRepository._INITIALIZED,
         ) = self.original
 
+    def _create_v4_project(self, directory_name: str = "v4项目"):
+        source_text = "他说：“你好。”"
+        segmented = SourceSegmenter().segment(source_text)
+        timestamp = "2026-01-01T00:00:00+00:00"
+        manifest = ProjectManifest(
+            project_id="project_v4_slot",
+            name="V4 展示名称",
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+        metadata = SourceMetadata(
+            original_filename="book.txt",
+            source_format="txt",
+            encoding="utf-8",
+            normalization="audiobook-normalization-v1",
+            char_count=len(source_text),
+            sha256=source_sha256(source_text),
+            imported_at=timestamp,
+        )
+        return ProjectV4Repository(self.workspace).create(
+            directory_name,
+            manifest,
+            source_text,
+            metadata,
+            segmented.script,
+            segmented.speakers,
+        )
+
     def test_available_and_valid_slots(self):
         assert ProjectRepository.inspect_project_slot("可用项目").status == "available"
         ProjectRepository.create_project("完整项目", self.script_path)
@@ -703,6 +735,28 @@ class TestProjectSlotInspection:
         (self.legacy / "旧版").mkdir()
         with pytest.raises(ValueError, match="仅可归档"):
             ProjectRepository.archive_orphan_project("旧版")
+
+    def test_valid_v4_slot_is_detected_and_protected_from_cleanup(self):
+        self._create_v4_project()
+
+        inspection = ProjectRepository.inspect_project_slot("v4项目")
+        assert inspection.status == "valid"
+        assert inspection.missing_files == []
+        assert inspection.invalid_files == []
+        assert "v4项目" not in {
+            item.name for item in ProjectRepository.list_abnormal_projects()
+        }
+        with pytest.raises(ValueError, match="仅可归档"):
+            ProjectRepository.archive_orphan_project("v4项目")
+
+    def test_incomplete_v4_slot_reports_v4_path_instead_of_v3_markers(self):
+        project = self._create_v4_project("v4缺文件")
+        (project / "script/speakers.json").unlink()
+
+        inspection = ProjectRepository.inspect_project_slot("v4缺文件")
+        assert inspection.status == "incomplete"
+        assert inspection.missing_files == ["script/speakers.json"]
+        assert "structured_script.json" not in inspection.missing_files
 
     def test_trash_directory_never_appears_in_project_scan(self):
         trash = self.workspace / ".trash"
