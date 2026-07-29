@@ -13,7 +13,7 @@ on:
 
 jobs:
   test:
-    name: Python tests (Ubuntu, no GPU / model)
+    name: Full validation (Ubuntu, no GPU)
     runs-on: ubuntu-latest
 
     steps:
@@ -34,15 +34,36 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
+          pip install ruff
 
       - name: Install FFmpeg (system binary)
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
+      - name: Compile check
+        run: python -m compileall -q .
+
+      - name: Git diff check
+        run: git diff --check
+
+      - name: Lint (ruff)
+        run: |
+          ruff check \
+            domain/v4 \
+            repositories/runtime_repository.py \
+            repositories/project_repo.py \
+            services/synthesis_executor.py \
+            tts/ \
+            tools/benchmark_indextts2.py \
+            ui/v4_workspace_handlers.py \
+            ui/v4_workspace_page.py \
+            app.py \
+            tests/v4
+
       - name: Run tests
         env:
           LANG: C.UTF-8
           LC_ALL: C.UTF-8
         run: |
-          python -m pytest tests/ -q --cov=lib --cov=services --cov=repositories --cov-report=term-missing
+          python -m pytest -q
