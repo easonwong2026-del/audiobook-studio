@@ -96,9 +96,10 @@ def open_v4_project(name: str):
         return (
             "请选择 v4 项目", [], gr.update(choices=[]),
             gr.update(choices=[]), gr.update(choices=[]), gr.update(choices=[]),
-            [], [], "", gr.update(choices=[]),
+            [], [], "", "", gr.update(choices=[]),
         )
     project = _root() / name
+    RuntimeRepository(project / "runtime/runtime.db").initialize()
     source = (project / "source/source.txt").read_text(encoding="utf-8")
     script = _load_script(project, source)
     speakers = _load_speakers(project)
@@ -121,7 +122,9 @@ def open_v4_project(name: str):
         f"{len(unresolved)} 待确认"
     )
     profile_text = (
-        f"`{profile.profile_id}` · {profile.limits.metric} "
+        f"引擎 `{profile.engine}` · 模型 `{profile.model_version or '目标机实测'}` · "
+        f"硬件 `{profile.hardware_profile}` · Profile `{profile.profile_id}` · "
+        f"{profile.limits.metric} "
         f"推荐/最大 {profile.limits.preferred}/{profile.limits.maximum} · "
         f"并发 {profile.concurrency} · OOM 自动拆分 "
         f"{'开启' if profile.oom_retry else '关闭'} · 情绪 "
@@ -142,6 +145,7 @@ def open_v4_project(name: str):
         plan_rows,
         queue_rows,
         profile_text,
+        _queue_summary(project),
         gr.update(choices=chapters, value=chapters[0] if chapters else None),
     )
 
@@ -276,6 +280,7 @@ def generate_v4_plan(project_name: str):
     )
     production.save_plan(result.plan)
     runtime = RuntimeRepository(project / "runtime/runtime.db")
+    runtime.initialize()
     diff = InvalidationService.sync_runtime(runtime, previous, result.plan)
     summary = synthesis_plan_summary(result.plan)
     message = (
@@ -284,7 +289,12 @@ def generate_v4_plan(project_name: str):
         f"unresolved {len(result.unresolved_segments)}，未绑定角色 "
         f"{len(result.unbound_speakers)}"
     )
-    return synthesis_plan_rows(result.plan), message, _queue_rows(project)
+    return (
+        synthesis_plan_rows(result.plan),
+        message,
+        _queue_rows(project),
+        _queue_summary(project),
+    )
 
 
 def run_v4_synthesis(project_name: str):
@@ -293,8 +303,9 @@ def run_v4_synthesis(project_name: str):
     _voices, _performance, _pronunciation, profile = production.load_inputs()
     plan = production.load_plan()
     if plan is None:
-        return "⚠ 请先生成计划", [], gr.update()
+        return "⚠ 请先生成计划", [], "尚未生成合成任务", gr.update()
     runtime = RuntimeRepository(project / "runtime/runtime.db")
+    runtime.initialize()
     model_dir = config.get_model_dir()
     adapter = IndexTTS2Adapter(
         model_dir,
@@ -331,6 +342,7 @@ def run_v4_synthesis(project_name: str):
             f"拆分 {summary.split_parents}，失败 {summary.failed}"
         ),
         _queue_rows(project),
+        _queue_summary(project),
         gr.update(choices=chapters, value=chapters[0] if chapters else None),
     )
 
@@ -339,14 +351,19 @@ def cancel_v4_synthesis(project_name: str):
     runtime = RuntimeRepository(
         _root() / project_name / "runtime/runtime.db"
     )
+    runtime.initialize()
     count = runtime.cancel_pending_tasks()
-    return f"已取消 {count} 个尚未开始的任务", _queue_rows(
-        _root() / project_name
+    project = _root() / project_name
+    return (
+        f"已取消 {count} 个尚未开始的任务",
+        _queue_rows(project),
+        _queue_summary(project),
     )
 
 
 def refresh_v4_queue(project_name: str):
-    return _queue_rows(_root() / project_name)
+    project = _root() / project_name
+    return _queue_rows(project), _queue_summary(project)
 
 
 def chapter_audio(project_name: str, chapter_id: str):
@@ -396,6 +413,7 @@ def _queue_rows(project: Path) -> list[list]:
     path = project / "runtime/runtime.db"
     if not path.is_file():
         return []
+    RuntimeRepository(path).initialize()
     with sqlite3.connect(path) as connection:
         return [
             list(item)
@@ -408,3 +426,56 @@ def _queue_rows(project: Path) -> list[list]:
                 """
             )
         ]
+
+
+def _queue_summary(project: Path) -> str:
+    path = project / "runtime/runtime.db"
+    if not path.is_file():
+        return "尚未生成合成任务"
+    runtime = RuntimeRepository(path)
+    runtime.initialize()
+    counts = runtime.task_counts()
+    with sqlite3.connect(path) as connection:
+        cache_hits = connection.execute(
+            "SELECT COALESCE(SUM(cache_hit), 0) FROM synthesis_metrics"
+        ).fetchone()[0]
+        current = connection.execute(
+            """
+            SELECT chapter_id, speaker_id, text_length, attempts, split_depth
+              FROM synthesis_tasks
+             WHERE status = 'running'
+             ORDER BY started_at, task_id LIMIT 1
+            """
+        ).fetchone()
+        total = connection.execute(
+            "SELECT COUNT(*) FROM synthesis_tasks"
+        ).fetchone()[0]
+        total_chapters = connection.execute(
+            "SELECT COUNT(DISTINCT chapter_id) FROM synthesis_tasks"
+        ).fetchone()[0]
+        completed_chapters = connection.execute(
+            """
+            SELECT COUNT(*) FROM (
+                SELECT chapter_id
+                  FROM synthesis_tasks
+                 GROUP BY chapter_id
+                HAVING SUM(
+                    CASE WHEN status IN (
+                        'pending', 'running', 'failed', 'stale', 'cancelled'
+                    ) THEN 1 ELSE 0 END
+                ) = 0
+            )
+            """
+        ).fetchone()[0]
+    summary = (
+        f"章节 {completed_chapters}/{total_chapters} · Tasks {total} · "
+        f"完成 {counts.get('completed', 0)} · 缓存命中 {cache_hits} · "
+        f"失败 {counts.get('failed', 0)} · stale {counts.get('stale', 0)}"
+    )
+    if current:
+        summary += (
+            f"\n\n当前：章节 `{current[0]}` · 角色 `{current[1] or '未指定'}` · "
+            f"长度 {current[2] or 0} · 尝试 {current[3]} · "
+            f"拆分深度 {current[4]}"
+        )
+    return summary
