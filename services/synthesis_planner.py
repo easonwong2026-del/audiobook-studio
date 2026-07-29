@@ -188,6 +188,8 @@ class SynthesisPlanner:
         if boundary < len(text):
             while (
                 boundary > 1
+                and text[boundary - 1].isascii()
+                and text[boundary].isascii()
                 and text[boundary - 1].isalnum()
                 and text[boundary].isalnum()
             ):
