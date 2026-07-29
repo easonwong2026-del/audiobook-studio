@@ -1,7 +1,6 @@
 """Deterministic baseline segmentation over immutable source coordinates."""
 from __future__ import annotations
 
-import hashlib
 import re
 from dataclasses import dataclass
 
@@ -12,7 +11,7 @@ from domain.v4 import (
     Speaker,
     SpeakersDocument,
 )
-from domain.v4.models import source_sha256
+from domain.v4.models import source_sha256, stable_speaker_id
 
 _CHAPTER_RE = re.compile(
     r"(?m)^(?:第[零〇一二三四五六七八九十百千万两\d]+[章节回卷部篇]|"
@@ -35,11 +34,6 @@ _PRONOUNS = {"他", "她", "它", "他们", "她们", "它们", "我", "你", "�
 class SegmentationResult:
     script: ScriptDocument
     speakers: SpeakersDocument
-
-
-def _speaker_id(name: str) -> str:
-    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:12]
-    return f"speaker_{digest}"
 
 
 class SourceSegmenter:
@@ -67,7 +61,7 @@ class SourceSegmenter:
                     speaker_source = "rule"
                     status = "confirmed"
                 elif speaker_name:
-                    speaker_id = _speaker_id(speaker_name)
+                    speaker_id = stable_speaker_id(speaker_name)
                     speaker_source = "rule"
                     status = "confirmed"
                     names.setdefault(
