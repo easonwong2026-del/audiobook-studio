@@ -62,6 +62,8 @@ def test_source_metadata_uses_prompt_field_names_and_round_trips():
         "character_count",
         "sha256",
         "imported_at",
+        "source_origin",
+        "source_fidelity",
     }
     assert SourceMetadata.from_dict(persisted) == metadata
 

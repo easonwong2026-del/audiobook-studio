@@ -125,7 +125,7 @@ def test_create_project_click_wiring():
     ids = _arg_ids(outputs)
     print(f"[B5] p_create.click outputs = {ids}")
     assert len(ids) == 4, f"outputs 应为 4 个，实际 {len(ids)}"
-    assert ids.count("p_sel") == 1, "p_sel 在 outputs 中应只出现一次"
+    assert ids.count("v4_project") == 1, "v4_project 在 outputs 中应只出现一次"
 
 
 def test_do_export_signature():
