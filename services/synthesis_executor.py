@@ -109,13 +109,17 @@ class SynthesisExecutor:
                 release_inference_memory(
                     clear_cuda_cache=profile.clear_cache_after_oom
                 )
-                if self._can_split(task, profile):
+                can_split = self._can_split(task, profile)
+                if can_split:
                     children = self._children(task, profile)
                     self.runtime.split_task(
                         task, children, error_type=error_type
                     )
                     split_parents += 1
                 else:
+                    unrecoverable_cuda = isinstance(
+                        exc, TtsOutOfMemoryError
+                    )
                     self.runtime.fail_task(
                         task["task_id"],
                         error_type,

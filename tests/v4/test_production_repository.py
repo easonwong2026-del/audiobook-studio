@@ -34,6 +34,18 @@ def test_production_documents_round_trip_and_preserve_engine_options(tmp_path):
     assert profile.hardware == {"gpu": "fake"}
     assert profile.options == {"fp16": True}
     assert profile.runtime_options["max_split_depth"] == 3
+    assert "clear_cuda_cache_after_oom" in profile.to_dict()["runtime"]
+
+
+def test_legacy_cuda_cleanup_key_is_read_but_rewritten_canonically():
+    value = _profile().to_dict()
+    value["runtime"]["clear_cache_after_oom"] = value["runtime"].pop(
+        "clear_cuda_cache_after_oom"
+    )
+    restored = TtsProfile.from_dict(value)
+    assert restored.clear_cache_after_oom is True
+    assert "clear_cuda_cache_after_oom" in restored.to_dict()["runtime"]
+    assert "clear_cache_after_oom" not in restored.to_dict()["runtime"]
 
 
 def test_production_edit_and_plan_create_revision_snapshots(tmp_path):

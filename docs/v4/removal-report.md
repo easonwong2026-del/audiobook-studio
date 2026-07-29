@@ -68,7 +68,7 @@ rg -n 'domain\.v4\.interfaces|FakeSpeakerRouter|FakeTtsAdapter' --glob '*.py'
 rg -n 'ui\.v4_speaker_review|unresolved_review_rows|assign_review_rows' --glob '*.py'
 ```
 
-目标 Windows 的启动、真实 IndexTTS2 签名、RTX 5070 Ti 12GB 显存与音质仍按 `indextts-runtime-audit.md` 和 `indextts-benchmark.md` 单独验收，不使用当前 Mac 的结果代替。
+目标 Windows 的启动、真实 IndexTTS2 签名、RTX 5070 Ti 12GB 显存与音质仍按 `indextts-runtime-audit.md` 和 `indextts2-benchmark.md` 单独验收，不使用当前 Mac 的结果代替。
 
 ## 回滚
 

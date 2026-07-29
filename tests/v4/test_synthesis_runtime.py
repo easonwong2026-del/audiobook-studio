@@ -262,6 +262,16 @@ def test_oom_splits_only_current_task_and_completes_children(tmp_path):
     assert all("actual_text" not in item for item in metrics)
 
 
+def test_unsplittable_oom_fails_only_task_and_restarts_worker(tmp_path):
+    plan = _plan("正文。")
+    adapter = FakeRuntimeAdapter(fail_over=1)
+    executor, runtime, _ = _executor(tmp_path, plan, adapter)
+    summary = executor.run(_profile(min_retry_tokens=10))
+    assert summary.failed == 1
+    assert runtime.task_counts()["failed"] == 1
+    assert adapter.closed == 1
+
+
 def test_cancel_stops_before_claiming_new_task(tmp_path):
     plan = _plan("正文。")
     adapter = FakeRuntimeAdapter()
