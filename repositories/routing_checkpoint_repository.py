@@ -165,6 +165,14 @@ class RoutingCheckpointRepository:
             connection.commit()
             return cursor.rowcount
 
+    def is_cancelled(self, batch_id: str) -> bool:
+        with sqlite3.connect(self.path) as connection:
+            row = connection.execute(
+                "SELECT status FROM routing_batches WHERE batch_id = ?",
+                (batch_id,),
+            ).fetchone()
+        return bool(row and row[0] == "cancelled")
+
     def _update(self, batch_id: str, assignments: str) -> None:
         with sqlite3.connect(self.path) as connection:
             connection.execute("BEGIN IMMEDIATE")

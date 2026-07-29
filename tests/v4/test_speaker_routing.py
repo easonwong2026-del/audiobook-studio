@@ -162,3 +162,38 @@ def test_checkpoint_contains_ids_but_not_context_or_api_key(tmp_path):
     assert dialogue.segment_id in persisted
     assert "上下文" not in persisted
     assert "API" not in persisted
+
+
+def test_cancelled_checkpoint_is_rechecked_before_each_remote_batch(tmp_path):
+    text = "“第一句。”“第二句。”"
+    segmented = SourceSegmenter().segment(text)
+    ids = [
+        item.segment_id
+        for item in segmented.script.chapters[0].segments
+        if item.kind == "dialogue"
+    ]
+    checkpoints = RoutingCheckpointRepository(tmp_path / "runtime.db")
+
+    class CancellingAdapter(StubAdapter):
+        def route(self, *, context, segment_ids):
+            result = super().route(context=context, segment_ids=segment_ids)
+            checkpoints.cancel_pending()
+            return result
+
+    adapter = CancellingAdapter(
+        [
+            {
+                "schema_version": "speaker-routing-v1",
+                "assignments": [{"segment_id": ids[0], "speaker": "甲"}],
+            },
+            {
+                "schema_version": "speaker-routing-v1",
+                "assignments": [{"segment_id": ids[1], "speaker": "乙"}],
+            },
+        ]
+    )
+    result = SpeakerRoutingService(
+        adapter, checkpoints, batch_size=1
+    ).route(text, segmented.script, segmented.speakers)
+    assert len(adapter.calls) == 1
+    assert result.unresolved_segments == 1
