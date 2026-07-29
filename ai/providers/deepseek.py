@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from ._remote import RemoteJsonDirectorProvider, parse_json_content
+from .exceptions import ProviderOutputTruncatedError
 
 
 class DeepSeekProvider(RemoteJsonDirectorProvider):
@@ -37,7 +38,13 @@ class DeepSeekProvider(RemoteJsonDirectorProvider):
             self.timeout,
         )
         try:
-            content = response["choices"][0]["message"]["content"]
+            choice = response["choices"][0]
         except (KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError("DeepSeek 响应缺少 choices[0]") from exc
+        if choice.get("finish_reason") == "length":
+            raise ProviderOutputTruncatedError("DeepSeek 输出达到长度限制")
+        try:
+            content = choice["message"]["content"]
+        except (KeyError, TypeError) as exc:
             raise RuntimeError("DeepSeek 响应缺少 choices[0].message.content") from exc
         return parse_json_content(content)

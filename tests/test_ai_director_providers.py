@@ -2,30 +2,42 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
+from ai.prompts.script_director_v3 import SCHEMA_VERSION
 from ai.providers import (
     DeepSeekProvider,
     OpenAIProvider,
+    ProviderOutputInvalidJsonError,
+    ProviderOutputTruncatedError,
     create_provider,
 )
 from script_director_cli import build_parser
 from services.script_director import ScriptDirectorService
 
 
-def _provider_script():
+def _prompt_value(prompt: str, label: str) -> str:
+    match = re.search(rf"^{re.escape(label)}：(.+)$", prompt, re.MULTILINE)
+    assert match, f"prompt missing {label}"
+    return match.group(1).strip()
+
+
+def _batch_from_prompt(prompt: str, *, speed: float = 0.95):
+    source = prompt.split("<novel>\n", 1)[1].rsplit("\n</novel>", 1)[0]
     return {
-        "chapters": [{
-            "id": 1,
-            "title": "第一章",
-            "segments": [{
+        "schema_version": SCHEMA_VERSION,
+        "batch_id": _prompt_value(prompt, "batch_id"),
+        "source_chapter_id": _prompt_value(prompt, "source_chapter_id"),
+        "source_chapter_title": _prompt_value(prompt, "source_chapter_title"),
+        "segments": [{
                 "speaker": "张三",
-                "text": "开始吧。",
+                "text": source,
                 "emotion": "confident",
                 "emotion_strength": 0.7,
                 "delivery": {
-                    "speed": 0.95,
+                    "speed": speed,
                     "pitch": 0,
                     "intensity": 0.7,
                     "breath": "light",
@@ -34,7 +46,6 @@ def _provider_script():
                 "pause_after": 800,
                 "pauses": [],
             }],
-        }]
     }
 
 
@@ -48,9 +59,13 @@ def test_deepseek_uses_json_output_and_current_endpoint():
             payload=payload,
             timeout=timeout,
         )
+        prompt = payload["messages"][1]["content"]
         return {
             "choices": [{
-                "message": {"content": json.dumps(_provider_script(), ensure_ascii=False)}
+                "finish_reason": "stop",
+                "message": {
+                    "content": json.dumps(_batch_from_prompt(prompt), ensure_ascii=False)
+                },
             }]
         }
 
@@ -70,12 +85,14 @@ def test_openai_uses_responses_json_output():
 
     def transport(url, headers, payload, timeout):
         captured.update(url=url, payload=payload)
+        raw = _batch_from_prompt(payload["input"])
         return {
+            "status": "completed",
             "output": [{
                 "type": "message",
                 "content": [{
                     "type": "output_text",
-                    "text": json.dumps(_provider_script(), ensure_ascii=False),
+                        "text": json.dumps(raw, ensure_ascii=False),
                 }],
             }]
         }
@@ -91,10 +108,10 @@ def test_openai_uses_responses_json_output():
 
 def test_remote_output_runs_through_common_quality_guards():
     def transport(url, headers, payload, timeout):
-        raw = _provider_script()
-        raw["chapters"][0]["segments"][0]["delivery"]["speed"] = 1.8
+        raw = _batch_from_prompt(payload["messages"][1]["content"], speed=1.15)
         return {
             "choices": [{
+                "finish_reason": "stop",
                 "message": {"content": json.dumps(raw, ensure_ascii=False)}
             }]
         }
@@ -134,20 +151,12 @@ def test_long_text_is_batched_by_chapter_and_merged():
 
     def transport(url, headers, payload, timeout):
         calls.append(payload)
-        number = len(calls)
-        raw = {
-            "chapters": [{
-                "id": number,
-                "title": f"第{number}章",
-                "segments": [{
-                    "speaker": "旁白",
-                    "text": f"批次{number}",
-                    "emotion": "neutral",
-                }],
-            }]
-        }
+        raw = _batch_from_prompt(payload["messages"][1]["content"])
+        raw["segments"][0]["speaker"] = "旁白"
+        raw["segments"][0]["emotion"] = "neutral"
         return {
             "choices": [{
+                "finish_reason": "stop",
                 "message": {"content": json.dumps(raw, ensure_ascii=False)}
             }]
         }
@@ -165,9 +174,83 @@ def test_long_text_is_batched_by_chapter_and_merged():
 
     assert len(calls) >= 2
     assert result["meta"]["analysis_batches"] == len(calls)
-    assert len(result["chapters"]) == len(calls)
+    assert len(result["chapters"]) == 2
+    assert [chapter["title"] for chapter in result["chapters"]] == ["第一章", "第二章"]
     prompts = [call["messages"][1]["content"] for call in calls]
     assert all("第一章" in prompt or "第二章" in prompt for prompt in prompts)
+
+
+def test_deepseek_length_finish_reason_raises_specialized_error():
+    def transport(url, headers, payload, timeout):
+        return {
+            "choices": [{
+                "finish_reason": "length",
+                "message": {"content": "{\"schema_version\":"},
+            }]
+        }
+
+    provider = DeepSeekProvider(api_key="test-key", transport=transport)
+    provider.max_split_depth = 0
+    with pytest.raises(ProviderOutputTruncatedError, match="来源章节"):
+        provider.analyze_script("无法再拆")
+
+
+def test_openai_incomplete_raises_specialized_error():
+    def transport(url, headers, payload, timeout):
+        return {
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output_text": "{\"schema_version\":",
+        }
+
+    provider = OpenAIProvider(api_key="test-key", transport=transport)
+    provider.max_split_depth = 0
+    with pytest.raises(ProviderOutputTruncatedError, match="批次"):
+        provider.analyze_script("无法再拆")
+
+
+def test_wrong_batch_schema_is_rejected():
+    def transport(url, headers, payload, timeout):
+        raw = _batch_from_prompt(payload["messages"][1]["content"])
+        raw["schema_version"] = "wrong"
+        return {
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"content": json.dumps(raw, ensure_ascii=False)},
+            }]
+        }
+
+    with pytest.raises(ProviderOutputInvalidJsonError, match="协议版本"):
+        DeepSeekProvider(api_key="x", transport=transport).analyze_script("文本")
+
+
+def test_truncated_chunk_splits_and_successful_child_is_not_repeated():
+    calls: list[str] = []
+
+    def transport(url, headers, payload, timeout):
+        prompt = payload["messages"][1]["content"]
+        batch_id = _prompt_value(prompt, "batch_id")
+        calls.append(batch_id)
+        if "-split-" not in batch_id:
+            return {
+                "choices": [{
+                    "finish_reason": "length",
+                    "message": {"content": ""},
+                }]
+            }
+        raw = _batch_from_prompt(prompt)
+        return {
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"content": json.dumps(raw, ensure_ascii=False)},
+            }]
+        }
+
+    result = DeepSeekProvider(api_key="x", transport=transport).analyze_script(
+        "第一段内容。\n\n第二段内容。"
+    )
+    assert len(result["chapters"][0]["segments"]) == 2
+    assert len(calls) == len(set(calls)) == 3
 
 
 def test_cli_accepts_provider_and_model():

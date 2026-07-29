@@ -218,3 +218,51 @@ def test_create_from_structured_script(tmp_path, monkeypatch):
     meta, _, _ = ProjectRepository.load_project("json_proj")
     assert meta.project_name == "json_proj"
     assert meta.total_segments == 2
+
+
+def test_truncated_ai_output_never_creates_formal_project(tmp_path, monkeypatch):
+    """Partial provider success must stop before ProjectRepository.create_project."""
+    from ai.providers import ProviderOutputTruncatedError
+    from services.project_creation import ProjectCreationService
+    from repositories.project_repo import ProjectRepository
+
+    data_dir = tmp_path / "atomic_failure"
+    data_dir.mkdir()
+    _setup_test_data_dir(monkeypatch, data_dir)
+    source = tmp_path / "long.txt"
+    source.write_text("第一章\n\n正文。", encoding="utf-8")
+
+    class FailingProvider:
+        name = "deepseek"
+
+        def analyze_script(self, text, *, title="", author=""):
+            raise ProviderOutputTruncatedError(
+                "AI 分析失败\n来源章节：第一章\n批次：2/5\n分片：2/4"
+            )
+
+    monkeypatch.setattr(
+        "services.project_creation.AiSettingsService.get_effective_provider_config",
+        lambda *args, **kwargs: {
+            "provider": "deepseek",
+            "model": "test",
+            "api_key": "hidden-key",
+            "base_url": "https://example.invalid",
+            "timeout": 30,
+        },
+    )
+    monkeypatch.setattr(
+        "services.project_creation.create_provider",
+        lambda *args, **kwargs: FailingProvider(),
+    )
+    called = []
+    monkeypatch.setattr(
+        ProjectRepository,
+        "create_project",
+        lambda *args, **kwargs: called.append(args),
+    )
+
+    with pytest.raises(ProviderOutputTruncatedError, match="批次：2/5"):
+        ProjectCreationService.create_from_source("不会创建", str(source))
+
+    assert called == []
+    assert ProjectRepository.inspect_project_slot("不会创建").status == "available"
