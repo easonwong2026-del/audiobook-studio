@@ -50,7 +50,7 @@ def test_groups_match_navigation_items_in_order():
     )
     group_names = [elt.id for elt in group_assign.value.elts if isinstance(elt, ast.Name)]
     assert group_names == [
-        "grp_overview", "grp_create_project", "grp_project", "grp_voices",
+        "grp_overview", "grp_create_project", "grp_v4", "grp_project", "grp_voices",
         "grp_production_nav", "grp_synth", "grp_review", "grp_export",
         "grp_supplement", "grp_settings",
     ]
