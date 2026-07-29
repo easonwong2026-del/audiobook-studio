@@ -108,7 +108,11 @@ def run_environment_diagnostics() -> dict[str, Any]:
                 "source": resolution.source,
                 "warnings": resolution.warnings,
             },
-            "suggestion": "设置 AUDIOBOOK_STUDIO_PYTHON 指向 IndexTTS2 虚拟环境的 Python。",
+            "suggestion": (
+                ""
+                if resolution.executable
+                else "设置 AUDIOBOOK_STUDIO_PYTHON 指向 IndexTTS2 虚拟环境的 Python。"
+            ),
         }
     add("IndexTTS2 Python", python_check)
     add("模型目录", lambda: _path_state(model_dir, empty_is_warning=True))

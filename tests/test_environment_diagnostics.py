@@ -1,4 +1,6 @@
 import json
+import sys
+from types import SimpleNamespace
 
 from services import environment_diagnostics as diagnostics
 from lib import environment
@@ -134,5 +136,89 @@ def test_launcher_and_diagnostics_share_resolver(monkeypatch, tmp_path):
     monkeypatch.setattr(diagnostics, "resolve_python_interpreter", lambda: resolution)
     assert launcher._resolve_python() == str(executable)
     item = _item(diagnostics.run_environment_diagnostics(), "IndexTTS2 Python")
+    assert item["status"] == "ok"
+    assert item["suggestion"] == ""
     assert item["details"]["executable"] == str(executable)
     assert item["details"]["source"] == "environment"
+
+
+def test_diagnostics_python_sibling_success_has_no_suggestion(monkeypatch):
+    resolution = environment.PythonResolution(
+        "/path/to/python", "sibling_venv", [],
+    )
+    monkeypatch.setattr(diagnostics, "resolve_python_interpreter", lambda: resolution)
+    item = _item(diagnostics.run_environment_diagnostics(), "IndexTTS2 Python")
+    assert item["status"] == "ok"
+    assert item["suggestion"] == ""
+    assert item["details"]["source"] == "sibling_venv"
+
+
+def test_diagnostics_invalid_env_fallback_remains_ok(monkeypatch, tmp_path):
+    warning = "AUDIOBOOK_STUDIO_PYTHON 指向的文件不存在：/missing/python"
+    resolution = environment.PythonResolution(
+        "/path/to/index-tts/.venv/bin/python", "sibling_venv", [warning],
+    )
+    monkeypatch.setattr(diagnostics, "resolve_python_interpreter", lambda: resolution)
+
+    data_dir = tmp_path / "data"
+    projects = data_dir / "projects"
+    projects.mkdir(parents=True)
+    model_dir = tmp_path / "index-tts" / "checkpoints"
+    model_dir.mkdir(parents=True)
+    (model_dir / "config.yaml").write_text("test", encoding="utf-8")
+    ffmpeg = tmp_path / "ffmpeg"
+    ffmpeg.write_text("", encoding="utf-8")
+    monkeypatch.setattr(diagnostics.config, "get_data_dir", lambda: str(data_dir))
+    monkeypatch.setattr(diagnostics.config, "get_projects_root", lambda: str(projects))
+    monkeypatch.setattr(diagnostics.config, "get_model_dir", lambda: str(model_dir))
+    monkeypatch.setattr(diagnostics.config, "get_ffmpeg_path", lambda: str(ffmpeg))
+    monkeypatch.setattr(
+        diagnostics.subprocess,
+        "run",
+        lambda *args, **kwargs: type(
+            "P", (), {"returncode": 0, "stdout": "ffmpeg version 7.1\n", "stderr": ""},
+        )(),
+    )
+    monkeypatch.setattr(diagnostics.shutil, "which", lambda _: None)
+    monkeypatch.setattr(
+        diagnostics.AiSettingsService,
+        "get_provider_config",
+        lambda: {"default_provider": "local"},
+    )
+    monkeypatch.setattr(
+        diagnostics.AiSettingsService, "has_api_key", lambda _: False,
+    )
+    monkeypatch.setattr(
+        diagnostics.AiSettingsService, "get_api_key_source", lambda _: "none",
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(
+            __version__="test",
+            cuda=SimpleNamespace(
+                is_available=lambda: False,
+                get_device_name=lambda _: None,
+            ),
+        ),
+    )
+
+    report = diagnostics.run_environment_diagnostics()
+    item = _item(report, "IndexTTS2 Python")
+    assert item["status"] == "ok"
+    assert item["suggestion"] == ""
+    assert item["details"]["warnings"] == [warning]
+    assert report["status"] != "error", [
+        (check["name"], check["message"])
+        for check in report["checks"]
+        if check["status"] == "error"
+    ]
+
+
+def test_diagnostics_python_missing_has_actionable_error(monkeypatch):
+    resolution = environment.PythonResolution(None, "missing", [])
+    monkeypatch.setattr(diagnostics, "resolve_python_interpreter", lambda: resolution)
+    item = _item(diagnostics.run_environment_diagnostics(), "IndexTTS2 Python")
+    assert item["status"] == "error"
+    assert item["message"] == "解释器不存在"
+    assert item["suggestion"]
