@@ -56,6 +56,21 @@ def refresh_config_summary() -> str:
     return _config_summary_text()
 
 
+def format_creation_warnings(warnings: list[str], limit: int = 10) -> str:
+    """统一格式化创建质量提示，限制长篇项目的 UI 输出。"""
+    if not warnings:
+        return ""
+    safe = [html.escape(str(item)) for item in warnings[:limit]]
+    lines = [
+        f"\n**质量检查**：共 {len(warnings)} 项 warning，不阻止创建\n",
+        *(f"- {item}" for item in safe),
+    ]
+    hidden = len(warnings) - len(safe)
+    if hidden:
+        lines.append(f"\n另有 {hidden} 条未展示，可在项目管理或验收工具中查看。")
+    return "\n".join(lines)
+
+
 def create_from_source(
     project_name, source_file, title, author
 ) -> tuple:
@@ -84,8 +99,7 @@ def create_from_source(
             f"- **段落数**：{result.segment_count}\n"
             f"- **角色数**：{result.role_count}\n"
         )
-        if result.warnings:
-            msg += "\n**提示**：\n" + "\n".join(f"- {w}" for w in result.warnings)
+        msg += format_creation_warnings(result.warnings)
         msg += "\n\n👉 **下一步**：进入「角色与声音」页面配置角色音色。"
 
         return (
@@ -125,6 +139,7 @@ def create_from_json(project_name, json_file) -> tuple:
             f"- **段落数**：{result.segment_count}\n"
             f"- **角色数**：{result.role_count}\n"
         )
+        msg += format_creation_warnings(result.warnings)
         msg += "\n\n👉 **下一步**：进入「角色与声音」页面配置角色音色。"
 
         return (

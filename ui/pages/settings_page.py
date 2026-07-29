@@ -76,6 +76,23 @@ def create_settings_page() -> dict:
                     s_version = gr.Markdown(f"**版本**：v{__version__}")
                     s_python = gr.Markdown("**Python**：3.10+")
                     s_status_info = gr.Markdown("")
+                    gr.Markdown("##### 环境诊断")
+                    gr.Markdown(
+                        "只读取环境状态，不安装 CUDA、Torch、模型，也不会执行 GPU 推理。"
+                    )
+                    s_diagnostics_run = gr.Button("运行环境诊断", variant="primary")
+                    s_diagnostics_status = gr.Markdown("")
+                    s_diagnostics_table = gr.Dataframe(
+                        headers=["检查项", "状态", "结果", "修复建议"],
+                        datatype=["str", "str", "str", "str"],
+                        interactive=False,
+                    )
+                    s_diagnostics_report = gr.Textbox(
+                        label="可复制诊断报告（Markdown）",
+                        lines=12,
+                        show_copy_button=True,
+                        interactive=False,
+                    )
 
     return {
         "group": grp,
@@ -96,4 +113,8 @@ def create_settings_page() -> dict:
         "s_version": s_version,
         "s_python": s_python,
         "s_status_info": s_status_info,
+        "s_diagnostics_run": s_diagnostics_run,
+        "s_diagnostics_status": s_diagnostics_status,
+        "s_diagnostics_table": s_diagnostics_table,
+        "s_diagnostics_report": s_diagnostics_report,
     }

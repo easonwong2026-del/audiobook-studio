@@ -22,6 +22,7 @@ import os
 import shutil
 import subprocess
 import sys
+from lib.environment import resolve_python_interpreter
 
 # ---------------------------------------------------------------------------
 # 程序目录：由本文件位置推导（仓库可整体移动，不依赖绝对路径）
@@ -38,33 +39,15 @@ PYTHON: str = ""   # will be filled by _resolve_python()
 
 def _resolve_python() -> str:
     """Resolve Python interpreter according to the priority documented above."""
-
-    # ---- 1. Environment variable ----
-    env_py = os.environ.get("AUDIOBOOK_STUDIO_PYTHON")
-    if env_py:
-        if os.path.isfile(env_py):
-            return env_py
-        print(f"⚠ AUDIOBOOK_STUDIO_PYTHON 指向的文件不存在：{env_py}")
+    resolution = resolve_python_interpreter()
+    for warning in resolution.warnings:
+        print(f"⚠ {warning}")
         print("  将尝试其他 Python 解释器。")
+    if resolution.executable:
+        if resolution.source == "sibling_venv":
+            print(f"使用仓库同级 venv 的 Python：{resolution.executable}")
+        return resolution.executable
 
-    # ---- 2. Sibling index-tts/.venv (cross‑platform) ----
-    venv_dir = os.path.normpath(os.path.join(BASE_DIR, "..", "index-tts", ".venv"))
-    if os.path.isdir(venv_dir):
-        candidates = [
-            os.path.join(venv_dir, "Scripts", "python.exe"),  # Windows
-            os.path.join(venv_dir, "bin", "python"),           # Unix
-        ]
-        for cand in candidates:
-            if os.path.isfile(cand):
-                print(f"使用仓库同级 venv 的 Python：{cand}")
-                return cand
-
-    # ---- 3. System PATH ----
-    path_py = shutil.which("python") or shutil.which("python3")
-    if path_py:
-        return path_py
-
-    # ---- 4. Nothing found — abort with clear message ----
     print()
     print("=" * 50)
     print("  错误：找不到 Python 解释器！")

@@ -7,7 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [3.2.1] - Unreleased
+## [3.3.1] - 2026-07-28
+
+### Added
+
+- AI 设置页状态加载，以及 OpenAI / DeepSeek / Local Provider 配置。
+- 通过系统 Keyring 安全存储 API Key，支持清除密钥并显示 Keyring / 环境变量来源状态。
+- 从 TXT、DOCX、EPUB 原稿经 AI 剧本导演分析、人工校正后直接创建项目。
+- 导演试听、反馈调整，以及 v3 导演停顿进入正式合成链；v2 固定停顿兼容逻辑保持不变。
+- 不依赖 GPU 推理的结构化环境诊断、设置页诊断报告和 `scripts/acceptance_check.py`。
+- 长篇剧本一致性检查：重复 ID、角色、语速、情绪、停顿、文本长度及疑似别名提示。
+
+### Fixed
+
+- 项目创建改为临时目录 + 原子替换，失败时清理临时产物。
+- 项目扫描增加完整性检查，排除并清理残留 `.tmp_` 项目目录。
+- AI 剧本导演工作流重构后，设置加载、密钥清除和异常信息均不再泄露密钥。
+
+### Quality
+
+- 覆盖环境诊断、验收脚本、剧本一致性、AI 设置、原子创建和文档一致性的自动测试。
+- macOS / Python 3.12 / Gradio 5.50 验证结果：545 passed、25 skipped，`lib` /
+  `services` / `repositories` 合计覆盖率 84%；CI 不运行真实 GPU 推理。
+- Gradio 继续固定在 `>=5.50,<6`。
+
+## [3.2.1] - 2026-07-27
 
 ### Fixed
 
