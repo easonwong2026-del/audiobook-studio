@@ -14,6 +14,8 @@ def test_project_creation_is_local_and_allows_unresolved(tmp_path):
     assert result.unresolved_segments == 1
     assert result.project_path.parent == projects
     assert (result.project_path / "project.json").is_file()
+    assert (result.project_path / "production/voices.json").is_file()
+    assert (result.project_path / "production/tts_profile.json").is_file()
     manifest = ProjectV4Repository(projects).load_manifest(result.project_path)
     assert (manifest.title, manifest.author) == ("作品名", "作者")
     assert not any(path.name.startswith(".tmp_v4_") for path in projects.iterdir())
