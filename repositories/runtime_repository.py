@@ -4,7 +4,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-RUNTIME_SCHEMA_VERSION = 2
+RUNTIME_SCHEMA_VERSION = 3
 
 _MIGRATIONS = {
     1: """
@@ -53,6 +53,27 @@ _MIGRATIONS = {
     UPDATE cache_entries
        SET file_path = output_path, file_sha256 = content_sha256
      WHERE file_path = '';
+    """,
+    3: """
+    CREATE TABLE routing_batches (
+        batch_id TEXT PRIMARY KEY,
+        source_sha256 TEXT NOT NULL,
+        script_revision INTEGER NOT NULL,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        segment_ids_json TEXT NOT NULL,
+        assignments_json TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL CHECK (
+            status IN ('pending','running','completed','failed','cancelled')
+        ),
+        attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+        error_type TEXT,
+        error_message TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX idx_routing_batches_resume
+        ON routing_batches(source_sha256, script_revision, provider, model, status);
     """,
 }
 
