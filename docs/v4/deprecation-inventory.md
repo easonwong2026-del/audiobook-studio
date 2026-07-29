@@ -17,5 +17,22 @@
 | v3 `structured_script.json` | REMOVE_AFTER_MIGRATION | 由 source/script/speakers/plan 分层替代 |
 | v3 UI 接线 | REMOVE_AFTER_MIGRATION | Phase 5 切换且验证回滚后处理 |
 | 未确认调用者的辅助脚本 | UNKNOWN | Phase 6 用静态扫描和运行时证据分类 |
+| `domain/v4/interfaces.py` Phase 1 placeholder | REMOVE_NOW | 无运行时调用者；已由严格 routing adapter 和 `tts/base_adapter.py` 替代 |
+| `domain/v4/fakes.py` Phase 1 placeholder | REMOVE_NOW | 仅自测调用；Phase 2/4 测试已有协议兼容 fake，旧签名不再匹配实际服务 |
+| `ui/v4_speaker_review.py` UI-neutral placeholder | REMOVE_NOW | 仅自测调用；集成工作流已直接调用 `SpeakerReviewService` |
 
-Phase 1 不批量删除遗留代码。`REMOVE_NOW` 当前为空；任何删除都进入独立 Phase 6 分支和 PR。
+Phase 1 不批量删除遗留代码。上述 `REMOVE_NOW` 项只在独立 Phase 6 分支删除。
+
+## Phase 6 caller evidence
+
+执行：
+
+```bash
+rg -n 'domain\.v4\.interfaces|SpeakerRouter|TtsAdapter' --glob '*.py'
+rg -n 'FakeSpeakerRouter|FakeTtsAdapter' --glob '*.py'
+rg -n 'ui\.v4_speaker_review|unresolved_review_rows|assign_review_rows' --glob '*.py'
+```
+
+删除前结果仅命中定义文件及其专用测试，没有应用调用者。删除后结果为空。
+
+v3 `ProjectRepository`、`ProjectCreationService`、`ScriptDirectorService`、`TaskRepository`、`lib.queue`、`lib.tts_engine` 和旧 Gradio 页面仍有明确兼容调用者，维持 `REMOVE_AFTER_MIGRATION`/`ADAPT`，本阶段不删除。v4 默认启用并不等于所有用户项目已迁移；保留这些路径是回滚要求，而不是遗漏。
