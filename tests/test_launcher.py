@@ -95,7 +95,7 @@ def test_launcher_dependency_check_runs_first():
 
     assert fake_run.calls, "no subprocess.run calls were recorded"
     first_call_cmd = fake_run.calls[0].args[0]
-    assert "import gradio" in first_call_cmd, "first call should be the gradio dependency check"
+    assert "import gradio" in first_call_cmd[2], "first call should be the runtime dependency check"
 
 
 def test_start_bat_echo_before_launcher():
@@ -154,6 +154,69 @@ def test_launcher_prints_startup_banner_before_env_check():
     assert pos_banner < pos_env, (
         "the Chinese 启动中 banner must be printed BEFORE 正在检查运行环境"
     )
+
+
+def _run_launcher_with_results(monkeypatch, results):
+    """Run main with a resolved interpreter and scripted subprocess results."""
+    calls = []
+    queue = iter(results)
+
+    def fake_run(*args, **kwargs):
+        calls.append(mock.call(*args, **kwargs))
+        result = next(queue)
+        if isinstance(result, int):
+            return subprocess.CompletedProcess(args[0], returncode=result, stdout="", stderr="")
+        return result
+
+    monkeypatch.setattr(launcher, "_resolve_python", lambda: "/tmp/target-python")
+    monkeypatch.setattr(launcher.shutil, "which", lambda name: "/usr/bin/ffmpeg" if name == "ffmpeg" else None)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return calls
+
+
+def test_launcher_skips_pip_when_all_runtime_dependencies_import(monkeypatch):
+    calls = _run_launcher_with_results(monkeypatch, [0, 0])
+    saved_cwd = os.getcwd()
+    try:
+        launcher.main()
+    finally:
+        os.chdir(saved_cwd)
+
+    assert not any("-m" in c.args[0] and "pip" in c.args[0] for c in calls)
+    assert calls[-1].args[0] == ["/tmp/target-python", "app.py"]
+
+
+def test_launcher_installs_requirements_with_resolved_python(monkeypatch, capsys):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-never-print-this")
+    calls = _run_launcher_with_results(monkeypatch, [1, 0, 0, 0])
+    saved_cwd = os.getcwd()
+    try:
+        launcher.main()
+    finally:
+        os.chdir(saved_cwd)
+
+    pip_calls = [c.args[0] for c in calls if "pip" in c.args[0]]
+    assert pip_calls == [[
+        "/tmp/target-python", "-m", "pip", "install", "-r", launcher.REQUIREMENTS_FILE,
+    ]]
+    assert "gradio>=5.50,<6" in open(os.path.join(_PROJECT_ROOT, "requirements.txt"), encoding="utf-8").read()
+    assert "sk-never-print-this" not in capsys.readouterr().out
+
+
+def test_launcher_exits_when_requirements_install_fails(monkeypatch, capsys):
+    calls = _run_launcher_with_results(monkeypatch, [1, 1])
+    saved_cwd = os.getcwd()
+    try:
+        with pytest.raises(SystemExit) as exc:
+            launcher.main()
+    finally:
+        os.chdir(saved_cwd)
+
+    assert exc.value.code == 1
+    assert not any("app.py" in c.args[0] for c in calls)
+    output = capsys.readouterr().out
+    assert "运行依赖安装失败" in output
+    assert "pip install -r requirements.txt" not in output  # secret-free concise error
 
 
 if __name__ == "__main__":

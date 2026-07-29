@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audiobook Studio v3.3.1 UI -- 有声书生产工作台。
+"""Audiobook Studio UI -- 有声书生产工作台。
 
 本次重构把模块式导航改为「工作台 → 项目 → 角色与声音 → 生产与质检 → 交付」
 的生产流程。页面 Builder 负责布局，既有 handler 继续委托给 Service；不改变 TTS、
@@ -36,7 +36,7 @@ from services.synthesis import SynthesisState
 from ui import create_project_handlers as create_ui
 from ui import director_handlers as director_ui
 from ui.wiring.settings_wiring import wire_settings_page
-from ui import voice_handlers as voice_ui
+from ui.wiring.voice_wiring import wire_voice_page
 from ui.components import (
     build_role_management_choices,
     create_production_navigation,
@@ -1328,11 +1328,6 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             v_recommend = vce_page["v_recommend"]
             v_recommendations = vce_page["v_recommendations"]
             v_recommend_status = vce_page["v_recommend_status"]
-            v_audition = vce_page["v_audition"]
-            v_audition_audio = vce_page["v_audition_audio"]
-            v_audition_status = vce_page["v_audition_status"]
-            v_feedback = vce_page["v_feedback"]
-            v_feedback_apply = vce_page["v_feedback_apply"]
 
             # ───────── 生产阶段内部导航 ─────────
             production_nav = create_production_navigation()
@@ -1417,24 +1412,16 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             sup_export = supplement_page["sup_export"]
             sup_out = supplement_page["sup_out"]
             sup_path = supplement_page["sup_path"]
-        set_page = create_settings_page()
-        grp_settings = set_page["group"]
-        s_provider = set_page["s_provider"]
-        s_model = set_page["s_model"]
-        s_provider_config = set_page["s_provider_config"]
-        s_api_key = set_page["s_api_key"]
-        s_base_url = set_page["s_base_url"]
-        s_timeout = set_page["s_timeout"]
-        s_save = set_page["s_save"]
-        s_test = set_page["s_test"]
-        s_clear_key = set_page["s_clear_key"]
-        s_status = set_page["s_status"]
-        s_data_dir = set_page["s_data_dir"]
-        s_data_apply = set_page["s_data_apply"]
-        s_data_open = set_page["s_data_open"]
-        s_data_msg = set_page["s_data_msg"]
-
-        # ───────── 设置 ─────────
+            # ───────── 设置 ─────────
+            set_page = create_settings_page()
+            grp_settings = set_page["group"]
+            s_provider = set_page["s_provider"]
+            s_model = set_page["s_model"]
+            s_provider_config = set_page["s_provider_config"]
+            s_api_key = set_page["s_api_key"]
+            s_base_url = set_page["s_base_url"]
+            s_timeout = set_page["s_timeout"]
+            s_clear_key = set_page["s_clear_key"]
 
     # 填充 _GROUPS（运行时装载，供 navigation._goto 使用）
     _GROUPS[:] = [
@@ -1569,45 +1556,30 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     wire_settings_page(set_page)
 
     # ═══════════ 角色与声音页面 ═══════════
-    v_recommend.click(
-        voice_ui.recommend_voice,
-        [p_sel, v_role],
-        [v_recommendations, v_recommend_status],
-    )
-    v_audition.click(
-        voice_ui.audition_director_segment,
-        [p_sel, v_role, v_lib],
-        [v_audition_audio, v_audition_status],
-    )
-    v_feedback_apply.click(
-        voice_ui.apply_feedback,
-        [p_sel, v_feedback, v_role],
-        [v_audition_audio, v_audition_status],
+    wire_voice_page(
+        vce_page,
+        {
+            "project": p_sel,
+            "session": ss,
+            "production_voice": e_voice,
+            "callbacks": {
+                "select_role_from_list": select_role_from_list,
+                "refresh_role_list": refresh_role_list,
+                "bind_voice": bind_voice,
+                "play_lib_voice": play_lib_voice,
+                "save_to_lib": save_to_lib,
+                "filter_vlib_by_category": filter_vlib_by_category,
+                "refresh_voice_lib": refresh_voice_lib,
+                "select_voice_from_browser": select_voice_from_browser,
+                "preview_bound_voice": preview_bound_voice,
+            },
+        },
     )
 
     p_refresh.click(refresh_projects_full, [], [p_sel])
     chain = p_open.click(open_project, [p_sel, ss], [p_summary, v_table, v_role, v_role_title, v_lib, s_log, v_status])
     _open_chain_rest(chain)
     p_del.click(delete_project, p_sel, p_sel)
-    v_table.change(
-        select_role_from_list,
-        [v_table, ss],
-        [v_role, v_role_title, v_audio, v_lib, v_current, v_preview_audio, v_bind_msg],
-    )
-    v_role_search.change(refresh_role_list, [v_role_search, v_role, ss], [v_table])
-    v_bind.click(
-        bind_voice,
-        [v_role, v_audio, v_lib, ss],
-        [v_bind_msg, v_table, v_lib, v_role, v_role_title, v_current],
-    )
-    v_lib.change(play_lib_voice, v_lib, v_audio)
-    v_lib.change(lambda c: f"*当前参考音频: 音色库/{c}*" if c else "*当前参考音频: 未选择*", v_lib, v_current)
-    v_audio.change(lambda f: f"*当前参考音频: {os.path.basename(f) if f else '未选择'}*", v_audio, v_current)
-    v_save_btn.click(save_to_lib, [v_record, v_upload_clone, v_save_name, v_save_category, ss], [v_save_msg, v_lib, e_voice, v_save_category])
-    v_bind_category.change(filter_vlib_by_category, [v_bind_category], v_lib)
-    v_lib_search.change(refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
-    v_lib_category.change(refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
-    v_lib_browser.select(select_voice_from_browser, [v_lib_browser], [v_lib, v_preview_audio])
     s_start.click(do_synthesis, [ss, s_beam, s_emo, s_override, s_alpha, s_rate, s_chapters_sel], outputs=[s_log, s_queue_list]).then(
         refresh_top_status, [ss], [top_status])
     s_cancel.click(cancel, [ss], outputs=s_log).then(refresh_top_status, [ss], [top_status])
@@ -1619,7 +1591,6 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     e_regenerate.click(regenerate_segment, [e_seg_sel, e_emo, e_alpha, e_rate, e_voice, ss], [e_seg_audio, e_regenerate_msg])
     e_go.click(do_export, [e_fmt, e_br, e_save_dir, ss], [e_out, e_path])
     e_subtitle_btn.click(do_export_subtitles, [ss, e_subtitle], [e_subtitle_out, e_subtitle_msg])
-    v_preview_btn.click(preview_bound_voice, [v_role, v_audio, v_lib, ss], v_preview_audio)
 
     # ── 角色单独补录 / 补合成导出 ──
     sup_refresh.click(refresh_supplement_roles, [ss], [sup_role])
