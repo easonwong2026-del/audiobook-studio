@@ -14,7 +14,7 @@ from repositories.project_v4_repository import (
     ProjectV4Repository,
     V4ProjectAlreadyExistsError,
 )
-from repositories.runtime_repository import RuntimeRepository
+from repositories.runtime_repository import RUNTIME_SCHEMA_VERSION, RuntimeRepository
 from services.source_segmenter import SourceSegmenter
 
 
@@ -114,14 +114,19 @@ def test_atomic_project_creation_and_runtime_schema(tmp_path):
     assert repository.load_manifest(path) == manifest
     assert (path / "source/source.txt").read_text(encoding="utf-8") == "他说：“你好。”"
     runtime = RuntimeRepository(path / "runtime/runtime.db")
-    assert runtime.schema_version() == 4
+    assert runtime.schema_version() == RUNTIME_SCHEMA_VERSION
     with sqlite3.connect(runtime.path) as connection:
         tables = {
             row[0] for row in connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }
-    assert {"migrations", "synthesis_tasks", "cache_entries"} <= tables
+    assert {
+        "migrations",
+        "synthesis_tasks",
+        "cache_entries",
+        "synthesis_metrics",
+    } <= tables
 
 
 def test_duplicate_and_windows_style_names_are_rejected(tmp_path):
@@ -151,7 +156,7 @@ def test_temporary_cleanup_and_idempotent_migration(tmp_path):
     runtime = RuntimeRepository(tmp_path / "runtime.db")
     runtime.initialize()
     runtime.initialize()
-    assert runtime.schema_version() == 4
+    assert runtime.schema_version() == RUNTIME_SCHEMA_VERSION
 
 
 def test_failed_creation_removes_temporary_directory(tmp_path, monkeypatch):
@@ -239,12 +244,18 @@ def test_existing_runtime_v1_database_migrates_to_latest(tmp_path):
         )
     runtime = RuntimeRepository(path)
     runtime.initialize()
-    assert runtime.schema_version() == 4
+    assert runtime.schema_version() == RUNTIME_SCHEMA_VERSION
     with sqlite3.connect(path) as connection:
         assert "completed_at" in {
             row[1] for row in connection.execute("PRAGMA table_info(synthesis_tasks)")
         }
         assert "routing_batches" in {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        assert "synthesis_metrics" in {
             row[0]
             for row in connection.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"

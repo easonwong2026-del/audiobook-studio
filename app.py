@@ -1620,6 +1620,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             v4_plan["table"],
             v4_queue["table"],
             v4_profile,
+            v4_queue["summary"],
             v4_chapter,
         ],
     )
@@ -1642,6 +1643,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             v4_plan["table"],
             v4_queue["table"],
             v4_profile,
+            v4_queue["summary"],
             v4_chapter,
         ],
     )
@@ -1673,6 +1675,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             v4_plan["table"],
             v4_queue["table"],
             v4_profile,
+            v4_queue["summary"],
             v4_chapter,
         ],
     )
@@ -1693,24 +1696,34 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     v4_plan["generate"].click(
         v4_ui.generate_v4_plan,
         [v4_project],
-        [v4_plan["table"], v4_plan_status, v4_queue["table"]],
+        [
+            v4_plan["table"],
+            v4_plan_status,
+            v4_queue["table"],
+            v4_queue["summary"],
+        ],
     )
     v4_queue["start"].click(
         v4_ui.run_v4_synthesis,
         [v4_project],
-        [v4_queue["status"], v4_queue["table"], v4_chapter],
+        [
+            v4_queue["status"],
+            v4_queue["table"],
+            v4_queue["summary"],
+            v4_chapter,
+        ],
         concurrency_limit=1,
         concurrency_id="v4-synthesis",
     )
     v4_queue["cancel"].click(
         v4_ui.cancel_v4_synthesis,
         [v4_project],
-        [v4_queue["status"], v4_queue["table"]],
+        [v4_queue["status"], v4_queue["table"], v4_queue["summary"]],
     )
     v4_queue["refresh"].click(
         v4_ui.refresh_v4_queue,
         [v4_project],
-        [v4_queue["table"]],
+        [v4_queue["table"], v4_queue["summary"]],
     )
     v4_chapter.change(
         v4_ui.chapter_audio,

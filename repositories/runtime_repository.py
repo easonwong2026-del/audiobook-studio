@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-RUNTIME_SCHEMA_VERSION = 4
+RUNTIME_SCHEMA_VERSION = 5
 
 _MIGRATIONS = {
     1: """
@@ -91,6 +91,31 @@ _MIGRATIONS = {
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+    """,
+    5: """
+    CREATE TABLE synthesis_metrics (
+        metric_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id TEXT NOT NULL,
+        attempt INTEGER NOT NULL,
+        text_chars INTEGER NOT NULL,
+        text_tokens INTEGER NOT NULL,
+        voice_id TEXT,
+        auto_emotion INTEGER NOT NULL CHECK (auto_emotion IN (0, 1)),
+        elapsed_seconds REAL NOT NULL,
+        audio_duration REAL,
+        memory_allocated_before_mb REAL,
+        memory_allocated_after_mb REAL,
+        memory_reserved_before_mb REAL,
+        memory_reserved_after_mb REAL,
+        max_memory_allocated_mb REAL,
+        free_vram_before_mb REAL,
+        free_vram_after_mb REAL,
+        cache_hit INTEGER NOT NULL CHECK (cache_hit IN (0, 1)),
+        error_type TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX idx_synthesis_metrics_task
+        ON synthesis_metrics(task_id, metric_id);
     """,
 }
 
@@ -336,6 +361,56 @@ class RuntimeRepository:
             )
             connection.commit()
             return cursor.rowcount
+
+    def record_synthesis_metric(self, metric: dict[str, Any]) -> None:
+        """Persist bounded operational telemetry without storing source text."""
+        fields = (
+            "task_id",
+            "attempt",
+            "text_chars",
+            "text_tokens",
+            "voice_id",
+            "auto_emotion",
+            "elapsed_seconds",
+            "audio_duration",
+            "memory_allocated_before_mb",
+            "memory_allocated_after_mb",
+            "memory_reserved_before_mb",
+            "memory_reserved_after_mb",
+            "max_memory_allocated_mb",
+            "free_vram_before_mb",
+            "free_vram_after_mb",
+            "cache_hit",
+            "error_type",
+        )
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                f"""
+                INSERT INTO synthesis_metrics({", ".join(fields)})
+                VALUES ({", ".join("?" for _ in fields)})
+                """,
+                tuple(metric.get(field) for field in fields),
+            )
+            connection.commit()
+
+    def synthesis_metrics(self, task_id: str | None = None) -> list[dict[str, Any]]:
+        """Return sanitized runtime metrics for diagnostics and UI summaries."""
+        with sqlite3.connect(self.path) as connection:
+            connection.row_factory = sqlite3.Row
+            if task_id is None:
+                rows = connection.execute(
+                    "SELECT * FROM synthesis_metrics ORDER BY metric_id"
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM synthesis_metrics
+                     WHERE task_id = ? ORDER BY metric_id
+                    """,
+                    (task_id,),
+                ).fetchall()
+        return [dict(row) for row in rows]
 
     def resolved_audio_paths(self, task_id: str) -> list[str]:
         """Resolve a plan task to its completed leaf outputs after OOM splitting."""

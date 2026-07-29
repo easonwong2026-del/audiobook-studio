@@ -364,7 +364,10 @@ class ProjectRepository:
             SpeakersDocument,
             ValidationError,
         )
-        from repositories.runtime_repository import RuntimeRepository
+        from repositories.runtime_repository import (
+            RUNTIME_SCHEMA_VERSION,
+            RuntimeRepository,
+        )
 
         invalid: list[str] = []
         try:
@@ -432,9 +435,10 @@ class ProjectRepository:
         except (OSError, UnicodeError, json.JSONDecodeError, ValidationError):
             invalid.append("script/speakers.json")
         try:
-            if RuntimeRepository(
+            runtime_version = RuntimeRepository(
                 os.path.join(path, manifest.runtime_db_path)
-            ).schema_version() != 4:
+            ).schema_version()
+            if not 0 < runtime_version <= RUNTIME_SCHEMA_VERSION:
                 invalid.append("runtime/runtime.db")
         except (OSError, ValueError, sqlite3.Error):
             invalid.append("runtime/runtime.db")
