@@ -1,4 +1,4 @@
-# 有声书合成工作台 (Audiobook Studio) · v3.3.2
+# 有声书合成工作台 (Audiobook Studio) · v3.3.3
 
 [![Tests](https://github.com/easonwong2026-del/audiobook-studio/actions/workflows/tests.yml/badge.svg)](https://github.com/easonwong2026-del/audiobook-studio/actions/workflows/tests.yml)
 
@@ -13,7 +13,7 @@
 
 | 项 | 说明 |
 |----|------|
-| 当前版本 | **v3.3.2**（设置与角色声音页面修复） |
+| 当前版本 | **v3.3.3**（真实书稿创建、模型发现与残留恢复加固） |
 | 产品定位 | **AI 驱动的本地有声书制作工作台** |
 | 是否独立安装软件 | **否** —— 不提供 Windows 安装包，也不内置模型 / Torch / CUDA / FFmpeg / IndexTTS2 本体 |
 | 部署方式 | **轻量工作台源码 + 外部推理环境**（IndexTTS2 仓库及其虚拟环境由用户单独准备） |
@@ -49,7 +49,7 @@
 | 分区 | 职责 |
 |------|------|
 | 工作台 | 当前项目、章节进度、角色绑定、最近任务和待处理问题 |
-| 项目创建 | TXT / DOCX / EPUB 导入、AI 剧本导演、人工校正、原子创建；高级入口支持 `structured_script.json` |
+| 项目创建 | 上传后自动派生项目名；TXT / DOCX / EPUB 采用 12,000 字符批次、v3.1 AI 批次协议、截断拆分重试和原子创建；高级入口支持 `structured_script.json` |
 | 角色与声音 | 按“选择角色 → 选择声音 → 确认绑定”配置 `voice_bindings.json` |
 | 生产与质检 | 内含合成中心、试听质检、角色补录；支持队列、暂停 / 恢复、断点续跑 |
 | 交付 | 章节拼接 → 均衡 → LUFS 归一 → 转码 mp3 / m4b / wav，并生成字幕 |
@@ -95,7 +95,7 @@ audiobook-studio/
 ├── domain/                 # 领域类型
 ├── tests/                  # 测试
 ├── docs/                   # 设计文档
-│   └── releases/v3.3.2.md  # 当前版本发布与验收说明
+│   └── releases/v3.3.3.md  # 当前版本发布与验收说明
 └── 更新日志.txt             # 中文变更日志
 ```
 
@@ -156,7 +156,7 @@ export AUDIOBOOK_STUDIO_PYTHON=/path/to/index-tts/.venv/bin/python
 | `DEEPSEEK_API_KEY` | DeepSeek 剧本导演密钥 | 无 |
 | `AUDIOBOOK_STUDIO_OPENAI_MODEL` | OpenAI 导演模型 | `gpt-5.6` |
 | `AUDIOBOOK_STUDIO_DEEPSEEK_MODEL` | DeepSeek 导演模型 | `deepseek-v4-pro` |
-| `AUDIOBOOK_STUDIO_AI_MAX_INPUT_CHARS` | 远程分析单批最大字符数 | `50000` |
+| `AUDIOBOOK_STUDIO_AI_MAX_INPUT_CHARS` | 远程分析单批最大字符数 | `12000` |
 
 ---
 
@@ -217,6 +217,16 @@ DeepSeek Provider，完成 AI 分析和人工校正后直接创建项目。远�
 Key 优先保存在系统 Keyring；报告、日志和前端状态只显示是否配置及来源。
 
 也可在高级区域上传已有 `structured_script.json` 创建项目。
+
+v3.3.3 会从上传文件的原始文件名自动填写项目名和作品名，但不会覆盖手工输入。
+远程分析使用 `audiobook-script-batch-v3.1`，同章长文按自然段和中文句末标点拆分；
+检测到输出长度限制或末尾截断 JSON 时，只拆小并重试当前批次。项目目录仅在全部
+批次通过协议、范围、顺序和覆盖检查后原子创建。
+
+设置页的模型字段支持从 Provider `/models` 接口刷新，也保留自定义模型 ID。
+「数据与存储 → 异常与残留项目」可查看不完整目录，并在用户确认后移动到
+`<data_dir>/.trash/projects/`；该操作不会自动重发付费 AI 请求，也不会归档合法或
+Legacy 项目。
 
 命令行可先把原稿转换为 v3 剧本：
 
@@ -353,7 +363,7 @@ Gradio 界面和项目管理可在无 GPU 环境运行，但实际的 TTS 合成
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | V3.2 系统架构和测试策略 |
 | [`CHANGELOG.md`](CHANGELOG.md) | 完整变更记录 |
 | [`docs/system_design.md`](docs/system_design.md) | 系统详细设计 |
-| [`docs/releases/v3.3.2.md`](docs/releases/v3.3.2.md) | GitHub Release 说明 |
+| [`docs/releases/v3.3.3.md`](docs/releases/v3.3.3.md) | GitHub Release 说明 |
 | [`icon.png`](icon.png) / [`icon.ico`](icon.ico) | 快捷方式与启动器图标（PNG 256px / ICO 7 种尺寸） |
 | [`DESIGN.md`](DESIGN.md) | UI 设计系统（Stripe 浅色招牌风） |
 

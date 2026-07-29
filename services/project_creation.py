@@ -18,12 +18,12 @@ import shutil
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from ai.providers import create_provider
 from lib import config, script_loader
 from lib.text_importer import load_text
-from repositories.project_repo import ProjectRepository
+from repositories.project_repo import ProjectRepository, sanitize_project_name
 from services.ai_settings import AiSettingsService
 from services.script_director import ScriptDirectorService
 from services.script_consistency import check_script_consistency
@@ -46,7 +46,31 @@ class ProjectCreationService:
 
     @staticmethod
     def _safe_name(s: str) -> str:
-        return "".join(c if c.isalnum() or c in "-_" else "_" for c in s)
+        return sanitize_project_name(s)
+
+    @staticmethod
+    def _assert_slot_available(project_name: str) -> None:
+        inspection = ProjectRepository.inspect_project_slot(project_name)
+        if inspection.status == "available":
+            return
+        if inspection.status == "valid":
+            raise ValueError(f"项目「{inspection.name}」已存在，请打开已有项目或更换名称")
+        if inspection.status == "legacy":
+            raise ValueError(f"项目「{inspection.name}」存在于旧版项目目录，请勿覆盖")
+        if inspection.status == "incomplete":
+            missing = "、".join(inspection.missing_files) or "未知文件"
+            raise ValueError(
+                f"发现上次创建失败遗留的目录「{inspection.name}」；缺失：{missing}。"
+                "请先点击“清理残留并重试”"
+            )
+        if inspection.status == "temporary":
+            raise ValueError(
+                f"发现临时项目目录「{inspection.name}」，请先归档残留后重试"
+            )
+        raise ValueError(
+            f"项目目录「{inspection.name}」存在，但项目文件损坏。"
+            "请先移动到回收站后重试"
+        )
 
     @staticmethod
     def _cleanup_tmp(tmp_dir: str) -> None:
@@ -60,6 +84,7 @@ class ProjectCreationService:
         title: Optional[str] = None,
         author: Optional[str] = None,
         provider_name: Optional[str] = None,
+        progress_callback: Optional[Callable[[str], None]] = None,
     ) -> ProjectCreationResult:
         """从原始书稿创建项目。
 
@@ -72,34 +97,35 @@ class ProjectCreationService:
             raise ValueError(f"书稿文件不存在：{source_path}")
 
         safe_name = ProjectCreationService._safe_name(project_name.strip())
-        data_root = config.get_projects_root()
-        project_dir = os.path.join(data_root, safe_name)
-
         source_ext = Path(source_path).suffix.lower()
         if source_ext not in (".txt", ".docx", ".epub"):
             raise ValueError(f"不支持的文件格式：{source_ext}；请使用 .txt / .docx / .epub")
-
-        if os.path.exists(project_dir):
-            raise ValueError(f"项目「{project_name}」已存在，请使用其他名称")
 
         tmp_root = os.path.join(config.get_data_dir(), ".tmp")
         os.makedirs(tmp_root, exist_ok=True)
         tmp_dir = os.path.join(tmp_root, f"create_{uuid.uuid4().hex}")
         warnings: list[str] = []
         script_path = ""
+        notify = progress_callback or (lambda _message: None)
 
         try:
             # 1. 读取原始文本
+            notify("1/6 读取书稿")
             text = load_text(source_path)
 
-            # 2. 获取 AI 配置（含密钥、基地址、超时）
+            # 2. 在任何付费请求前检查项目槽位
+            notify("2/6 检查项目名称")
+            ProjectCreationService._assert_slot_available(safe_name)
+
+            # 3. 获取 AI 配置（含密钥、基地址、超时）
             ai_config = (
                 AiSettingsService.get_effective_provider_config(provider_name)
                 if provider_name
                 else AiSettingsService.get_effective_provider_config()
             )
+            notify("3/6 切分章节和批次")
 
-            # 3. 创建 Provider（密钥 / base_url / timeout 显式透传）
+            # 4. 创建 Provider（密钥 / base_url / timeout 显式透传）
             provider = create_provider(
                 ai_config["provider"],
                 model=ai_config.get("model") or None,
@@ -107,9 +133,12 @@ class ProjectCreationService:
                 base_url=ai_config.get("base_url") or None,
                 timeout=int(ai_config.get("timeout", 180)),
             )
+            if hasattr(provider, "progress_callback"):
+                provider.progress_callback = notify
             director = ScriptDirectorService(provider)
 
-            # 4. AI 分析
+            # 4. AI 分析；远程 Provider 会进一步报告批次和自动拆分状态
+            notify("4/6 AI 分析")
             script = director.analyze_text(
                 text,
                 title=title or Path(source_path).stem,
@@ -117,6 +146,7 @@ class ProjectCreationService:
             )
 
             # 5. 校验结构化剧本
+            notify("5/6 校验结构化剧本")
             script_obj = script_loader.from_dict(script)
             errors = script_loader.validate_script(script_obj)
             if errors:
@@ -133,13 +163,14 @@ class ProjectCreationService:
                 if item["severity"] == "warning"
             )
 
-            # 6. 写入临时 structured_script.json（仅用于传给 ProjectRepository）
+            # 写入临时 structured_script.json（仅用于传给 ProjectRepository）
             os.makedirs(tmp_dir, exist_ok=True)
             script_path = os.path.join(tmp_dir, "structured_script.json")
             with open(script_path, "w", encoding="utf-8") as f:
                 json.dump(script, f, ensure_ascii=False, indent=2)
 
-            # 7. 委托 ProjectRepository 创建项目
+            # 6. 委托 ProjectRepository 原子创建项目
+            notify("6/6 创建项目目录")
             ProjectRepository.create_project(safe_name, script_path)
 
             chapters = script.get("chapters", [])
@@ -176,11 +207,7 @@ class ProjectCreationService:
             raise ValueError(f"剧本文件不存在：{script_path}")
 
         safe_name = ProjectCreationService._safe_name(project_name.strip())
-        data_root = config.get_projects_root()
-        project_dir = os.path.join(data_root, safe_name)
-
-        if os.path.exists(project_dir):
-            raise ValueError(f"项目「{project_name}」已存在，请使用其他名称")
+        ProjectCreationService._assert_slot_available(safe_name)
 
         script = script_loader.load_script(script_path)
         errors = script_loader.validate_script(script)

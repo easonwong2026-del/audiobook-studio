@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from ._remote import RemoteJsonDirectorProvider, parse_json_content
+from .exceptions import ProviderOutputTruncatedError
 
 
 class OpenAIProvider(RemoteJsonDirectorProvider):
@@ -32,7 +33,9 @@ class OpenAIProvider(RemoteJsonDirectorProvider):
                 if content.get("type") in {"output_text", "text"} and isinstance(text, str):
                     texts.append(text)
         if not texts:
-            raise RuntimeError("OpenAI Responses 响应缺少 output_text")
+            raise ProviderOutputTruncatedError(
+                "OpenAI Responses 请求成功但 output_text 为空"
+            )
         return "".join(texts)
 
     def _request_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
@@ -51,4 +54,23 @@ class OpenAIProvider(RemoteJsonDirectorProvider):
             payload,
             self.timeout,
         )
+        status = str(response.get("status") or "").lower()
+        incomplete = response.get("incomplete_details")
+        if status == "incomplete" or incomplete:
+            reason = (
+                incomplete.get("reason")
+                if isinstance(incomplete, dict)
+                else "incomplete"
+            )
+            raise ProviderOutputTruncatedError(
+                f"OpenAI Responses 输出未完成（{reason or 'unknown'}）"
+            )
+        if status in {"failed", "cancelled"}:
+            raise RuntimeError(f"OpenAI Responses 请求状态异常：{status}")
+        for item in response.get("output", []):
+            if not isinstance(item, dict):
+                continue
+            for content in item.get("content", []):
+                if isinstance(content, dict) and content.get("type") == "refusal":
+                    raise RuntimeError("OpenAI Responses 拒绝处理当前批次")
         return parse_json_content(self._extract_output_text(response))

@@ -8,7 +8,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import urllib.error
+import urllib.request
 from typing import Any, Optional
+
+from ai.providers import DeepSeekProvider, OpenAIProvider
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +24,15 @@ _CONFIG_PATH = os.path.join(
 KEYRING_SERVICE = "AudiobookStudio"
 KEYRING_OPENAI_KEY = "openai_api_key"
 KEYRING_DEEPSEEK_KEY = "deepseek_api_key"
+PROVIDER_DEFAULT_MODELS = {
+    "local": ["本地离线基线"],
+    "openai": [OpenAIProvider.default_model],
+    "deepseek": [DeepSeekProvider.default_model],
+}
+PROVIDER_DEFAULT_BASE_URLS = {
+    "openai": OpenAIProvider.default_base_url,
+    "deepseek": DeepSeekProvider.default_base_url,
+}
 
 
 class SecretStoreUnavailableError(RuntimeError):
@@ -103,6 +116,8 @@ def _delete_secret(service: str, username: str) -> None:
 
 class AiSettingsService:
     """AI Provider 配置的读写和有效配置计算。"""
+
+    DEFAULT_MODELS = PROVIDER_DEFAULT_MODELS
 
     @staticmethod
     def get_provider_config() -> dict[str, Any]:
@@ -192,11 +207,88 @@ class AiSettingsService:
         }
 
     @staticmethod
+    def get_default_model(provider: str) -> str:
+        normalized = str(provider or "local").strip().lower()
+        models = PROVIDER_DEFAULT_MODELS.get(normalized, [])
+        if not models or normalized == "local":
+            return ""
+        return models[0]
+
+    @staticmethod
+    def get_default_base_url(provider: str) -> str:
+        return PROVIDER_DEFAULT_BASE_URLS.get(str(provider or ""), "")
+
+    @staticmethod
+    def list_models(
+        provider: str,
+        api_key: str = "",
+        base_url: str = "",
+        timeout: float = 30.0,
+    ) -> list[str]:
+        """Read model IDs from the current form endpoint without persisting it."""
+        provider = str(provider or "local").strip().lower()
+        if provider == "local":
+            return list(PROVIDER_DEFAULT_MODELS["local"])
+        if provider not in PROVIDER_DEFAULT_BASE_URLS:
+            raise ValueError(f"不支持的 AI Provider：{provider}")
+
+        effective_key = api_key.strip() if api_key and api_key.strip() else (
+            AiSettingsService.get_api_key(provider) or ""
+        )
+        if not effective_key:
+            raise ValueError(f"{provider.title()} API Key 尚未配置")
+
+        saved = AiSettingsService.get_provider_config()
+        effective_url = (
+            base_url.strip()
+            if base_url and base_url.strip()
+            else saved.get(f"{provider}_base_url")
+            or AiSettingsService.get_default_base_url(provider)
+        )
+        effective_timeout = min(max(float(timeout), 5), 60)
+        endpoint = f"{effective_url.rstrip('/')}/models"
+        request = urllib.request.Request(
+            endpoint,
+            headers={
+                "Authorization": f"Bearer {effective_key}",
+                "Content-Type": "application/json",
+            },
+            method="GET",
+        )
+        with urllib.request.urlopen(request, timeout=effective_timeout) as response:
+            body = response.read().decode("utf-8")
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("模型列表接口返回了无效 JSON") from exc
+        data = payload.get("data", []) if isinstance(payload, dict) else []
+        model_ids = {
+            str(item.get("id")).strip()
+            for item in data
+            if isinstance(item, dict) and str(item.get("id") or "").strip()
+        }
+        return sorted(model_ids)
+
+    @staticmethod
+    def model_source(provider: str, model: str, api_models: Optional[list[str]] = None) -> str:
+        selected = str(model or "").strip()
+        default = AiSettingsService.get_default_model(provider)
+        saved = AiSettingsService.get_provider_config().get(f"{provider}_model", "")
+        if not selected or selected == default:
+            return "Provider 默认"
+        if selected == saved:
+            return "已保存配置"
+        if api_models and selected in api_models:
+            return "API 模型列表"
+        return "自定义输入"
+
+    @staticmethod
     def check_connection(
         provider: str,
         api_key: str = "",
         base_url: str = "",
         timeout: float = 30.0,
+        model: str = "",
     ) -> str:
         """测试 Provider 连接，使用提供的参数（优先）而非已保存配置。
 
@@ -212,35 +304,38 @@ class AiSettingsService:
         if provider == "local":
             return "✅ 本地离线基线无需网络连接。"
 
-        effective_key = api_key.strip() if api_key and api_key.strip() else (
-            AiSettingsService.get_api_key(provider) or ""
-        )
-        if not effective_key:
-            return (
-                f"⚠ **{provider.title()} API Key 尚未配置**。\n\n"
-                f"请输入密钥并保存，或设置环境变量。"
-            )
-
-        effective_url = base_url.strip() if base_url and base_url.strip() else (
-            "https://api.openai.com/v1"
-            if provider == "openai"
-            else "https://api.deepseek.com"
-        )
-        effective_timeout = min(max(float(timeout), 5), 60)
-
         try:
-            import urllib.request
-            import urllib.error
-            endpoint = f"{effective_url.rstrip('/')}/models"
-            headers = {
-                "Authorization": f"Bearer {effective_key}",
-                "Content-Type": "application/json",
-            }
-            req = urllib.request.Request(endpoint, headers=headers, method="GET")
-            with urllib.request.urlopen(req, timeout=effective_timeout) as resp:
-                resp.read()
-            return f"✅ **{provider.title()}** 连接成功。Endpoint：`{effective_url}`"
+            models = AiSettingsService.list_models(
+                provider,
+                api_key=api_key,
+                base_url=base_url,
+                timeout=timeout,
+            )
+            current_model = (
+                str(model or "").strip()
+                or AiSettingsService.get_default_model(provider)
+            )
+            lines = [
+                f"✅ **{provider.title()}** Provider 连接成功",
+                f"✅ 模型列表读取成功（{len(models)} 个）",
+            ]
+            if current_model and current_model in models:
+                lines.append(f"✅ 当前模型 `{current_model}` 在账户可用列表中")
+            elif current_model:
+                lines.append(
+                    f"⚠ Provider 连接成功，但未在模型列表中找到当前模型 "
+                    f"`{current_model}`。如果服务允许隐藏模型列表，可继续保存并尝试调用。"
+                )
+            return "\n\n".join(lines)
         except Exception as exc:
+            effective_key = api_key.strip() if api_key and api_key.strip() else (
+                AiSettingsService.get_api_key(provider) or ""
+            )
+            if not effective_key:
+                return (
+                    f"⚠ **{provider.title()} API Key 尚未配置**。\n\n"
+                    "请输入密钥并保存，或设置环境变量。"
+                )
             msg = str(exc)[:200]
             # 不要在错误信息中泄露 API Key
             safe_msg = msg.replace(effective_key, "***") if effective_key in msg else msg

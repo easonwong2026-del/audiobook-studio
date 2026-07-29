@@ -624,3 +624,89 @@ class TestAtomicCreateFailure:
         if ws_dir and os.path.isdir(ws_dir):
             tmp_dirs = [d for d in os.listdir(ws_dir) if d.startswith(".tmp_")]
             assert len(tmp_dirs) == 0, f"重复创建后残留临时目录：{tmp_dirs}"
+
+
+class TestProjectSlotInspection:
+    @pytest.fixture(autouse=True)
+    def _isolated_roots(self, tmp_path):
+        self.original = (
+            ProjectRepository.WORKSPACE_ROOT,
+            ProjectRepository.LEGACY_ROOT,
+            ProjectRepository._INITIALIZED,
+        )
+        self.workspace = tmp_path / "data" / "projects"
+        self.legacy = tmp_path / "legacy"
+        self.workspace.mkdir(parents=True)
+        self.legacy.mkdir()
+        ProjectRepository.WORKSPACE_ROOT = str(self.workspace)
+        ProjectRepository.LEGACY_ROOT = str(self.legacy)
+        ProjectRepository._INITIALIZED = True
+        self.script_path = _make_minimal_script(tmp_path, "slot_script.json")
+        yield
+        (
+            ProjectRepository.WORKSPACE_ROOT,
+            ProjectRepository.LEGACY_ROOT,
+            ProjectRepository._INITIALIZED,
+        ) = self.original
+
+    def test_available_and_valid_slots(self):
+        assert ProjectRepository.inspect_project_slot("可用项目").status == "available"
+        ProjectRepository.create_project("完整项目", self.script_path)
+        inspection = ProjectRepository.inspect_project_slot("完整项目")
+        assert inspection.status == "valid"
+        assert inspection.location == "workspace"
+
+    def test_incomplete_and_corrupted_slots_are_visible(self):
+        incomplete = self.workspace / "残留"
+        incomplete.mkdir()
+        (incomplete / "project.json").write_text("{}", encoding="utf-8")
+        corrupted = self.workspace / "损坏"
+        corrupted.mkdir()
+        for marker in ("project.json", "structured_script.json", "voice_bindings.json"):
+            (corrupted / marker).write_text("{bad", encoding="utf-8")
+
+        first = ProjectRepository.inspect_project_slot("残留")
+        second = ProjectRepository.inspect_project_slot("损坏")
+        assert first.status == "incomplete"
+        assert "structured_script.json" in first.missing_files
+        assert second.status == "corrupted"
+        assert {item.name for item in ProjectRepository.list_abnormal_projects()} == {
+            "残留",
+            "损坏",
+        }
+        assert "残留" not in ProjectRepository.scan_projects()
+
+    def test_temporary_and_legacy_statuses(self):
+        (self.workspace / ".tmp_书稿_abc").mkdir()
+        legacy_project = self.legacy / "旧项目"
+        legacy_project.mkdir()
+        assert (
+            ProjectRepository.inspect_project_slot(".tmp_书稿_abc").status
+            == "temporary"
+        )
+        legacy = ProjectRepository.inspect_project_slot("旧项目")
+        assert legacy.status == "legacy"
+        assert legacy.location == "legacy"
+
+    def test_archive_orphan_restores_name_and_protects_valid_and_legacy(self):
+        orphan = self.workspace / "待恢复"
+        orphan.mkdir()
+        archived = ProjectRepository.archive_orphan_project("待恢复")
+        assert os.path.isdir(archived)
+        assert ".trash" in archived
+        assert ProjectRepository.inspect_project_slot("待恢复").status == "available"
+
+        ProjectRepository.create_project("合法", self.script_path)
+        with pytest.raises(ValueError, match="仅可归档"):
+            ProjectRepository.archive_orphan_project("合法")
+
+        (self.legacy / "旧版").mkdir()
+        with pytest.raises(ValueError, match="仅可归档"):
+            ProjectRepository.archive_orphan_project("旧版")
+
+    def test_trash_directory_never_appears_in_project_scan(self):
+        trash = self.workspace / ".trash"
+        trash.mkdir()
+        for marker in ("project.json", "structured_script.json", "voice_bindings.json"):
+            (trash / marker).write_text("{}", encoding="utf-8")
+        assert ".trash" not in ProjectRepository.scan_projects()

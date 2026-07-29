@@ -27,11 +27,17 @@ def create_settings_page() -> dict:
                             value="local",
                             scale=2,
                         )
-                        s_model = gr.Textbox(
-                            label="默认模型（可选）",
-                            placeholder="留空使用 Provider 默认模型",
+                        s_model = gr.Dropdown(
+                            label="模型",
+                            choices=[],
+                            allow_custom_value=True,
+                            info="可从账户模型列表选择，也可输入兼容代理的自定义模型 ID",
                             scale=2,
                         )
+                    with gr.Row(elem_classes=["settings-model-actions"]):
+                        s_models_refresh = gr.Button("刷新模型列表", size="sm")
+                        s_model_default = gr.Button("恢复 Provider 默认模型", size="sm")
+                    s_model_source = gr.Markdown("当前模型来源：Provider 默认")
                     s_provider_config = gr.HTML(value="<p>当前 Provider 无需配置密钥。</p>")
 
                     s_api_key = gr.Textbox(
@@ -73,6 +79,27 @@ def create_settings_page() -> dict:
                         s_data_apply = gr.Button("应用", variant="primary")
                         s_data_open = gr.Button("打开数据文件夹")
                     s_data_msg = gr.Markdown("")
+                with gr.Group(elem_classes=["settings-card"]):
+                    gr.Markdown("##### 异常与残留项目")
+                    gr.Markdown(
+                        "这里只列出不完整、损坏或临时目录。归档会移动到数据目录的 "
+                        "`.trash/projects`，不会永久删除。"
+                    )
+                    s_orphan_table = gr.Dataframe(
+                        headers=["项目名称", "状态", "路径", "缺失/损坏文件", "最后修改时间"],
+                        datatype=["str", "str", "str", "str", "str"],
+                        interactive=False,
+                        wrap=True,
+                    )
+                    s_orphan_name = gr.Dropdown(
+                        label="选择要处理的异常项目",
+                        choices=[],
+                    )
+                    with gr.Row():
+                        s_orphan_refresh = gr.Button("刷新")
+                        s_orphan_open = gr.Button("打开目录")
+                        s_orphan_archive = gr.Button("移动到回收站", variant="stop")
+                    s_orphan_status = gr.Markdown("")
 
             with gr.Tab("系统信息"):
                 with gr.Group(elem_classes=["settings-card"]):
@@ -106,6 +133,9 @@ def create_settings_page() -> dict:
         "group": grp,
         "s_provider": s_provider,
         "s_model": s_model,
+        "s_models_refresh": s_models_refresh,
+        "s_model_default": s_model_default,
+        "s_model_source": s_model_source,
         "s_provider_config": s_provider_config,
         "s_api_key": s_api_key,
         "s_base_url": s_base_url,
@@ -118,6 +148,12 @@ def create_settings_page() -> dict:
         "s_data_apply": s_data_apply,
         "s_data_open": s_data_open,
         "s_data_msg": s_data_msg,
+        "s_orphan_table": s_orphan_table,
+        "s_orphan_name": s_orphan_name,
+        "s_orphan_refresh": s_orphan_refresh,
+        "s_orphan_open": s_orphan_open,
+        "s_orphan_archive": s_orphan_archive,
+        "s_orphan_status": s_orphan_status,
         "s_version": s_version,
         "s_python": s_python,
         "s_status_info": s_status_info,

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.3.3] - 2026-07-29
+
+### Added
+
+- 上传 TXT、DOCX、EPUB 或 JSON 后，从原始文件名自动填写项目名称/作品名，并即时检查名称槽位。
+- 设置页模型改为可编辑下拉框，支持调用当前 Provider `/models`、恢复唯一默认模型并显示模型来源。
+- 数据设置增加异常与残留项目列表、打开目录和显式移动到 `.trash/projects` 的恢复入口。
+
+### Changed
+
+- 远程导演默认单批输入从 50,000 降至 12,000 字符；优先按章节、自然段和中文句末标点拆分。
+- AI 输出改用 `audiobook-script-batch-v3.1`，同章多批按来源章节合并。
+
+### Fixed
+
+- DeepSeek `finish_reason=length`、OpenAI Responses incomplete 和末尾截断 JSON 现在会触发当前批次的有界拆分重试（最多 3 层、最小叶片最多 2 次）。
+- 正式项目仅在所有批次完成协议、枚举、范围、顺序和原文覆盖检查后原子创建。
+- 项目名称占用现在区分完整、不完整、损坏、临时和 Legacy 目录；空 Legacy 根不再误读当前目录。
+
+### Security
+
+- 模型刷新、连接检查和 AI 失败摘要不记录 API Key、完整书稿或完整 Provider 原始响应。
+- 残留清理只在用户明确点击后归档；合法项目和 Legacy 项目不会经此接口移动。
+
 ## [3.3.2] - 2026-07-29
 
 ### Fixed

@@ -7,7 +7,12 @@
 from typing import Any, Optional
 
 from .base import ScriptAnalysisProvider
+from ._remote import SourceChunk
 from .deepseek import DeepSeekProvider
+from .exceptions import (
+    ProviderOutputInvalidJsonError,
+    ProviderOutputTruncatedError,
+)
 from .local import LocalDirectorProvider
 from .openai import OpenAIProvider
 
@@ -44,6 +49,9 @@ __all__ = [
     "DeepSeekProvider",
     "LocalDirectorProvider",
     "OpenAIProvider",
+    "ProviderOutputInvalidJsonError",
+    "ProviderOutputTruncatedError",
     "ScriptAnalysisProvider",
+    "SourceChunk",
     "create_provider",
 ]

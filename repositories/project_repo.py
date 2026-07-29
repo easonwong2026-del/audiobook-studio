@@ -16,15 +16,53 @@ import shutil
 import time
 import uuid
 import time as _time
+from dataclasses import dataclass, field
 from typing import ClassVar, Optional
 
 from lib.types import ProjectMeta
 from lib.snapshot import ProjectSnapshot
 
 from ._atomic import atomic_write as _atomic_write
-from .exceptions import ProjectNotFoundError, AtomicWriteError
+from .exceptions import ProjectNotFoundError
 
 logger = logging.getLogger(__name__)
+
+_PROJECT_MARKERS = (
+    "project.json",
+    "structured_script.json",
+    "voice_bindings.json",
+)
+
+
+def sanitize_project_name(value: str) -> str:
+    """Return the single canonical project-directory name used by UI and storage."""
+    text = str(value or "").strip()
+    safe = "".join(
+        character
+        if character.isalnum() or character in {" ", "-", "_", "."}
+        else "_"
+        for character in text
+    )
+    safe = " ".join(safe.split()).strip()
+    safe = safe.rstrip(".")
+    while "__" in safe:
+        safe = safe.replace("__", "_")
+    if not safe or safe in {".", ".."}:
+        raise ValueError("项目名称不包含可用字符")
+    return safe
+
+
+@dataclass(frozen=True)
+class ProjectSlotInspection:
+    """Structured inspection result for one project directory slot."""
+
+    name: str
+    status: str
+    path: str
+    location: str
+    missing_files: list[str] = field(default_factory=list)
+    invalid_files: list[str] = field(default_factory=list)
+    modified_at: Optional[float] = None
 
 
 class ProjectRepository:
@@ -60,10 +98,10 @@ class ProjectRepository:
         ws = ProjectRepository.WORKSPACE_ROOT or ""
         lg = ProjectRepository.LEGACY_ROOT or ""
         new = os.path.join(ws, name)
-        if os.path.isdir(new):
+        if ws and os.path.isdir(new):
             return new
         old = os.path.join(lg, name)
-        if os.path.isdir(old):
+        if lg and os.path.isdir(old):
             return old
         return new
 
@@ -160,12 +198,203 @@ class ProjectRepository:
         lg = ProjectRepository.LEGACY_ROOT or ""
         for root in (ws, lg):
             if root and os.path.isdir(root):
-                ProjectRepository._cleanup_stale_tmp_dirs(root)
                 names.update(
                     d for d in os.listdir(root)
-                    if ProjectRepository._is_valid_project_dir(os.path.join(root, d))
+                    if d != ".trash"
+                    and ProjectRepository._is_valid_project_dir(os.path.join(root, d))
                 )
         return sorted(names)
+
+    @staticmethod
+    def inspect_project_slot(name: str) -> ProjectSlotInspection:
+        """Inspect a project name without changing or deleting user data."""
+        ProjectRepository._ensure_roots()
+        safe_name = sanitize_project_name(name)
+        workspace = ProjectRepository.WORKSPACE_ROOT or ""
+        legacy = ProjectRepository.LEGACY_ROOT or ""
+        workspace_path = os.path.join(workspace, safe_name)
+        legacy_path = os.path.join(legacy, safe_name)
+
+        if workspace and os.path.lexists(workspace_path):
+            return ProjectRepository._inspect_existing_slot(
+                safe_name, workspace_path, "workspace"
+            )
+        if legacy and os.path.lexists(legacy_path):
+            inspected = ProjectRepository._inspect_existing_slot(
+                safe_name, legacy_path, "legacy"
+            )
+            return ProjectSlotInspection(
+                name=inspected.name,
+                status="legacy",
+                path=inspected.path,
+                location=inspected.location,
+                missing_files=inspected.missing_files,
+                invalid_files=inspected.invalid_files,
+                modified_at=inspected.modified_at,
+            )
+        return ProjectSlotInspection(
+            name=safe_name,
+            status="available",
+            path=workspace_path,
+            location="workspace",
+        )
+
+    @staticmethod
+    def _inspect_existing_slot(
+        name: str,
+        path: str,
+        location: str,
+    ) -> ProjectSlotInspection:
+        try:
+            modified_at = os.path.getmtime(path)
+        except OSError:
+            modified_at = None
+
+        if name.startswith(".tmp_"):
+            return ProjectSlotInspection(
+                name=name,
+                status="temporary",
+                path=path,
+                location=location,
+                modified_at=modified_at,
+            )
+        if not os.path.isdir(path):
+            return ProjectSlotInspection(
+                name=name,
+                status="corrupted",
+                path=path,
+                location=location,
+                invalid_files=["项目路径不是目录"],
+                modified_at=modified_at,
+            )
+
+        missing = [
+            marker
+            for marker in _PROJECT_MARKERS
+            if not os.path.isfile(os.path.join(path, marker))
+        ]
+        if missing:
+            return ProjectSlotInspection(
+                name=name,
+                status="incomplete",
+                path=path,
+                location=location,
+                missing_files=missing,
+                modified_at=modified_at,
+            )
+
+        invalid: list[str] = []
+        parsed: dict[str, object] = {}
+        for marker in _PROJECT_MARKERS:
+            try:
+                with open(os.path.join(path, marker), encoding="utf-8") as file:
+                    parsed[marker] = json.load(file)
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                invalid.append(marker)
+
+        project_meta = parsed.get("project.json")
+        if isinstance(project_meta, dict):
+            meta_name = project_meta.get("project_name")
+            if meta_name != name:
+                invalid.append("project.json:project_name")
+        elif "project.json" not in invalid:
+            invalid.append("project.json")
+
+        raw_script = parsed.get("structured_script.json")
+        if isinstance(raw_script, dict):
+            try:
+                from lib import script_loader
+
+                errors = script_loader.validate_script(
+                    script_loader.from_dict(raw_script)
+                )
+                if errors:
+                    invalid.append("structured_script.json")
+            except Exception:
+                invalid.append("structured_script.json")
+        elif "structured_script.json" not in invalid:
+            invalid.append("structured_script.json")
+
+        bindings = parsed.get("voice_bindings.json")
+        if not isinstance(bindings, dict) and "voice_bindings.json" not in invalid:
+            invalid.append("voice_bindings.json")
+
+        invalid = list(dict.fromkeys(invalid))
+        return ProjectSlotInspection(
+            name=name,
+            status="corrupted" if invalid else "valid",
+            path=path,
+            location=location,
+            invalid_files=invalid,
+            modified_at=modified_at,
+        )
+
+    @staticmethod
+    def list_abnormal_projects() -> list[ProjectSlotInspection]:
+        """List visible workspace remnants excluded from the normal bookshelf."""
+        ProjectRepository._ensure_roots()
+        workspace = ProjectRepository.WORKSPACE_ROOT or ""
+        if not workspace or not os.path.isdir(workspace):
+            return []
+        inspections: list[ProjectSlotInspection] = []
+        for name in sorted(os.listdir(workspace)):
+            if name == ".trash":
+                continue
+            inspection = ProjectRepository._inspect_existing_slot(
+                name,
+                os.path.join(workspace, name),
+                "workspace",
+            )
+            if (
+                inspection.location == "workspace"
+                and inspection.status in {"incomplete", "corrupted", "temporary"}
+            ):
+                inspections.append(inspection)
+        return inspections
+
+    @staticmethod
+    def archive_orphan_project(name: str) -> str:
+        """Move an incomplete/corrupted/temp workspace entry into data trash."""
+        ProjectRepository._ensure_roots()
+        raw_name = str(name or "").strip()
+        if (
+            not raw_name
+            or os.path.basename(raw_name) != raw_name
+            or raw_name in {".", ".."}
+        ):
+            raise ValueError("残留项目名称无效")
+        workspace = ProjectRepository.WORKSPACE_ROOT or ""
+        exact_path = os.path.join(workspace, raw_name)
+        inspection = (
+            ProjectRepository._inspect_existing_slot(
+                raw_name,
+                exact_path,
+                "workspace",
+            )
+            if workspace and os.path.lexists(exact_path)
+            else ProjectRepository.inspect_project_slot(raw_name)
+        )
+        if inspection.location != "workspace" or inspection.status not in {
+            "incomplete",
+            "corrupted",
+            "temporary",
+        }:
+            raise ValueError(
+                "仅可归档工作区中的不完整、损坏或临时项目；合法及 Legacy 项目不受影响"
+            )
+
+        data_dir = os.path.dirname(os.path.normpath(workspace))
+        trash_root = os.path.join(data_dir, ".trash", "projects")
+        os.makedirs(trash_root, exist_ok=True)
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        target = os.path.join(trash_root, f"{inspection.name}_{timestamp}")
+        if os.path.lexists(target):
+            target = f"{target}_{uuid.uuid4().hex[:8]}"
+        try:
+            os.replace(inspection.path, target)
+        except OSError:
+            shutil.move(inspection.path, target)
+        return target
 
     @staticmethod
     def _is_valid_project_dir(project_dir: str) -> bool:
@@ -175,7 +404,7 @@ class ProjectRepository:
         name = os.path.basename(project_dir)
         if name.startswith(".tmp_"):
             return False
-        for marker in ("project.json", "structured_script.json", "voice_bindings.json"):
+        for marker in _PROJECT_MARKERS:
             if not os.path.isfile(os.path.join(project_dir, marker)):
                 return False
         return True
@@ -276,6 +505,7 @@ class ProjectRepository:
             FileExistsError: 项目已存在时抛出。
         """
         ProjectRepository._ensure_roots()
+        name = sanitize_project_name(name)
         ws = ProjectRepository.WORKSPACE_ROOT or ""
         project_dir = os.path.join(ws, name)
         if os.path.exists(project_dir):
