@@ -410,3 +410,102 @@ class TestConnectionForm:
             "openai", api_key="sk-super-secret-value",
             base_url="https://api.openai.com/v1", timeout=30)
         assert "sk-super-secret-value" not in result
+
+
+class TestModelDiscovery:
+    def _mock_models(self, monkeypatch, ids, request_log):
+        import json
+        import urllib.request
+
+        class FakeResponse:
+            def read(self):
+                return json.dumps(
+                    {"data": [{"id": model_id} for model_id in ids]}
+                ).encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+        def fake_urlopen(request, timeout=30):
+            request_log.append({
+                "url": request.full_url,
+                "auth": request.headers.get("Authorization", ""),
+            })
+            return FakeResponse()
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    def test_local_returns_fixed_offline_choice(self, monkeypatch):
+        _patch_secrets(monkeypatch)
+        from services.ai_settings import AiSettingsService
+
+        assert AiSettingsService.list_models("local") == ["本地离线基线"]
+
+    @pytest.mark.parametrize("provider", ["openai", "deepseek"])
+    def test_remote_models_are_parsed_deduplicated_and_sorted(
+        self, monkeypatch, provider
+    ):
+        _patch_secrets(monkeypatch, {provider: "sk-keyring"})
+        requests = []
+        self._mock_models(monkeypatch, ["z-model", "a-model", "z-model"], requests)
+        from services.ai_settings import AiSettingsService
+
+        models = AiSettingsService.list_models(
+            provider,
+            api_key="sk-form",
+            base_url="https://custom.example/v1",
+        )
+        assert models == ["a-model", "z-model"]
+        assert requests[0]["url"] == "https://custom.example/v1/models"
+        assert "sk-form" in requests[0]["auth"]
+        assert "sk-keyring" not in requests[0]["auth"]
+
+    def test_empty_form_key_falls_back_to_keyring(self, monkeypatch):
+        _patch_secrets(monkeypatch, {"openai": "sk-keyring"})
+        requests = []
+        self._mock_models(monkeypatch, ["gpt-test"], requests)
+        from services.ai_settings import AiSettingsService
+
+        AiSettingsService.list_models("openai", api_key="")
+        assert "sk-keyring" in requests[0]["auth"]
+
+    def test_refresh_failure_preserves_custom_model(self, monkeypatch):
+        _patch_secrets(monkeypatch, {"openai": "sk-test"})
+        from services.ai_settings import AiSettingsService
+
+        monkeypatch.setattr(
+            AiSettingsService,
+            "list_models",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
+        )
+        from ui.director_handlers import refresh_ai_models
+
+        model_update, status, source = refresh_ai_models(
+            "openai", "private-model", "", "", 30
+        )
+        assert model_update["value"] == "private-model"
+        assert "失败" in status
+        assert "自定义输入" in source
+
+    def test_provider_default_model_has_single_source(self, monkeypatch):
+        _patch_secrets(monkeypatch)
+        from ai.providers import DeepSeekProvider, OpenAIProvider
+        from services.ai_settings import AiSettingsService
+
+        assert AiSettingsService.get_default_model("openai") == OpenAIProvider.default_model
+        assert (
+            AiSettingsService.get_default_model("deepseek")
+            == DeepSeekProvider.default_model
+        )
+
+    def test_settings_model_dropdown_allows_custom_values(self):
+        from pathlib import Path
+
+        page = (
+            Path(__file__).parents[1] / "ui" / "pages" / "settings_page.py"
+        ).read_text(encoding="utf-8")
+        assert "s_model = gr.Dropdown(" in page
+        assert "allow_custom_value=True" in page
