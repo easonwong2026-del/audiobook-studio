@@ -66,6 +66,9 @@ class InvalidationService:
                     "task_id": item.task_id,
                     "chapter_id": item.chapter_id,
                     "speaker_id": item.speaker_id,
+                    "voice_id": item.voice_id,
+                    "actual_text": item.actual_text,
+                    "text_length": item.text_length,
                     "input_fingerprint": item.input_fingerprint,
                 }
                 for item in current.tasks

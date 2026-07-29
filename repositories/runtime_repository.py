@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-RUNTIME_SCHEMA_VERSION = 3
+RUNTIME_SCHEMA_VERSION = 4
 
 _MIGRATIONS = {
     1: """
@@ -75,6 +75,22 @@ _MIGRATIONS = {
     );
     CREATE INDEX idx_routing_batches_resume
         ON routing_batches(source_sha256, script_revision, provider, model, status);
+    """,
+    4: """
+    ALTER TABLE synthesis_tasks ADD COLUMN voice_id TEXT;
+    ALTER TABLE synthesis_tasks ADD COLUMN actual_text TEXT;
+    ALTER TABLE synthesis_tasks ADD COLUMN input_fingerprint TEXT;
+    ALTER TABLE synthesis_tasks ADD COLUMN text_length INTEGER;
+    ALTER TABLE synthesis_tasks ADD COLUMN failed_text_length INTEGER;
+    CREATE TABLE chapter_outputs (
+        chapter_id TEXT PRIMARY KEY,
+        plan_revision INTEGER NOT NULL,
+        file_path TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        duration REAL NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
     """,
 }
 
@@ -163,13 +179,18 @@ class RuntimeRepository:
                     """
                     INSERT INTO synthesis_tasks(
                         task_id, plan_revision, chapter_id, speaker_id, cache_key,
+                        voice_id, actual_text, input_fingerprint, text_length,
                         status, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP,
-                              CURRENT_TIMESTAMP)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending',
+                              CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                     ON CONFLICT(task_id) DO UPDATE SET
                         plan_revision = excluded.plan_revision,
                         chapter_id = excluded.chapter_id,
                         speaker_id = excluded.speaker_id,
+                        voice_id = excluded.voice_id,
+                        actual_text = excluded.actual_text,
+                        input_fingerprint = excluded.input_fingerprint,
+                        text_length = excluded.text_length,
                         status = CASE
                             WHEN synthesis_tasks.cache_key != excluded.cache_key
                             THEN 'stale'
@@ -184,6 +205,192 @@ class RuntimeRepository:
                         task["chapter_id"],
                         task["speaker_id"],
                         task["input_fingerprint"],
+                        task.get("voice_id"),
+                        task.get("actual_text"),
+                        task["input_fingerprint"],
+                        task.get("text_length"),
                     ),
                 )
+            connection.commit()
+
+    def claim_next_task(self) -> dict[str, Any] | None:
+        """Atomically claim one pending task; concurrency remains one by policy."""
+        with sqlite3.connect(self.path) as connection:
+            connection.row_factory = sqlite3.Row
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT * FROM synthesis_tasks
+                 WHERE status = 'pending'
+                 ORDER BY split_depth, created_at, task_id
+                 LIMIT 1
+                """
+            ).fetchone()
+            if row is None:
+                connection.commit()
+                return None
+            connection.execute(
+                """
+                UPDATE synthesis_tasks
+                   SET status = 'running', attempts = attempts + 1,
+                       started_at = CURRENT_TIMESTAMP,
+                       updated_at = CURRENT_TIMESTAMP
+                 WHERE task_id = ? AND status = 'pending'
+                """,
+                (row["task_id"],),
+            )
+            connection.commit()
+            return dict(row)
+
+    def complete_task(self, task_id: str, output_path: str) -> None:
+        self._finish_task(task_id, "completed", output_path=output_path)
+
+    def fail_task(
+        self,
+        task_id: str,
+        error_type: str,
+        error_message: str,
+        failed_text_length: int | None = None,
+    ) -> None:
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE synthesis_tasks
+                   SET status = 'failed', error_type = ?, error_message = ?,
+                       failed_text_length = ?, completed_at = CURRENT_TIMESTAMP,
+                       updated_at = CURRENT_TIMESTAMP
+                 WHERE task_id = ?
+                """,
+                (error_type, error_message[:500], failed_text_length, task_id),
+            )
+            connection.commit()
+
+    def split_task(
+        self,
+        parent: dict[str, Any],
+        children: list[dict[str, Any]],
+        *,
+        error_type: str,
+    ) -> None:
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("BEGIN IMMEDIATE")
+            for child in children:
+                connection.execute(
+                    """
+                    INSERT INTO synthesis_tasks(
+                        task_id, plan_revision, chapter_id, speaker_id, voice_id,
+                        cache_key, input_fingerprint, actual_text, text_length,
+                        status, attempts, parent_task_id, split_depth,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?,
+                              CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    """,
+                    (
+                        child["task_id"],
+                        parent["plan_revision"],
+                        parent["chapter_id"],
+                        parent["speaker_id"],
+                        parent["voice_id"],
+                        child["cache_key"],
+                        child["cache_key"],
+                        child["actual_text"],
+                        child["text_length"],
+                        parent["task_id"],
+                        int(parent["split_depth"]) + 1,
+                    ),
+                )
+            connection.execute(
+                """
+                UPDATE synthesis_tasks
+                   SET status = 'skipped', error_type = ?,
+                       error_message = 'split into child tasks',
+                       failed_text_length = text_length,
+                       completed_at = CURRENT_TIMESTAMP,
+                       updated_at = CURRENT_TIMESTAMP
+                 WHERE task_id = ?
+                """,
+                (error_type, parent["task_id"]),
+            )
+            connection.commit()
+
+    def task_counts(self) -> dict[str, int]:
+        with sqlite3.connect(self.path) as connection:
+            return {
+                row[0]: row[1]
+                for row in connection.execute(
+                    "SELECT status, COUNT(*) FROM synthesis_tasks GROUP BY status"
+                )
+            }
+
+    def resolved_audio_paths(self, task_id: str) -> list[str]:
+        """Resolve a plan task to its completed leaf outputs after OOM splitting."""
+        with sqlite3.connect(self.path) as connection:
+            row = connection.execute(
+                "SELECT status, output_path FROM synthesis_tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            if row[0] == "completed" and row[1]:
+                return [row[1]]
+            children = [
+                item[0]
+                for item in connection.execute(
+                    """
+                    SELECT task_id FROM synthesis_tasks
+                     WHERE parent_task_id = ? ORDER BY task_id
+                    """,
+                    (task_id,),
+                )
+            ]
+        if not children:
+            raise RuntimeError(f"task has no completed audio: {task_id}")
+        paths: list[str] = []
+        for child in children:
+            paths.extend(self.resolved_audio_paths(child))
+        return paths
+
+    def save_chapter_output(
+        self,
+        chapter_id: str,
+        plan_revision: int,
+        file_path: str,
+        fingerprint: str,
+        duration: float,
+    ) -> None:
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                INSERT INTO chapter_outputs(
+                    chapter_id, plan_revision, file_path, fingerprint, duration
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(chapter_id) DO UPDATE SET
+                    plan_revision = excluded.plan_revision,
+                    file_path = excluded.file_path,
+                    fingerprint = excluded.fingerprint,
+                    duration = excluded.duration,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (chapter_id, plan_revision, file_path, fingerprint, duration),
+            )
+            connection.commit()
+
+    def _finish_task(
+        self, task_id: str, status: str, *, output_path: str | None = None
+    ) -> None:
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE synthesis_tasks
+                   SET status = ?, output_path = ?, error_type = NULL,
+                       error_message = NULL, completed_at = CURRENT_TIMESTAMP,
+                       updated_at = CURRENT_TIMESTAMP
+                 WHERE task_id = ?
+                """,
+                (status, output_path, task_id),
+            )
             connection.commit()
