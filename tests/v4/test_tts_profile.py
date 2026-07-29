@@ -15,4 +15,9 @@ def test_5070ti_profile_is_conservative_and_unbenchmarked():
     assert profile["limits"]["maximum"] == 100
     assert profile["limits"]["absolute"] == 120
     assert profile["runtime"]["concurrency"] == 1
+    assert profile["runtime"]["clear_cuda_cache_after_oom"] is True
+    assert profile["runtime"]["restart_worker_after_tasks"] == 100
+    assert profile["runtime"]["restart_on_vram_growth_mb"] == 1536
+    assert "clear_cache_after_oom" not in profile["runtime"]
+    assert "restart_engine_after_tasks" not in profile["runtime"]
     assert profile["options"]["cuda_kernel"] is False
