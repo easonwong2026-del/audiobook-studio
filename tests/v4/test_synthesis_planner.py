@@ -77,6 +77,21 @@ def test_long_segment_splits_at_sentence_boundaries_without_loss():
     assert result.plan.tasks[1].pause_after_ms == 120
 
 
+def test_long_chinese_without_punctuation_splits_near_limit():
+    text = "长" * 25
+    segmented, voices, performance, pronunciation, profile = _inputs(text)
+    result = SynthesisPlanner(CharacterMeasurer()).plan(
+        text,
+        segmented.script,
+        segmented.speakers,
+        voices,
+        performance,
+        pronunciation,
+        profile,
+    )
+    assert [item.text_length for item in result.plan.tasks] == [10, 10, 5]
+
+
 def test_short_same_speaker_segments_merge_and_keep_whitespace_gap():
     text = "“甲。”\n\n“乙。”"
     segmented, voices, performance, pronunciation, _ = _inputs(text)
