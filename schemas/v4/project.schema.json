@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "audiobook-project-v4",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "project_id", "name", "title", "author", "created_at", "updated_at", "source", "source_meta", "script", "speakers", "runtime_db"],
+  "properties": {
+    "schema_version": {"const": "audiobook-project-v4"},
+    "project_id": {"type": "string", "minLength": 1},
+    "name": {"type": "string", "minLength": 1},
+    "title": {"type": "string"},
+    "author": {"type": "string"},
+    "created_at": {"type": "string"},
+    "updated_at": {"type": "string"},
+    "source": {"type": "string"},
+    "source_meta": {"type": "string"},
+    "script": {"type": "string"},
+    "speakers": {"type": "string"},
+    "runtime_db": {"type": "string"}
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "audiobook-script-v4",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "source_sha256", "revision", "chapters"],
+  "properties": {
+    "schema_version": {"const": "audiobook-script-v4"},
+    "source_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "revision": {"type": "integer", "minimum": 1},
+    "chapters": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["chapter_id", "title", "source_start", "source_end", "segments"],
+        "properties": {
+          "chapter_id": {"type": "string"},
+          "title": {"type": "string"},
+          "source_start": {"type": "integer", "minimum": 0},
+          "source_end": {"type": "integer", "minimum": 1},
+          "segments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "chapter_id", "source_start", "source_end", "kind", "speaker_id", "speaker_source", "status", "text_override"],
+              "properties": {
+                "id": {"type": "string"},
+                "chapter_id": {"type": "string"},
+                "source_start": {"type": "integer", "minimum": 0},
+                "source_end": {"type": "integer", "minimum": 1},
+                "kind": {"enum": ["narration", "dialogue"]},
+                "speaker_id": {"type": ["string", "null"]},
+                "speaker_source": {"enum": ["rule", "router", "manual", "unresolved"]},
+                "status": {"enum": ["confirmed", "unresolved"]},
+                "text_override": {"type": ["string", "null"]}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
