@@ -1274,6 +1274,8 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             cp_source = cr_page["cp_source"]
             cp_title = cr_page["cp_title"]
             cp_author = cr_page["cp_author"]
+            cp_slot_status = cr_page["cp_slot_status"]
+            cp_cleanup = cr_page["cp_cleanup"]
             cp_config_summary = cr_page["cp_config_summary"]
             cp_create = cr_page["cp_create"]
             cp_status = cr_page["cp_status"]
@@ -1281,6 +1283,8 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             cp_json_name = cr_page["cp_json_name"]
             cp_json_file = cr_page["cp_json_file"]
             cp_json_status = cr_page["cp_json_status"]
+            cp_json_slot_status = cr_page["cp_json_slot_status"]
+            cp_json_cleanup = cr_page["cp_json_cleanup"]
             cp_json_create = cr_page["cp_json_create"]
             cp_json_result = cr_page["cp_json_result"]
 
@@ -1524,15 +1528,57 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     # ═══════════ events（业务接线，沿用 v2） ═══════════
 
     # ═══════════ 新建项目页面 ═══════════
+    cp_source.change(
+        create_ui.derive_project_fields,
+        [cp_source, cp_name, cp_title],
+        [cp_name, cp_title],
+    ).then(
+        create_ui.inspect_project_name,
+        [cp_name],
+        [cp_slot_status, cp_cleanup],
+    )
+    cp_name.change(
+        create_ui.inspect_project_name,
+        [cp_name],
+        [cp_slot_status, cp_cleanup],
+    )
+    cp_cleanup.click(
+        create_ui.archive_orphan_and_recheck,
+        [cp_name],
+        [cp_slot_status, cp_cleanup],
+    )
     cp_create.click(
         create_ui.create_from_source,
         [cp_name, cp_source, cp_title, cp_author],
         [cp_status, cp_result, p_sel, cp_json_result],
+        concurrency_limit=1,
+        concurrency_id="project-creation",
+    )
+    cp_json_file.change(
+        create_ui.derive_json_project_name,
+        [cp_json_file, cp_json_name],
+        [cp_json_name],
+    ).then(
+        create_ui.inspect_project_name,
+        [cp_json_name],
+        [cp_json_slot_status, cp_json_cleanup],
+    )
+    cp_json_name.change(
+        create_ui.inspect_project_name,
+        [cp_json_name],
+        [cp_json_slot_status, cp_json_cleanup],
+    )
+    cp_json_cleanup.click(
+        create_ui.archive_orphan_and_recheck,
+        [cp_json_name],
+        [cp_json_slot_status, cp_json_cleanup],
     )
     cp_json_create.click(
         create_ui.create_from_json,
         [cp_json_name, cp_json_file],
         [cp_json_result, p_sel, cp_result],
+        concurrency_limit=1,
+        concurrency_id="project-creation",
     )
 
     # ═══════════ 项目管理（人工校正） ═══════════

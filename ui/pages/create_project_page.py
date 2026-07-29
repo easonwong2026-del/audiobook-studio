@@ -28,6 +28,14 @@ def create_create_project_page() -> dict:
             cp_title = gr.Textbox(label="作品名（可选）", placeholder="默认使用文件名")
             cp_author = gr.Textbox(label="作者（可选）")
 
+        cp_slot_status = gr.Markdown("⚪ 上传书稿或输入项目名称后，将立即检查名称状态")
+        cp_cleanup = gr.Button(
+            "清理残留并重试",
+            variant="stop",
+            size="sm",
+            visible=False,
+        )
+
         with gr.Row():
             cp_config_summary = gr.Markdown(
                 "##### 当前 AI 配置\n"
@@ -52,8 +60,15 @@ def create_create_project_page() -> dict:
                         type="filepath",
                     )
             cp_json_status = gr.Markdown("")
+            cp_json_slot_status = gr.Markdown("⚪ 上传 JSON 或输入项目名称后检查")
             with gr.Row():
                 cp_json_create = gr.Button("从 JSON 创建", variant="primary")
+                cp_json_cleanup = gr.Button(
+                    "清理残留并重试",
+                    variant="stop",
+                    size="sm",
+                    visible=False,
+                )
             cp_json_result = gr.Markdown("")
 
     return {
@@ -62,6 +77,8 @@ def create_create_project_page() -> dict:
         "cp_source": cp_source,
         "cp_title": cp_title,
         "cp_author": cp_author,
+        "cp_slot_status": cp_slot_status,
+        "cp_cleanup": cp_cleanup,
         "cp_config_summary": cp_config_summary,
         "cp_create": cp_create,
         "cp_status": cp_status,
@@ -69,6 +86,8 @@ def create_create_project_page() -> dict:
         "cp_json_name": cp_json_name,
         "cp_json_file": cp_json_file,
         "cp_json_status": cp_json_status,
+        "cp_json_slot_status": cp_json_slot_status,
+        "cp_json_cleanup": cp_json_cleanup,
         "cp_json_create": cp_json_create,
         "cp_json_result": cp_json_result,
     }
