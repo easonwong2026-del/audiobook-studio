@@ -3,15 +3,17 @@
   "$id": "audiobook-source-v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "original_filename", "original_format", "encoding", "normalization_version", "character_count", "sha256", "imported_at"],
+  "required": ["schema_version", "original_filename", "original_format", "encoding", "normalization_version", "character_count", "sha256", "imported_at", "source_origin", "source_fidelity"],
   "properties": {
     "schema_version": {"const": "audiobook-source-v1"},
     "original_filename": {"type": "string", "minLength": 1},
-    "original_format": {"enum": ["txt", "docx", "epub"]},
+    "original_format": {"enum": ["txt", "docx", "epub", "v3-reconstructed"]},
     "encoding": {"type": "string"},
     "normalization_version": {"const": "audiobook-normalization-v1"},
     "character_count": {"type": "integer", "minimum": 1},
     "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
-    "imported_at": {"type": "string"}
+    "imported_at": {"type": "string"},
+    "source_origin": {"enum": ["original-upload", "reconstructed-from-v3"]},
+    "source_fidelity": {"enum": ["normalized-source", "segment-text"]}
   }
 }
