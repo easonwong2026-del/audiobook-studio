@@ -50,6 +50,7 @@ jobs:
       - name: Lint (ruff)
         run: |
           ruff check \
+            --output-format=github \
             domain/v4 \
             repositories/runtime_repository.py \
             repositories/project_repo.py \
@@ -57,7 +58,10 @@ jobs:
             tts/ \
             tools/benchmark_indextts2.py \
             ui/v4_workspace_handlers.py \
-            ui/v4_workspace_page.py \
+            ui/pages/v4_workspace_page.py \
+            ui/pages/v4_speaker_review_page.py \
+            ui/pages/v4_plan_page.py \
+            ui/pages/v4_queue_page.py \
             app.py \
             tests/v4
 
