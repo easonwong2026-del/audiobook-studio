@@ -26,6 +26,7 @@ from lib.text_importer import load_text
 from repositories.project_repo import ProjectRepository
 from services.ai_settings import AiSettingsService
 from services.script_director import ScriptDirectorService
+from services.script_consistency import check_script_consistency
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,17 @@ class ProjectCreationService:
             errors = script_loader.validate_script(script_obj)
             if errors:
                 raise ValueError("剧本分析校验失败：\n" + "\n".join(f"- {e}" for e in errors))
+            consistency = check_script_consistency(script)
+            if consistency["summary"]["errors"]:
+                messages = [
+                    item["message"] for item in consistency["issues"]
+                    if item["severity"] == "error"
+                ]
+                raise ValueError("剧本一致性检查失败：\n" + "\n".join(f"- {m}" for m in messages))
+            warnings.extend(
+                item["message"] for item in consistency["issues"]
+                if item["severity"] == "warning"
+            )
 
             # 6. 写入临时 structured_script.json（仅用于传给 ProjectRepository）
             os.makedirs(tmp_dir, exist_ok=True)
@@ -178,6 +190,13 @@ class ProjectCreationService:
         # load_script 返回 Script 对象；重新读原始 JSON 获取统计信息
         with open(script_path, encoding="utf-8") as f:
             raw = json.load(f)
+        consistency = check_script_consistency(raw)
+        if consistency["summary"]["errors"]:
+            messages = [
+                item["message"] for item in consistency["issues"]
+                if item["severity"] == "error"
+            ]
+            raise ValueError("剧本一致性检查失败：\n" + "\n".join(f"- {m}" for m in messages))
         ProjectRepository.create_project(safe_name, script_path)
         return ProjectCreationResult(
             project_name=safe_name,
@@ -188,4 +207,8 @@ class ProjectCreationService:
                 sum(len(ch.get("segments", [])) for ch in raw.get("chapters", [])),
             ),
             role_count=len(raw.get("voices", {})),
+            warnings=[
+                item["message"] for item in consistency["issues"]
+                if item["severity"] == "warning"
+            ],
         )

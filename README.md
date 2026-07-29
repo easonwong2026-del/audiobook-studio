@@ -2,9 +2,10 @@
 
 [![Tests](https://github.com/easonwong2026-del/audiobook-studio/actions/workflows/tests.yml/badge.svg)](https://github.com/easonwong2026-del/audiobook-studio/actions/workflows/tests.yml)
 
-本地化的**有声书合成工作台**：把一个结构化剧本 `structured_script.json`（角色 / 章节 / 段落，含情感标注）通过 [IndexTTS2](https://github.com/index-tts/index-tts) 逐段合成、拼接、响度归一、转码，最终导出整本有声书（mp3 / m4b / wav）。基于 Gradio 的图形界面，本地运行、GPU 推理。
-
-> **设计理念：文本分析在前，机械合成在后。** 角色识别、情感标注、多音字处理由前置工具（如 WorkBuddy 对话）完成并产出 `structured_script.json`；本工作台只负责「加载 JSON + 绑定音色 → 调 IndexTTS2 → 拼接导出」。音色选择权完全归用户。
+**AI 驱动的本地有声书制作工作台。** 上传 TXT、DOCX 或 EPUB 后，内置 AI
+剧本导演完成角色识别、段落拆分、情绪与停顿设计；经人工校正后直接创建项目，
+再通过本地 IndexTTS2 完成音色绑定、合成、质检和 mp3 / m4b / wav / 字幕导出。
+也可导入既有 `structured_script.json`，兼容原有 v2 项目和高级工作流。
 
 ---
 
@@ -13,7 +14,7 @@
 | 项 | 说明 |
 |----|------|
 | 当前版本 | **v3.3.1**（AI 剧本导演工作流重构） |
-| 产品定位 | 面向**本地 IndexTTS2 环境**的有声书**生产工作台** |
+| 产品定位 | **AI 驱动的本地有声书制作工作台** |
 | 是否独立安装软件 | **否** —— 不提供 Windows 安装包，也不内置模型 / Torch / CUDA / FFmpeg / IndexTTS2 本体 |
 | 部署方式 | **轻量工作台源码 + 外部推理环境**（IndexTTS2 仓库及其虚拟环境由用户单独准备） |
 
@@ -21,12 +22,34 @@
 
 ---
 
-## 核心能力（5 个生产阶段）
+## 制作流程
+
+默认流程：
+
+```text
+上传 TXT / DOCX / EPUB
+→ AI 剧本导演分析
+→ 人工校正
+→ 直接创建项目
+→ 绑定音色
+→ 合成
+→ 质检
+→ 导出
+```
+
+高级兼容流程：
+
+```text
+上传已有 structured_script.json
+→ 创建项目
+```
+
+## 核心能力
 
 | 分区 | 职责 |
 |------|------|
 | 工作台 | 当前项目、章节进度、角色绑定、最近任务和待处理问题 |
-| 项目 | 上传 `structured_script.json` 创建项目、项目管理 |
+| 项目创建 | TXT / DOCX / EPUB 导入、AI 剧本导演、人工校正、原子创建；高级入口支持 `structured_script.json` |
 | 角色与声音 | 按“选择角色 → 选择声音 → 试听 → 确认绑定”配置 `voice_bindings.json` |
 | 生产与质检 | 内含合成中心、试听质检、角色补录；支持队列、暂停 / 恢复、断点续跑 |
 | 交付 | 章节拼接 → 均衡 → LUFS 归一 → 转码 mp3 / m4b / wav，并生成字幕 |
@@ -66,12 +89,13 @@ audiobook-studio/
 │   ├── exceptions.py       # 异常定义
 │   └── types.py            # 类型定义
 ├── repositories/           # 持久化层（Repository + 原子 JSON 写入）
-├── services/               # 业务服务层
-├── ui/                     # UI 模块（ui/pages/*，7 个页面）
+├── services/               # 业务服务、环境诊断、剧本一致性检查
+├── scripts/                # 参数化真实环境验收工具
+├── ui/                     # UI 页面与 ui/wiring/* 事件接线
 ├── domain/                 # 领域类型
 ├── tests/                  # 测试
 ├── docs/                   # 设计文档
-│   └── releases/v3.2.1.md  # GitHub Release 说明
+│   └── releases/v3.3.1.md  # 当前版本发布与验收说明
 └── 更新日志.txt             # 中文变更日志
 ```
 
@@ -186,11 +210,15 @@ python launcher.py
 首次启动会依序完成：依赖检查（缺失时自动 pip install），FFmpeg 检测，然后加载 IndexTTS2 模型
 （首次约 10–30 秒），最后在 `http://localhost:7862` 打开工作台。
 
-### 7. 导入剧本
+### 7. 创建项目
 
-在「项目」页面上传 `structured_script.json`。
+默认在「新建项目」上传 TXT、DOCX 或 EPUB，选择已配置的 Local / OpenAI /
+DeepSeek Provider，完成 AI 分析和人工校正后直接创建项目。远程 Provider 的 API
+Key 优先保存在系统 Keyring；报告、日志和前端状态只显示是否配置及来源。
 
-v3.3 可以在命令行把 TXT、DOCX 或 EPUB 转换为 v3 剧本：
+也可在高级区域上传已有 `structured_script.json` 创建项目。
+
+命令行可先把原稿转换为 v3 剧本：
 
 ```bash
 python script_director_cli.py novel.epub \
@@ -204,8 +232,7 @@ python script_director_cli.py novel.epub \
 OpenAI 和 DeepSeek 分别读取 `OPENAI_API_KEY` 与 `DEEPSEEK_API_KEY`。
 产物包含角色、情绪、速度、强度、停顿和呼吸 metadata，并保留现有 TTS 链所需的兼容字段。
 
-也可以直接在「项目」页面使用“AI 剧本导演”面板。分析完成后，生成的 JSON 会自动
-回填到新建项目区域；系统不会未经确认自动创建项目。生成后可在 Segment 导演表中
+也可以直接在工作台使用“AI 剧本导演”。分析完成后可在 Segment 导演表中
 人工修改角色、文本、情绪、速度、强度、呼吸和停顿，并可撤销最近一次保存。
 
 导演台还会根据角色描述、主要情绪与音色文件名 / 分类标签生成可解释的声音候选。
@@ -222,6 +249,21 @@ structured_script v3 的内部停顿与前后留白同时进入正式整书合�
 ### 8. 绑定音色 → 合成 → 质检 → 导出
 
 各页面提供对应功能（见上文「核心能力」表）。
+
+### 9. 运行环境诊断与验收
+
+在「设置 → 系统信息」运行环境诊断；该功能不会安装或加载 CUDA、Torch、模型。
+命令行验收示例：
+
+```bash
+python scripts/acceptance_check.py --environment
+python scripts/acceptance_check.py --project "项目名"
+python scripts/acceptance_check.py --provider openai
+python scripts/acceptance_check.py --export-check "项目名"
+```
+
+Provider 验收默认只检查配置。只有显式追加 `--allow-real-request` 才会发送最小
+连接请求，并在调用前提示 Provider、模型及可能产生的费用。
 
 ---
 
@@ -259,8 +301,13 @@ IndexTTS2 模型 + Torch + CUDA 运行时 + Python 虚拟环境的总体积可�
 
 ### 是否支持 TXT、DOCX 或 EPUB
 
-支持。v3.3 的项目页面和命令行导演 Pipeline 均可导入 TXT、DOCX 与 EPUB，再生成
-`structured_script.json`。TXT 支持 UTF-8 和 GB18030；EPUB 按 spine 阅读顺序提取正文。
+支持。TXT、DOCX、EPUB 是默认项目创建入口；已有结构化剧本可通过高级入口导入。
+TXT 支持 UTF-8 和 GB18030；EPUB 按 spine 阅读顺序提取正文。
+
+### 环境诊断会自动安装依赖吗
+
+不会。它只报告数据目录、IndexTTS2、模型、FFmpeg、NVIDIA、Torch/CUDA 和
+Provider 配置状态，并给出修复建议。
 
 ### 为什么仓库里没有模型和音色文件
 

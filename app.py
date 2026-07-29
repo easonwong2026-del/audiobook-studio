@@ -35,6 +35,7 @@ from services.session import SessionState
 from services.synthesis import SynthesisState
 from ui import create_project_handlers as create_ui
 from ui import director_handlers as director_ui
+from ui.wiring.settings_wiring import wire_settings_page
 from ui import voice_handlers as voice_ui
 from ui.components import (
     build_role_management_choices,
@@ -1565,27 +1566,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     )
 
     # ═══════════ 设置页面 ═══════════
-    s_provider.change(
-        director_ui.update_provider_config_fields,
-        [s_provider],
-        [s_provider_config, s_model, s_api_key, s_base_url, s_clear_key],
-    )
-    s_save.click(
-        director_ui.save_ai_settings,
-        [s_provider, s_model, s_api_key, s_base_url, s_timeout],
-        [s_status, s_provider_config, s_api_key, s_clear_key],
-    )
-    s_test.click(
-        director_ui.test_ai_connection,
-        [s_provider, s_model, s_api_key, s_base_url, s_timeout],
-        [s_status],
-    )
-    s_clear_key.click(
-        director_ui.clear_ai_api_key,
-        [s_provider], [s_provider_config, s_api_key, s_clear_key, s_status],
-    )
-    s_data_apply.click(director_ui.apply_data_dir, [s_data_dir], [s_data_msg, s_data_dir])
-    s_data_open.click(director_ui.open_data_dir, [], [s_data_msg])
+    wire_settings_page(set_page)
 
     # ═══════════ 角色与声音页面 ═══════════
     v_recommend.click(

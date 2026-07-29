@@ -125,6 +125,11 @@ def create_from_json(project_name, json_file) -> tuple:
             f"- **段落数**：{result.segment_count}\n"
             f"- **角色数**：{result.role_count}\n"
         )
+        if result.warnings:
+            msg += (
+                f"\n**质量检查**：{len(result.warnings)} 项 warning（不阻止创建）\n"
+                + "\n".join(f"- {html.escape(item)}" for item in result.warnings[:10])
+            )
         msg += "\n\n👉 **下一步**：进入「角色与声音」页面配置角色音色。"
 
         return (
