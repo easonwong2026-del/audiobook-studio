@@ -1,6 +1,7 @@
 """Application service for local, source-first v4 project creation."""
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from dataclasses import dataclass
@@ -8,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from domain.v4 import ProjectManifest
+from domain.v4.production import TtsProfile
 from repositories.project_v4_repository import ProjectV4Repository
 from services.source_import_service import SourceImportService
 from services.source_segmenter import SourceSegmenter
@@ -54,6 +56,12 @@ class V4ProjectCreationService:
             created_at=timestamp,
             updated_at=timestamp,
         )
+        profile_path = (
+            Path(__file__).resolve().parents[1]
+            / "config/tts_profiles/indextts2-rtx5070ti-laptop-12gb-v1.json"
+        )
+        with profile_path.open("r", encoding="utf-8") as handle:
+            profile = TtsProfile.from_dict(json.load(handle))
         path = self.repository.create(
             directory_name=directory_name,
             manifest=manifest,
@@ -61,6 +69,7 @@ class V4ProjectCreationService:
             source_metadata=imported.metadata,
             script=segmented.script,
             speakers=segmented.speakers,
+            tts_profile=profile,
         )
         unresolved = sum(
             segment.status == "unresolved"

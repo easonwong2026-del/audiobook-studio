@@ -14,6 +14,8 @@ from domain.v4 import (
     SourceMetadata,
     SpeakersDocument,
 )
+from domain.v4.production import TtsProfile
+from repositories.production_repository import ProductionRepository
 from repositories.runtime_repository import RuntimeRepository
 from repositories.v4_atomic import atomic_write_json, atomic_write_text
 
@@ -46,6 +48,7 @@ class ProjectV4Repository:
         source_metadata: SourceMetadata,
         script: ScriptDocument,
         speakers: SpeakersDocument,
+        tts_profile: TtsProfile | None = None,
     ) -> Path:
         self._validate_directory_name(directory_name)
         target = self.root / directory_name
@@ -67,6 +70,8 @@ class ProjectV4Repository:
             )
             atomic_write_json(temporary / "script/script.json", script.to_dict())
             atomic_write_json(temporary / "script/speakers.json", speakers.to_dict())
+            if tts_profile is not None:
+                ProductionRepository(temporary).initialize(tts_profile)
             RuntimeRepository(temporary / "runtime/runtime.db").initialize()
             os.replace(temporary, target)
             return target
