@@ -1,4 +1,4 @@
-# 有声书合成工作台 (Audiobook Studio) · v3.3.1
+# 有声书合成工作台 (Audiobook Studio) · v3.3.2
 
 [![Tests](https://github.com/easonwong2026-del/audiobook-studio/actions/workflows/tests.yml/badge.svg)](https://github.com/easonwong2026-del/audiobook-studio/actions/workflows/tests.yml)
 
@@ -13,7 +13,7 @@
 
 | 项 | 说明 |
 |----|------|
-| 当前版本 | **v3.3.1**（AI 剧本导演工作流重构） |
+| 当前版本 | **v3.3.2**（设置与角色声音页面修复） |
 | 产品定位 | **AI 驱动的本地有声书制作工作台** |
 | 是否独立安装软件 | **否** —— 不提供 Windows 安装包，也不内置模型 / Torch / CUDA / FFmpeg / IndexTTS2 本体 |
 | 部署方式 | **轻量工作台源码 + 外部推理环境**（IndexTTS2 仓库及其虚拟环境由用户单独准备） |
@@ -50,7 +50,7 @@
 |------|------|
 | 工作台 | 当前项目、章节进度、角色绑定、最近任务和待处理问题 |
 | 项目创建 | TXT / DOCX / EPUB 导入、AI 剧本导演、人工校正、原子创建；高级入口支持 `structured_script.json` |
-| 角色与声音 | 按“选择角色 → 选择声音 → 试听 → 确认绑定”配置 `voice_bindings.json` |
+| 角色与声音 | 按“选择角色 → 选择声音 → 确认绑定”配置 `voice_bindings.json` |
 | 生产与质检 | 内含合成中心、试听质检、角色补录；支持队列、暂停 / 恢复、断点续跑 |
 | 交付 | 章节拼接 → 均衡 → LUFS 归一 → 转码 mp3 / m4b / wav，并生成字幕 |
 
@@ -95,7 +95,7 @@ audiobook-studio/
 ├── domain/                 # 领域类型
 ├── tests/                  # 测试
 ├── docs/                   # 设计文档
-│   └── releases/v3.3.1.md  # 当前版本发布与验收说明
+│   └── releases/v3.3.2.md  # 当前版本发布与验收说明
 └── 更新日志.txt             # 中文变更日志
 ```
 
@@ -122,7 +122,7 @@ workspace-root/
 - **GPU**：推荐 **NVIDIA GPU 12 GB+ VRAM**。CUDA、cuDNN 由 IndexTTS2 的虚拟环境负责。
 - **Torch**：由 IndexTTS2 的虚拟环境安装（GPU 版本），不通过本仓库的 pip 安装。
 - **FFmpeg**：导出 mp3 / m4b 需要 FFmpeg（系统级二进制，**不是** pip 包）。可选设置 `AUDIOBOOK_STUDIO_FFMPEG` 环境变量指向自定义路径；缺失时 launcher 会显式警告（可改用 WAV 导出）。
-- **本仓库 Python 依赖**：`requirements.txt`（Gradio 5.50–5.x、numpy、scipy、pyloudnorm、mutagen）—— 这些**不依赖 GPU / CUDA**，使用 Python 3.10+ 安装。
+- **本仓库 Python 依赖**：`requirements.txt`（Gradio 5.50–5.x、numpy、scipy、pyloudnorm、mutagen、keyring）—— 这些**不依赖 GPU / CUDA**，使用 Python 3.10+ 安装。
 
 ### `AUDIOBOOK_STUDIO_PYTHON` 环境变量
 
@@ -353,7 +353,7 @@ Gradio 界面和项目管理可在无 GPU 环境运行，但实际的 TTS 合成
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | V3.2 系统架构和测试策略 |
 | [`CHANGELOG.md`](CHANGELOG.md) | 完整变更记录 |
 | [`docs/system_design.md`](docs/system_design.md) | 系统详细设计 |
-| [`docs/releases/v3.2.1.md`](docs/releases/v3.2.1.md) | GitHub Release 说明 |
+| [`docs/releases/v3.3.2.md`](docs/releases/v3.3.2.md) | GitHub Release 说明 |
 | [`icon.png`](icon.png) / [`icon.ico`](icon.ico) | 快捷方式与启动器图标（PNG 256px / ICO 7 种尺寸） |
 | [`DESIGN.md`](DESIGN.md) | UI 设计系统（Stripe 浅色招牌风） |
 
