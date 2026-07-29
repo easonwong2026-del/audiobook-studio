@@ -4,8 +4,8 @@ from __future__ import annotations
 import gradio as gr
 
 
-def create_v4_plan_page() -> dict:
-    with gr.Group(visible=False, elem_id="grp-v4-synthesis-plan") as group:
+def create_v4_plan_page(*, visible: bool = False) -> dict:
+    with gr.Group(visible=visible, elem_id="grp-v4-synthesis-plan") as group:
         gr.Markdown("### TTS 合成计划")
         summary = gr.Markdown("尚未生成计划")
         table = gr.Dataframe(
