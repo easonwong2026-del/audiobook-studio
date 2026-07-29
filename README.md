@@ -364,6 +364,8 @@ Gradio 界面和项目管理可在无 GPU 环境运行，但实际的 TTS 合成
 | [`CHANGELOG.md`](CHANGELOG.md) | 完整变更记录 |
 | [`docs/system_design.md`](docs/system_design.md) | 系统详细设计 |
 | [`docs/releases/v3.3.3.md`](docs/releases/v3.3.3.md) | GitHub Release 说明 |
+| [`docs/releases/v4.0.0.md`](docs/releases/v4.0.0.md) | v4.0 发布、兼容与实机验收说明 |
+| [`docs/v4/completion-audit.md`](docs/v4/completion-audit.md) | v4 需求证据矩阵与 Windows 待验收边界 |
 | [`icon.png`](icon.png) / [`icon.ico`](icon.ico) | 快捷方式与启动器图标（PNG 256px / ICO 7 种尺寸） |
 | [`DESIGN.md`](DESIGN.md) | UI 设计系统（Stripe 浅色招牌风） |
 
