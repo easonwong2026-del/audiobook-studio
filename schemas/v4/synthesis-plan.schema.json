@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "audiobook-synthesis-plan-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "revision", "dependencies", "tasks"],
+  "properties": {
+    "schema_version": {"const": "audiobook-synthesis-plan-v1"},
+    "revision": {"type": "integer", "minimum": 1},
+    "dependencies": {"type": "object"},
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["task_id", "chapter_id", "speaker_id", "voice_id", "source_segments", "parts", "actual_text", "text_length", "continuation", "input_fingerprint", "merge_group_fingerprint", "merge_allowed"]
+      }
+    }
+  }
+}

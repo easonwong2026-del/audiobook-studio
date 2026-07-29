@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "audiobook-performance-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "revision", "overrides"],
+  "properties": {
+    "schema_version": {"const": "audiobook-performance-v1"},
+    "revision": {"type": "integer", "minimum": 1},
+    "overrides": {"type": "object"}
+  }
+}
