@@ -19,6 +19,10 @@ APP_PATH = os.path.join(PROJECT_ROOT, "app.py")
 with open(APP_PATH, encoding="utf-8") as f:
     SRC = f.read()
 TREE = ast.parse(SRC)
+VOICE_WIRING_PATH = os.path.join(PROJECT_ROOT, "ui", "wiring", "voice_wiring.py")
+with open(VOICE_WIRING_PATH, encoding="utf-8") as f:
+    VOICE_WIRING_SRC = f.read()
+VOICE_WIRING_TREE = ast.parse(VOICE_WIRING_SRC)
 
 
 def has_import_from(module, name):
@@ -49,8 +53,38 @@ def find_click(target_var):
     return None
 
 
+def find_voice_page_event(target_key, event_name):
+    """找到 ``page["target_key"].<event_name>(...)`` 的 Call 节点。"""
+    for node in ast.walk(VOICE_WIRING_TREE):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == event_name
+            and isinstance(node.func.value, ast.Subscript)
+        ):
+            continue
+        owner = node.func.value
+        if not (isinstance(owner.value, ast.Name) and owner.value.id == "page"):
+            continue
+        key = owner.slice.value if isinstance(owner.slice, ast.Constant) else None
+        if key == target_key:
+            return node
+    return None
+
+
 def _arg_ids(list_node):
     return [e.id if isinstance(e, ast.Name) else None for e in list_node.elts]
+
+
+def _mapping_key(node, mapping_name):
+    if not (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == mapping_name
+        and isinstance(node.slice, ast.Constant)
+    ):
+        return None
+    return node.slice.value
 
 
 def test_create_project_returns_4tuple():
@@ -127,22 +161,24 @@ def test_save_to_lib_returns_4tuple():
 
 
 def test_save_to_lib_wiring():
-    node = find_click("v_save_btn")
+    node = find_voice_page_event("v_save_btn", "click")
     assert node is not None, "未找到 v_save_btn.click"
     assert len(node.args) >= 3
+    assert _mapping_key(node.args[0], "cb") == "save_to_lib"
     outputs = node.args[2]
-    ids = _arg_ids(outputs)
-    print(f"[B10] v_save_btn.click outputs = {ids}")
-    assert "e_voice" in ids, "e_voice 未出现在 save_to_lib 的 outputs（B10 接线缺失）"
+    output_src = ast.unparse(outputs)
+    print(f"[B10] v_save_btn.click outputs = {output_src}")
+    assert "production_voice" in output_src, \
+        "生产页音色下拉未出现在 save_to_lib 的 outputs（B10 接线缺失）"
 
 
 def test_preview_bound_voice_defined_and_wired():
     fn = find_func("preview_bound_voice")
     assert fn is not None, "未定义 preview_bound_voice 函数（D4 缺失）"
-    node = find_click("v_preview_btn")
+    node = find_voice_page_event("v_preview_btn", "click")
     assert node is not None, "未找到 v_preview_btn.click（D4 接线缺失）"
-    assert (isinstance(node.args[0], ast.Name)
-            and node.args[0].id == "preview_bound_voice"), "v_preview_btn 未接线到 preview_bound_voice"
+    assert _mapping_key(node.args[0], "cb") == "preview_bound_voice", \
+        "v_preview_btn 未接线到 preview_bound_voice"
     print("[D4] preview_bound_voice 已定义且已接线 ✔")
 
 
