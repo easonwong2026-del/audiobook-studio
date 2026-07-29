@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "audiobook-speakers-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "revision", "speakers"],
+  "properties": {
+    "schema_version": {"const": "audiobook-speakers-v1"},
+    "revision": {"type": "integer", "minimum": 1},
+    "speakers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "type", "aliases", "status", "locked"],
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": "string"},
+          "type": {"enum": ["narrator", "character"]},
+          "aliases": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+          "status": {"enum": ["confirmed", "unresolved"]},
+          "locked": {"type": "boolean"}
+        }
+      }
+    }
+  }
+}
