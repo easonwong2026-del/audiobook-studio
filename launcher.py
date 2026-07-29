@@ -36,6 +36,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 PYTHON: str = ""   # will be filled by _resolve_python()
 
+REQUIRED_MODULES = ("gradio", "numpy", "scipy", "pyloudnorm", "mutagen", "keyring")
+REQUIREMENTS_FILE = os.path.join(BASE_DIR, "requirements.txt")
+
 
 def _resolve_python() -> str:
     """Resolve Python interpreter according to the priority documented above."""
@@ -78,6 +81,42 @@ def _read_version() -> str:
 
 VERSION = _read_version()
 
+
+def _dependency_check_code() -> str:
+    """Return the import probe executed by the resolved interpreter."""
+    return "import " + ", ".join(REQUIRED_MODULES)
+
+
+def _check_runtime_dependencies(python: str) -> bool:
+    """Check all runtime modules in one subprocess using ``python``."""
+    result = subprocess.run(
+        [python, "-c", _dependency_check_code()],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _install_runtime_dependencies(python: str) -> None:
+    """Install the project's pinned runtime requirements into ``python``."""
+    print("-> 检测到运行依赖缺失，正在使用已选定的 Python 安装 requirements.txt ...")
+    result = subprocess.run(
+        [python, "-m", "pip", "install", "-r", REQUIREMENTS_FILE],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        print("❌ 运行依赖安装失败，应用不会继续启动。")
+        print("   请检查网络、pip 和 requirements.txt 后重试。")
+        raise SystemExit(1)
+
+    if not _check_runtime_dependencies(python):
+        print("❌ 运行依赖安装后仍无法导入全部模块，应用不会继续启动。")
+        print("   请检查该 Python 环境后重试。")
+        raise SystemExit(1)
+
 # ────────────────────────────────────────────────────────────────────────────
 # main
 # ────────────────────────────────────────────────────────────────────────────
@@ -96,26 +135,8 @@ def main() -> None:
     # 检查运行环境（依赖检查较慢，先给出提示，避免控制台空屏）
     print("正在检查运行环境，请稍候...")
 
-    # UI 依赖检查
-    result = subprocess.run(
-        [PYTHON, "-c", "import gradio"],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        print("-> 正在安装 gradio ...")
-        subprocess.run([PYTHON, "-m", "pip", "install", "gradio"], check=True)
-
-    # 科学计算 / 音频后处理依赖
-    result = subprocess.run(
-        [PYTHON, "-c", "import numpy, scipy, pyloudnorm, mutagen"],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        print("-> 正在安装 numpy / scipy / pyloudnorm / mutagen ...")
-        subprocess.run(
-            [PYTHON, "-m", "pip", "install", "numpy", "scipy", "pyloudnorm", "mutagen"],
-            check=True,
-        )
+    if not _check_runtime_dependencies(PYTHON):
+        _install_runtime_dependencies(PYTHON)
 
     # ffmpeg 系统二进制检查（非 pip 包）
     # 缺失时导出会显式报错（ExportError），已生成的中间 WAV 仍保留。

@@ -20,6 +20,10 @@ APP_PATH = os.path.join(PROJECT_ROOT, "app.py")
 with open(APP_PATH, encoding="utf-8") as f:
     SRC = f.read()
 TREE = ast.parse(SRC)
+VOICE_WIRING_PATH = os.path.join(PROJECT_ROOT, "ui", "wiring", "voice_wiring.py")
+with open(VOICE_WIRING_PATH, encoding="utf-8") as f:
+    VOICE_WIRING_SRC = f.read()
+VOICE_WIRING_TREE = ast.parse(VOICE_WIRING_SRC)
 
 
 def find_func(name):
@@ -45,6 +49,35 @@ def _click_of(target_var):
                 and node.func.value.id == target_var):
             return node
     return None
+
+
+def _voice_page_event(target_key, event_name):
+    for node in ast.walk(VOICE_WIRING_TREE):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == event_name
+            and isinstance(node.func.value, ast.Subscript)
+        ):
+            continue
+        owner = node.func.value
+        if not (isinstance(owner.value, ast.Name) and owner.value.id == "page"):
+            continue
+        key = owner.slice.value if isinstance(owner.slice, ast.Constant) else None
+        if key == target_key:
+            return node
+    return None
+
+
+def _mapping_key(node, mapping_name):
+    if not (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == mapping_name
+        and isinstance(node.slice, ast.Constant)
+    ):
+        return None
+    return node.slice.value
 
 
 # ── O4：书架 + 章节树组件与接线 ──
@@ -118,12 +151,16 @@ def test_o9_p_open_click_appends_refresh_voice_lib():
 
 
 def test_o9_browser_wiring():
-    assert "v_lib_search.change(refresh_voice_lib" in SRC, \
-        "v_lib_search 未接线 refresh_voice_lib"
-    assert "v_lib_category.change(refresh_voice_lib" in SRC, \
-        "v_lib_category 未接线 refresh_voice_lib"
-    assert "v_lib_browser.select(select_voice_from_browser" in SRC, \
-        "v_lib_browser.select 未接线 select_voice_from_browser"
+    cases = (
+        ("v_lib_search", "change", "refresh_voice_lib"),
+        ("v_lib_category", "change", "refresh_voice_lib"),
+        ("v_lib_browser", "select", "select_voice_from_browser"),
+    )
+    for target, event_name, callback in cases:
+        node = _voice_page_event(target, event_name)
+        assert node is not None, f"{target}.{event_name} 接线缺失"
+        assert _mapping_key(node.args[0], "cb") == callback, \
+            f"{target} 未接线 {callback}"
 
 
 # ── O13：章节合并试听组件与接线 ──

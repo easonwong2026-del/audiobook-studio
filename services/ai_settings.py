@@ -77,9 +77,11 @@ def _set_secret(service: str, username: str, password: str) -> None:
             "Keyring 库未安装。请使用环境变量设置 API Key，"
             "或 `pip install keyring` 后重试。"
         ) from None
-    except Exception as exc:
+    except Exception:
         raise SecretStoreUnavailableError(
-            f"Keyring 写入失败：{exc}\n请使用环境变量设置 API Key。"
+            "系统密钥环不可用，无法安全保存 API Key。"
+            "请在 Windows 上配置可用的 Keyring 后端，或使用 OPENAI_API_KEY / "
+            "DEEPSEEK_API_KEY 环境变量。"
         ) from None
 
 
@@ -90,8 +92,11 @@ def _delete_secret(service: str, username: str) -> None:
             keyring.delete_password(service, username)
         except keyring.errors.PasswordDeleteError:
             pass
-        except Exception as exc:
-            raise SecretStoreUnavailableError(f"删除系统密钥失败：{exc}") from exc
+        except Exception:
+            raise SecretStoreUnavailableError(
+                "系统密钥环不可用，无法删除 API Key。"
+                "请检查 Keyring 后端权限，或使用环境变量管理密钥。"
+            ) from None
     except ImportError:
         raise SecretStoreUnavailableError("Keyring 库未安装，无法删除系统密钥。") from None
 

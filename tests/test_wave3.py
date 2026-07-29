@@ -30,6 +30,7 @@ import lib.segment_cache as sc           # noqa: E402
 
 CHANGELOG = os.path.join(PROJECT_ROOT, "更新日志.txt")
 APP_PATH = os.path.join(PROJECT_ROOT, "app.py")
+VOICE_WIRING_PATH = os.path.join(PROJECT_ROOT, "ui", "wiring", "voice_wiring.py")
 
 
 class _FakeSeg:
@@ -126,14 +127,25 @@ def test_preview_bound_voice_full_three_sentences():
     assert "_concat_wavs" in body, "preview_bound_voice 应拼接完整三句"
     assert "test_voice(audio)[0]" not in body, "不应只返回第一句测试句"
 
-    # 接线：v_preview_btn.click(preview_bound_voice, ...)
+    # 接线迁移后：page["v_preview_btn"].click(cb["preview_bound_voice"], ...)
+    with open(VOICE_WIRING_PATH, encoding="utf-8") as f:
+        wiring_tree = ast.parse(f.read())
     wired = False
-    for node in ast.walk(tree):
+    for node in ast.walk(wiring_tree):
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                 and node.func.attr == "click"
-                and isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "v_preview_btn"):
-            if (node.args and isinstance(node.args[0], ast.Name)
-                    and node.args[0].id == "preview_bound_voice"):
-                wired = True
+                and isinstance(node.func.value, ast.Subscript)
+                and isinstance(node.func.value.value, ast.Name)
+                and node.func.value.value.id == "page"
+                and isinstance(node.func.value.slice, ast.Constant)
+                and node.func.value.slice.value == "v_preview_btn"):
+            if node.args:
+                callback = node.args[0]
+                wired = (
+                    isinstance(callback, ast.Subscript)
+                    and isinstance(callback.value, ast.Name)
+                    and callback.value.id == "cb"
+                    and isinstance(callback.slice, ast.Constant)
+                    and callback.slice.value == "preview_bound_voice"
+                )
     assert wired, "v_preview_btn 未接线到 preview_bound_voice"

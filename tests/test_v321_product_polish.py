@@ -22,8 +22,8 @@ def _text(relative: str) -> str:
 
 
 def test_runtime_version_has_one_current_source():
-    assert __version__ == "3.3.1"
-    assert '__version__ = "3.3.1"' in _text("lib/__init__.py")
+    assert __version__ == "3.3.2"
+    assert '__version__ = "3.3.2"' in _text("lib/__init__.py")
     assert 'title=f"Audiobook Studio v{__version__}"' in _text("app.py")
     launcher = _text("launcher.py")
     assert "from lib import __version__" in launcher
@@ -199,8 +199,9 @@ def test_dashboard_and_page_titles_do_not_repeat_navigation():
     assert 'v_role = gr.State' in voice
     assert 'v_role = gr.Dropdown' not in voice
     assert '##### ① 选择角色' not in voice
-    assert 'v_table.change(' in _text("app.py")
-    assert 'select_role_from_list' in _text("app.py")
+    voice_wiring = _text("ui/wiring/voice_wiring.py")
+    assert 'page["v_table"].change(' in voice_wiring
+    assert 'cb["select_role_from_list"]' in voice_wiring
 
 
 def test_voice_category_filters_before_voice_selection():

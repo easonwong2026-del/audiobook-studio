@@ -186,7 +186,7 @@ button:hover, .gr-button:hover {{ transform:translateY(-1px)!important; }}
 .gr-checkbox-group label:has(input:checked), .gr-radiogroup label:has(input:checked), .gr-checkboxgroup label:has(input:checked), .gr-radio-group label:has(input:checked) {{ border-color:{ACCENT}!important; background:rgba(212,245,106,0.1)!important; color:{TEXT_PRIMARY}!important; }}
 
 /* ===== 表格 Dataframe（白底、圆角、表头浅灰、行 hover） ===== */
-.gr-dataframe, .gr-dataframe .wrap {{ background:{CARD}!important; border-radius:14px!important; border:1px solid {BORDER}!important; overflow:hidden!important; }}
+.gr-dataframe, .gr-dataframe .wrap {{ background:{CARD}!important; border-radius:14px!important; border:1px solid {BORDER}!important; max-width:100%!important; overflow-x:auto!important; }}
 .gr-dataframe table {{ background:{CARD}!important; color:{TEXT_PRIMARY}; border-collapse:collapse; border-radius:14px!important; overflow:hidden!important; }}
 .gr-dataframe th {{ background:#fafafa!important; color:{TEXT_MUTED}!important; border-bottom:1px solid {BORDER}!important; font-size:12px!important; font-weight:600!important; text-transform:uppercase!important; letter-spacing:0.5px!important; padding:12px 16px!important; }}
 .gr-dataframe td {{ background:{CARD}!important; color:{TEXT_PRIMARY}; border-bottom:1px solid #f0f0f0!important; padding:14px 16px!important; font-size:14px!important; }}
@@ -235,7 +235,16 @@ button:hover, .gr-button:hover {{ transform:translateY(-1px)!important; }}
 }}
 
 /* ===== 主工作区（浅色 + 大圆角 + 统一分区间距） ===== */
-.main-area {{ border:none!important; min-width:0!important; padding:8px 20px 24px!important; background:transparent!important; }}
+.main-area {{ border:none!important; width:100%!important; max-width:100%!important; min-width:0!important; padding:8px 20px 24px!important; background:transparent!important; box-sizing:border-box!important; }}
+.main-area > * {{ width:100%!important; max-width:100%!important; min-width:0!important; box-sizing:border-box!important; }}
+.settings-page, .settings-page > *, .settings-card {{ width:100%!important; max-width:100%!important; min-width:0!important; box-sizing:border-box!important; }}
+.settings-page .tabs, .settings-page .settings-tabs, .settings-page [role="tabpanel"] {{ width:100%!important; max-width:100%!important; min-width:0!important; box-sizing:border-box!important; }}
+.settings-provider-row, .settings-actions, .settings-data-actions {{ flex-wrap:wrap!important; gap:10px!important; }}
+.settings-provider-row > *, .settings-actions > *, .settings-data-actions > * {{ flex:1 1 180px!important; min-width:0!important; max-width:100%!important; box-sizing:border-box!important; }}
+.settings-card input, .settings-card textarea {{ max-width:100%!important; min-width:0!important; overflow-wrap:anywhere!important; }}
+.settings-card .prose, .settings-card .form, .settings-card .wrap {{ min-width:0!important; max-width:100%!important; box-sizing:border-box!important; }}
+.diagnostics-table .table-wrap {{ max-width:100%!important; overflow-x:auto!important; }}
+.diagnostics-report textarea {{ width:100%!important; max-width:100%!important; overflow-wrap:anywhere!important; white-space:pre-wrap!important; }}
 
 /* ===== 页面标题 ===== */
 .main-area > .gr-group > .prose:first-child h3,
@@ -351,10 +360,9 @@ button[aria-label*="Play"] {{ border-radius:999px!important; background:{ACCENT}
 .voice-config-steps {{ display:flex!important; flex-direction:column!important; gap:10px!important; }}
 .voice-binding-layout {{ gap:12px!important; align-items:start!important; flex-wrap:nowrap!important; }}
 .voice-choice-card {{ flex:1 1 auto!important; min-width:0!important; }}
-.voice-save-card {{ flex:0 0 134px!important; min-width:134px!important; }}
-.voice-save-card .gr-button {{ width:100%!important; min-height:153px!important; height:153px!important; }}
-.voice-config-footer {{ gap:10px!important; align-items:start!important; }}
-.voice-config-footer > * {{ min-width:0!important; }}
+.voice-config-footer {{ gap:10px!important; align-items:center!important; flex-wrap:wrap!important; margin-top:12px!important; }}
+.voice-config-footer > * {{ min-width:0!important; max-width:100%!important; box-sizing:border-box!important; }}
+.voice-config-footer .voice-bind-action {{ flex:0 1 180px!important; width:auto!important; min-height:44px!important; height:auto!important; }}
 .voice-binding-steps {{ display:grid!important; grid-template-columns:1fr!important; gap:10px!important; align-items:start!important; }}
 .voice-step-card {{ width:auto!important; min-width:0!important; background:{CARD}!important; border:1px solid {BORDER}!important; border-radius:12px!important; padding:4px 12px 12px!important; min-height:0!important; align-self:start!important; }}
 .voice-reference-upload .audio-container button.boundedheight {{ height:150px!important; min-height:150px!important; }}
@@ -389,11 +397,20 @@ button[aria-label*="Play"] {{ border-radius:999px!important; background:{ACCENT}
   .main-area {{ padding:8px 12px 20px!important; }}
   .voice-workspace {{ flex-wrap:wrap!important; }}
   .voice-binding-layout {{ flex-wrap:wrap!important; }}
-  .voice-save-card {{ flex:1 1 100%!important; min-width:100%!important; }}
   .voice-config-footer {{ flex-wrap:wrap!important; }}
-  .voice-config-footer > * {{ min-width:100%!important; }}
+  .voice-config-footer > * {{ flex:1 1 100%!important; min-width:0!important; }}
+  .voice-config-footer .voice-bind-action {{ flex:1 1 100%!important; width:100%!important; }}
   .voice-binding-steps {{ grid-template-columns:1fr!important; }}
   .workbench-main-row > *, .stage-row > *, .voice-step-card {{ min-width:100%!important; }}
+}}
+@media (max-width: 1180px) and (min-width: 901px) {{
+  .gradio-container {{ padding:16px!important; }}
+  .sidebar {{ min-width:220px!important; padding-left:12px!important; padding-right:12px!important; }}
+  .main-area {{ padding-left:12px!important; padding-right:12px!important; }}
+  .voice-workspace > .role-list-panel {{ flex-basis:220px!important; }}
+  .voice-binding-layout {{ flex-wrap:wrap!important; }}
+  .voice-choice-card {{ flex:1 1 480px!important; }}
+  .settings-actions > *, .settings-data-actions > * {{ flex-basis:150px!important; }}
 }}
 </style>
 <script>

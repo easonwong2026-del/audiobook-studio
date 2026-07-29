@@ -5,14 +5,18 @@ import gradio as gr
 
 
 def create_settings_page() -> dict:
-    with gr.Group(visible=False, elem_id="grp-settings") as grp:
+    with gr.Group(
+        visible=False,
+        elem_id="grp-settings",
+        elem_classes=["settings-page"],
+    ) as grp:
         gr.Markdown("### 设置")
 
-        with gr.Tabs():
+        with gr.Tabs(elem_classes=["settings-tabs"]):
             with gr.Tab("AI 模型"):
                 with gr.Group(elem_classes=["settings-card"]):
                     gr.Markdown("##### 默认 Provider")
-                    with gr.Row():
+                    with gr.Row(elem_classes=["settings-provider-row"]):
                         s_provider = gr.Dropdown(
                             label="Provider",
                             choices=[
@@ -50,7 +54,7 @@ def create_settings_page() -> dict:
                         step=10,
                     )
 
-                    with gr.Row():
+                    with gr.Row(elem_classes=["settings-actions"]):
                         s_save = gr.Button("保存配置", variant="primary")
                         s_test = gr.Button("测试当前配置", variant="secondary")
                         s_clear_key = gr.Button("清除已保存密钥", variant="stop", size="sm", visible=False)
@@ -65,7 +69,7 @@ def create_settings_page() -> dict:
                         label="数据目录",
                         value=config.get_data_dir(),
                     )
-                    with gr.Row():
+                    with gr.Row(elem_classes=["settings-data-actions"]):
                         s_data_apply = gr.Button("应用", variant="primary")
                         s_data_open = gr.Button("打开数据文件夹")
                     s_data_msg = gr.Markdown("")
@@ -74,7 +78,8 @@ def create_settings_page() -> dict:
                 with gr.Group(elem_classes=["settings-card"]):
                     from lib import __version__
                     s_version = gr.Markdown(f"**版本**：v{__version__}")
-                    s_python = gr.Markdown("**Python**：3.10+")
+                    import platform
+                    s_python = gr.Markdown(f"**Python**：{platform.python_version()}")
                     s_status_info = gr.Markdown("")
                     gr.Markdown("##### 环境诊断")
                     gr.Markdown(
@@ -86,12 +91,15 @@ def create_settings_page() -> dict:
                         headers=["检查项", "状态", "结果", "修复建议"],
                         datatype=["str", "str", "str", "str"],
                         interactive=False,
+                        wrap=True,
+                        elem_classes=["diagnostics-table"],
                     )
                     s_diagnostics_report = gr.Textbox(
                         label="可复制诊断报告（Markdown）",
                         lines=12,
                         show_copy_button=True,
                         interactive=False,
+                        elem_classes=["diagnostics-report"],
                     )
 
     return {

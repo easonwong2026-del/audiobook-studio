@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.3.2] - 2026-07-29
+
+### Fixed
+
+- 启动器统一使用已解析的 Python 执行 `requirements.txt`，自动补齐 `keyring`，并保持 Gradio `<6` 约束。
+- 修复设置页被创建在主工作区外导致内容裁切的问题，补充中等窗口响应式布局。
+- 角色与声音页删除导演试听、试听反馈及对应死接线；确认绑定改为正常底部操作区。
+
+### Quality
+
+- 增加启动器依赖安装、设置页结构和导演试听清理回归测试。
+
 ## [3.3.1] - 2026-07-28
 
 ### Added

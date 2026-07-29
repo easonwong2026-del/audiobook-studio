@@ -1,4 +1,4 @@
-"""AI 剧本导演 UI 静态接线测试（v3.3.1 重构版）。"""
+"""AI 剧本导演与角色声音 UI 静态接线测试。"""
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,12 +27,13 @@ def test_director_not_in_create_project_page():
     assert "d_audio" not in CREATE_PAGE
 
 
-def test_recommend_and_audition_in_voice_page():
-    """推荐与导演试听转移到角色与声音页面。"""
+def test_recommendation_remains_but_voice_page_has_no_audition():
+    """AI 声音推荐保留，角色页导演试听与反馈完整删除。"""
     assert '"v_recommend"' in VOICE_PAGE
-    assert '"v_audition"' in VOICE_PAGE
-    assert '"v_feedback"' in VOICE_PAGE
-    assert '"v_feedback_apply"' in VOICE_PAGE
+    for name in ("v_audition", "v_audition_audio", "v_audition_status", "v_feedback", "v_feedback_apply"):
+        assert name not in VOICE_PAGE
+    assert "试听确认" not in VOICE_PAGE
+    assert "② 确认绑定" in VOICE_PAGE
 
 
 def test_director_editor_wired_in_app():
@@ -46,11 +47,13 @@ def test_director_editor_wired_in_app():
 
 
 def test_voice_handlers_wired():
-    """声音推荐和导演试听使用 voice_ui 处理器。"""
-    assert "from ui import voice_handlers as voice_ui" in APP
-    assert "voice_ui.recommend_voice" in APP
-    assert "voice_ui.audition_director_segment" in APP
-    assert "voice_ui.apply_feedback" in APP
+    """角色声音页面由独立 wiring 注册，导演试听不再有入口。"""
+    wiring = (ROOT / "ui/wiring/voice_wiring.py").read_text(encoding="utf-8")
+    assert "wire_voice_page" in APP
+    assert "voice_handlers.recommend_voice" in wiring
+    for name in ("audition_director_segment", "apply_feedback", "v_audition", "v_feedback_apply"):
+        assert name not in APP
+        assert name not in wiring
 
 
 def test_settings_handlers_exist():
