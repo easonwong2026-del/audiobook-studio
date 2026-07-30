@@ -29,6 +29,7 @@ from domain.v4.production import (
 from repositories.production_repository import ProductionRepository
 from repositories.project_v4_repository import ProjectV4Repository
 from repositories.v4_atomic import atomic_write_json
+from repositories.v4_atomic import _short_tmp
 
 
 @dataclass(frozen=True)
@@ -98,7 +99,7 @@ class V3ToV4MigrationService:
         )
         backup_root.mkdir(parents=True, exist_ok=True)
         shutil.copytree(source, backup)
-        staging_root = root / f".tmp_v3_migration_{uuid.uuid4().hex}"
+        staging_root = root / f".tmp_v3_{_short_tmp()}"
         try:
             profile = self._profile()
             staged = ProjectV4Repository(staging_root).create(
