@@ -45,3 +45,20 @@ ruff check <v4 changed files>
 ```
 
 并检查所有堆叠 PR 的精确 head Actions。全仓 Ruff 的旧 v3 findings 单独记录；本次没有把风格批量改写冒充架构退役。
+
+
+### PR 栈状态
+
+| 阶段 | PR | Base | Head | Draft | CI |
+|---|---|---|---|---|---|
+| Phase 2 | #20 | `main` | `feature/v4-phase2-speaker-routing` | ✅ | ✅ |
+| Phase 3 | #16 | `feature/v4-phase2-speaker-routing` | `feature/v4-phase3-synthesis-planner` | ✅ | ✅ |
+| Phase 4 | #17 | `feature/v4-phase3-synthesis-planner` | `feature/v4-phase4-synthesis-runtime` | ✅ | ✅ |
+| Phase 5 | #18 | `feature/v4-phase4-synthesis-runtime` | `feature/v4-phase5-migration-ui` | ✅ | ✅ |
+| Phase 6 | #19 | `feature/v4-phase5-migration-ui` | `feature/v4-phase6-legacy-retirement` | ✅ | ✅ |
+
+### Windows 长路径问题
+
+已修复：`repositories/v4_atomic.py` 使用 `_filesystem_path()` 在 Windows 下自动添加 `\\?\` 前缀；
+临时文件名从 `.<filename>.<32hex>.tmp` 缩短为 `.<12hex>.tmp`；
+暂存目录从长格式缩短至 12hex。深路径单元测试已添加。
