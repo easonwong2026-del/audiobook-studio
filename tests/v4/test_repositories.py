@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from repositories import v4_atomic
 from domain.v4 import ProjectManifest, SourceMetadata, ValidationError
 from domain.v4.models import source_sha256
+from repositories import v4_atomic
 from repositories.project_v4_repository import (
     ProjectV4Repository,
     V4ProjectAlreadyExistsError,
