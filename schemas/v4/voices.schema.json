@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "audiobook-voices-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "revision", "bindings"],
+  "properties": {
+    "schema_version": {"const": "audiobook-voices-v1"},
+    "revision": {"type": "integer", "minimum": 1},
+    "bindings": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["voice_id", "fingerprint"],
+        "properties": {
+          "voice_id": {"type": "string", "minLength": 1},
+          "fingerprint": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}

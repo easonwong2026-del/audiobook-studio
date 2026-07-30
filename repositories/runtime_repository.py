@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 RUNTIME_SCHEMA_VERSION = 3
 
@@ -137,3 +138,52 @@ class RuntimeRepository:
             )
             connection.commit()
             return cursor.rowcount
+
+    def sync_synthesis_plan(
+        self,
+        plan_revision: int,
+        tasks: list[dict[str, Any]],
+        removed_task_ids: list[str],
+    ) -> None:
+        """Register a plan and mark only changed/removed task rows stale."""
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("BEGIN IMMEDIATE")
+            for task_id in removed_task_ids:
+                connection.execute(
+                    """
+                    UPDATE synthesis_tasks
+                       SET status = 'stale', updated_at = CURRENT_TIMESTAMP
+                     WHERE task_id = ? AND status != 'stale'
+                    """,
+                    (task_id,),
+                )
+            for task in tasks:
+                connection.execute(
+                    """
+                    INSERT INTO synthesis_tasks(
+                        task_id, plan_revision, chapter_id, speaker_id, cache_key,
+                        status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP,
+                              CURRENT_TIMESTAMP)
+                    ON CONFLICT(task_id) DO UPDATE SET
+                        plan_revision = excluded.plan_revision,
+                        chapter_id = excluded.chapter_id,
+                        speaker_id = excluded.speaker_id,
+                        status = CASE
+                            WHEN synthesis_tasks.cache_key != excluded.cache_key
+                            THEN 'stale'
+                            ELSE synthesis_tasks.status
+                        END,
+                        cache_key = excluded.cache_key,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (
+                        task["task_id"],
+                        str(plan_revision),
+                        task["chapter_id"],
+                        task["speaker_id"],
+                        task["input_fingerprint"],
+                    ),
+                )
+            connection.commit()

@@ -11,8 +11,8 @@ def test_5070ti_profile_is_conservative_and_unbenchmarked():
     assert profile["schema_version"] == "audiobook-tts-profile-v1"
     assert profile["status"] == "provisional-unbenchmarked"
     assert profile["hardware"]["vram_gb"] == 12
-    assert profile["limits"]["preferred_text_tokens"] == 80
-    assert profile["limits"]["max_text_tokens"] == 100
-    assert profile["limits"]["absolute_text_tokens"] == 120
+    assert profile["limits"]["preferred"] == 80
+    assert profile["limits"]["maximum"] == 100
+    assert profile["limits"]["absolute"] == 120
     assert profile["runtime"]["concurrency"] == 1
     assert profile["options"]["cuda_kernel"] is False
