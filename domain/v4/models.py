@@ -27,6 +27,14 @@ def source_sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def stable_speaker_id(name: str) -> str:
+    normalized = name.strip()
+    if not normalized:
+        raise ValidationError("speaker name cannot be empty")
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
+    return f"speaker_{digest}"
+
+
 @dataclass(frozen=True)
 class SourceMetadata:
     original_filename: str

@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from domain.v4 import (
@@ -78,6 +79,37 @@ class ProjectV4Repository:
         path = Path(project_path) / "project.json"
         with path.open("r", encoding="utf-8") as handle:
             return ProjectManifest.from_dict(json.load(handle))
+
+    def save_script_and_speakers(
+        self,
+        project_path: str | Path,
+        source_text: str,
+        script: ScriptDocument,
+        speakers: SpeakersDocument,
+    ) -> None:
+        """Persist reviewed routing data with immutable pre-edit snapshots."""
+        project = Path(project_path)
+        current_script_path = project / "script/script.json"
+        current_speakers_path = project / "script/speakers.json"
+        with current_script_path.open("r", encoding="utf-8") as handle:
+            previous_script = json.load(handle)
+        with current_speakers_path.open("r", encoding="utf-8") as handle:
+            previous_speakers = json.load(handle)
+        old_script = ScriptDocument.from_dict(previous_script, source_text)
+        old_speakers = SpeakersDocument.from_dict(previous_speakers)
+        script.validate(source_text)
+        speakers.validate()
+        if script.revision <= old_script.revision:
+            raise ValueError("script revision must increase")
+        if speakers.revision < old_speakers.revision:
+            raise ValueError("speakers revision cannot decrease")
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+        snapshot = project / "revisions" / f"routing-{stamp}"
+        snapshot.mkdir(parents=True, exist_ok=False)
+        atomic_write_json(snapshot / "script.json", previous_script)
+        atomic_write_json(snapshot / "speakers.json", previous_speakers)
+        atomic_write_json(current_script_path, script.to_dict())
+        atomic_write_json(current_speakers_path, speakers.to_dict())
 
     def cleanup_temporary_projects(self) -> list[Path]:
         removed: list[Path] = []
