@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from repositories.runtime_repository import RuntimeRepository
+from repositories.runtime_repository import RUNTIME_SCHEMA_VERSION, RuntimeRepository
 
 
 @dataclass(frozen=True)
@@ -17,6 +17,26 @@ class V4ProgressSnapshot:
 
 
 class V4ProgressService:
+    @staticmethod
+    def from_project(
+        project_path: str | Path,
+        chapters: list[Any],
+        *,
+        plan_revision: int | None = None,
+    ) -> V4ProgressSnapshot:
+        runtime_path = Path(project_path) / "runtime/runtime.db"
+        runtime = None
+        if runtime_path.is_file():
+            runtime = RuntimeRepository(runtime_path)
+            if runtime.schema_version() < RUNTIME_SCHEMA_VERSION:
+                runtime.initialize()
+        return V4ProgressService.snapshot(
+            runtime,
+            project_path,
+            chapters,
+            plan_revision=plan_revision,
+        )
+
     @staticmethod
     def snapshot(
         runtime: RuntimeRepository | None,

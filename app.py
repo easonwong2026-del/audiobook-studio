@@ -192,33 +192,25 @@ def _open_v4_project(name, ss):
         if context is None or not context.is_v4:
             raise ValueError("项目不存在或不是 V4 格式")
         ss.set_v4_project(name, context.script, context.speakers)
+        from services.v4_progress import V4ProgressService
+
         script = context.script
-        speakers = context.speakers
         source = (context.project_path / "source/source.txt").read_text(
             encoding="utf-8"
         )
         unresolved_rows = SpeakerReviewService.unresolved_rows(source, script)
         unresolved = len(unresolved_rows)
-        segment_total = sum(
-            len(chapter.segments) for chapter in script.chapters
+        plan = context.production.load_plan()
+        progress = V4ProgressService.from_project(
+            context.project_path,
+            list(script.chapters),
+            plan_revision=plan.revision if plan else None,
         )
+        segment_total = progress.segments_total
         title = (
             context.manifest.title if context.manifest is not None else name
         )
-        runtime = context.project_path / "runtime/runtime.db"
-        completed = 0
-        if runtime.is_file():
-            import sqlite3 as _sqlite
-
-            try:
-                with _sqlite.connect(runtime) as connection:
-                    row = connection.execute(
-                        "SELECT COUNT(*) FROM synthesis_tasks "
-                        "WHERE status = 'completed'"
-                    ).fetchone()
-                completed = int(row[0] or 0)
-            except _sqlite.Error:
-                completed = 0
+        completed = progress.segments_done
         info = f"""### 📚 {title}
 <div style="display:flex;gap:20px;margin-top:8px">
 <span>📄 **{len(script.chapters)}** 章</span>
@@ -311,9 +303,10 @@ def refresh_top_status(ss):
         return "*等待打开项目…*"
     try:
         if getattr(ss, "is_v4", False):
+            from repositories.production_repository import ProductionRepository
+            from services.v4_progress import V4ProgressService
+
             script = ss.script
-            chapters = len(script.chapters)
-            total = sum(len(ch.segments) for ch in script.chapters)
             try:
                 with (V4ProjectService.root() / ss.project / "project.json").open(
                     "r", encoding="utf-8"
@@ -322,22 +315,15 @@ def refresh_top_status(ss):
             except (OSError, json.JSONDecodeError):
                 title = ss.project
             project_path = V4ProjectService.root() / ss.project
-            completed = 0
-            runtime = project_path / "runtime/runtime.db"
-            if runtime.is_file():
-                import sqlite3 as _sqlite
-
-                try:
-                    with _sqlite.connect(runtime) as connection:
-                        row = connection.execute(
-                            "SELECT COUNT(*) FROM synthesis_tasks "
-                            "WHERE status = 'completed'"
-                        ).fetchone()
-                    completed = int(row[0] or 0)
-                except _sqlite.Error:
-                    completed = 0
+            plan = ProductionRepository(project_path).load_plan()
+            progress = V4ProgressService.from_project(
+                project_path,
+                list(script.chapters),
+                plan_revision=plan.revision if plan else None,
+            )
             return (
-                f"📖 **{title}** · {chapters} 章 · {completed}/{total} 段 · "
+                f"📖 **{title}** · {progress.chapters_total} 章 · "
+                f"{progress.segments_done}/{progress.segments_total} 段 · "
                 f"引擎: {'已加载' if getattr(sys.modules.get('lib.tts_engine'), '_tts', None) is not None else '未加载'}"
             )
         snap = _snap(ss)
@@ -2008,10 +1994,6 @@ def _dashboard_snapshot_v4(ss):
     """V4 项目工作台概览（章节 / 片段 / 待确认 / 已合成 / 待绑定）。"""
     try:
         from repositories.production_repository import ProductionRepository
-        from repositories.runtime_repository import (
-            RUNTIME_SCHEMA_VERSION,
-            RuntimeRepository,
-        )
         from services.v4_progress import V4ProgressService
 
         script = ss.script
@@ -2025,14 +2007,7 @@ def _dashboard_snapshot_v4(ss):
         production = ProductionRepository(project_path)
         voices, _p, _pr, _profile = production.load_inputs()
         plan = production.load_plan()
-        runtime_path = project_path / "runtime/runtime.db"
-        runtime_repository = None
-        if runtime_path.is_file():
-            runtime_repository = RuntimeRepository(runtime_path)
-            if runtime_repository.schema_version() < RUNTIME_SCHEMA_VERSION:
-                runtime_repository.initialize()
-        progress = V4ProgressService.snapshot(
-            runtime_repository,
+        progress = V4ProgressService.from_project(
             project_path,
             chapters,
             plan_revision=plan.revision if plan else None,
