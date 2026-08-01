@@ -324,6 +324,19 @@ class RuntimeRepository:
                 )
             }
 
+    def cancel_pending_tasks(self) -> int:
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                """
+                UPDATE synthesis_tasks
+                   SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+                 WHERE status = 'pending'
+                """
+            )
+            connection.commit()
+            return cursor.rowcount
+
     def resolved_audio_paths(self, task_id: str) -> list[str]:
         """Resolve a plan task to its completed leaf outputs after OOM splitting."""
         with sqlite3.connect(self.path) as connection:

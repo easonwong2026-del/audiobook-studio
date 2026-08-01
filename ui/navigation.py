@@ -10,6 +10,7 @@ from ui.components.brand_logo import create_brand_logo
 NAV_ITEMS = [
     ("overview", "🏠 工作台", "nav-overview"),
     ("create_project", "① 新建项目", "nav-create-project"),
+    ("v4", "✨ v4 工作流", "nav-v4"),
     ("project", "② 项目管理", "nav-project"),
     ("voices", "③ 角色与声音", "nav-voices"),
     ("synth", "④ 生产与质检", "nav-synth"),
@@ -22,6 +23,7 @@ _SETTINGS_ITEM = ("settings", "⚙ 设置", "nav-settings")
 GROUP_ITEMS = [
     "overview",
     "create_project",
+    "v4",
     "project",
     "voices",
     "production-nav",

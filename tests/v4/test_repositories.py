@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
+import os
 import sqlite3
+from pathlib import Path
 
 import pytest
 
+from repositories import v4_atomic
 from domain.v4 import ProjectManifest, SourceMetadata, ValidationError
 from domain.v4.models import source_sha256
 from repositories.project_v4_repository import (
@@ -12,6 +16,72 @@ from repositories.project_v4_repository import (
 )
 from repositories.runtime_repository import RuntimeRepository
 from services.source_segmenter import SourceSegmenter
+
+
+def test_filesystem_path_preserves_non_windows():
+    path = Path("/tmp/test")
+    assert str(v4_atomic._filesystem_path(path)) == "/tmp/test"
+
+
+def test_filesystem_path_does_not_double_prefix():
+    if os.name != "nt":
+        raw = "\\\\?\\C:\\projects"
+        assert str(v4_atomic._filesystem_path(Path(raw))) == raw
+
+
+def test_atomic_write_succeeds_in_deep_directory(tmp_path):
+    deep = tmp_path
+    for _ in range(15):
+        deep = deep / "a"
+    target = deep / "result.json"
+    v4_atomic.atomic_write_json(target, {"key": "value"})
+    assert target.is_file()
+    assert json.loads(target.read_text(encoding="utf-8")) == {"key": "value"}
+
+
+def test_atomic_write_temp_name_is_short():
+    suffix = v4_atomic._short_tmp()
+    assert len(suffix) == 12
+    assert all(c in "0123456789abcdef" for c in suffix)
+
+
+def test_deep_path_v4_project_creation(tmp_path):
+    deep = tmp_path
+    for _ in range(12):
+        deep = deep / "deep_component"
+    manifest, metadata, segmented = _documents()
+    repository = ProjectV4Repository(deep)
+    path = repository.create(
+        "deep项目", manifest, "他说：“你好。”", metadata,
+        segmented.script, segmented.speakers,
+    )
+    assert path.is_dir()
+    assert (path / "source/source.txt").is_file()
+    assert (path / "runtime/runtime.db").is_file()
+
+
+def test_deep_path_migration_staging_is_short(tmp_path):
+    from services.migration_v3_to_v4 import V3ToV4MigrationService
+    source = tmp_path / "src-v3"
+    source.mkdir(parents=True)
+    (source / "structured_script.json").write_text(
+        json.dumps({
+            "meta": {"title": "书"},
+            "voices": {"王": {"name": "王"}},
+            "chapters": [{"id": 1, "segments": [
+                {"id": "1-001", "role": "旁白",
+                 "text": "正文。", "emotion": "neutral"},
+            ]}],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (source / "voice_bindings.json").write_text("{}", encoding="utf-8")
+    deep = tmp_path / "projects"
+    for _ in range(8):
+        deep = deep / "sub"
+    deep.mkdir(parents=True)
+    result = V3ToV4MigrationService().migrate(source, deep)
+    assert result.project_path.is_dir()
 
 
 def _documents(text="他说：“你好。”"):

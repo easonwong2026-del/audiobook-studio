@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,6 +17,7 @@ from domain.v4.production import TtsProfile
 from repositories.production_repository import ProductionRepository
 from repositories.runtime_repository import RuntimeRepository
 from repositories.v4_atomic import atomic_write_json, atomic_write_text
+from repositories.v4_atomic import _short_tmp
 
 _DIRECTORIES = (
     "source",
@@ -59,7 +59,7 @@ class ProjectV4Repository:
         speakers.validate()
         manifest.validate()
         self.root.mkdir(parents=True, exist_ok=True)
-        temporary = self.root / f".tmp_v4_{directory_name}_{uuid.uuid4().hex}"
+        temporary = self.root / f".tmp_v4_{_short_tmp()}"
         try:
             for directory in _DIRECTORIES:
                 (temporary / directory).mkdir(parents=True, exist_ok=True)

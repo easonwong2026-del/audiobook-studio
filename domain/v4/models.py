@@ -44,6 +44,8 @@ class SourceMetadata:
     char_count: int
     sha256: str
     imported_at: str
+    source_origin: str = "original-upload"
+    source_fidelity: str = "normalized-source"
     schema_version: str = SOURCE_SCHEMA
 
     def validate(self, source_text: str | None = None) -> None:
@@ -67,6 +69,8 @@ class SourceMetadata:
             "character_count": self.char_count,
             "sha256": self.sha256,
             "imported_at": self.imported_at,
+            "source_origin": self.source_origin,
+            "source_fidelity": self.source_fidelity,
         }
 
     @classmethod
@@ -81,6 +85,10 @@ class SourceMetadata:
                 char_count=data["character_count"],
                 sha256=data["sha256"],
                 imported_at=data["imported_at"],
+                source_origin=data.get("source_origin", "original-upload"),
+                source_fidelity=data.get(
+                    "source_fidelity", "normalized-source"
+                ),
                 schema_version=data["schema_version"],
             )
         except (TypeError, KeyError) as exc:

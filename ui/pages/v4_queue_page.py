@@ -4,8 +4,8 @@ from __future__ import annotations
 import gradio as gr
 
 
-def create_v4_queue_page() -> dict:
-    with gr.Group(visible=False, elem_id="grp-v4-synthesis-queue") as group:
+def create_v4_queue_page(*, visible: bool = False) -> dict:
+    with gr.Group(visible=visible, elem_id="grp-v4-synthesis-queue") as group:
         gr.Markdown("### 合成队列")
         summary = gr.Markdown("尚未加载任务")
         table = gr.Dataframe(

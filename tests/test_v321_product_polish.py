@@ -22,8 +22,8 @@ def _text(relative: str) -> str:
 
 
 def test_runtime_version_has_one_current_source():
-    assert __version__ == "3.3.3"
-    assert '__version__ = "3.3.3"' in _text("lib/__init__.py")
+    assert __version__ == "4.0.0"
+    assert '__version__ = "4.0.0"' in _text("lib/__init__.py")
     assert 'title=f"Audiobook Studio v{__version__}"' in _text("app.py")
     launcher = _text("launcher.py")
     assert "from lib import __version__" in launcher
@@ -130,7 +130,7 @@ def test_production_stage_has_internal_navigation_and_check():
         and any(isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)
                 and target.value.id == "_GROUPS" for target in node.targets)
     ]
-    assert assignments and len(assignments[0].value.elts) == 10
+    assert assignments and len(assignments[0].value.elts) == 11
 
 
 def test_project_onboarding_and_user_facing_quality_labels_exist():
