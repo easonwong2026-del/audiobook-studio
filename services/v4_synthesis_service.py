@@ -59,6 +59,20 @@ class V4SynthesisService:
     # ── 计划 ────────────────────────────────────────────────────────────────
 
     @classmethod
+    def ensure_plan(cls, project_path: str | Path) -> tuple[bool, str]:
+        """确保项目已有合成计划；没有则自动生成（返回 (ok, 说明)）。
+
+        若存在 unresolved 片段或未绑定角色，计划仍会生成（这些片段被跳过），
+        并在说明中提示用户。
+        """
+        project = Path(project_path)
+        production = ProductionRepository(project)
+        if production.load_plan() is not None:
+            return True, ""
+        _rows, message = cls.generate_plan(project)
+        return True, message
+
+    @classmethod
     def generate_plan(cls, project_path: str | Path) -> tuple[list[list], str]:
         """生成合成计划并同步 runtime（局部失效）。返回 (计划行, 消息)。"""
         project = Path(project_path)

@@ -735,6 +735,9 @@ def do_synthesis(ss, num_beams=2, progress=gr.Progress(),
     并透传至 ``SynthesisService.start``，保证预览 / 导出缓存键一致。
     """
     proj = ss.project
+    if ss and ss.is_v4:
+        yield from _do_synthesis_v4(ss, progress)
+        return
     bindings = ss.bindings
     script = ss.script or {}
     if not proj:
@@ -802,11 +805,71 @@ def do_synthesis(ss, num_beams=2, progress=gr.Progress(),
         logger.debug("进度回调异常（终态）: %s", exc)
     yield (state.snapshot_text(), df_style.style_dataframe(synth_progress.to_queue_rows(state.segment_states), synth_progress.QUEUE_HEADERS, status_col=0, status_color_map=df_style.ICON_COLORS))
 
+
+def _do_synthesis_v4(ss, progress=gr.Progress()):
+    """V4 合成：确保计划 → 启动统一队列（后台线程）→ 轮询 runtime.db 进度。
+
+    语义：pause 协作暂停（当前任务完成后挂起）；resume 跳过已完成；
+    cancel 保留已完成缓存；中断恢复由 executor 在下次启动时自动处理。
+    """
+    proj = ss.project
+    if not proj:
+        yield ("请先在项目管理中打开项目", [])
+        return
+    project_path = V4ProjectService.root() / proj
+    plan_ok, plan_msg = V4SynthesisService.ensure_plan(project_path)
+    if not plan_ok:
+        yield (plan_msg, [])
+        return
+    if "unresolved" in plan_msg or "未绑定" in plan_msg:
+        yield (plan_msg + "\n\n未确认角色 / 未绑定音色的片段将跳过，可在③继续处理后重试。", _v4_queue_styled(proj))
+    ok, message = V4SynthesisService.start(proj)
+    if not ok:
+        yield (message, _v4_queue_styled(proj))
+        return
+    yield (message, _v4_queue_styled(proj))
+    while True:
+        time.sleep(0.5)
+        snapshot = V4SynthesisService.snapshot(proj)
+        status = snapshot["run_status"]
+        text = snapshot.get("text") or snapshot.get("error") or status
+        try:
+            counts = snapshot["counts"]
+            done = counts.get("completed", 0)
+            total = sum(counts.values())
+            progress(done / total if total else 0, f"{done}/{total}")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("V4 进度回调异常: %s", exc)
+        yield (text, _v4_queue_styled(proj))
+        if status in ("done", "cancelled", "error"):
+            break
+    final = V4SynthesisService.snapshot(proj)
+    yield (
+        final.get("text") or final.get("error") or "已完成",
+        _v4_queue_styled(proj),
+    )
+
+
+def _v4_queue_styled(project_name):
+    """V4 队列表格样式化行。"""
+    rows = V4SynthesisService.queue_rows(project_name)
+    return df_style.style_dataframe(
+        rows,
+        ["task", "chapter", "speaker", "status", "len", "try", "split", "out"],
+        status_col=3,
+        status_color_map=df_style.ICON_COLORS,
+    )
+
+
 def cancel(ss):
     """停止合成：置协作取消标志（worker 在下一段前检查 -> 段边界生效）。"""
+    if ss and ss.is_v4:
+        ok, message = V4SynthesisService.cancel(ss.project)
+        return message
     if ss.synthesis is not None:
         SynthesisService.cancel(ss.synthesis)
-    return "停止中..."
+        return "停止中..."
+    return "当前没有运行中的合成任务。"
 
 def pause_synthesis(ss):
     """O12：暂停合成（协作暂停，段边界挂起，不杀进行中进程）。
@@ -814,6 +877,16 @@ def pause_synthesis(ss):
     仅在 ``ss.synthesis`` 存在且 ``status in (running, paused)`` 时生效；否则返回提示不报错。
     返回 (队列列表, 暂停按钮, 恢复按钮) 的更新三元组。
     """
+    if ss and ss.is_v4:
+        ok, message = V4SynthesisService.pause(ss.project)
+        rows = _v4_queue_styled(ss.project)
+        if ok:
+            return (
+                rows,
+                gr.update(value="⏸ 已暂停", interactive=False),
+                gr.update(interactive=True),
+            )
+        return (rows, gr.update(), gr.update())
     if ss.synthesis is None or ss.synthesis.status not in ("running", "paused"):
         return (gr.update(), gr.update(), gr.update())
     SynthesisService.pause(ss.synthesis)
@@ -835,6 +908,16 @@ def resume_synthesis(ss):
     仅在 ``ss.synthesis`` 存在且 ``status == 'paused'`` 时生效；否则返回提示不报错。
     返回 (队列列表, 暂停按钮, 恢复按钮) 的更新三元组。
     """
+    if ss and ss.is_v4:
+        ok, message = V4SynthesisService.resume(ss.project)
+        rows = _v4_queue_styled(ss.project)
+        if ok:
+            return (
+                rows,
+                gr.update(value="⏸ 暂停", interactive=True),
+                gr.update(interactive=False),
+            )
+        return (rows, gr.update(), gr.update())
     if ss.synthesis is None or ss.synthesis.status != "paused":
         return (gr.update(), gr.update(), gr.update())
     SynthesisService.resume(ss.synthesis)
@@ -1035,6 +1118,11 @@ def play_segment(choices, ss):
     if not ss.project or not choices: return None
     if isinstance(choices,list): choices=choices[0] if choices else None
     if not choices: return None
+    if ss.is_v4:
+        segment_id = choices.split(" ")[0]
+        return V4QualityService.segment_audio(
+            V4ProjectService.root() / ss.project, segment_id
+        )
     # 阶段三：复用会话态快照的剧本 dict。
     script = _snap(ss).script
     sid=choices.split(" ")[0]; proj_dir=ProjectService.get_project_dir(ss.project)
@@ -1056,6 +1144,8 @@ def play_segment(choices, ss):
 def regenerate_segment(choices, emotion, emo_alpha, speech_rate, voice_choice, ss):
     if not ss.project or not choices: return None,"请选择段落"
     if isinstance(choices,str): choices=[choices]
+    if ss.is_v4:
+        return _regenerate_segment_v4(choices, ss)
     bindings=ss.bindings
     # 阶段三：复用会话态快照的剧本 dict。
     script = _snap(ss).script
@@ -1105,6 +1195,20 @@ def regenerate_segment(choices, emotion, emo_alpha, speech_rate, voice_choice, s
     ss.invalidate_snapshot()
     return (first_fp, "\n".join(results))
 
+
+def _regenerate_segment_v4(choices, ss):
+    """V4 重新生成：失效该 segment 对应任务缓存并置回 pending（不影响其他缓存）。"""
+    project_path = V4ProjectService.root() / ss.project
+    results = []
+    first_audio = None
+    for choice in choices:
+        segment_id = choice.split(" ")[0]
+        ok, message = V4QualityService.regenerate_segment(project_path, segment_id)
+        results.append(("✅ " if ok else "❌ ") + message if ok else message)
+        if first_audio is None:
+            first_audio = V4QualityService.segment_audio(project_path, segment_id)
+    return first_audio, "\n".join(results)
+
 # ═══════════ 角色单独补录 / 补合成导出（T1-T4） ═══════════
 
 def refresh_supplement_roles(ss):
@@ -1117,6 +1221,26 @@ def refresh_supplement_roles(ss):
     if not ss or not ss.project or not ss.script:
         return gr.update(interactive=False, choices=[], value=None,
                          info="请先打开项目并绑定角色音色")
+    if ss.is_v4:
+        from repositories.production_repository import ProductionRepository
+
+        try:
+            production = ProductionRepository(
+                V4ProjectService.root() / ss.project
+            )
+            voices, _p, _pr, _profile = production.load_inputs()
+        except Exception:  # noqa: BLE001
+            return gr.update(interactive=False, choices=[], value=None,
+                             info="请先打开项目并绑定角色音色")
+        choices = [
+            (item.display_name, item.speaker_id)
+            for item in ss.speakers_v4.speakers
+            if item.speaker_id in voices.bindings
+        ]
+        if not choices:
+            return gr.update(interactive=False, choices=[], value=None,
+                             info="V4 项目：请先绑定角色音色")
+        return gr.update(interactive=True, choices=choices, value=choices[0][1])
     choices = format_bound_role_choices(ss.script, ss.bindings)
     if not choices:
         return gr.update(interactive=False, choices=[], value=None,
@@ -1191,7 +1315,25 @@ def do_supplement_synth(sup_role, sup_mode, sup_text, sup_json_role, sup_json_li
 
     # 音色真相源：参考音频唯一来自 ss.bindings[role]；P1 换音色仅本次覆盖、不回写 ss.bindings。
     override_voice = _lib_path(sup_voice) if sup_voice else None
-    speaker = override_voice or ss.bindings.get(role)
+    if ss.is_v4:
+        from repositories.production_repository import ProductionRepository
+
+        try:
+            production = ProductionRepository(
+                V4ProjectService.root() / ss.project
+            )
+            voices, _p, _pr, _profile = production.load_inputs()
+            binding = voices.bindings.get(role)
+            bound = (
+                str(V4ProjectService.root() / ss.project / binding.voice_id)
+                if binding is not None
+                else None
+            )
+        except Exception:  # noqa: BLE001
+            bound = None
+        speaker = override_voice or bound
+    else:
+        speaker = override_voice or ss.bindings.get(role)
     if not speaker:
         return [], f"❌ 角色「{role}」未绑定音色，且未选择替换音色"
 
@@ -1567,6 +1709,10 @@ def preview_chapter(ss, chapter_id):
     """合并试听单章：调 audio_pipeline.concat_for_preview 返回路径。"""
     if not ss or not ss.project or not chapter_id:
         return None
+    if ss.is_v4:
+        return V4QualityService.chapter_audio(
+            V4ProjectService.root() / ss.project, chapter_id
+        )
     proj_dir = ProjectService.get_project_dir(ss.project)
     out_path = os.path.join(config.get_preview_dir(), f"chapter_{chapter_id}.wav")
     try:
