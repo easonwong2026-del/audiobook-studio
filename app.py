@@ -14,6 +14,7 @@ import shutil
 import sys
 import tempfile
 import time
+from pathlib import Path
 
 import gradio as gr
 
@@ -39,7 +40,6 @@ from services.v4_quality_service import V4QualityService
 from services.v4_synthesis_service import V4SynthesisService
 from services.v4_voice_service import V4VoiceService
 from services.v4_export import V4ExportService
-from repositories.project_v4_repository import ProjectV4Repository
 from ui import create_project_handlers as create_ui
 from ui import director_handlers as director_ui
 from ui import v4_workspace_handlers as v4_ui
@@ -376,6 +376,35 @@ def open_data_dir():
     except OSError as exc:
         logger.warning("打开数据目录失败: %s", exc)
     return ""
+
+
+def _project_path(name):
+    """根据项目名解析项目目录（V3 用 ProjectService，V4 用统一服务 root）。"""
+    if V4ProjectService.detect_format(name) == "v4":
+        return V4ProjectService.root() / name
+    return Path(ProjectService.get_project_dir(name))
+
+
+def project_dir_markup(name):
+    """已打开项目时显示项目目录路径与「打开项目目录」按钮可见性。"""
+    if not name:
+        return "项目目录：未打开项目", gr.update(visible=False)
+    path = _project_path(name)
+    return f"项目目录：`{path}`", gr.update(visible=True)
+
+
+def open_project_dir(name):
+    """在资源管理器中打开当前项目目录。"""
+    if not name:
+        return "请先打开项目。"
+    path = _project_path(name)
+    os.makedirs(path, exist_ok=True)
+    try:
+        os.startfile(str(path))
+    except OSError as exc:
+        logger.warning("打开项目目录失败: %s", exc)
+        return f"❌ 打开项目目录失败：{exc}"
+    return f"✅ 已打开项目目录：`{path}`"
 
 def refresh_role_list(search, current_role, ss):
     """按搜索词刷新角色管理列表，同时保留仍可见的当前角色。"""
@@ -1937,6 +1966,7 @@ def _open_chain_rest(event):
     """
     e = event
     e = e.then(refresh_top_status, [ss], [top_status])
+    e = e.then(project_dir_markup, [p_sel], [p_dir_md, p_open_dir])
     e = e.then(preview_chapters, [ss], [e_chapter_table, e_seg_audio, e_seg_sel])
     e = e.then(preview_chapter_options, [ss], [e_chapter_sel])
     e = e.then(refresh_queue_list, [ss], [s_queue_list])
@@ -2083,6 +2113,9 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             p_open_msg = prj_page["p_open_msg"]
             p_migrate_msg = prj_page["p_migrate_msg"]
             p_summary = prj_page["p_summary"]
+            p_dir_md = prj_page["p_dir_md"]
+            p_open_dir = prj_page["p_open_dir"]
+            p_open_dir_msg = prj_page["p_open_dir_msg"]
             p_chapter_tree = prj_page["p_chapter_tree"]
 
             # ───────── 音色资产 ─────────
@@ -2657,6 +2690,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     p_refresh.click(refresh_projects_full, [], [p_sel])
     chain = p_open.click(open_project, [p_sel, ss], [p_summary, v_table, v_role, v_role_title, v_lib, s_log, v_status])
     _open_chain_rest(chain)
+    p_open_dir.click(open_project_dir, [p_sel], [p_open_dir_msg])
     p_del.click(delete_project, p_sel, p_sel)
     s_start.click(do_synthesis, [ss, s_beam, s_emo, s_override, s_alpha, s_rate, s_chapters_sel], outputs=[s_log, s_queue_list]).then(
         refresh_top_status, [ss], [top_status])

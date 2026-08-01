@@ -33,6 +33,10 @@ def create_project_page() -> dict:
 
         gr.Markdown("#### 书稿结构")
         p_summary = gr.Markdown("打开项目后显示书名、角色与合成概览。")
+        with gr.Row():
+            p_dir_md = gr.Markdown("项目目录：未打开项目")
+            p_open_dir = gr.Button("打开项目目录", size="sm", scale=1, visible=False)
+        p_open_dir_msg = gr.Markdown("")
         p_chapter_tree = gr.HTML(value="<div class='inline-empty'>打开项目后在这里查看章节结构。</div>")
 
     return {
@@ -45,5 +49,8 @@ def create_project_page() -> dict:
         "p_open_msg": p_open_msg,
         "p_migrate_msg": p_migrate_msg,
         "p_summary": p_summary,
+        "p_dir_md": p_dir_md,
+        "p_open_dir": p_open_dir,
+        "p_open_dir_msg": p_open_dir_msg,
         "p_chapter_tree": p_chapter_tree,
     }
