@@ -38,6 +38,7 @@ from services.v4_project_service import V4ProjectService
 from services.v4_quality_service import V4QualityService
 from services.v4_synthesis_service import V4SynthesisService
 from services.v4_voice_service import V4VoiceService
+from repositories.project_v4_repository import ProjectV4Repository
 from ui import create_project_handlers as create_ui
 from ui import director_handlers as director_ui
 from ui import v4_workspace_handlers as v4_ui
@@ -247,8 +248,150 @@ def _open_v4_project(name, ss):
         )
 
 
+def _reload_v4_session(ss):
+    """重新加载当前 V4 项目到会话（脚本 / 角色可能已变更）。"""
+    if ss is None or not ss.is_v4:
+        return
+    context = V4ProjectService.open_project(ss.project)
+    if context is not None:
+        ss.set_v4_project(ss.project, context.script, context.speakers)
+
+
+def _v4_role_panel_update(ss):
+    """V4 角色管理面板状态：可见性 + unresolved 表 + 角色下拉。"""
+    if ss is None or not ss.is_v4:
+        return (
+            gr.update(visible=False), [], gr.update(choices=[]),
+            gr.update(choices=[]), gr.update(choices=[]),
+        )
+    rows = []
+    try:
+        source = (
+            V4ProjectService.root() / ss.project / "source/source.txt"
+        ).read_text(encoding="utf-8")
+        rows = [
+            [item["segment_id"], item["chapter_id"], item["text"]]
+            for item in SpeakerReviewService.unresolved_rows(source, ss.script)
+        ]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("刷新 V4 角色面板失败: %s", exc)
+    choices = _v4_role_choices(ss)
+    return (
+        gr.update(visible=True),
+        rows,
+        gr.update(choices=choices),
+        gr.update(choices=choices),
+        gr.update(choices=choices),
+    )
+
+
+def v4_role_route(ss):
+    """AI 自动识别角色（复用 V4 路由服务，断点续传）。"""
+    if not ss or not ss.is_v4:
+        return "请先打开 V4 项目。"
+    try:
+        message = v4_ui.route_v4_speakers(ss.project)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("V4 角色识别失败: %s", exc)
+        return f"❌ 角色识别失败：{str(exc)[:300]}"
+    _reload_v4_session(ss)
+    return message
+
+
+def v4_role_assign(ss, segs, speaker, new, lock):
+    """人工指派片段到角色（V4 稳定角色 ID）。"""
+    if not ss or not ss.is_v4:
+        return "请先打开 V4 项目。"
+    try:
+        message = v4_ui.assign_v4_speaker(
+            ss.project, segs or "", speaker or "", new or "", bool(lock)
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("V4 角色指派失败: %s", exc)
+        return f"❌ 指派失败：{str(exc)[:300]}"
+    _reload_v4_session(ss)
+    return message
+
+
+def v4_role_merge(ss, source, target):
+    """合并角色（旧角色保留为别名）。"""
+    if not ss or not ss.is_v4:
+        return "请先打开 V4 项目。"
+    if not source or not target:
+        return "请选择来源角色和目标角色。"
+    if source == target:
+        return "来源与目标角色相同，无需合并。"
+    try:
+        message = v4_ui.merge_v4_speakers(ss.project, source, target)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("V4 角色合并失败: %s", exc)
+        return f"❌ 合并失败：{str(exc)[:300]}"
+    _reload_v4_session(ss)
+    return message
+
+
+def v4_role_toggle_lock(ss, role):
+    """切换角色锁定状态。"""
+    if not ss or not ss.is_v4 or not role:
+        return "请先选择角色。"
+    from dataclasses import replace
+
+    project = V4ProjectService.root() / ss.project
+    source = (project / "source/source.txt").read_text(encoding="utf-8")
+    speakers = ss.speakers_v4
+    updated = list(speakers.speakers)
+    target = None
+    for index, item in enumerate(updated):
+        if item.speaker_id == role:
+            target = replace(item, locked=not item.locked)
+            updated[index] = target
+            break
+    if target is None:
+        return "角色不存在。"
+    new_speakers = replace(
+        speakers,
+        speakers=updated,
+        revision=speakers.revision + (updated != speakers.speakers),
+    )
+    ProjectV4Repository(V4ProjectService.root()).save_script_and_speakers(
+        project, source, ss.script, new_speakers
+    )
+    _reload_v4_session(ss)
+    return f"角色「{target.display_name}」已{'锁定' if target.locked else '解锁'}。"
+
+
+def v4_role_set_alias(ss, role, aliases):
+    """修改角色别名（逗号分隔）。"""
+    if not ss or not ss.is_v4 or not role:
+        return "请先选择角色。"
+    from dataclasses import replace
+
+    alias_list = [item.strip() for item in (aliases or "").split(",") if item.strip()]
+    project = V4ProjectService.root() / ss.project
+    source = (project / "source/source.txt").read_text(encoding="utf-8")
+    speakers = ss.speakers_v4
+    updated = list(speakers.speakers)
+    target = None
+    for index, item in enumerate(updated):
+        if item.speaker_id == role:
+            target = replace(item, aliases=alias_list)
+            updated[index] = target
+            break
+    if target is None:
+        return "角色不存在。"
+    new_speakers = replace(
+        speakers,
+        speakers=updated,
+        revision=speakers.revision + (updated != speakers.speakers),
+    )
+    ProjectV4Repository(V4ProjectService.root()).save_script_and_speakers(
+        project, source, ss.script, new_speakers
+    )
+    _reload_v4_session(ss)
+    return f"已保存别名：{', '.join(alias_list) or '（空）'}。"
+
+
 def migrate_v3_to_v4(name):
-    """项目管理页：V3 项目「复制并升级到 V4」（原项目不变，含备份与幂等）。"""
     if not name:
         return "请先选择要迁移的 V3 项目。", gr.update()
     if V4ProjectService.detect_format(name) != "v3":
@@ -379,6 +522,16 @@ def refresh_role_list(search, current_role, ss):
     """按搜索词刷新角色管理列表，同时保留仍可见的当前角色。"""
     if not ss or not ss.project:
         return gr.update(choices=[], value=None)
+    if ss.is_v4:
+        choices = _v4_role_choices(ss)
+        if search:
+            choices = [(label, value) for label, value in choices if search in label]
+        selected = (
+            current_role
+            if current_role in {value for _, value in choices}
+            else None
+        )
+        return gr.update(choices=choices, value=selected)
     snap = _snap(ss)
     if not snap:
         return gr.update(choices=[], value=None)
@@ -402,6 +555,36 @@ def select_role_from_list(role, ss):
     if not ss or not ss.project or not role:
         return gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
     role = str(role)
+    if ss.is_v4:
+        bound_audio = None
+        try:
+            from repositories.production_repository import ProductionRepository
+
+            production = ProductionRepository(
+                V4ProjectService.root() / ss.project
+            )
+            voices, _p, _pr, _profile = production.load_inputs()
+            binding = voices.bindings.get(role)
+            if binding is not None:
+                bound_audio = (
+                    V4ProjectService.root() / ss.project / binding.voice_id
+                )
+        except Exception:  # noqa: BLE001
+            bound_audio = None
+        current = (
+            f"当前绑定音频：{os.path.basename(str(bound_audio))}"
+            if bound_audio and bound_audio.is_file()
+            else "当前绑定音频：未选择"
+        )
+        return (
+            role,
+            _v4_role_config_title(ss, role),
+            gr.update(value=str(bound_audio) if bound_audio and bound_audio.is_file() else None),
+            gr.update(value=None),
+            f"*{current}*",
+            None,
+            "",
+        )
     snap = _snap(ss)
     if not snap or role not in (snap.script.get("voices", {}) or {}):
         return gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
@@ -434,6 +617,26 @@ def bind_voice(role, audio_file, from_lib, ss):
     src = _lib_path(from_lib) if from_lib else audio_file
     if not src:
         return "请上传音频、录制或从音色库选择", gr.update(), gr.update(), role, gr.update(), gr.update()
+    if ss.is_v4:
+        project_path = V4ProjectService.root() / ss.project
+        ok, message = V4VoiceService.bind_voice(project_path, role, src)
+        if not ok:
+            return message, gr.update(), gr.update(), role, gr.update(), gr.update()
+        # 刷新会话角色文档（绑定后 voices.json 已更新）
+        context = V4ProjectService.open_project(ss.project)
+        if context is not None:
+            ss.set_v4_project(ss.project, context.script, context.speakers)
+        speaker_name = _v4_speaker_name(ss, role)
+        return (
+            f"✅ {speaker_name or role} 已绑定",
+            gr.update(
+                choices=_v4_role_choices(ss), value=role
+            ),
+            gr.update(),
+            role,
+            _v4_role_config_title(ss, role),
+            f"*当前绑定音频：{os.path.basename(str(src))}*",
+        )
     # 业务委托 ProjectService.bind_voice（拷贝 + 写 voice_bindings.json），返回 dest
     cat = voice_lib._category_of(os.path.basename(src)) if from_lib else "未分类"
     dest = ProjectService.bind_voice(ss.project, role, src, category=cat)
@@ -455,6 +658,47 @@ def bind_voice(role, audio_file, from_lib, ss):
         _role_config_title(role, voice, dest),
         f"*当前绑定音频：{os.path.basename(dest)}*",
     )
+
+
+def _v4_role_choices(ss):
+    """V4 角色列表选项（带锁定 / 别名标记）。"""
+    if ss is None or ss.speakers_v4 is None:
+        return []
+    choices = []
+    for item in ss.speakers_v4.speakers:
+        label = item.display_name
+        if item.locked:
+            label += " 🔒"
+        if item.aliases:
+            label += f"（{'/'.join(item.aliases[:3])}）"
+        choices.append((label, item.speaker_id))
+    return choices
+
+
+def _v4_speaker_name(ss, speaker_id):
+    if ss is None or ss.speakers_v4 is None:
+        return None
+    for item in ss.speakers_v4.speakers:
+        if item.speaker_id == speaker_id:
+            return item.display_name
+    return None
+
+
+def _v4_role_config_title(ss, speaker_id):
+    """V4 右侧当前角色标题（含绑定状态）。"""
+    name = _v4_speaker_name(ss, speaker_id)
+    if not name:
+        return "### 当前角色配置\n请从左侧角色列表选择角色。"
+    from repositories.production_repository import ProductionRepository
+
+    try:
+        production = ProductionRepository(V4ProjectService.root() / ss.project)
+        voices, _p, _pr, _profile = production.load_inputs()
+        bound = speaker_id in voices.bindings
+    except Exception:  # noqa: BLE001
+        bound = False
+    status = "✅ 已绑定" if bound else "⚠ 待绑定"
+    return f"### 当前角色：{name}\n{status}"
 
 def preview_bound_voice(role, audio_file, from_lib, ss):
     """试听当前选择的声音，未选择候选声音时回退到已绑定声音。
@@ -1659,6 +1903,10 @@ def _open_chain_rest(event):
     """
     e = event
     e = e.then(refresh_top_status, [ss], [top_status])
+    e = e.then(
+        lambda ss: _v4_role_panel_update(ss), [ss],
+        [v4_role_grp, v4_unresolved_table, v4_assign_speaker, v4_merge_source, v4_merge_target]
+    )
     e = e.then(preview_chapters, [ss], [e_chapter_table, e_seg_audio, e_seg_sel])
     e = e.then(preview_chapter_options, [ss], [e_chapter_sel])
     e = e.then(refresh_queue_list, [ss], [s_queue_list])
@@ -1793,6 +2041,24 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             v_bind_category = vce_page["v_bind_category"]
             v_audio = vce_page["v_audio"]
             v_role = vce_page["v_role"]
+            v4_role_grp = vce_page["v4_role_grp"]
+            v4_unresolved_table = vce_page["v4_unresolved_table"]
+            v4_route_btn = vce_page["v4_route_btn"]
+            v4_route_msg = vce_page["v4_route_msg"]
+            v4_assign_segs = vce_page["v4_assign_segs"]
+            v4_assign_speaker = vce_page["v4_assign_speaker"]
+            v4_assign_new = vce_page["v4_assign_new"]
+            v4_assign_lock = vce_page["v4_assign_lock"]
+            v4_assign_btn = vce_page["v4_assign_btn"]
+            v4_assign_msg = vce_page["v4_assign_msg"]
+            v4_merge_source = vce_page["v4_merge_source"]
+            v4_merge_target = vce_page["v4_merge_target"]
+            v4_merge_btn = vce_page["v4_merge_btn"]
+            v4_merge_msg = vce_page["v4_merge_msg"]
+            v4_lock_btn = vce_page["v4_lock_btn"]
+            v4_alias = vce_page["v4_alias"]
+            v4_alias_btn = vce_page["v4_alias_btn"]
+            v4_lock_alias_msg = vce_page["v4_lock_alias_msg"]
             v_lib = vce_page["v_lib"]
             v_current = vce_page["v_current"]
             v_bind = vce_page["v_bind"]
@@ -1957,11 +2223,63 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     nav_voices.click(
         lambda: _goto("voices"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-voices')?.classList.add('active'); }").then(
+        lambda ss: _v4_role_panel_update(ss), [ss],
+        [v4_role_grp, v4_unresolved_table, v4_assign_speaker, v4_merge_source, v4_merge_target]).then(
         refresh_role_list,
         [v_role_search, v_role, ss], [v_table]).then(
         refresh_voice_filters,
         [], [v_bind_category, v_lib_category, v_save_category]).then(
         refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
+    # ── V4 角色管理：AI 识别 / 指派 / 合并 / 锁定 / 别名 ──
+    v4_route_btn.click(
+        v4_role_route, [ss], [v4_route_msg],
+        concurrency_limit=1, concurrency_id="v4-routing",
+    ).then(
+        lambda ss: _v4_role_panel_update(ss), [ss],
+        [v4_role_grp, v4_unresolved_table, v4_assign_speaker, v4_merge_source, v4_merge_target],
+    ).then(
+        refresh_role_list, [v_role_search, v_role, ss], [v_table],
+    ).then(
+        format_v4_role_summary, [ss], [v_status],
+    )
+    v4_assign_btn.click(
+        v4_role_assign,
+        [ss, v4_assign_segs, v4_assign_speaker, v4_assign_new, v4_assign_lock],
+        [v4_assign_msg],
+    ).then(
+        lambda ss: _v4_role_panel_update(ss), [ss],
+        [v4_role_grp, v4_unresolved_table, v4_assign_speaker, v4_merge_source, v4_merge_target],
+    ).then(
+        refresh_role_list, [v_role_search, v_role, ss], [v_table],
+    ).then(
+        format_v4_role_summary, [ss], [v_status],
+    )
+    v4_merge_btn.click(
+        v4_role_merge, [ss, v4_merge_source, v4_merge_target], [v4_merge_msg],
+    ).then(
+        lambda ss: _v4_role_panel_update(ss), [ss],
+        [v4_role_grp, v4_unresolved_table, v4_assign_speaker, v4_merge_source, v4_merge_target],
+    ).then(
+        refresh_role_list, [v_role_search, v_role, ss], [v_table],
+    ).then(
+        format_v4_role_summary, [ss], [v_status],
+    )
+    v4_lock_btn.click(
+        v4_role_toggle_lock, [ss, v_role], [v4_lock_alias_msg],
+    ).then(
+        lambda ss: _v4_role_panel_update(ss), [ss],
+        [v4_role_grp, v4_unresolved_table, v4_assign_speaker, v4_merge_source, v4_merge_target],
+    ).then(
+        refresh_role_list, [v_role_search, v_role, ss], [v_table],
+    )
+    v4_alias_btn.click(
+        v4_role_set_alias, [ss, v_role, v4_alias], [v4_lock_alias_msg],
+    ).then(
+        lambda ss: _v4_role_panel_update(ss), [ss],
+        [v4_role_grp, v4_unresolved_table, v4_assign_speaker, v4_merge_source, v4_merge_target],
+    ).then(
+        refresh_role_list, [v_role_search, v_role, ss], [v_table],
+    )
     nav_synth.click(
         lambda: _goto("synth"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-synth')?.classList.add('active'); }").then(
@@ -1999,6 +2317,8 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     ov_voices.click(
         lambda: _goto("voices"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-voices')?.classList.add('active'); }").then(
+        lambda ss: _v4_role_panel_update(ss), [ss],
+        [v4_role_grp, v4_unresolved_table, v4_assign_speaker, v4_merge_source, v4_merge_target]).then(
         refresh_role_list,
         [v_role_search, v_role, ss], [v_table]).then(
         refresh_voice_filters,
