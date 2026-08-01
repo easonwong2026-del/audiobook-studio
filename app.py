@@ -38,6 +38,7 @@ from services.v4_project_service import V4ProjectService
 from services.v4_quality_service import V4QualityService
 from services.v4_synthesis_service import V4SynthesisService
 from services.v4_voice_service import V4VoiceService
+from services.v4_export import V4ExportService
 from repositories.project_v4_repository import ProjectV4Repository
 from ui import create_project_handlers as create_ui
 from ui import director_handlers as director_ui
@@ -1011,6 +1012,28 @@ def do_export(fmt, bitrate, output_dir, *args):
     ss = args[0] if args else None
     if not ss or not ss.project:
         return None, "请先打开项目"
+    if ss.is_v4:
+        try:
+            project_path = V4ProjectService.root() / ss.project
+            # 导出前检查章节是否已拼接
+            chapters = V4QualityService.available_chapters(project_path)
+            if not chapters:
+                return None, (
+                    "尚未生成可导出的章节音频：请先在「④ 生产与质检」"
+                    "生成计划并完成合成。"
+                )
+            path = V4ExportService.export(
+                project_path,
+                output_format=fmt,
+                bitrate=bitrate,
+                output_dir=output_dir or None,
+            )
+            return (
+                _safe_path_for_file_component(path),
+                f"✅ 导出完成：`{path}`",
+            )
+        except Exception as e:
+            return None, str(e)
     try:
         out = ExportService.export(ProjectService.get_project_dir(ss.project), fmt, bitrate, output_dir)
         return _safe_path_for_file_component(out), "导出完成"
@@ -1031,6 +1054,13 @@ def do_export_subtitles(ss, sub_choice):
         return None, "未选择字幕格式"
     fmts = ("srt", "lrc") if sub_choice == "both" else (sub_choice,)
     try:
+        if ss.is_v4:
+            paths = V4ExportService.generate_subtitles(
+                V4ProjectService.root() / ss.project, formats=fmts
+            )
+            if not paths:
+                return None, "未找到已合成段落，无法生成字幕（请先合成）"
+            return [str(item) for item in paths], "字幕已生成"
         paths = ExportService.export_subtitles(
             ProjectService.get_project_dir(ss.project), formats=fmts
         )
