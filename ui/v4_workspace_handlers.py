@@ -78,7 +78,8 @@ def create_v4_from_source(name, source_file, title, author):
             f"- 语义片段：{total}\n"
             f"- 待确认角色：{result.unresolved_segments}\n"
             f"- Source SHA：`{script.source_sha256}`\n\n"
-            "进入「v4 工作流」继续角色确认、音色、计划和合成。"
+            "已进入「② 项目管理」；请到「③ 角色与声音」确认角色并绑定音色，"
+            "然后在「④ 生产与质检」生成计划并合成。"
         )
         choices = scan_v4_projects()
         return (
