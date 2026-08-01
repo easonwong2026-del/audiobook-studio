@@ -10,12 +10,14 @@ HANDLERS = (ROOT / "ui/director_handlers.py").read_text(encoding="utf-8")
 VOICE_HANDLERS = (ROOT / "ui/voice_handlers.py").read_text(encoding="utf-8")
 
 
-def test_director_editor_is_in_project_stage():
-    """高级剧本校正以折叠形式存在于项目管理页面。"""
-    assert '"d_editor"' in PROJECT_PAGE
-    assert '"d_apply"' in PROJECT_PAGE
-    assert '"d_undo"' in PROJECT_PAGE
-    assert '"d_edit_chapter"' in PROJECT_PAGE
+def test_director_editor_removed_from_project_stage():
+    """高级剧本校正已从项目管理页移除（用户反馈明确无用）。"""
+    assert '"d_editor"' not in PROJECT_PAGE
+    assert '"d_apply"' not in PROJECT_PAGE
+    assert '"d_undo"' not in PROJECT_PAGE
+    assert '"d_edit_chapter"' not in PROJECT_PAGE
+    assert "director-editor-accordion" not in PROJECT_PAGE
+    assert "剧本导演校正" not in PROJECT_PAGE
 
 
 def test_director_not_in_create_project_page():
@@ -36,11 +38,11 @@ def test_recommendation_remains_but_voice_page_has_no_audition():
     assert "② 确认绑定" in VOICE_PAGE
 
 
-def test_director_editor_wired_in_app():
-    """项目管理的人工校正事件使用 project-based handlers。"""
-    assert "director_ui.refresh_director_editor_for_project" in APP
-    assert "director_ui.apply_director_edits_for_project" in APP
-    assert "director_ui.undo_director_edits_for_project" in APP
+def test_director_editor_no_longer_wired_in_app():
+    """项目管理的人工校正事件已从 app.py 移除。"""
+    assert "director_ui.refresh_director_editor_for_project" not in APP
+    assert "director_ui.apply_director_edits_for_project" not in APP
+    assert "director_ui.undo_director_edits_for_project" not in APP
     assert "old analyze_director_file not in APP"
     assert "director_ui.analyze_director_file" not in APP
     assert "director_ui.recommend_director_voice" not in APP

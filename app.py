@@ -2192,11 +2192,6 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             # ───────── 项目 ─────────
             prj_page = create_project_page()
             grp_project = prj_page["group"]
-            d_edit_chapter = prj_page["d_edit_chapter"]
-            d_editor = prj_page["d_editor"]
-            d_apply = prj_page["d_apply"]
-            d_undo = prj_page["d_undo"]
-            d_history = prj_page["d_history"]
             p_sel = prj_page["p_sel"]
             p_refresh = prj_page["p_refresh"]
             p_open = prj_page["p_open"]
@@ -2728,22 +2723,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         concurrency_id="project-creation",
     )
 
-    # ═══════════ 项目管理（人工校正） ═══════════
-    d_edit_chapter.change(
-        director_ui.refresh_director_editor_for_project,
-        [p_sel, d_edit_chapter],
-        [d_editor],
-    )
-    d_apply.click(
-        director_ui.apply_director_edits_for_project,
-        [p_sel, d_editor, d_edit_chapter],
-        [p_summary, d_editor, d_history],
-    )
-    d_undo.click(
-        director_ui.undo_director_edits_for_project,
-        [p_sel, d_history, d_edit_chapter],
-        [p_summary, d_editor, d_history],
-    )
+    # ═══════════ 项目管理 ═══════════
 
     # ═══════════ 设置页面 ═══════════
     wire_settings_page(set_page)
