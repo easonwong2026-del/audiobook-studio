@@ -32,7 +32,12 @@ from services import (
     SynthesisService,
 )
 from services.session import SessionState
+from services.speaker_review_service import SpeakerReviewService
 from services.synthesis import SynthesisState
+from services.v4_project_service import V4ProjectService
+from services.v4_quality_service import V4QualityService
+from services.v4_synthesis_service import V4SynthesisService
+from services.v4_voice_service import V4VoiceService
 from ui import create_project_handlers as create_ui
 from ui import director_handlers as director_ui
 from ui import v4_workspace_handlers as v4_ui
@@ -100,7 +105,7 @@ def create_project(name, script_file, ss):
         ProjectService.create_project(name, script_file)
         # 写入会话态（多标签各自独立，不共享全局可变 S）
         ss.set_project(name, None, {})
-        return "", None, f"### ✅ 项目「{name}」创建成功！请在右侧下拉框选中它，点击「打开项目」", gr.update(choices=ProjectService.scan_projects())
+        return "", None, f"### ✅ 项目「{name}」创建成功！请在右侧下拉框选中它，点击「打开项目」", gr.update(choices=project_choices())
     except _json.JSONDecodeError:
         # 文件不是合法 JSON（如用户传了 TXT 改名）：给出明确、可操作的提示
         return name, None, (
@@ -113,8 +118,13 @@ def create_project(name, script_file, ss):
 
 
 def _snap(ss):
-    """读取（必要时重建）当前项目快照：优先用会话态快照，缺失时按项目名重建。"""
-    s = ss.ensure_snapshot()
+    """读取（必要时重建）当前项目快照：优先用会话态快照，缺失时按项目名重建。
+
+    V4 项目没有 V3 快照，直接返回 None（各页面按 ``ss.is_v4`` 走 V4 分支）。
+    """
+    if ss is not None and ss.is_v4:
+        return None
+    s = ss.ensure_snapshot() if ss is not None else None
     if s is not None:
         return s
     if ss and ss.project:
@@ -130,6 +140,9 @@ def open_project(name, ss):
             "### 当前角色配置\n请从左侧角色列表选择角色。",
             gr.update(choices=[]), "", "打开项目后显示角色绑定状态。",
         )
+    # V4 项目：走统一服务（V4ProjectService），其余逻辑与 V3 一致由页面处理
+    if V4ProjectService.detect_format(name) == "v4":
+        return _open_v4_project(name, ss)
     try:
         # 业务委托 ProjectService.open_project_as_snapshot（包 pm.load_snapshot）
         snap = ProjectService.open_project_as_snapshot(name)
@@ -168,6 +181,121 @@ def open_project(name, ss):
         )
 
 
+def _open_v4_project(name, ss):
+    """打开 V4 项目：统一上下文入会话，返回与 V3 打开一致的角色管理 7 元组。"""
+    try:
+        context = V4ProjectService.open_project(name)
+        if context is None or not context.is_v4:
+            raise ValueError("项目不存在或不是 V4 格式")
+        ss.set_v4_project(name, context.script, context.speakers)
+        script = context.script
+        speakers = context.speakers
+        source = (context.project_path / "source/source.txt").read_text(
+            encoding="utf-8"
+        )
+        unresolved_rows = SpeakerReviewService.unresolved_rows(source, script)
+        unresolved = len(unresolved_rows)
+        segment_total = sum(
+            len(chapter.segments) for chapter in script.chapters
+        )
+        title = (
+            context.manifest.title if context.manifest is not None else name
+        )
+        runtime = context.project_path / "runtime/runtime.db"
+        completed = 0
+        if runtime.is_file():
+            import sqlite3 as _sqlite
+
+            try:
+                with _sqlite.connect(runtime) as connection:
+                    row = connection.execute(
+                        "SELECT COUNT(*) FROM synthesis_tasks "
+                        "WHERE status = 'completed'"
+                    ).fetchone()
+                completed = int(row[0] or 0)
+            except _sqlite.Error:
+                completed = 0
+        info = f"""### 📚 {title}
+<div style="display:flex;gap:20px;margin-top:8px">
+<span>📄 **{len(script.chapters)}** 章</span>
+<span>🧩 **{segment_total}** 片段</span>
+<span>🔎 **{unresolved}** 待确认角色</span>
+<span>✅ **{completed}** 段已合成</span>
+</div>"""
+        speaker_choices = [
+            (item.display_name, item.speaker_id) for item in speakers.speakers
+        ]
+        log_init = (
+            "V4 项目：请在「③ 角色与声音」确认角色与音色，"
+            "然后在「④ 生产与质检」生成计划并合成。"
+        )
+        return (
+            info,
+            gr.update(choices=speaker_choices, value=None),
+            None,
+            "### 当前角色配置\n请从左侧角色列表选择角色。",
+            gr.update(choices=_lib_voices(), value=None),
+            log_init,
+            format_v4_role_summary(ss),
+        )
+    except Exception as exc:  # noqa: BLE001 - 打开失败转为用户可读消息
+        logger.warning("打开 V4 项目失败: %s", exc)
+        return (
+            f"### 打开失败\n{exc}", gr.update(), None,
+            "### 当前角色配置\n请从左侧角色列表选择角色。",
+            gr.update(), "", "打开项目后显示角色绑定状态。",
+        )
+
+
+def migrate_v3_to_v4(name):
+    """项目管理页：V3 项目「复制并升级到 V4」（原项目不变，含备份与幂等）。"""
+    if not name:
+        return "请先选择要迁移的 V3 项目。", gr.update()
+    if V4ProjectService.detect_format(name) != "v3":
+        return f"「{name}」不是 V3 项目（V4 项目无需迁移）。", gr.update()
+    try:
+        result = V4ProjectService.migrate_to_v4(name)
+        msg = (
+            f"✅ 已复制迁移到 `{result.project_path.name}`（V3 原项目保持不变）"
+        )
+        if result.reused_existing:
+            msg += "（复用上次迁移结果）"
+        msg += f"\n备份：`{result.backup_path}`"
+        return msg, gr.update(
+            choices=project_choices(), value=result.project_path.name
+        )
+    except Exception as exc:  # noqa: BLE001 - 用户可读错误
+        logger.warning("V3 → V4 迁移失败: %s", exc)
+        return f"❌ 迁移失败：{exc}", gr.update()
+
+
+def format_v4_role_summary(ss):
+    """V4 角色绑定概览（③ 角色与声音页右侧状态栏）。"""
+    if ss is None or not ss.is_v4 or ss.speakers_v4 is None:
+        return "打开 V4 项目后显示角色状态。"
+    from repositories.production_repository import ProductionRepository
+
+    project_path = V4ProjectService.root() / ss.project
+    production = ProductionRepository(project_path)
+    voices, _p, _pr, _profile = production.load_inputs()
+    speakers = ss.speakers_v4.speakers
+    total = len(speakers)
+    bound = sum(1 for item in speakers if item.speaker_id in voices.bindings)
+    lines = [
+        f"**角色 {bound}/{total} 已绑定音色**",
+        "",
+        "| 角色 | 状态 |",
+        "| --- | --- |",
+    ]
+    for item in speakers:
+        state = "✅" if item.speaker_id in voices.bindings else "⚠ 待绑定"
+        name = item.display_name
+        if item.locked:
+            name += " 🔒"
+        lines.append(f"| {name} | {state} |")
+    return "\n".join(lines)
+
+
 
 
 def refresh_top_status(ss):
@@ -175,6 +303,36 @@ def refresh_top_status(ss):
     if not ss or not ss.project:
         return "*等待打开项目…*"
     try:
+        if ss.is_v4:
+            script = ss.script
+            chapters = len(script.chapters)
+            total = sum(len(ch.segments) for ch in script.chapters)
+            try:
+                with (V4ProjectService.root() / ss.project / "project.json").open(
+                    "r", encoding="utf-8"
+                ) as handle:
+                    title = json.load(handle).get("title") or ss.project
+            except (OSError, json.JSONDecodeError):
+                title = ss.project
+            project_path = V4ProjectService.root() / ss.project
+            completed = 0
+            runtime = project_path / "runtime/runtime.db"
+            if runtime.is_file():
+                import sqlite3 as _sqlite
+
+                try:
+                    with _sqlite.connect(runtime) as connection:
+                        row = connection.execute(
+                            "SELECT COUNT(*) FROM synthesis_tasks "
+                            "WHERE status = 'completed'"
+                        ).fetchone()
+                    completed = int(row[0] or 0)
+                except _sqlite.Error:
+                    completed = 0
+            return (
+                f"📖 **{title}** · {chapters} 章 · {completed}/{total} 段 · "
+                f"引擎: {'已加载' if getattr(sys.modules.get('lib.tts_engine'), '_tts', None) is not None else '未加载'}"
+            )
         snap = _snap(ss)
         if snap is None:
             meta, script, _ = ProjectService.open_project(ss.project)
@@ -193,7 +351,7 @@ def refresh_top_status(ss):
 
 def delete_project(name):
     if name: ProjectService.delete_project(name)
-    return gr.update(choices=ProjectService.scan_projects())
+    return gr.update(choices=project_choices())
 
 
 def apply_data_dir(new_dir):
@@ -454,6 +612,14 @@ def refresh_queue_list(ss):
     与 O11 ``refresh_top_status`` 共享状态源约定：O11 读 meta（粗粒度），本函数读
     ``state.segment_states``（细粒度）；不互相写、不反向写 meta。
     """
+    if ss and ss.is_v4 and ss.project:
+        rows = V4SynthesisService.queue_rows(ss.project)
+        return df_style.style_dataframe(
+            rows,
+            ["task", "chapter", "speaker", "status", "len", "try", "split", "out"],
+            status_col=3,
+            status_color_map=df_style.ICON_COLORS,
+        )
     if ss and ss.synthesis is not None and ss.synthesis.segment_states:
         return df_style.style_dataframe(
             synth_progress.to_queue_rows(ss.synthesis.segment_states),
@@ -549,6 +715,8 @@ def do_export_subtitles(ss, sub_choice):
 
 def preview_chapters(ss):
     if not ss.project: return "*请先在项目管理中打开项目*",None,gr.update(choices=[])
+    if ss.is_v4:
+        return _preview_chapters_v4(ss)
     # 阶段三：复用会话态快照的剧本 dict，不再直接读盘。
     snap = _snap(ss); script = snap.script
     proj_dir=ProjectService.get_project_dir(ss.project)
@@ -584,6 +752,40 @@ def preview_chapters(ss):
     summary=f"### 📊 {td}/{ta} 段已完成\n\n"+"\n".join(lines)
     if td==0: summary+="\n\n⚠ 未检测到合成段落"
     return summary,first_audio,gr.update(choices=seg_choices,value=seg_choices[0] if seg_choices else None)
+
+def _preview_chapters_v4(ss):
+    """V4 项目章节试听表：从 runtime.db 读取每章已完成片段。"""
+    project_path = V4ProjectService.root() / ss.project
+    script = ss.script
+    lines = ["| 章节 | 完成 | 详情 |", "|------|------|------|"]
+    chapter_rows = []
+    seg_choices = []
+    first_audio = None
+    td = ta = 0
+    for chapter in script.chapters:
+        segs = chapter.segments
+        ta += len(segs)
+        done = []
+        for seg in segs:
+            audio = V4QualityService.segment_audio(project_path, seg.segment_id)
+            if audio:
+                done.append(seg.segment_id)
+                seg_choices.append(f"{seg.segment_id} {seg.speaker_id or '?'}")
+                if first_audio is None:
+                    first_audio = audio
+        td += len(done)
+        chapter_rows.append(
+            f"| {chapter.title} | {len(done)}/{len(segs)} | "
+            + (", ".join(done[:4]) if done else "等待合成")
+            + (" +…" if len(done) > 4 else "") + " |"
+        )
+    summary = f"### 📊 {td}/{ta} 段已完成\n\n" + "\n".join(lines + chapter_rows)
+    if td == 0:
+        summary += "\n\n⚠ 尚未合成段落：请先在「④ 生产与质检」生成计划并合成。"
+    return summary, first_audio, gr.update(
+        choices=seg_choices, value=seg_choices[0] if seg_choices else None
+    )
+
 
 def play_segment(choices, ss):
     if not ss.project or not choices: return None
@@ -920,9 +1122,21 @@ def open_segments_folder(ss):
 
 # ── O4：书架 + 章节树 ──
 def refresh_bookshelf():
-    """刷新书架 Dataframe（返回着色契约 dict，列：项目|章|段进度|状态）。"""
-    projects = ProjectService.list_projects()
-    rows = [[p["name"], p["chapters"], f"{p['done']}/{p['total']}", p["status"]] for p in projects]
+    """刷新书架 Dataframe（返回着色契约 dict，列：项目|章|段进度|状态）。
+
+    V3 / V4 项目混合展示：V4 项目行带格式标记。
+    """
+    rows = []
+    for item in V4ProjectService.scan_projects():
+        marker = "V4 " if item.project_format == "v4" else "V3 "
+        rows.append(
+            [
+                f"{marker}{item.name}",
+                item.total_chapters,
+                f"{item.completed_segments}/{item.total_segments}",
+                item.status,
+            ]
+        )
     return df_style.style_dataframe(
         rows,
         df_style.BOOKSHELF_HEADERS,
@@ -947,13 +1161,64 @@ def render_chapter_tree(project):
     """渲染章节折叠树 HTML（O4 右栏）。project 为空返回提示。"""
     if not project:
         return "<i>未打开项目</i>"
+    if V4ProjectService.detect_format(project) == "v4":
+        return _render_chapter_tree_v4(project)
     return _pm.build_chapter_tree(project)
 
 
+def _render_chapter_tree_v4(project_name):
+    """V4 章节树：章节 + 片段 + 状态徽标。"""
+    context = V4ProjectService.open_project(project_name)
+    if context is None:
+        return "<i>未打开项目</i>"
+    project_path = context.project_path
+    parts = ["<div class='chapter-tree'>"]
+    for chapter in context.script.chapters:
+        segs = chapter.segments
+        done = sum(
+            1
+            for seg in segs
+            if V4QualityService.segment_audio(project_path, seg.segment_id)
+        )
+        badge = (
+            f"<span class='tree-badge done'>{done}/{len(segs)} 段</span>"
+            if done
+            else "<span class='tree-badge'>待合成</span>"
+        )
+        parts.append(
+            f"<details open><summary>{chapter.title} {badge}</summary>"
+        )
+        for seg in segs[:8]:
+            speaker = seg.speaker_id or "待确认"
+            state = "✅" if V4QualityService.segment_audio(
+                project_path, seg.segment_id
+            ) else "·"
+            text = (context.script and _segment_text(project_path, seg)) or ""
+            parts.append(
+                f"<div class='tree-item'>{state} <b>{speaker}</b> "
+                f"<span class='tree-text'>{text[:36]}</span></div>"
+            )
+        if len(segs) > 8:
+            parts.append(f"<div class='tree-item'>… 共 {len(segs)} 段</div>")
+        parts.append("</details>")
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def _segment_text(project_path, seg):
+    """取 V4 segment 原文（text_override 优先，否则从 source 切）。"""
+    if getattr(seg, "text_override", None):
+        return seg.text_override
+    try:
+        source = (project_path / "source/source.txt").read_text(encoding="utf-8")
+        return source[seg.start:seg.end]
+    except (OSError, IndexError):
+        return ""
+
+
 def refresh_projects_full():
-    """p_refresh 全量刷新：仅刷新 p_sel 选项（书架入口已统一到概览页）。"""
-    choices = ProjectService.scan_projects()
-    return gr.update(choices=choices)
+    """p_refresh 全量刷新：刷新 p_sel 选项（V3/V4 混合）。"""
+    return gr.update(choices=project_choices())
 
 
 # ── O5：合成前分段预览 / 勾选 ──
@@ -964,6 +1229,8 @@ def render_preview(ss):
     """
     if not ss or not ss.project:
         return [], gr.update(choices=[], value=[])
+    if ss.is_v4:
+        return _render_preview_v4(ss)
     snap = _snap(ss)
     script = snap.script
     chapters = script.get("chapters", [])
@@ -983,6 +1250,30 @@ def render_preview(ss):
     return df_style.style_dataframe(rows, synth_progress.PREVIEW_HEADERS, status_col=None), gr.update(
         choices=[(chapter_labels.get(c, c), c) for c in chapter_options],
         value=chosen,
+    )
+
+
+def _render_preview_v4(ss):
+    """V4 合成前预览：展示待合成片段概览（真正的计划在④生成）。"""
+    rows = []
+    for chapter in ss.script.chapters:
+        for seg in chapter.segments:
+            rows.append(
+                [
+                    seg.segment_id,
+                    chapter.chapter_id,
+                    seg.speaker_id or "待确认",
+                    seg.kind,
+                    seg.status,
+                ]
+            )
+    chapter_options = [ch.chapter_id for ch in ss.script.chapters]
+    labels = {ch.chapter_id: ch.title for ch in ss.script.chapters}
+    return df_style.style_dataframe(
+        rows, ["id", "chapter", "speaker", "kind", "status"], status_col=None
+    ), gr.update(
+        choices=[(labels.get(c, c), c) for c in chapter_options],
+        value=list(chapter_options),
     )
 
 
@@ -1015,6 +1306,11 @@ def preview_chapter_options(ss):
     """刷新章节合并试听下拉选项。"""
     if not ss or not ss.project:
         return gr.update(choices=[], value=None)
+    if ss.is_v4:
+        opts = [
+            (chapter.title, chapter.chapter_id) for chapter in ss.script.chapters
+        ]
+        return gr.update(choices=opts, value=opts[0][1] if opts else None)
     script = _snap(ss).script
     opts = [
         (f"第{ch.get('id')}章 {ch.get('title', '')}", str(ch.get("id")))
@@ -1073,11 +1369,12 @@ def refresh_production_check(ss):
     """进入生产阶段时主动展示剧本和角色绑定检查（只提示，不阻断）。"""
     if not ss or not ss.project:
         return "#### 生产检查\n请先打开项目，系统会在这里显示剧本和角色声音状态。"
+    if ss.is_v4:
+        return _production_check_v4(ss)
     try:
         snap = _snap(ss)
         if snap is None:
-            return "#### 生产检查\n请先打开项目。"
-        # ProjectSnapshot stores the raw structured_script dict; validation
+            return "#### 生产检查\n请先打开项目。"        # ProjectSnapshot stores the raw structured_script dict; validation
         # expects the parsed Script model used by the loader/service layer.
         errors = script_loader.validate_script(script_loader.from_dict(snap.script))
         roles = snap.script.get("voices", {}) or {}
@@ -1100,12 +1397,58 @@ def refresh_production_check(ss):
         return f"#### 生产检查\n⚠ 状态读取失败：{exc}"
 
 
+def _production_check_v4(ss):
+    """V4 项目生产检查：unresolved 片段数 + 未绑定音色角色数。"""
+    from repositories.production_repository import ProductionRepository
+
+    lines = ["#### 生产检查"]
+    try:
+        unresolved = sum(
+            seg.status == "unresolved"
+            for ch in ss.script.chapters
+            for seg in ch.segments
+        )
+        project_path = V4ProjectService.root() / ss.project
+        production = ProductionRepository(project_path)
+        voices, _p, _pr, _profile = production.load_inputs()
+        speakers = ss.speakers_v4.speakers
+        missing = [
+            item.display_name
+            for item in speakers
+            if item.speaker_id not in voices.bindings
+        ]
+        lines.append("✅ V4 剧本有效（source-first）")
+        if unresolved:
+            lines.append(
+                f"⚠ {unresolved} 个片段待确认角色，请先到「③ 角色与声音」处理。"
+            )
+        if missing:
+            lines.append(
+                f"⚠ {len(missing)} 个角色未绑定音色：{', '.join(missing[:8])}"
+                + ("…" if len(missing) > 8 else "")
+                + "。"
+            )
+            lines.append("这里不会阻断你查看队列或质检。")
+        else:
+            lines.append("✅ 所有角色已绑定音色，可以生成计划并合成。")
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"⚠ 状态读取失败：{exc}")
+    return "\n".join(lines)
+
+
 def refresh_export_default_dir(ss):
     """显示当前项目的动态默认导出目录，避免用户猜路径。"""
     if not ss or not ss.project:
         return "项目默认目录：打开项目后显示。留空保存位置即可使用该目录。"
     try:
-        project_dir = os.path.normpath(ProjectService.get_project_dir(ss.project))
+        if ss.is_v4:
+            project_dir = os.path.normpath(
+                str(V4ProjectService.root() / ss.project)
+            )
+        else:
+            project_dir = os.path.normpath(
+                ProjectService.get_project_dir(ss.project)
+            )
         output_dir = os.path.normpath(os.path.join(project_dir, "output"))
         return f"项目默认目录：`{output_dir}`\n留空保存位置即可导出到该目录。"
     except Exception as exc:
@@ -1121,6 +1464,9 @@ def _dashboard_snapshot(ss):
     """
     if not ss or not ss.project:
         return empty_dashboard_html()
+
+    if ss.is_v4:
+        return _dashboard_snapshot_v4(ss)
 
     try:
         snap = _snap(ss)
@@ -1194,14 +1540,114 @@ def _dashboard_snapshot(ss):
         return empty_dashboard_html()
 
 
+def _dashboard_snapshot_v4(ss):
+    """V4 项目工作台概览（章节 / 片段 / 待确认 / 已合成 / 待绑定）。"""
+    try:
+        from repositories.production_repository import ProductionRepository
+
+        script = ss.script
+        project_path = V4ProjectService.root() / ss.project
+        chapters = list(script.chapters)
+        total_segments = sum(len(ch.segments) for ch in chapters)
+        unresolved = sum(
+            seg.status == "unresolved"
+            for ch in chapters
+            for seg in ch.segments
+        )
+        runtime = project_path / "runtime/runtime.db"
+        completed = 0
+        if runtime.is_file():
+            import sqlite3 as _sqlite
+
+            try:
+                with _sqlite.connect(runtime) as connection:
+                    row = connection.execute(
+                        "SELECT COUNT(*) FROM synthesis_tasks "
+                        "WHERE status = 'completed'"
+                    ).fetchone()
+                completed = int(row[0] or 0)
+            except _sqlite.Error:
+                completed = 0
+        production = ProductionRepository(project_path)
+        voices, _p, _pr, _profile = production.load_inputs()
+        speakers = ss.speakers_v4.speakers
+        bound = sum(1 for s in speakers if s.speaker_id in voices.bindings)
+        title = ss.project
+        try:
+            with (project_path / "project.json").open(
+                "r", encoding="utf-8"
+            ) as handle:
+                title = json.load(handle).get("title") or ss.project
+        except (OSError, json.JSONDecodeError):
+            pass
+        issues = []
+        if unresolved:
+            issues.append(("warning", f"还有 {unresolved} 个片段待确认角色"))
+        if bound < len(speakers):
+            issues.append(("warning", f"还有 {len(speakers) - bound} 个角色未绑定音色"))
+        remaining = max(total_segments - completed, 0)
+        if not unresolved and bound == len(speakers) and remaining:
+            issues.append(("info", f"还有 {remaining} 个段落等待合成"))
+        if unresolved or bound < len(speakers):
+            next_step, next_detail = (
+                "确认角色与音色",
+                "在「③ 角色与声音」完成角色确认和音色绑定后即可生产。",
+            )
+        elif remaining:
+            next_step, next_detail = (
+                "开始或继续生产",
+                "在「④ 生产与质检」生成计划并合成，已有结果自动保留。",
+            )
+        else:
+            next_step, next_detail = (
+                "交付成品",
+                "章节已全部完成，可在「⑤ 交付」导出有声书。",
+            )
+        return project_dashboard_html(
+            title=title,
+            project_name=ss.project,
+            chapters_done=completed and sum(1 for ch in chapters if True) or 0,
+            chapters_total=len(chapters),
+            segments_done=completed,
+            segments_total=total_segments,
+            roles_bound=bound,
+            roles_total=len(speakers),
+            task_label=(
+                "最近一次生产结果" if completed else "尚未开始生产"
+            ),
+            task_detail=(
+                f"已完成 {completed}/{total_segments} 段，可继续质检或交付。"
+                if completed
+                else "完成角色确认与音色绑定后即可开始合成。"
+            ),
+            next_step=next_step,
+            next_detail=next_detail,
+            issues=issues,
+        )
+    except Exception as exc:
+        logger.warning("刷新 V4 工作台状态失败: %s", exc)
+        return empty_dashboard_html()
+
+
 def refresh_overview(ss):
     """刷新工作台的项目状态、生产摘要、待办和项目书架。"""
     return (*_dashboard_snapshot(ss), refresh_bookshelf())
 
 
 def refresh_p_sel(name):
-    """刷新项目下拉选项（确保选中项在 choices 内）。"""
-    return gr.update(choices=ProjectService.scan_projects(), value=name)
+    """刷新项目下拉选项（确保选中项在 choices 内，V3/V4 混合）。"""
+    return gr.update(choices=project_choices(), value=name)
+
+
+def project_choices():
+    """V3 / V4 混合项目下拉选项（label 带格式标记，value 为项目名）。"""
+    return [
+        (
+            f"{item.name}（{'V4' if item.project_format == 'v4' else 'V3'}）",
+            item.name,
+        )
+        for item in V4ProjectService.scan_projects()
+    ]
 
 
 def _open_chain_rest(event):
@@ -1330,8 +1776,10 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             p_sel = prj_page["p_sel"]
             p_refresh = prj_page["p_refresh"]
             p_open = prj_page["p_open"]
+            p_migrate = prj_page["p_migrate"]
             p_del = prj_page["p_del"]
             p_open_msg = prj_page["p_open_msg"]
+            p_migrate_msg = prj_page["p_migrate_msg"]
             p_summary = prj_page["p_summary"]
             p_chapter_tree = prj_page["p_chapter_tree"]
 
@@ -1600,7 +2048,24 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         concurrency_limit=1,
         concurrency_id="project-creation",
     ).then(
-        lambda: _goto("v4"), None, _GROUPS
+        lambda: _goto("project"), None, _GROUPS
+    ).then(
+        lambda: (
+            gr.update(
+                choices=project_choices(),
+                value=cp_name.value if hasattr(cp_name, "value") else None,
+            ),
+            gr.update(),
+        ),
+        None,
+        [p_sel, p_migrate_msg],
+    )
+    p_migrate.click(
+        migrate_v3_to_v4,
+        [p_sel],
+        [p_migrate_msg, p_sel],
+        concurrency_limit=1,
+        concurrency_id="project-migration",
     )
     v4_refresh_projects.click(
         lambda: gr.update(choices=v4_ui.scan_v4_projects()),

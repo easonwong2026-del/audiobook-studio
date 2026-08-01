@@ -21,8 +21,15 @@ def create_project_page() -> dict:
                     p_refresh = gr.Button("刷新", size="sm", scale=1)
                 with gr.Row():
                     p_open = gr.Button("打开项目", variant="primary")
+                    p_migrate = gr.Button(
+                        "复制并升级到 V4", size="sm"
+                    )
                     p_del = gr.Button("删除项目", variant="stop", size="sm")
                 p_open_msg = gr.Markdown("")
+                p_migrate_msg = gr.Markdown(
+                    "V3 项目可「复制并升级到 V4」：原项目保持不变，"
+                    "生成新的 V4 项目（含备份，重复迁移复用上次结果）。"
+                )
 
         gr.Markdown("#### 书稿结构")
         p_summary = gr.Markdown("打开项目后显示书名、角色与合成概览。")
@@ -70,8 +77,10 @@ def create_project_page() -> dict:
         "p_sel": p_sel,
         "p_refresh": p_refresh,
         "p_open": p_open,
+        "p_migrate": p_migrate,
         "p_del": p_del,
         "p_open_msg": p_open_msg,
+        "p_migrate_msg": p_migrate_msg,
         "p_summary": p_summary,
         "p_chapter_tree": p_chapter_tree,
         "d_edit_chapter": d_edit_chapter,

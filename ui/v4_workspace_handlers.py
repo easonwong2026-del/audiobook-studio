@@ -367,17 +367,24 @@ def refresh_v4_queue(project_name: str):
 
 
 def chapter_audio(project_name: str, chapter_id: str):
+    if not project_name or not chapter_id:
+        return None
     path = _root() / project_name / "audio/chapters" / f"{chapter_id}.wav"
     return str(path) if path.is_file() else None
 
 
 def export_v4(project_name: str, output_format: str, bitrate: str):
-    path = V4ExportService.export(
-        _root() / project_name,
-        output_format=output_format,
-        bitrate=bitrate,
-    )
-    return str(path), f"✅ 已导出：`{path}`"
+    if not project_name:
+        return "", "⚠ 请先打开一个 v4 项目"
+    try:
+        path = V4ExportService.export(
+            _root() / project_name,
+            output_format=output_format,
+            bitrate=bitrate,
+        )
+        return str(path), f"✅ 已导出：`{path}`"
+    except Exception as exc:  # noqa: BLE001 - 导出失败转用户可读消息
+        return "", f"❌ 导出失败：{str(exc)[:400]}"
 
 
 def migrate_v3_project(v3_name: str):
