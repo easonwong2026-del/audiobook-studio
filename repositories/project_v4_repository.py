@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,8 +15,13 @@ from domain.v4 import (
 from domain.v4.production import TtsProfile
 from repositories.production_repository import ProductionRepository
 from repositories.runtime_repository import RuntimeRepository
-from repositories.v4_atomic import atomic_write_json, atomic_write_text
-from repositories.v4_atomic import _short_tmp
+from repositories.v4_atomic import (
+    _filesystem_path,
+    _short_tmp,
+    atomic_write_json,
+    atomic_write_text,
+    replace_with_retry,
+)
 
 _DIRECTORIES = (
     "source",
@@ -38,7 +42,7 @@ class V4ProjectAlreadyExistsError(FileExistsError):
 
 class ProjectV4Repository:
     def __init__(self, root: str | Path):
-        self.root = Path(root)
+        self.root = _filesystem_path(Path(root))
 
     def create(
         self,
@@ -73,11 +77,15 @@ class ProjectV4Repository:
             if tts_profile is not None:
                 ProductionRepository(temporary).initialize(tts_profile)
             RuntimeRepository(temporary / "runtime/runtime.db").initialize()
-            os.replace(temporary, target)
+            replace_with_retry(temporary, target)
             return target
-        except Exception:
-            if temporary.exists():
-                shutil.rmtree(temporary)
+        except Exception as exc:
+            temporary_path = _filesystem_path(temporary)
+            try:
+                if temporary_path.exists():
+                    shutil.rmtree(temporary_path)
+            except OSError as cleanup_error:
+                raise exc from cleanup_error
             raise
 
     def load_manifest(self, project_path: str | Path) -> ProjectManifest:

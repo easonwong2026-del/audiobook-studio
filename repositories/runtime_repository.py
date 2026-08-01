@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+
+from repositories.v4_atomic import _filesystem_path
 
 RUNTIME_SCHEMA_VERSION = 5
 
@@ -122,11 +126,20 @@ _MIGRATIONS = {
 
 class RuntimeRepository:
     def __init__(self, path: str | Path):
-        self.path = Path(path)
+        self.path = _filesystem_path(Path(path))
+
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Open a runtime connection with deterministic close semantics."""
+        connection = sqlite3.connect(_filesystem_path(self.path))
+        try:
+            yield connection
+        finally:
+            connection.close()
 
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute(
@@ -160,11 +173,13 @@ class RuntimeRepository:
                 """
             )
             connection.commit()
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            connection.commit()
 
     def schema_version(self) -> int:
         if not self.path.exists():
             return 0
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             try:
                 row = connection.execute("SELECT MAX(version) FROM migrations").fetchone()
             except sqlite3.OperationalError:
@@ -173,7 +188,7 @@ class RuntimeRepository:
 
     def recover_interrupted_tasks(self) -> int:
         """Return abandoned running tasks to pending after an unclean shutdown."""
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(
@@ -192,7 +207,7 @@ class RuntimeRepository:
 
     def set_run_status(self, status: str) -> None:
         """记录整体运行状态（running / paused / cancelled / done / error）。"""
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO run_state(key, value, updated_at)
@@ -209,7 +224,7 @@ class RuntimeRepository:
         """读取整体运行状态；未记录返回 None。"""
         if not self.path.exists():
             return None
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             try:
                 row = connection.execute(
                     "SELECT value FROM run_state WHERE key = 'status'"
@@ -224,7 +239,7 @@ class RuntimeRepository:
         Returns:
             是否真的把任务状态改回 pending（任务不存在或已 pending 返回 False）。
         """
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             connection.execute("PRAGMA foreign_keys = ON")
             cursor = connection.execute(
                 """
@@ -246,7 +261,7 @@ class RuntimeRepository:
 
     def tasks_for_text(self, chapter_id: str, text: str) -> list[dict[str, Any]]:
         """按章节 + 实际文本反查任务（用于 segment 级重新生成定位）。"""
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 """
                 SELECT task_id, cache_key, chapter_id, status
@@ -271,7 +286,7 @@ class RuntimeRepository:
         removed_task_ids: list[str],
     ) -> None:
         """Register a plan and mark only changed/removed task rows stale."""
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("BEGIN IMMEDIATE")
             for task_id in removed_task_ids:
@@ -324,7 +339,7 @@ class RuntimeRepository:
 
     def claim_next_task(self) -> dict[str, Any] | None:
         """Atomically claim one pending task; concurrency remains one by policy."""
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             connection.row_factory = sqlite3.Row
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -361,7 +376,7 @@ class RuntimeRepository:
         error_message: str,
         failed_text_length: int | None = None,
     ) -> None:
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """
@@ -382,7 +397,7 @@ class RuntimeRepository:
         *,
         error_type: str,
     ) -> None:
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("BEGIN IMMEDIATE")
             for child in children:
@@ -425,7 +440,7 @@ class RuntimeRepository:
             connection.commit()
 
     def task_counts(self) -> dict[str, int]:
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             return {
                 row[0]: row[1]
                 for row in connection.execute(
@@ -434,7 +449,7 @@ class RuntimeRepository:
             }
 
     def cancel_pending_tasks(self) -> int:
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(
                 """
@@ -467,7 +482,7 @@ class RuntimeRepository:
             "cache_hit",
             "error_type",
         )
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 f"""
@@ -480,7 +495,7 @@ class RuntimeRepository:
 
     def synthesis_metrics(self, task_id: str | None = None) -> list[dict[str, Any]]:
         """Return sanitized runtime metrics for diagnostics and UI summaries."""
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             connection.row_factory = sqlite3.Row
             if task_id is None:
                 rows = connection.execute(
@@ -498,7 +513,7 @@ class RuntimeRepository:
 
     def resolved_audio_paths(self, task_id: str) -> list[str]:
         """Resolve a plan task to its completed leaf outputs after OOM splitting."""
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             row = connection.execute(
                 "SELECT status, output_path FROM synthesis_tasks WHERE task_id = ?",
                 (task_id,),
@@ -532,7 +547,7 @@ class RuntimeRepository:
         fingerprint: str,
         duration: float,
     ) -> None:
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """
@@ -553,7 +568,7 @@ class RuntimeRepository:
     def _finish_task(
         self, task_id: str, status: str, *, output_path: str | None = None
     ) -> None:
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """
