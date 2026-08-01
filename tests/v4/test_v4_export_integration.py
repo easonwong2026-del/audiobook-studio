@@ -180,6 +180,6 @@ def test_v4_subtitles_generated(v4_export_project: Path):
     assert len(paths) == 2
     for path in paths:
         assert path.is_file()
-    srt = [item for item in paths if item.suffix == ".srt"][0]
+    srt = next(item for item in paths if item.suffix == ".srt")
     content = srt.read_text(encoding="utf-8")
     assert "-->" in content

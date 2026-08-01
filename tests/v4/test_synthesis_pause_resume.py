@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import json
-import threading
 import time
 import wave
 from pathlib import Path
@@ -103,7 +102,6 @@ class SlowMockAdapter:
 def _bind_all_speakers(project: Path) -> None:
     """给所有角色绑定 mock 音色（写 voices.json）。"""
     import hashlib
-    import shutil
 
     from domain.v4.production import VoiceBinding, VoiceBindings
     from repositories.production_repository import ProductionRepository
@@ -132,7 +130,7 @@ def _bind_all_speakers(project: Path) -> None:
 
 def test_pause_resume_cancel_semantics(v4_project: Path, monkeypatch):
     _bind_all_speakers(v4_project)
-    rows, message = V4SynthesisService.generate_plan(v4_project)
+    _rows, message = V4SynthesisService.generate_plan(v4_project)
     assert "tasks" in message
     runtime = RuntimeRepository(v4_project / "runtime/runtime.db")
     runtime.initialize()
@@ -145,8 +143,6 @@ def test_pause_resume_cancel_semantics(v4_project: Path, monkeypatch):
     import services.v4_synthesis_service as v4svc
 
     original_executor = v4svc.SynthesisExecutor
-    from repositories.audio_cache_repository import AudioCacheRepository
-    from services.synthesis_executor import ExecutionSummary
 
     def fake_executor_factory(runtime_repo, cache, adptr, measurer, project_path, monitor=None):
         executor = original_executor(
@@ -162,7 +158,7 @@ def test_pause_resume_cancel_semantics(v4_project: Path, monkeypatch):
         v4svc, "IndexTTS2Adapter", lambda *args, **kwargs: adapter
     )
 
-    ok, start_msg = V4SynthesisService.start("暂停测试")
+    ok, _start_msg = V4SynthesisService.start("暂停测试")
     assert ok
 
     # 等一小段让部分任务完成
@@ -182,11 +178,12 @@ def test_pause_resume_cancel_semantics(v4_project: Path, monkeypatch):
     # 暂停：已完成保留，不再推进
     paused_ok, _ = V4SynthesisService.pause("暂停测试")
     assert paused_ok
+    calls_at_pause = adapter.synthesize_calls
     time.sleep(0.3)
     after_pause = V4SynthesisService.snapshot("暂停测试")
     assert after_pause["run_status"] == "paused"
     assert after_pause["counts"].get("completed", 0) >= completed_before_pause
-    calls_at_pause = adapter.synthesize_calls
+    assert adapter.synthesize_calls == calls_at_pause
 
     # 继续：不重复合成已完成任务（新合成调用数只增不减已完成部分）
     resumed_ok, _ = V4SynthesisService.resume("暂停测试")
@@ -209,7 +206,7 @@ def test_pause_resume_cancel_semantics(v4_project: Path, monkeypatch):
     ok2, _ = V4SynthesisService.start("暂停测试")
     assert ok2
     # 立即取消（任务尚在进行中）
-    cancelled_ok, cancel_msg = V4SynthesisService.cancel("暂停测试")
+    cancelled_ok, _cancel_msg = V4SynthesisService.cancel("暂停测试")
     assert cancelled_ok
     deadline = time.time() + 10
     while time.time() < deadline:

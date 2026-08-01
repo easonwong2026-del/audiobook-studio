@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from services.speaker_normalization import normalize_speaker_name
 from services.source_segmenter import SourceSegmenter
+from services.speaker_normalization import normalize_speaker_name
 
 
 @pytest.mark.parametrize(

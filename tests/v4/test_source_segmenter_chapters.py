@@ -1,8 +1,6 @@
 """题名页章节修复与规则噪音的切分测试（任务十.2 / 十.4）。"""
 from __future__ import annotations
 
-import pytest
-
 from services.source_segmenter import SourceSegmenter
 
 # 与测试稿 D:\AudiobookStudio-Test\source\测试书稿_雨夜书店.txt 同构的开头

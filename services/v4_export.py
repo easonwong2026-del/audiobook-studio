@@ -97,8 +97,6 @@ class V4ExportService:
             生成的字幕文件路径列表（无可用段落时返回空列表）。
         """
         import json as _json
-        import sqlite3
-        import wave
 
         from repositories.runtime_repository import RuntimeRepository
 

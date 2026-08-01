@@ -18,11 +18,11 @@ from domain.v4.models import source_sha256
 from domain.v4.production import TtsProfile
 from repositories.project_v4_repository import ProjectV4Repository
 from services.source_segmenter import SourceSegmenter
-from services.v4_project_service import V4ProjectService
-from services.v4_voice_service import V4VoiceService
-from services.v4_synthesis_service import V4SynthesisService
-from services.v4_quality_service import V4QualityService
 from services.v4_export import V4ExportService
+from services.v4_project_service import V4ProjectService
+from services.v4_quality_service import V4QualityService
+from services.v4_synthesis_service import V4SynthesisService
+from services.v4_voice_service import V4VoiceService
 
 
 @pytest.fixture()
@@ -110,7 +110,7 @@ def test_flow_a_five_step_workflow(env_root: Path):
     )
     audio = env_root / "ref.wav"
     _wav(audio)
-    ok, message = V4VoiceService.bind_voice(project, target.speaker_id, audio)
+    ok, _message = V4VoiceService.bind_voice(project, target.speaker_id, audio)
     assert ok
     # 旁白默认绑定（迁移/创建时生成）
     narrator = next(
@@ -120,10 +120,10 @@ def test_flow_a_five_step_workflow(env_root: Path):
     assert ok2
 
     # ④ 生产与质检：生成计划 + mock 合成
-    rows, plan_message = V4SynthesisService.generate_plan(project)
+    _rows, plan_message = V4SynthesisService.generate_plan(project)
     assert "tasks" in plan_message
-    from services.v4_synthesis_service import V4SynthesisService as Svc
     import services.v4_synthesis_service as v4svc
+    from services.v4_synthesis_service import V4SynthesisService as Svc
 
     class QuickAdapter:
         def synthesize(self, task, profile, output_path):
@@ -207,7 +207,6 @@ def _make_v3_project(root: Path, name: str = "旧书") -> Path:
 
 
 def test_flow_b_v3_migration_keeps_original(env_root: Path):
-    from lib import config
 
     _make_v3_project(env_root, "旧书")
     # 迁移前 V3 可识别
