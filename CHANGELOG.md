@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [4.1.0] - 2026-08-01
+
+### Added（V4 工作流整合）
+
+- 统一服务层：`V4ProjectService`（V3/V4 混合扫描、格式识别、打开、状态、迁移入口）、
+  `V4VoiceService`（音色绑定 + 音频校验 + SHA 指纹 + 自动重生成计划触发局部失效）、
+  `V4SynthesisService`（计划 / 后台统一队列 / 暂停 / 继续 / 取消 / 中断恢复，
+  运行状态落 `runtime.db` `run_state` 表）、`V4QualityService`（试听 / 重新生成）。
+- 角色名规整 `speaker_normalization`：过滤情绪 / 动作 / 语气 / 叙述性后缀与泛指称呼，
+  AI 路由与规则切分结果落盘前统一规整；`audio_validation` 提供用户可读的音频校验。
+- 项目管理页新增「复制并升级到 V4」迁移入口（原项目不变、含备份、幂等复用）。
+
+### Changed
+
+- 原五步流程全面接入 V4 底层能力：新建项目默认创建 V4（source-first + runtime.db）；
+  项目管理 V3/V4 混合列表；角色与声音支持稳定角色 ID、AI 识别、人工指派、合并
+  （旧角色保留为别名）、锁定、别名编辑；生产与质检使用 V4 计划、runtime.db、
+  cache key、局部失效与真实暂停 / 继续 / 取消；交付使用 V4 章节拼接与
+  WAV / MP3 / M4B / 字幕导出。
+- 「✨ v4 工作流」从主导航隐藏（开发模式 `AUDIOBOOK_STUDIO_DEV_MODE=1` 可重新显示）；
+  `v4_workspace_page.py` 与全部 handler 保留作为调试入口。
+- 章节解析：纯题名页（书名 / 作者短行）并入第一章旁白，不再产生「前言」伪章节；
+  说话动词正则收紧（排除「名叫 / 道谢」误判、后置动词需紧跟标点）。
+
+### Fixed
+
+- 未选择项目 / 章节时的 `WindowsPath` / `NoneType` 空态异常。
+- 自动角色识别不再产生「她自言自语 / 顾川急 / 轻声说 / 笑着问」等噪音角色。
+
+---
+
 ## [3.3.3] - 2026-07-29
 
 ### Added

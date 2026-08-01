@@ -122,9 +122,9 @@ def create_project(name, script_file, ss):
 def _snap(ss):
     """读取（必要时重建）当前项目快照：优先用会话态快照，缺失时按项目名重建。
 
-    V4 项目没有 V3 快照，直接返回 None（各页面按 ``ss.is_v4`` 走 V4 分支）。
+    V4 项目没有 V3 快照，直接返回 None（各页面按 ``getattr(ss, "is_v4", False)`` 走 V4 分支）。
     """
-    if ss is not None and ss.is_v4:
+    if ss is not None and getattr(ss, "is_v4", False):
         return None
     s = ss.ensure_snapshot() if ss is not None else None
     if s is not None:
@@ -251,7 +251,7 @@ def _open_v4_project(name, ss):
 
 def _reload_v4_session(ss):
     """重新加载当前 V4 项目到会话（脚本 / 角色可能已变更）。"""
-    if ss is None or not ss.is_v4:
+    if ss is None or not getattr(ss, "is_v4", False):
         return
     context = V4ProjectService.open_project(ss.project)
     if context is not None:
@@ -260,7 +260,7 @@ def _reload_v4_session(ss):
 
 def _v4_role_panel_update(ss):
     """V4 角色管理面板状态：可见性 + unresolved 表 + 角色下拉。"""
-    if ss is None or not ss.is_v4:
+    if ss is None or not getattr(ss, "is_v4", False):
         return (
             gr.update(visible=False), [], gr.update(choices=[]),
             gr.update(choices=[]), gr.update(choices=[]),
@@ -288,7 +288,7 @@ def _v4_role_panel_update(ss):
 
 def v4_role_route(ss):
     """AI 自动识别角色（复用 V4 路由服务，断点续传）。"""
-    if not ss or not ss.is_v4:
+    if not ss or not getattr(ss, "is_v4", False):
         return "请先打开 V4 项目。"
     try:
         message = v4_ui.route_v4_speakers(ss.project)
@@ -301,7 +301,7 @@ def v4_role_route(ss):
 
 def v4_role_assign(ss, segs, speaker, new, lock):
     """人工指派片段到角色（V4 稳定角色 ID）。"""
-    if not ss or not ss.is_v4:
+    if not ss or not getattr(ss, "is_v4", False):
         return "请先打开 V4 项目。"
     try:
         message = v4_ui.assign_v4_speaker(
@@ -316,7 +316,7 @@ def v4_role_assign(ss, segs, speaker, new, lock):
 
 def v4_role_merge(ss, source, target):
     """合并角色（旧角色保留为别名）。"""
-    if not ss or not ss.is_v4:
+    if not ss or not getattr(ss, "is_v4", False):
         return "请先打开 V4 项目。"
     if not source or not target:
         return "请选择来源角色和目标角色。"
@@ -333,7 +333,7 @@ def v4_role_merge(ss, source, target):
 
 def v4_role_toggle_lock(ss, role):
     """切换角色锁定状态。"""
-    if not ss or not ss.is_v4 or not role:
+    if not ss or not getattr(ss, "is_v4", False) or not role:
         return "请先选择角色。"
     from dataclasses import replace
 
@@ -363,7 +363,7 @@ def v4_role_toggle_lock(ss, role):
 
 def v4_role_set_alias(ss, role, aliases):
     """修改角色别名（逗号分隔）。"""
-    if not ss or not ss.is_v4 or not role:
+    if not ss or not getattr(ss, "is_v4", False) or not role:
         return "请先选择角色。"
     from dataclasses import replace
 
@@ -415,7 +415,7 @@ def migrate_v3_to_v4(name):
 
 def format_v4_role_summary(ss):
     """V4 角色绑定概览（③ 角色与声音页右侧状态栏）。"""
-    if ss is None or not ss.is_v4 or ss.speakers_v4 is None:
+    if ss is None or not getattr(ss, "is_v4", False) or ss.speakers_v4 is None:
         return "打开 V4 项目后显示角色状态。"
     from repositories.production_repository import ProductionRepository
 
@@ -447,7 +447,7 @@ def refresh_top_status(ss):
     if not ss or not ss.project:
         return "*等待打开项目…*"
     try:
-        if ss.is_v4:
+        if getattr(ss, "is_v4", False):
             script = ss.script
             chapters = len(script.chapters)
             total = sum(len(ch.segments) for ch in script.chapters)
@@ -523,7 +523,7 @@ def refresh_role_list(search, current_role, ss):
     """按搜索词刷新角色管理列表，同时保留仍可见的当前角色。"""
     if not ss or not ss.project:
         return gr.update(choices=[], value=None)
-    if ss.is_v4:
+    if getattr(ss, "is_v4", False):
         choices = _v4_role_choices(ss)
         if search:
             choices = [(label, value) for label, value in choices if search in label]
@@ -556,7 +556,7 @@ def select_role_from_list(role, ss):
     if not ss or not ss.project or not role:
         return gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
     role = str(role)
-    if ss.is_v4:
+    if getattr(ss, "is_v4", False):
         bound_audio = None
         try:
             from repositories.production_repository import ProductionRepository
@@ -618,7 +618,7 @@ def bind_voice(role, audio_file, from_lib, ss):
     src = _lib_path(from_lib) if from_lib else audio_file
     if not src:
         return "请上传音频、录制或从音色库选择", gr.update(), gr.update(), role, gr.update(), gr.update()
-    if ss.is_v4:
+    if getattr(ss, "is_v4", False):
         project_path = V4ProjectService.root() / ss.project
         ok, message = V4VoiceService.bind_voice(project_path, role, src)
         if not ok:
@@ -736,7 +736,7 @@ def do_synthesis(ss, num_beams=2, progress=gr.Progress(),
     并透传至 ``SynthesisService.start``，保证预览 / 导出缓存键一致。
     """
     proj = ss.project
-    if ss and ss.is_v4:
+    if ss and getattr(ss, "is_v4", False):
         yield from _do_synthesis_v4(ss, progress)
         return
     bindings = ss.bindings
@@ -864,7 +864,7 @@ def _v4_queue_styled(project_name):
 
 def cancel(ss):
     """停止合成：置协作取消标志（worker 在下一段前检查 -> 段边界生效）。"""
-    if ss and ss.is_v4:
+    if ss and getattr(ss, "is_v4", False):
         ok, message = V4SynthesisService.cancel(ss.project)
         return message
     if ss.synthesis is not None:
@@ -878,7 +878,7 @@ def pause_synthesis(ss):
     仅在 ``ss.synthesis`` 存在且 ``status in (running, paused)`` 时生效；否则返回提示不报错。
     返回 (队列列表, 暂停按钮, 恢复按钮) 的更新三元组。
     """
-    if ss and ss.is_v4:
+    if ss and getattr(ss, "is_v4", False):
         ok, message = V4SynthesisService.pause(ss.project)
         rows = _v4_queue_styled(ss.project)
         if ok:
@@ -909,7 +909,7 @@ def resume_synthesis(ss):
     仅在 ``ss.synthesis`` 存在且 ``status == 'paused'`` 时生效；否则返回提示不报错。
     返回 (队列列表, 暂停按钮, 恢复按钮) 的更新三元组。
     """
-    if ss and ss.is_v4:
+    if ss and getattr(ss, "is_v4", False):
         ok, message = V4SynthesisService.resume(ss.project)
         rows = _v4_queue_styled(ss.project)
         if ok:
@@ -940,7 +940,7 @@ def refresh_queue_list(ss):
     与 O11 ``refresh_top_status`` 共享状态源约定：O11 读 meta（粗粒度），本函数读
     ``state.segment_states``（细粒度）；不互相写、不反向写 meta。
     """
-    if ss and ss.is_v4 and ss.project:
+    if ss and getattr(ss, "is_v4", False) and ss.project:
         rows = V4SynthesisService.queue_rows(ss.project)
         return df_style.style_dataframe(
             rows,
@@ -1012,7 +1012,7 @@ def do_export(fmt, bitrate, output_dir, *args):
     ss = args[0] if args else None
     if not ss or not ss.project:
         return None, "请先打开项目"
-    if ss.is_v4:
+    if getattr(ss, "is_v4", False):
         try:
             project_path = V4ProjectService.root() / ss.project
             # 导出前检查章节是否已拼接
@@ -1054,7 +1054,7 @@ def do_export_subtitles(ss, sub_choice):
         return None, "未选择字幕格式"
     fmts = ("srt", "lrc") if sub_choice == "both" else (sub_choice,)
     try:
-        if ss.is_v4:
+        if getattr(ss, "is_v4", False):
             paths = V4ExportService.generate_subtitles(
                 V4ProjectService.root() / ss.project, formats=fmts
             )
@@ -1072,7 +1072,7 @@ def do_export_subtitles(ss, sub_choice):
 
 def preview_chapters(ss):
     if not ss.project: return "*请先在项目管理中打开项目*",None,gr.update(choices=[])
-    if ss.is_v4:
+    if getattr(ss, "is_v4", False):
         return _preview_chapters_v4(ss)
     # 阶段三：复用会话态快照的剧本 dict，不再直接读盘。
     snap = _snap(ss); script = snap.script
@@ -1148,7 +1148,7 @@ def play_segment(choices, ss):
     if not ss.project or not choices: return None
     if isinstance(choices,list): choices=choices[0] if choices else None
     if not choices: return None
-    if ss.is_v4:
+    if getattr(ss, "is_v4", False):
         segment_id = choices.split(" ")[0]
         return V4QualityService.segment_audio(
             V4ProjectService.root() / ss.project, segment_id
@@ -1174,7 +1174,7 @@ def play_segment(choices, ss):
 def regenerate_segment(choices, emotion, emo_alpha, speech_rate, voice_choice, ss):
     if not ss.project or not choices: return None,"请选择段落"
     if isinstance(choices,str): choices=[choices]
-    if ss.is_v4:
+    if getattr(ss, "is_v4", False):
         return _regenerate_segment_v4(choices, ss)
     bindings=ss.bindings
     # 阶段三：复用会话态快照的剧本 dict。
@@ -1251,7 +1251,7 @@ def refresh_supplement_roles(ss):
     if not ss or not ss.project or not ss.script:
         return gr.update(interactive=False, choices=[], value=None,
                          info="请先打开项目并绑定角色音色")
-    if ss.is_v4:
+    if getattr(ss, "is_v4", False):
         from repositories.production_repository import ProductionRepository
 
         try:
@@ -1345,7 +1345,7 @@ def do_supplement_synth(sup_role, sup_mode, sup_text, sup_json_role, sup_json_li
 
     # 音色真相源：参考音频唯一来自 ss.bindings[role]；P1 换音色仅本次覆盖、不回写 ss.bindings。
     override_voice = _lib_path(sup_voice) if sup_voice else None
-    if ss.is_v4:
+    if getattr(ss, "is_v4", False):
         from repositories.production_repository import ProductionRepository
 
         try:
@@ -1645,7 +1645,7 @@ def render_preview(ss):
     """
     if not ss or not ss.project:
         return [], gr.update(choices=[], value=[])
-    if ss.is_v4:
+    if getattr(ss, "is_v4", False):
         return _render_preview_v4(ss)
     snap = _snap(ss)
     script = snap.script
@@ -1722,7 +1722,7 @@ def preview_chapter_options(ss):
     """刷新章节合并试听下拉选项。"""
     if not ss or not ss.project:
         return gr.update(choices=[], value=None)
-    if ss.is_v4:
+    if getattr(ss, "is_v4", False):
         opts = [
             (chapter.title, chapter.chapter_id) for chapter in ss.script.chapters
         ]
@@ -1739,7 +1739,7 @@ def preview_chapter(ss, chapter_id):
     """合并试听单章：调 audio_pipeline.concat_for_preview 返回路径。"""
     if not ss or not ss.project or not chapter_id:
         return None
-    if ss.is_v4:
+    if getattr(ss, "is_v4", False):
         return V4QualityService.chapter_audio(
             V4ProjectService.root() / ss.project, chapter_id
         )
@@ -1789,7 +1789,7 @@ def refresh_production_check(ss):
     """进入生产阶段时主动展示剧本和角色绑定检查（只提示，不阻断）。"""
     if not ss or not ss.project:
         return "#### 生产检查\n请先打开项目，系统会在这里显示剧本和角色声音状态。"
-    if ss.is_v4:
+    if getattr(ss, "is_v4", False):
         return _production_check_v4(ss)
     try:
         snap = _snap(ss)
@@ -1861,7 +1861,7 @@ def refresh_export_default_dir(ss):
     if not ss or not ss.project:
         return "项目默认目录：打开项目后显示。留空保存位置即可使用该目录。"
     try:
-        if ss.is_v4:
+        if getattr(ss, "is_v4", False):
             project_dir = os.path.normpath(
                 str(V4ProjectService.root() / ss.project)
             )
@@ -1885,7 +1885,7 @@ def _dashboard_snapshot(ss):
     if not ss or not ss.project:
         return empty_dashboard_html()
 
-    if ss.is_v4:
+    if getattr(ss, "is_v4", False):
         return _dashboard_snapshot_v4(ss)
 
     try:
