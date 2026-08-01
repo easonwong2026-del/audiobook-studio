@@ -6,7 +6,7 @@ APP = (ROOT / "app.py").read_text(encoding="utf-8")
 PROJECT_PAGE = (ROOT / "ui/pages/project_page.py").read_text(encoding="utf-8")
 CREATE_PAGE = (ROOT / "ui/pages/create_project_page.py").read_text(encoding="utf-8")
 VOICE_PAGE = (ROOT / "ui/pages/voice_page.py").read_text(encoding="utf-8")
-HANDLERS = (ROOT / "ui/director_handlers.py").read_text(encoding="utf-8")
+HANDLERS = (ROOT / "ui/settings_handlers.py").read_text(encoding="utf-8")
 VOICE_HANDLERS = (ROOT / "ui/voice_handlers.py").read_text(encoding="utf-8")
 
 
@@ -40,12 +40,12 @@ def test_recommendation_remains_but_voice_page_has_no_audition():
 
 def test_director_editor_no_longer_wired_in_app():
     """项目管理的人工校正事件已从 app.py 移除。"""
-    assert "director_ui.refresh_director_editor_for_project" not in APP
-    assert "director_ui.apply_director_edits_for_project" not in APP
-    assert "director_ui.undo_director_edits_for_project" not in APP
+    assert "settings_ui.refresh_director_editor_for_project" not in APP
+    assert "settings_ui.apply_director_edits_for_project" not in APP
+    assert "settings_ui.undo_director_edits_for_project" not in APP
     assert "old analyze_director_file not in APP"
-    assert "director_ui.analyze_director_file" not in APP
-    assert "director_ui.recommend_director_voice" not in APP
+    assert "settings_ui.analyze_director_file" not in APP
+    assert "settings_ui.recommend_director_voice" not in APP
 
 
 def test_voice_handlers_wired():
@@ -59,7 +59,7 @@ def test_voice_handlers_wired():
 
 
 def test_settings_handlers_exist():
-    """设置页面相关回调已添加到 director_handlers。"""
+    """设置页面相关回调集中在 settings_handlers。"""
     assert "def update_provider_config_fields" in HANDLERS
     assert "def save_ai_settings" in HANDLERS
     assert "def test_ai_connection" in HANDLERS

@@ -18,8 +18,7 @@
 app.py                      # Gradio 接线 + 导航（不含导演业务实现）
 ├── ai/providers/           # AI Provider 抽象：Local / OpenAI / DeepSeek
 ├── ui/                     # UI 页面、组件与轻量事件编排
-│   ├── pages/director_page # AI 剧本导演页面
-│   └── director_handlers   # 导演 UI 回调，避免 app.py 继续膨胀
+│   └── settings_handlers   # 设置 UI 回调，避免 app.py 继续膨胀
 ├── services/               # 业务服务层
 │   ├── script_director     # 分析、规范化、分章编辑与历史快照
 │   └── voice_director      # 音色推荐、试听与反馈
