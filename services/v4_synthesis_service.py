@@ -120,6 +120,8 @@ class V4SynthesisService:
             run = cls._runs.get(project_name)
             if run is not None and run.status in ("running", "paused", "cancelling"):
                 return False, f"⚠ 已有合成任务进行中（{run.status}），请先停止。"
+            if run is not None and run.thread is not None and run.thread.is_alive():
+                return False, "⚠ 上一轮合成仍在收尾，请稍候片刻再开始。"
             run = V4SynthesisRun(project_name=project_name, project_path=project_path)
             cls._runs[project_name] = run
         production = ProductionRepository(project_path)
