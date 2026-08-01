@@ -149,6 +149,16 @@ class RuntimeRepository:
                     f"INSERT INTO migrations(version) VALUES ({int(version)});\n"
                     "COMMIT;\n"
                 )
+            # 运行状态（idempotent；不参与 migrations 版本号，避免 schema_version 漂移）
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS run_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
             connection.commit()
 
     def schema_version(self) -> int:
@@ -179,6 +189,80 @@ class RuntimeRepository:
             )
             connection.commit()
             return cursor.rowcount
+
+    def set_run_status(self, status: str) -> None:
+        """记录整体运行状态（running / paused / cancelled / done / error）。"""
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                """
+                INSERT INTO run_state(key, value, updated_at)
+                VALUES ('status', ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (status,),
+            )
+            connection.commit()
+
+    def run_status(self) -> str | None:
+        """读取整体运行状态；未记录返回 None。"""
+        if not self.path.exists():
+            return None
+        with sqlite3.connect(self.path) as connection:
+            try:
+                row = connection.execute(
+                    "SELECT value FROM run_state WHERE key = 'status'"
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return None
+        return row[0] if row else None
+
+    def requeue_task(self, task_id: str) -> bool:
+        """把已完成 / 失败 / 取消 / 过期的任务置回 pending（供重新生成）。
+
+        Returns:
+            是否真的把任务状态改回 pending（任务不存在或已 pending 返回 False）。
+        """
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
+            cursor = connection.execute(
+                """
+                UPDATE synthesis_tasks
+                   SET status = 'pending',
+                       attempts = 0,
+                       error_type = NULL,
+                       error_message = NULL,
+                       started_at = NULL,
+                       completed_at = NULL,
+                       updated_at = CURRENT_TIMESTAMP
+                 WHERE task_id = ?
+                   AND status IN ('completed', 'failed', 'cancelled', 'stale')
+                """,
+                (task_id,),
+            )
+            connection.commit()
+            return cursor.rowcount > 0
+
+    def tasks_for_text(self, chapter_id: str, text: str) -> list[dict[str, Any]]:
+        """按章节 + 实际文本反查任务（用于 segment 级重新生成定位）。"""
+        with sqlite3.connect(self.path) as connection:
+            rows = connection.execute(
+                """
+                SELECT task_id, cache_key, chapter_id, status
+                  FROM synthesis_tasks
+                 WHERE chapter_id = ?
+                   AND actual_text IS NOT NULL
+                   AND actual_text = ?
+                ORDER BY created_at, task_id
+                """,
+                (chapter_id, text),
+            ).fetchall()
+        return [
+            {"task_id": row[0], "cache_key": row[1],
+             "chapter_id": row[2], "status": row[3]}
+            for row in rows
+        ]
 
     def sync_synthesis_plan(
         self,

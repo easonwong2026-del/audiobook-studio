@@ -24,13 +24,18 @@ class SessionState:
 
     Attributes:
         project: 当前项目名（``None`` 表示尚未打开项目）。
-        script: 结构化剧本（``lib.project_manager.open_project`` 返回的 raw dict）。
-        bindings: 角色 -> 参考音频绝对路径 的绑定表。
+        project_format: 当前项目格式（``"v4"`` / ``"v3"`` / ``None``）。
+        script: 结构化剧本（V3：``lib.project_manager.open_project`` raw dict；
+            V4：``domain.v4.ScriptDocument``）。
+        speakers_v4: V4 项目角色文档（``SpeakersDocument``；V3 项目为 None）。
+        bindings: 角色 -> 参考音频绝对路径 的绑定表（V3 语义；V4 走 voices.json）。
         synthesis: 当前合成任务态（``SynthesisState``）；未开始合成时为 ``None``。
     """
 
     project: Optional[str] = None
+    project_format: Optional[str] = None
     script: Optional[Any] = None
+    speakers_v4: Optional[Any] = None
     bindings: dict[str, str] = field(default_factory=dict)
     synthesis: Optional["SynthesisState"] = None
     project_snapshot: Optional[ProjectSnapshot] = None
@@ -46,6 +51,19 @@ class SessionState:
         self.project = name
         self.script = script
         self.bindings = bindings
+
+    def set_v4_project(self, name: str, script: Any, speakers: Any) -> None:
+        """写入 V4 项目状态（不触碰 V3 快照 / bindings 字段）。"""
+        self.project = name
+        self.project_format = "v4"
+        self.script = script
+        self.speakers_v4 = speakers
+        self.project_snapshot = None
+        self.bindings = {}
+
+    @property
+    def is_v4(self) -> bool:
+        return self.project_format == "v4"
 
     def set_snapshot(self, snapshot: Optional[ProjectSnapshot]) -> None:
         """写入当前项目快照（``ProjectSnapshot``），原地更新字段。"""
