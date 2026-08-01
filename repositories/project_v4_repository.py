@@ -42,7 +42,7 @@ class V4ProjectAlreadyExistsError(FileExistsError):
 
 class ProjectV4Repository:
     def __init__(self, root: str | Path):
-        self.root = _filesystem_path(Path(root))
+        self.root = Path(root)
 
     def create(
         self,
@@ -56,17 +56,19 @@ class ProjectV4Repository:
     ) -> Path:
         self._validate_directory_name(directory_name)
         target = self.root / directory_name
-        if target.exists():
+        if _filesystem_path(target).exists():
             raise V4ProjectAlreadyExistsError(f"project already exists: {directory_name}")
         source_metadata.validate(source_text)
         script.validate(source_text)
         speakers.validate()
         manifest.validate()
-        self.root.mkdir(parents=True, exist_ok=True)
+        _filesystem_path(self.root).mkdir(parents=True, exist_ok=True)
         temporary = self.root / f".tmp_v4_{_short_tmp()}"
         try:
             for directory in _DIRECTORIES:
-                (temporary / directory).mkdir(parents=True, exist_ok=True)
+                _filesystem_path(temporary / directory).mkdir(
+                    parents=True, exist_ok=True
+                )
             atomic_write_json(temporary / "project.json", manifest.to_dict())
             atomic_write_text(temporary / "source/source.txt", source_text)
             atomic_write_json(
@@ -126,12 +128,13 @@ class ProjectV4Repository:
 
     def cleanup_temporary_projects(self) -> list[Path]:
         removed: list[Path] = []
-        if not self.root.exists():
+        root_path = _filesystem_path(self.root)
+        if not root_path.exists():
             return removed
-        for path in self.root.iterdir():
+        for path in root_path.iterdir():
             if path.is_dir() and path.name.startswith(".tmp_v4_"):
                 shutil.rmtree(path)
-                removed.append(path)
+                removed.append(self.root / path.name)
         return removed
 
     @staticmethod

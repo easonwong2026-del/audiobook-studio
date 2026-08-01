@@ -20,7 +20,11 @@ from services.source_segmenter import SourceSegmenter
 
 def test_filesystem_path_preserves_non_windows():
     path = Path("/tmp/test")
-    assert str(v4_atomic._filesystem_path(path)) == "/tmp/test"
+    converted = v4_atomic._filesystem_path(path)
+    if os.name == "nt":
+        assert str(converted).startswith("\\\\?\\")
+    else:
+        assert str(converted) == "/tmp/test"
 
 
 def test_filesystem_path_does_not_double_prefix():
