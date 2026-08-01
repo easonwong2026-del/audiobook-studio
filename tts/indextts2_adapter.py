@@ -60,10 +60,31 @@ class IndexTTS2Adapter:
                 "emo_text": text,
                 "emo_alpha": float(profile.emotion.get("emo_alpha", 0.55)),
                 "max_text_tokens_per_segment": profile.limits.maximum,
+                "use_random": bool(profile.emotion.get("use_random", False)),
             }
             options = profile.options
-            if "num_beams" in parameters or has_kwargs:
-                kwargs["num_beams"] = int(options.get("num_beams", 2))
+            optional_infer_values = {
+                "num_beams": int(options.get("num_beams", 2)),
+                "do_sample": bool(options.get("do_sample", False)),
+                "max_mel_tokens": options.get("max_mel_tokens"),
+                "speed": options.get("speed"),
+                "duration": options.get("duration"),
+                "duration_control": options.get("duration_control"),
+                "max_duration": options.get("max_duration"),
+                "temperature": options.get("temperature"),
+                "top_p": options.get("top_p"),
+                "top_k": options.get("top_k"),
+                "length_penalty": options.get("length_penalty"),
+                "repetition_penalty": options.get("repetition_penalty"),
+            }
+            kwargs.update(
+                {
+                    key: value
+                    for key, value in optional_infer_values.items()
+                    if value is not None
+                    and (key in parameters or (has_kwargs and key == "num_beams"))
+                }
+            )
             kwargs = {
                 key: value
                 for key, value in kwargs.items()
@@ -78,7 +99,14 @@ class IndexTTS2Adapter:
 
     def close(self) -> None:
         with self._lock:
+            engine = self._engine
             self._engine = None
+            close = getattr(engine, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # noqa: BLE001 - cleanup remains best effort
+                    return
 
     def _get_engine(self, profile: TtsProfile) -> Any:
         if self._engine is not None:
@@ -99,6 +127,9 @@ class IndexTTS2Adapter:
             "use_deepspeed": bool(profile.options.get("deepspeed", False)),
             "use_accel": bool(profile.options.get("accel", False)),
             "use_cuda_kernel": bool(profile.options.get("cuda_kernel", False)),
+            "use_torch_compile": bool(
+                profile.options.get("torch_compile", False)
+            ),
         }
         signature = inspect.signature(engine_class)
         kwargs = {

@@ -189,7 +189,7 @@ class TtsProfile:
                 **self.runtime_options,
                 "concurrency": self.concurrency,
                 "oom_retry": self.oom_retry,
-                "clear_cache_after_oom": self.clear_cache_after_oom,
+                "clear_cuda_cache_after_oom": self.clear_cache_after_oom,
             },
         }
 
@@ -214,14 +214,22 @@ class TtsProfile:
                     key: value
                     for key, value in runtime.items()
                     if key
-                    not in {"concurrency", "oom_retry", "clear_cache_after_oom"}
+                    not in {
+                        "concurrency",
+                        "oom_retry",
+                        "clear_cache_after_oom",
+                        "clear_cuda_cache_after_oom",
+                    }
                 },
                 allow_merge=splitting["allow_merge"],
                 split_priority=list(splitting["split_priority"]),
                 max_retry_split_depth=splitting["max_retry_split_depth"],
                 concurrency=runtime["concurrency"],
                 oom_retry=runtime["oom_retry"],
-                clear_cache_after_oom=runtime["clear_cache_after_oom"],
+                clear_cache_after_oom=runtime.get(
+                    "clear_cuda_cache_after_oom",
+                    runtime.get("clear_cache_after_oom", True),
+                ),
                 schema_version=data["schema_version"],
             )
         except (KeyError, TypeError) as exc:

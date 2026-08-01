@@ -3,7 +3,6 @@ from domain.v4.models import source_sha256
 from repositories.project_v4_repository import ProjectV4Repository
 from services.source_segmenter import SourceSegmenter
 from services.speaker_review_service import SpeakerReviewService
-from ui.v4_speaker_review import assign_review_rows, unresolved_review_rows
 
 
 def test_review_assigns_and_locks_new_speaker():
@@ -40,22 +39,6 @@ def test_review_merges_speaker_and_preserves_alias():
         for chapter in script.chapters
         for item in chapter.segments
     )
-
-
-def test_ui_neutral_review_handlers_round_trip():
-    text = "“待确认。”"
-    segmented = SourceSegmenter().segment(text)
-    rows = unresolved_review_rows(text, segmented.script.to_dict())
-    assert rows[0][2] == "“待确认。”"
-    script_data, speakers_data = assign_review_rows(
-        text,
-        segmented.script.to_dict(),
-        segmented.speakers.to_dict(),
-        [rows[0][0]],
-        "narrator",
-    )
-    assert script_data["chapters"][0]["segments"][0]["speaker_source"] == "manual"
-    assert speakers_data["schema_version"] == "audiobook-speakers-v1"
 
 
 def test_review_persistence_creates_pre_edit_snapshot(tmp_path):

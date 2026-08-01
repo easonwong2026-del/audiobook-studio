@@ -2,14 +2,18 @@ name: Tests
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - feature/v4-*
   pull_request:
-    branches: [main]
+    branches:
+      - main
+      - feature/v4-*
   workflow_dispatch:
 
 jobs:
   test:
-    name: Python tests (Ubuntu, no GPU / model)
+    name: Full validation (Ubuntu, no GPU)
     runs-on: ubuntu-latest
 
     steps:
@@ -30,15 +34,49 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
+          pip install ruff
 
       - name: Install FFmpeg (system binary)
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
+      - name: Compile check
+        run: python -m compileall -q .
+
+      - name: Git diff check
+        run: git diff --check
+
+      - name: Lint (ruff)
+        # 只校验纯 v4 模块；旧 v3 保留文件的预存发现不影响本阶段。
+        run: |
+          ruff check \
+            --output-format=github \
+            domain/v4 \
+            repositories/runtime_repository.py \
+            services/synthesis_executor.py \
+            tts/ \
+            tools/benchmark_indextts2.py \
+            ui/v4_workspace_handlers.py \
+            ui/pages/v4_workspace_page.py \
+            ui/pages/v4_speaker_review_page.py \
+            ui/pages/v4_plan_page.py \
+            ui/pages/v4_queue_page.py \
+            services/plan_preview.py \
+            services/synthesis_planner.py \
+            services/speaker_routing_service.py \
+            services/speaker_review_service.py \
+            services/v4_project_creation.py \
+            services/v4_export.py \
+            services/migration_v3_to_v4.py \
+            services/source_segmenter.py \
+            services/invalidation_service.py \
+            services/chapter_assembler.py \
+            tests/v4
+
       - name: Run tests
         env:
           LANG: C.UTF-8
           LC_ALL: C.UTF-8
         run: |
-          python -m pytest tests/ -q --cov=lib --cov=services --cov=repositories --cov-report=term-missing
+          python -m pytest -q

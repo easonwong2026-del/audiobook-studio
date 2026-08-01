@@ -86,6 +86,8 @@ class SpeakerRoutingService:
         failed = 0
         segment_index = {item.segment_id: item for item in targets}
         for batch in checkpoints:
+            if self.checkpoints.is_cancelled(batch.batch_id):
+                continue
             if batch.status == "completed":
                 assignments.extend(batch.assignments)
                 completed += 1

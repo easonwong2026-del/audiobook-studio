@@ -46,14 +46,12 @@
   "runtime": {
     "concurrency": 1,
     "oom_retry": true,
-    "clear_cache_after_oom": true,
+    "clear_cuda_cache_after_oom": true,
     "oom_recovery": true,
     "oom_split_ratio": 0.6,
-    "max_split_depth": 3,
     "min_retry_tokens": 12,
-    "clear_cuda_cache": true,
-    "restart_engine_after_tasks": 100,
-    "vram_growth_limit_mb": 1536,
+    "restart_worker_after_tasks": 100,
+    "restart_on_vram_growth_mb": 1536,
     "minimum_free_vram_mb": 1536
   }
 }

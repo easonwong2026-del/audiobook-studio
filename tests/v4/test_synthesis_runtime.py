@@ -25,6 +25,7 @@ from services.synthesis_executor import SynthesisExecutor
 from services.synthesis_planner import SynthesisPlanner
 from tts.base_adapter import SynthesisOutput, TtsOutOfMemoryError
 from tts.indextts2_adapter import IndexTTS2Adapter
+from tts.runtime_monitor import MemorySnapshot
 from tts.text_measurement import CharacterMeasurer
 
 
@@ -85,6 +86,21 @@ class FakeRuntimeAdapter:
         self.closed += 1
 
 
+class FakeMonitor:
+    def __init__(self, snapshots):
+        self.snapshots = list(snapshots)
+
+    def snapshot(self):
+        return self.snapshots.pop(0)
+
+    def begin_task(self):
+        return self.snapshot()
+
+    @staticmethod
+    def audio_duration(_path):
+        return 1.25
+
+
 def _executor(tmp_path, plan, adapter):
     runtime = RuntimeRepository(tmp_path / "runtime/runtime.db")
     runtime.initialize()
@@ -111,6 +127,15 @@ def test_executor_completes_tasks_and_validates_cache(tmp_path):
     assert cached is not None
     cached.write_bytes(b"corrupt")
     assert cache.lookup(key) is None
+    metrics = runtime.synthesis_metrics(plan.tasks[0].task_id)
+    assert len(metrics) == 1
+    assert metrics[0]["text_chars"] == len("正文。")
+    assert metrics[0]["text_tokens"] > 0
+    assert metrics[0]["voice_id"] == "voice_narrator"
+    assert metrics[0]["auto_emotion"] == 1
+    assert metrics[0]["cache_hit"] == 0
+    assert metrics[0]["audio_duration"] > 0
+    assert "actual_text" not in metrics[0]
 
 
 def test_executor_uses_cache_without_calling_adapter(tmp_path):
@@ -134,6 +159,92 @@ def test_executor_uses_cache_without_calling_adapter(tmp_path):
     summary = cached_executor.run(_profile())
     assert summary.cache_hits == 1
     assert second_adapter.calls == []
+    metrics = runtime.synthesis_metrics(plan.tasks[0].task_id)
+    assert [item["cache_hit"] for item in metrics] == [0, 1]
+
+
+def test_worker_restarts_after_task_limit_only_when_vram_grows(tmp_path):
+    plan = _plan("正文。")
+    adapter = FakeRuntimeAdapter()
+    runtime = RuntimeRepository(tmp_path / "runtime/runtime.db")
+    runtime.initialize()
+    InvalidationService.sync_runtime(runtime, None, plan)
+    monitor = FakeMonitor(
+        [
+            MemorySnapshot(allocated_mb=100, free_mb=5000),
+            MemorySnapshot(allocated_mb=100, free_mb=5000),
+            MemorySnapshot(
+                allocated_mb=180,
+                peak_allocated_mb=220,
+                free_mb=4900,
+            ),
+            MemorySnapshot(allocated_mb=0, free_mb=6000),
+        ]
+    )
+    executor = SynthesisExecutor(
+        runtime,
+        AudioCacheRepository(runtime.path, tmp_path),
+        adapter,
+        CharacterMeasurer(),
+        tmp_path,
+        monitor=monitor,
+    )
+    executor.run(_profile(restart_worker_after_tasks=1))
+    assert adapter.closed == 1
+    metric = runtime.synthesis_metrics()[0]
+    assert metric["memory_allocated_before_mb"] == 100
+    assert metric["memory_allocated_after_mb"] == 180
+    assert metric["max_memory_allocated_mb"] == 220
+
+
+def test_worker_restarts_when_free_vram_crosses_safety_floor(tmp_path):
+    plan = _plan("正文。")
+    adapter = FakeRuntimeAdapter()
+    runtime = RuntimeRepository(tmp_path / "runtime/runtime.db")
+    runtime.initialize()
+    InvalidationService.sync_runtime(runtime, None, plan)
+    monitor = FakeMonitor(
+        [
+            MemorySnapshot(allocated_mb=100, free_mb=5000),
+            MemorySnapshot(allocated_mb=100, free_mb=5000),
+            MemorySnapshot(allocated_mb=110, free_mb=1000),
+            MemorySnapshot(allocated_mb=0, free_mb=6000),
+        ]
+    )
+    executor = SynthesisExecutor(
+        runtime,
+        AudioCacheRepository(runtime.path, tmp_path),
+        adapter,
+        CharacterMeasurer(),
+        tmp_path,
+        monitor=monitor,
+    )
+    executor.run(_profile(minimum_free_vram_mb=1536))
+    assert adapter.closed == 1
+
+
+def test_worker_restart_policy_covers_cuda_errors_and_growth():
+    baseline = MemorySnapshot(allocated_mb=100, free_mb=5000)
+    normal = MemorySnapshot(allocated_mb=100, free_mb=5000)
+    grown = MemorySnapshot(allocated_mb=1700, free_mb=3400)
+    profile = _profile(
+        restart_worker_after_tasks=100,
+        restart_on_vram_growth_mb=1536,
+        minimum_free_vram_mb=1536,
+    )
+
+    assert not SynthesisExecutor._should_restart_worker(
+        profile, baseline, normal, 100, 0, False
+    )
+    assert SynthesisExecutor._should_restart_worker(
+        profile, baseline, grown, 1, 0, False
+    )
+    assert SynthesisExecutor._should_restart_worker(
+        profile, baseline, normal, 1, 2, False
+    )
+    assert SynthesisExecutor._should_restart_worker(
+        profile, baseline, normal, 1, 0, True
+    )
 
 
 def test_oom_splits_only_current_task_and_completes_children(tmp_path):
@@ -146,6 +257,19 @@ def test_oom_splits_only_current_task_and_completes_children(tmp_path):
     assert counts["skipped"] >= 1
     assert counts["completed"] >= 2
     assert runtime.resolved_audio_paths(plan.tasks[0].task_id)
+    metrics = runtime.synthesis_metrics()
+    assert any(item["error_type"] == "TtsOutOfMemoryError" for item in metrics)
+    assert all("actual_text" not in item for item in metrics)
+
+
+def test_unsplittable_oom_fails_only_task_and_restarts_worker(tmp_path):
+    plan = _plan("正文。")
+    adapter = FakeRuntimeAdapter(fail_over=1)
+    executor, runtime, _ = _executor(tmp_path, plan, adapter)
+    summary = executor.run(_profile(min_retry_tokens=10))
+    assert summary.failed == 1
+    assert runtime.task_counts()["failed"] == 1
+    assert adapter.closed == 1
 
 
 def test_cancel_stops_before_claiming_new_task(tmp_path):
@@ -198,11 +322,27 @@ def test_indextts_adapter_keeps_one_engine_and_uses_actual_signature(tmp_path):
 
     class FakeEngine:
         instances = 0
+        constructor_options = None
+        infer_options = None
 
-        def __init__(self, cfg_path, model_dir, use_fp16):
+        def __init__(self, cfg_path, model_dir, use_fp16, use_torch_compile):
             self.__class__.instances += 1
+            self.__class__.constructor_options = (use_fp16, use_torch_compile)
 
-        def infer(self, spk_audio_prompt, text, output_path, use_emo_text):
+        def infer(
+            self,
+            spk_audio_prompt,
+            text,
+            output_path,
+            use_emo_text,
+            use_random,
+            do_sample,
+        ):
+            self.__class__.infer_options = (
+                use_emo_text,
+                use_random,
+                do_sample,
+            )
             _wav(Path(output_path))
 
     adapter = IndexTTS2Adapter(
@@ -210,11 +350,17 @@ def test_indextts_adapter_keeps_one_engine_and_uses_actual_signature(tmp_path):
         lambda _voice: tmp_path / "voice.wav",
         engine_class=FakeEngine,
     )
-    profile = replace(_profile(), options={"fp16": True})
+    profile = replace(
+        _profile(),
+        options={"fp16": True, "torch_compile": False, "do_sample": False},
+        emotion={"mode": "text_auto", "use_emo_text": True, "use_random": False},
+    )
     task = {"voice_id": "voice", "actual_text": "正文"}
     adapter.synthesize(task, profile, tmp_path / "one.wav")
     adapter.synthesize(task, profile, tmp_path / "two.wav")
     assert FakeEngine.instances == 1
+    assert FakeEngine.constructor_options == (True, False)
+    assert FakeEngine.infer_options == (True, False, False)
 
 
 def test_indextts_adapter_classifies_oom_without_leaking_source(tmp_path):

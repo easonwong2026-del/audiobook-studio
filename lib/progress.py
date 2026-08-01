@@ -61,7 +61,9 @@ PREVIEW_DATATYPES = ["str", "str", "str", "str"]
 _PREVIEW_LEN = 40
 
 
-def build_segment_states(project: str, selected_chapters: Optional[list] = None) -> list[dict]:
+def build_segment_states(
+    project: str, selected_chapters: list | None = None
+) -> list[dict]:
     """从项目 ``meta.segments_status`` + 剧本初始化全部段态（按章节/段顺序）。
 
     状态与持久态对齐：``meta.segments_status`` 仅含 pending/done/failed；

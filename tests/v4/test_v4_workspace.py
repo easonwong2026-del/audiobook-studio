@@ -36,10 +36,15 @@ def test_workspace_create_open_and_plan_without_ai_or_tts(tmp_path, monkeypatch)
     opened = handlers.open_v4_project(name)
     assert "1 片段" in opened[0]
     assert opened[1] == []
-    plan_rows, message, queue = handlers.generate_v4_plan(name)
+    assert "引擎 `indextts2`" in opened[8]
+    assert opened[9] == "章节 0/0 · Tasks 0 · 完成 0 · 缓存命中 0 · 失败 0 · stale 0"
+    plan_rows, message, queue, queue_summary = handlers.generate_v4_plan(name)
     assert plan_rows == []
     assert "未绑定角色 1" in message
     assert queue == []
+    assert queue_summary == (
+        "章节 0/0 · Tasks 0 · 完成 0 · 缓存命中 0 · 失败 0 · stale 0"
+    )
 
 
 def test_v4_wav_export_uses_assembled_chapter_order(tmp_path):

@@ -28,8 +28,7 @@ from domain.v4.production import (
 )
 from repositories.production_repository import ProductionRepository
 from repositories.project_v4_repository import ProjectV4Repository
-from repositories.v4_atomic import atomic_write_json
-from repositories.v4_atomic import _short_tmp
+from repositories.v4_atomic import _short_tmp, atomic_write_json
 
 
 @dataclass(frozen=True)

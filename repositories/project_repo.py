@@ -13,14 +13,15 @@ import json
 import logging
 import os
 import shutil
+import sqlite3
 import time
-import uuid
 import time as _time
+import uuid
 from dataclasses import dataclass, field
 from typing import ClassVar, Optional
 
-from lib.types import ProjectMeta
 from lib.snapshot import ProjectSnapshot
+from lib.types import ProjectMeta
 
 from ._atomic import atomic_write as _atomic_write
 from .exceptions import ProjectNotFoundError
@@ -268,6 +269,24 @@ class ProjectRepository:
                 modified_at=modified_at,
             )
 
+        project_json = os.path.join(path, "project.json")
+        try:
+            with open(project_json, encoding="utf-8") as file:
+                project_data = json.load(file)
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            project_data = None
+        if (
+            isinstance(project_data, dict)
+            and project_data.get("schema_version") == "audiobook-project-v4"
+        ):
+            return ProjectRepository._inspect_v4_slot(
+                name,
+                path,
+                location,
+                modified_at,
+                project_data,
+            )
+
         missing = [
             marker
             for marker in _PROJECT_MARKERS
@@ -320,6 +339,110 @@ class ProjectRepository:
             invalid.append("voice_bindings.json")
 
         invalid = list(dict.fromkeys(invalid))
+        return ProjectSlotInspection(
+            name=name,
+            status="corrupted" if invalid else "valid",
+            path=path,
+            location=location,
+            invalid_files=invalid,
+            modified_at=modified_at,
+        )
+
+    @staticmethod
+    def _inspect_v4_slot(
+        name: str,
+        path: str,
+        location: str,
+        modified_at: Optional[float],
+        project_data: dict,
+    ) -> ProjectSlotInspection:
+        """Validate a v4 slot so legacy cleanup can never archive a valid project."""
+        from domain.v4 import (
+            ProjectManifest,
+            ScriptDocument,
+            SourceMetadata,
+            SpeakersDocument,
+            ValidationError,
+        )
+        from repositories.runtime_repository import (
+            RUNTIME_SCHEMA_VERSION,
+            RuntimeRepository,
+        )
+
+        invalid: list[str] = []
+        try:
+            manifest = ProjectManifest.from_dict(project_data)
+        except (KeyError, TypeError, ValueError, ValidationError):
+            manifest = None
+            invalid.append("project.json")
+
+        if manifest is None:
+            return ProjectSlotInspection(
+                name=name,
+                status="corrupted",
+                path=path,
+                location=location,
+                invalid_files=invalid,
+                modified_at=modified_at,
+            )
+
+        relative_paths = {
+            "source/source.txt": manifest.source_path,
+            "source/source.meta.json": manifest.source_meta_path,
+            "script/script.json": manifest.script_path,
+            "script/speakers.json": manifest.speakers_path,
+            "runtime/runtime.db": manifest.runtime_db_path,
+        }
+        missing = [
+            label
+            for label, relative_path in relative_paths.items()
+            if not os.path.isfile(os.path.join(path, relative_path))
+        ]
+        if missing:
+            return ProjectSlotInspection(
+                name=name,
+                status="incomplete",
+                path=path,
+                location=location,
+                missing_files=missing,
+                modified_at=modified_at,
+            )
+
+        try:
+            with open(
+                os.path.join(path, manifest.source_path), encoding="utf-8"
+            ) as file:
+                source_text = file.read()
+            with open(
+                os.path.join(path, manifest.source_meta_path), encoding="utf-8"
+            ) as file:
+                SourceMetadata.from_dict(json.load(file)).validate(source_text)
+        except (OSError, UnicodeError, json.JSONDecodeError, ValidationError):
+            invalid.append("source/source.meta.json")
+            source_text = ""
+        try:
+            with open(
+                os.path.join(path, manifest.script_path), encoding="utf-8"
+            ) as file:
+                ScriptDocument.from_dict(json.load(file), source_text)
+        except (OSError, UnicodeError, json.JSONDecodeError, ValidationError):
+            invalid.append("script/script.json")
+        try:
+            with open(
+                os.path.join(path, manifest.speakers_path), encoding="utf-8"
+            ) as file:
+                SpeakersDocument.from_dict(json.load(file))
+        except (OSError, UnicodeError, json.JSONDecodeError, ValidationError):
+            invalid.append("script/speakers.json")
+        try:
+            runtime_version = RuntimeRepository(
+                os.path.join(path, manifest.runtime_db_path)
+            ).schema_version()
+            if not 0 < runtime_version <= RUNTIME_SCHEMA_VERSION:
+                invalid.append("runtime/runtime.db")
+        except (OSError, ValueError, sqlite3.Error):
+            invalid.append("runtime/runtime.db")
+
         return ProjectSlotInspection(
             name=name,
             status="corrupted" if invalid else "valid",
