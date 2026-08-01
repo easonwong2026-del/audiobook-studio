@@ -1,6 +1,7 @@
 """SQLite-backed high-frequency runtime state for v4."""
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -9,7 +10,7 @@ from typing import Any
 
 from repositories.v4_atomic import _filesystem_path
 
-RUNTIME_SCHEMA_VERSION = 5
+RUNTIME_SCHEMA_VERSION = 6
 
 _MIGRATIONS = {
     1: """
@@ -120,6 +121,9 @@ _MIGRATIONS = {
     );
     CREATE INDEX idx_synthesis_metrics_task
         ON synthesis_metrics(task_id, metric_id);
+    """,
+    6: """
+    ALTER TABLE synthesis_tasks ADD COLUMN segment_ids_json TEXT NOT NULL DEFAULT '[]';
     """,
 }
 
@@ -302,15 +306,17 @@ class RuntimeRepository:
                 connection.execute(
                     """
                     INSERT INTO synthesis_tasks(
-                        task_id, plan_revision, chapter_id, speaker_id, cache_key,
+                        task_id, plan_revision, chapter_id, speaker_id,
+                        segment_ids_json, cache_key,
                         voice_id, actual_text, input_fingerprint, text_length,
                         status, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending',
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending',
                               CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                     ON CONFLICT(task_id) DO UPDATE SET
                         plan_revision = excluded.plan_revision,
                         chapter_id = excluded.chapter_id,
                         speaker_id = excluded.speaker_id,
+                        segment_ids_json = excluded.segment_ids_json,
                         voice_id = excluded.voice_id,
                         actual_text = excluded.actual_text,
                         input_fingerprint = excluded.input_fingerprint,
@@ -328,6 +334,11 @@ class RuntimeRepository:
                         str(plan_revision),
                         task["chapter_id"],
                         task["speaker_id"],
+                        json.dumps(
+                            task.get("segment_ids", []),
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
                         task["input_fingerprint"],
                         task.get("voice_id"),
                         task.get("actual_text"),
@@ -404,11 +415,12 @@ class RuntimeRepository:
                 connection.execute(
                     """
                     INSERT INTO synthesis_tasks(
-                        task_id, plan_revision, chapter_id, speaker_id, voice_id,
-                        cache_key, input_fingerprint, actual_text, text_length,
+                        task_id, plan_revision, chapter_id, speaker_id,
+                        segment_ids_json, voice_id, cache_key, input_fingerprint,
+                        actual_text, text_length,
                         status, attempts, parent_task_id, split_depth,
                         created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?,
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?,
                               CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                     """,
                     (
@@ -416,6 +428,7 @@ class RuntimeRepository:
                         parent["plan_revision"],
                         parent["chapter_id"],
                         parent["speaker_id"],
+                        parent.get("segment_ids_json", "[]"),
                         parent["voice_id"],
                         child["cache_key"],
                         child["cache_key"],
@@ -447,6 +460,87 @@ class RuntimeRepository:
                     "SELECT status, COUNT(*) FROM synthesis_tasks GROUP BY status"
                 )
             }
+
+    def completed_segment_ids(
+        self,
+        segment_ids_by_chapter: dict[str, set[str]],
+        *,
+        plan_revision: int | None = None,
+    ) -> set[str]:
+        """Return original segment IDs whose active task leaves all completed.
+
+        A plan task may be split into multiple runtime rows.  The split parent is
+        deliberately ignored, while every non-stale/non-skipped row carrying an
+        original segment ID must be completed before that ID is counted.
+        """
+        if not segment_ids_by_chapter or not self.path.exists():
+            return set()
+        chapter_ids = tuple(sorted(segment_ids_by_chapter))
+        placeholders = ", ".join("?" for _ in chapter_ids)
+        query = f"""
+            SELECT chapter_id, status, segment_ids_json
+              FROM synthesis_tasks
+             WHERE chapter_id IN ({placeholders})
+        """
+        params: list[Any] = list(chapter_ids)
+        if plan_revision is not None:
+            query += " AND plan_revision = ?"
+            params.append(str(plan_revision))
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+
+        states: dict[str, list[str]] = {}
+        for chapter_id, status, segment_ids_json in rows:
+            allowed = segment_ids_by_chapter.get(chapter_id, set())
+            try:
+                segment_ids = json.loads(segment_ids_json or "[]")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(segment_ids, list):
+                continue
+            for segment_id in set(segment_ids) & allowed:
+                if status in {"stale", "skipped"}:
+                    continue
+                states.setdefault(segment_id, []).append(status)
+        return {
+            segment_id
+            for segment_id, statuses in states.items()
+            if statuses and all(status == "completed" for status in statuses)
+        }
+
+    def valid_chapter_output_ids(
+        self,
+        project_path: str | Path,
+        chapter_ids: set[str],
+        *,
+        plan_revision: int | None = None,
+    ) -> set[str]:
+        """Return chapter IDs with a current, non-empty persisted audio file."""
+        if not chapter_ids or not self.path.exists():
+            return set()
+        chapter_ids = tuple(sorted(chapter_ids))
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT chapter_id, plan_revision, file_path, fingerprint, duration
+                  FROM chapter_outputs
+                 WHERE chapter_id IN ({})
+                """.format(", ".join("?" for _ in chapter_ids)),
+                tuple(chapter_ids),
+            ).fetchall()
+        project = Path(project_path)
+        valid: set[str] = set()
+        for chapter_id, output_revision, file_path, fingerprint, duration in rows:
+            if plan_revision is not None and int(output_revision) != plan_revision:
+                continue
+            if not file_path or not fingerprint or float(duration) <= 0:
+                continue
+            try:
+                if (project / file_path).is_file() and (project / file_path).stat().st_size:
+                    valid.add(chapter_id)
+            except (OSError, ValueError, TypeError):
+                continue
+        return valid
 
     def cancel_pending_tasks(self) -> int:
         with self._connect() as connection:

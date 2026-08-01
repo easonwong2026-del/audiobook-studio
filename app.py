@@ -2008,32 +2008,36 @@ def _dashboard_snapshot_v4(ss):
     """V4 项目工作台概览（章节 / 片段 / 待确认 / 已合成 / 待绑定）。"""
     try:
         from repositories.production_repository import ProductionRepository
+        from repositories.runtime_repository import (
+            RUNTIME_SCHEMA_VERSION,
+            RuntimeRepository,
+        )
+        from services.v4_progress import V4ProgressService
 
         script = ss.script
         project_path = V4ProjectService.root() / ss.project
         chapters = list(script.chapters)
-        total_segments = sum(len(ch.segments) for ch in chapters)
         unresolved = sum(
             seg.status == "unresolved"
             for ch in chapters
             for seg in ch.segments
         )
-        runtime = project_path / "runtime/runtime.db"
-        completed = 0
-        if runtime.is_file():
-            import sqlite3 as _sqlite
-
-            try:
-                with _sqlite.connect(runtime) as connection:
-                    row = connection.execute(
-                        "SELECT COUNT(*) FROM synthesis_tasks "
-                        "WHERE status = 'completed'"
-                    ).fetchone()
-                completed = int(row[0] or 0)
-            except _sqlite.Error:
-                completed = 0
         production = ProductionRepository(project_path)
         voices, _p, _pr, _profile = production.load_inputs()
+        plan = production.load_plan()
+        runtime_path = project_path / "runtime/runtime.db"
+        runtime_repository = None
+        if runtime_path.is_file():
+            runtime_repository = RuntimeRepository(runtime_path)
+            if runtime_repository.schema_version() < RUNTIME_SCHEMA_VERSION:
+                runtime_repository.initialize()
+        progress = V4ProgressService.snapshot(
+            runtime_repository,
+            project_path,
+            chapters,
+            plan_revision=plan.revision if plan else None,
+        )
+        completed = progress.segments_done
         speakers = ss.speakers_v4.speakers
         bound = sum(1 for s in speakers if s.speaker_id in voices.bindings)
         title = ss.project
@@ -2049,7 +2053,7 @@ def _dashboard_snapshot_v4(ss):
             issues.append(("warning", f"还有 {unresolved} 个片段待确认角色"))
         if bound < len(speakers):
             issues.append(("warning", f"还有 {len(speakers) - bound} 个角色未绑定音色"))
-        remaining = max(total_segments - completed, 0)
+        remaining = max(progress.segments_total - completed, 0)
         if not unresolved and bound == len(speakers) and remaining:
             issues.append(("info", f"还有 {remaining} 个段落等待合成"))
         if unresolved or bound < len(speakers):
@@ -2070,17 +2074,17 @@ def _dashboard_snapshot_v4(ss):
         return project_dashboard_html(
             title=title,
             project_name=ss.project,
-            chapters_done=completed and sum(1 for ch in chapters if True) or 0,
-            chapters_total=len(chapters),
-            segments_done=completed,
-            segments_total=total_segments,
+            chapters_done=progress.chapters_done,
+            chapters_total=progress.chapters_total,
+            segments_done=progress.segments_done,
+            segments_total=progress.segments_total,
             roles_bound=bound,
             roles_total=len(speakers),
             task_label=(
                 "最近一次生产结果" if completed else "尚未开始生产"
             ),
             task_detail=(
-                f"已完成 {completed}/{total_segments} 段，可继续质检或交付。"
+                f"已完成 {completed}/{progress.segments_total} 段，可继续质检或交付。"
                 if completed
                 else "完成角色确认与音色绑定后即可开始合成。"
             ),

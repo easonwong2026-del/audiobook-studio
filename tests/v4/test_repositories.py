@@ -237,7 +237,7 @@ def test_runtime_migration_fields_and_interrupted_task_recovery(tmp_path):
             """
         )
         connection.commit()
-    assert {"started_at", "completed_at"} <= task_columns
+    assert {"started_at", "completed_at", "segment_ids_json"} <= task_columns
     assert {
         "file_path", "file_sha256", "duration", "sample_rate", "channels", "valid"
     } <= cache_columns
