@@ -9,7 +9,6 @@ import shutil
 from pathlib import Path
 
 from domain.v4.production import VoiceBinding, VoiceBindings
-from repositories.audio_cache_repository import AudioCacheRepository
 from repositories.production_repository import ProductionRepository
 from repositories.runtime_repository import RuntimeRepository
 from services.audio_validation import validate_audio_file
@@ -68,6 +67,40 @@ class V4VoiceService:
             except Exception as exc:  # noqa: BLE001 - 计划刷新失败不阻断绑定
                 changed = 0
                 message = f"✅ 音色已绑定；⚠ 计划刷新失败：{exc}"
+            if changed:
+                message += "；已重新生成计划并局部失效旧任务"
+        return True, message
+
+    @staticmethod
+    def unbind_voice(
+        project_path: str | Path,
+        speaker_id: str,
+        *,
+        regenerate_plan: bool = True,
+    ) -> tuple[bool, str]:
+        """Remove a V4 binding and refresh only affected synthesis tasks."""
+        project = Path(project_path)
+        production = ProductionRepository(project)
+        voices, _performance, _pronunciation, _profile = production.load_inputs()
+        if speaker_id not in {
+            item.speaker_id for item in _speakers_document(project).speakers
+        }:
+            return False, f"角色不存在：{speaker_id}"
+        if speaker_id not in voices.bindings:
+            return False, "该角色当前没有绑定音色"
+        bindings = dict(voices.bindings)
+        bindings.pop(speaker_id)
+        production.save_document(
+            "voices.json",
+            VoiceBindings(bindings, revision=voices.revision + 1).to_dict(),
+        )
+        message = "✅ 已解除音色绑定"
+        if regenerate_plan:
+            try:
+                changed = V4VoiceService._refresh_plan(project)
+            except Exception as exc:  # noqa: BLE001 - keep binding change durable
+                changed = 0
+                message = f"✅ 已解除音色绑定；⚠ 计划刷新失败：{exc}"
             if changed:
                 message += "；已重新生成计划并局部失效旧任务"
         return True, message

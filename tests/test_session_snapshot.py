@@ -74,3 +74,15 @@ def test_invalidate_snapshot():
     assert ss.project_snapshot is not None
     ss.invalidate_snapshot()
     assert ss.project_snapshot is None
+
+
+def test_switching_from_v4_to_v3_clears_project_specific_state():
+    ss = SessionState()
+    ss.set_v4_project("v4-book", object(), object())
+    ss.synthesis = object()
+    ss.set_project("v3-book", {"voices": {}}, {"旁白": "/tmp/voice.wav"})
+    assert ss.project == "v3-book"
+    assert ss.is_v4 is False
+    assert ss.speakers_v4 is None
+    assert ss.bindings == {"旁白": "/tmp/voice.wav"}
+    assert ss.synthesis is None

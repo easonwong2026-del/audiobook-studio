@@ -1,17 +1,18 @@
-"""V4 角色工作台 UI builder — AI 识别 / 指派 / 合并 / 锁定 / 别名。
+"""V4 高级角色整理 UI builder — AI 识别 / 指派 / 合并 / 锁定 / 别名。
 
-V4 角色管理能力从「③ 角色与声音」页移出，收敛为独立调试入口：
-仅在开发模式（AUDIOBOOK_STUDIO_DEV_MODE=1）下通过导航显示。
-主角色与声音页完全恢复 V3 紧耦合布局（Radio 选角色 → 右侧绑定）。
+组件默认作为开发调试页隐藏，也可以嵌入「③ 角色与声音」的高级折叠区，
+让普通用户在同一角色工作流中使用 V4 的高级能力。
 """
 from __future__ import annotations
 
 import gradio as gr
 
 
-def create_v4_role_page() -> dict:
-    """创建 V4 角色工作台页面（默认隐藏，开发模式可见）。"""
-    with gr.Group(visible=False, elem_id="grp-v4-role") as grp_v4_role:
+def create_v4_role_page(
+    *, visible: bool = False, elem_id: str = "grp-v4-role"
+) -> dict:
+    """创建 V4 角色工作台；可嵌入角色页或作为开发调试入口。"""
+    with gr.Group(visible=visible, elem_id=elem_id) as grp_v4_role:
         gr.Markdown("## V4 角色工作台")
         gr.Markdown(
             "V4 项目使用稳定角色 ID。未确认片段可先由 AI 自动识别，"

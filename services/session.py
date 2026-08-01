@@ -49,8 +49,12 @@ class SessionState:
             bindings: 角色绑定表（dict）。
         """
         self.project = name
+        self.project_format = "v3"
         self.script = script
+        self.speakers_v4 = None
         self.bindings = bindings
+        self.synthesis = None
+        self.project_snapshot = None
 
     def set_v4_project(self, name: str, script: Any, speakers: Any) -> None:
         """写入 V4 项目状态（不触碰 V3 快照 / bindings 字段）。"""
@@ -60,6 +64,7 @@ class SessionState:
         self.speakers_v4 = speakers
         self.project_snapshot = None
         self.bindings = {}
+        self.synthesis = None
 
     @property
     def is_v4(self) -> bool:

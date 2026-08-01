@@ -41,6 +41,16 @@ def wire_voice_page(page: dict, context: dict) -> None:
         [
             page["v_bind_msg"], page["v_table"], page["v_lib"],
             page["v_role"], page["v_role_title"], page["v_current"],
+            page["v_status"],
+        ],
+    )
+    page["v_unbind"].click(
+        cb["unbind_voice"],
+        [page["v_role"], session],
+        [
+            page["v_bind_msg"], page["v_table"], page["v_lib"],
+            page["v_role"], page["v_role_title"], page["v_current"],
+            page["v_status"],
         ],
     )
     page["v_lib"].change(cb["play_lib_voice"], page["v_lib"], page["v_audio"])

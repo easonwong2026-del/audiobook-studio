@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import gradio as gr
 
+from ui.pages.v4_role_page import create_v4_role_page
+
 
 def create_voice_page() -> dict:
     with gr.Group(visible=False, elem_id="grp-voices") as grp_voices:
@@ -72,7 +74,17 @@ def create_voice_page() -> dict:
                     with gr.Row(equal_height=False, elem_classes=["voice-config-footer"]):
                         v_current = gr.Markdown("当前参考音频：未选择")
                         v_bind = gr.Button("确认绑定", variant="primary", elem_classes=["voice-bind-action"])
-                    v_bind_msg = gr.Markdown("")
+                        v_unbind = gr.Button("解除绑定", variant="secondary")
+            v_bind_msg = gr.Markdown("")
+
+        with gr.Accordion(
+            "高级角色整理（AI 识别、人工指派、合并、锁定、别名）",
+            open=False,
+            elem_classes=["advanced-role-accordion"],
+        ):
+            advanced_role = create_v4_role_page(
+                visible=True, elem_id="grp-v4-role-embedded"
+            )
 
         v_role = gr.State(value=None)
 
@@ -117,6 +129,7 @@ def create_voice_page() -> dict:
         "v_lib": v_lib,
         "v_current": v_current,
         "v_bind": v_bind,
+        "v_unbind": v_unbind,
         "v_bind_msg": v_bind_msg,
         "v_preview_btn": v_preview_btn,
         "v_preview_audio": v_preview_audio,
@@ -132,4 +145,5 @@ def create_voice_page() -> dict:
         "v_lib_search": v_lib_search,
         "v_lib_category": v_lib_category,
         "v_lib_browser": v_lib_browser,
+        "advanced_role": advanced_role,
     }

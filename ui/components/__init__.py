@@ -9,6 +9,7 @@ from .production_nav import create_production_navigation
 from .voice_binding import (
     build_role_management_choices,
     build_role_management_rows,
+    build_v4_role_management_choices,
     format_bound_role_choices,
     format_role_choices,
     format_role_label,
@@ -24,6 +25,7 @@ __all__ = [
     "create_production_navigation",
     "build_role_management_choices",
     "build_role_management_rows",
+    "build_v4_role_management_choices",
     "format_bound_role_choices",
     "format_role_choices",
     "format_role_label",

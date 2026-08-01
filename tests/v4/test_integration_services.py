@@ -8,11 +8,11 @@ from pathlib import Path
 import pytest
 
 from services.audio_validation import validate_audio_file
+from services.source_segmenter import SourceSegmenter
 from services.v4_project_service import V4ProjectService
 from services.v4_quality_service import V4QualityService
 from services.v4_synthesis_service import V4SynthesisService
 from services.v4_voice_service import V4VoiceService
-from services.source_segmenter import SourceSegmenter
 
 
 @pytest.fixture()
@@ -155,7 +155,7 @@ def test_voice_service_bind_validates_and_binds(data_root, tmp_path):
         for item in speakers["speakers"]
         if item["name"] == "林晚"
     )
-    ok, message = V4VoiceService.bind_voice(project, speaker_id, audio)
+    ok, _message = V4VoiceService.bind_voice(project, speaker_id, audio)
     assert ok
     voices = json.loads((project / "production/voices.json").read_text(encoding="utf-8"))
     assert speaker_id in voices["bindings"]
@@ -168,6 +168,54 @@ def test_voice_service_bind_rejects_missing_audio(data_root, tmp_path):
     )
     assert not ok
     assert "不存在" in message
+
+
+def test_voice_service_unbind_restores_unbound_card_state(data_root, tmp_path):
+    project = _make_v4_project(data_root)
+    audio = tmp_path / "voice.wav"
+    with wave.open(str(audio), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(22050)
+        handle.writeframes(b"\x00\x00" * 44100)
+    speakers = json.loads((project / "script/speakers.json").read_text(encoding="utf-8"))
+    speaker_id = next(
+        item["id"] for item in speakers["speakers"] if item["name"] == "林晚"
+    )
+    ok, _message = V4VoiceService.bind_voice(project, speaker_id, audio)
+    assert ok
+    ok, _message = V4VoiceService.unbind_voice(project, speaker_id)
+    assert ok
+    voices = json.loads((project / "production/voices.json").read_text(encoding="utf-8"))
+    assert speaker_id not in voices["bindings"]
+
+
+def test_merge_moves_source_voice_binding_to_target(data_root, tmp_path):
+    from ui.v4_workspace_handlers import merge_v4_speakers
+
+    project = _make_v4_project(data_root)
+    audio = tmp_path / "voice.wav"
+    with wave.open(str(audio), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(22050)
+        handle.writeframes(b"\x00\x00" * 44100)
+    speakers = json.loads((project / "script/speakers.json").read_text(encoding="utf-8"))
+    source_id = next(
+        item["id"] for item in speakers["speakers"] if item["name"] == "林晚"
+    )
+    target_id = next(
+        item["id"] for item in speakers["speakers"] if item["name"] == "顾川"
+    )
+    ok, _message = V4VoiceService.bind_voice(project, source_id, audio)
+    assert ok
+    message = merge_v4_speakers(project.name, source_id, target_id)
+    assert "迁移到目标角色" in message
+    voices = json.loads((project / "production/voices.json").read_text(encoding="utf-8"))
+    assert source_id not in voices["bindings"]
+    assert target_id in voices["bindings"]
+    updated = json.loads((project / "script/speakers.json").read_text(encoding="utf-8"))
+    assert source_id not in {item["id"] for item in updated["speakers"]}
 
 
 # ── 质检服务 ────────────────────────────────────────────────────────────────
@@ -183,7 +231,7 @@ def test_quality_service_empty_states_do_not_raise(data_root):
 
 def test_synthesis_service_generate_plan(data_root):
     project = _make_v4_project(data_root)
-    rows, message = V4SynthesisService.generate_plan(project)
+    _rows, message = V4SynthesisService.generate_plan(project)
     assert "tasks" in message
     runtime = project / "runtime/runtime.db"
     assert runtime.is_file()
