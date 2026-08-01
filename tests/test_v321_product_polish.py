@@ -130,7 +130,7 @@ def test_production_stage_has_internal_navigation_and_check():
         and any(isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)
                 and target.value.id == "_GROUPS" for target in node.targets)
     ]
-    assert assignments and len(assignments[0].value.elts) == 11
+    assert assignments and len(assignments[0].value.elts) == 12
 
 
 def test_project_onboarding_and_user_facing_quality_labels_exist():

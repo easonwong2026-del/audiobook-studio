@@ -13,23 +13,25 @@ NAV_ITEMS = [
     ("overview", "🏠 工作台", "nav-overview"),
     ("create_project", "① 新建项目", "nav-create-project"),
     ("v4", "✨ v4 工作流", "nav-v4"),
+    ("v4_role", "🧪 v4 角色工作台", "nav-v4-role"),
     ("project", "② 项目管理", "nav-project"),
     ("voices", "③ 角色与声音", "nav-voices"),
     ("synth", "④ 生产与质检", "nav-synth"),
     ("export", "⑤ 交付", "nav-export"),
 ]
 
-# 主导航隐藏的页面（V4 独立工作台收敛为内部调试入口）。
+# 主导航隐藏的页面（V4 独立工作台 / V4 角色工作台收敛为内部调试入口）。
 # 开发模式（环境变量 AUDIOBOOK_STUDIO_DEV_MODE=1）下重新显示。
-_HIDDEN_NAV = {"v4"}
+_HIDDEN_NAV = {"v4", "v4_role"}
 
 _SETTINGS_ITEM = ("settings", "⚙ 设置", "nav-settings")
 
-# 内部 Group 与顶级导航的映射（保留 "v4"，供开发模式 / 内部跳转使用）。
+# 内部 Group 与顶级导航的映射（保留 "v4"/"v4_role"，供开发模式 / 内部跳转使用）。
 GROUP_ITEMS = [
     "overview",
     "create_project",
     "v4",
+    "v4_role",
     "project",
     "voices",
     "production-nav",

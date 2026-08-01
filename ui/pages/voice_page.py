@@ -76,56 +76,6 @@ def create_voice_page() -> dict:
 
         v_role = gr.State(value=None)
 
-        # ── V4 项目专用：AI 角色识别 / 人工指派 / 合并 / 锁定 / 别名 ──
-        with gr.Group(visible=False, elem_id="v4-role-manager") as v4_role_grp:
-            with gr.Accordion(
-                "V4 角色管理：AI 识别 / 人工指派 / 合并 / 锁定 / 别名",
-                open=True,
-                elem_classes=["v4-role-manager-accordion"],
-            ):
-                gr.Markdown(
-                    "V4 项目使用稳定角色 ID。未确认片段可先由 AI 自动识别，"
-                    "再人工指派、合并（旧角色保留为别名）、锁定或修改别名。"
-                )
-                with gr.Row():
-                    v4_unresolved_table = gr.Dataframe(
-                        headers=["segment_id", "chapter", "text"],
-                        datatype=["str", "str", "str"],
-                        row_count=(0, "dynamic"),
-                        col_count=(3, "fixed"),
-                        interactive=False,
-                        wrap=True,
-                        label="待确认片段（unresolved）",
-                    )
-                with gr.Row():
-                    v4_route_btn = gr.Button("🤖 AI 自动识别角色", variant="primary", size="sm")
-                    v4_route_msg = gr.Markdown("")
-                with gr.Row():
-                    v4_assign_segs = gr.Textbox(
-                        label="要指派的片段 ID（逗号分隔）", scale=2,
-                        placeholder="例如：segment_000012, segment_000013",
-                    )
-                    v4_assign_speaker = gr.Dropdown(
-                        label="指定现有角色", choices=[], scale=1,
-                    )
-                    v4_assign_new = gr.Textbox(
-                        label="或新建角色名", scale=1,
-                    )
-                    v4_assign_lock = gr.Checkbox(label="锁定该角色", value=False, scale=1)
-                with gr.Row():
-                    v4_assign_btn = gr.Button("指派片段", variant="secondary", size="sm")
-                    v4_assign_msg = gr.Markdown("")
-                with gr.Row():
-                    v4_merge_source = gr.Dropdown(label="合并来源角色", choices=[], scale=1)
-                    v4_merge_target = gr.Dropdown(label="合并到角色", choices=[], scale=1)
-                    v4_merge_btn = gr.Button("合并角色", variant="secondary", size="sm")
-                    v4_merge_msg = gr.Markdown("")
-                with gr.Row():
-                    v4_lock_btn = gr.Button("🔒 切换锁定当前角色", size="sm")
-                    v4_alias = gr.Textbox(label="修改别名（逗号分隔，保存即生效）", scale=2)
-                    v4_alias_btn = gr.Button("保存别名", size="sm")
-                    v4_lock_alias_msg = gr.Markdown("")
-
         # 隐藏兼容组件
         v_preview_btn = gr.Button("试听当前声音", visible=False)
         v_preview_audio = gr.Audio(
@@ -164,24 +114,6 @@ def create_voice_page() -> dict:
         "v_bind_category": v_bind_category,
         "v_audio": v_audio,
         "v_role": v_role,
-        "v4_role_grp": v4_role_grp,
-        "v4_unresolved_table": v4_unresolved_table,
-        "v4_route_btn": v4_route_btn,
-        "v4_route_msg": v4_route_msg,
-        "v4_assign_segs": v4_assign_segs,
-        "v4_assign_speaker": v4_assign_speaker,
-        "v4_assign_new": v4_assign_new,
-        "v4_assign_lock": v4_assign_lock,
-        "v4_assign_btn": v4_assign_btn,
-        "v4_assign_msg": v4_assign_msg,
-        "v4_merge_source": v4_merge_source,
-        "v4_merge_target": v4_merge_target,
-        "v4_merge_btn": v4_merge_btn,
-        "v4_merge_msg": v4_merge_msg,
-        "v4_lock_btn": v4_lock_btn,
-        "v4_alias": v4_alias,
-        "v4_alias_btn": v4_alias_btn,
-        "v4_lock_alias_msg": v4_lock_alias_msg,
         "v_lib": v_lib,
         "v_current": v_current,
         "v_bind": v_bind,

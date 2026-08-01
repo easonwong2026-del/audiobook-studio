@@ -233,6 +233,102 @@ def merge_v4_speakers(project_name: str, source_id: str, target_id: str):
     return "✅ 角色已合并；旧角色名已保留为 alias"
 
 
+def open_v4_role_project(project_name: str):
+    """V4 角色工作台：加载 unresolved 表与全部角色下拉（复用薄服务）。"""
+    if not project_name:
+        return (
+            "请选择 v4 项目", [], gr.update(choices=[]), gr.update(choices=[]),
+            gr.update(choices=[]), gr.update(choices=[]), gr.update(choices=[]),
+        )
+    project = _root() / project_name
+    source = (project / "source/source.txt").read_text(encoding="utf-8")
+    script = _load_script(project, source)
+    speakers = _load_speakers(project)
+    unresolved = SpeakerReviewService.unresolved_rows(source, script)
+    review_rows = [
+        [item["segment_id"], item["chapter_id"], item["text"]]
+        for item in unresolved
+    ]
+    speaker_choices = [
+        (item.display_name, item.speaker_id) for item in speakers.speakers
+    ]
+    summary = (
+        f"**{project_name}** · {len(script.chapters)} 章 · "
+        f"{sum(len(item.segments) for item in script.chapters)} 片段 · "
+        f"{len(unresolved)} 待确认"
+    )
+    return (
+        summary,
+        review_rows,
+        gr.update(choices=speaker_choices, value=None),
+        gr.update(choices=speaker_choices, value=None),
+        gr.update(choices=speaker_choices, value=None),
+        gr.update(choices=speaker_choices, value=None),
+        gr.update(choices=speaker_choices, value=None),
+    )
+
+
+def set_v4_speaker_lock(project_name: str, speaker_id: str):
+    """切换角色锁定状态（V4 稳定角色 ID）。"""
+    from dataclasses import replace
+
+    if not project_name or not speaker_id:
+        return "请先选择要锁定/解锁的角色。"
+    project = _root() / project_name
+    source = (project / "source/source.txt").read_text(encoding="utf-8")
+    script = _load_script(project, source)
+    speakers = _load_speakers(project)
+    updated = list(speakers.speakers)
+    target = None
+    for index, item in enumerate(updated):
+        if item.speaker_id == speaker_id:
+            target = replace(item, locked=not item.locked)
+            updated[index] = target
+            break
+    if target is None:
+        return "角色不存在。"
+    new_speakers = replace(
+        speakers,
+        speakers=updated,
+        revision=speakers.revision + (updated != speakers.speakers),
+    )
+    ProjectV4Repository(_root()).save_script_and_speakers(
+        project, source, script, new_speakers
+    )
+    return f"角色「{target.display_name}」已{'锁定' if target.locked else '解锁'}。"
+
+
+def set_v4_speaker_alias(project_name: str, speaker_id: str, aliases: str):
+    """修改角色别名（逗号分隔）。"""
+    from dataclasses import replace
+
+    if not project_name or not speaker_id:
+        return "请先选择要修改别名的角色。"
+    alias_list = [item.strip() for item in (aliases or "").split(",") if item.strip()]
+    project = _root() / project_name
+    source = (project / "source/source.txt").read_text(encoding="utf-8")
+    script = _load_script(project, source)
+    speakers = _load_speakers(project)
+    updated = list(speakers.speakers)
+    target = None
+    for index, item in enumerate(updated):
+        if item.speaker_id == speaker_id:
+            target = replace(item, aliases=alias_list)
+            updated[index] = target
+            break
+    if target is None:
+        return "角色不存在。"
+    new_speakers = replace(
+        speakers,
+        speakers=updated,
+        revision=speakers.revision + (updated != speakers.speakers),
+    )
+    ProjectV4Repository(_root()).save_script_and_speakers(
+        project, source, script, new_speakers
+    )
+    return f"已保存别名：{', '.join(alias_list) or '（空）'}。"
+
+
 def bind_v4_voice(project_name: str, speaker_id: str, audio_file):
     source = getattr(audio_file, "name", None) or audio_file
     if not source:

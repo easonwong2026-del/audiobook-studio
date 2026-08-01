@@ -64,7 +64,7 @@ def test_grp_supplement_present():
 
 
 def test_groups_tuple_has_eight_items():
-    # v3.3.1: _GROUPS[:] = [10 个 group]（新增 create_project、settings）
+    # v4: _GROUPS[:] = [12 个 group]（新增 create_project、settings、v4_role）
     for node in ast.walk(TREE):
         if isinstance(node, ast.Assign):
             for t in node.targets:
@@ -73,8 +73,8 @@ def test_groups_tuple_has_eight_items():
                         val = node.value
                         assert isinstance(val, (ast.List, ast.Tuple)), \
                             f"_GROUPS[:] 赋值应为列表/元组（实际 {type(val).__name__}）"
-                        assert len(val.elts) == 11, \
-                                f"_GROUPS[:] 应为 11 项（实际 {len(val.elts)}）"
+                        assert len(val.elts) == 12, \
+                                f"_GROUPS[:] 应为 12 项（实际 {len(val.elts)}）"
                         return
     raise AssertionError("未找到 _GROUPS[:] = [...] 赋值")
 
@@ -96,9 +96,9 @@ def test_goto_returns_internal_group_updates_for_five_stage_navigation():
                 if isinstance(t, ast.Name) and t.id == "GROUP_ITEMS":
                     assert isinstance(node.value, (ast.List, ast.Tuple)), \
                         "GROUP_ITEMS 应为列表"
-                    # v3.3.1: 10 items (+create_project, +settings)
-                    assert len(node.value.elts) == 11, \
-                        f"GROUP_ITEMS 应为 11 项（实际 {len(node.value.elts)}）"
+                    # v4: 12 items（+create_project、+settings、+v4_role）
+                    assert len(node.value.elts) == 12, \
+                        f"GROUP_ITEMS 应为 12 项（实际 {len(node.value.elts)}）"
                     break
     # 验证还有一个 _SETTINGS_ITEM 常量
     for node in ast.walk(NAV_TREE):

@@ -65,6 +65,7 @@ from ui.pages import (
     create_supplement_page,
     create_synthesis_page,
     create_voice_page,
+    create_v4_role_page,
     create_v4_workspace_page,
 )
 from ui.shared import create_status_bar
@@ -247,149 +248,6 @@ def _open_v4_project(name, ss):
             "### 当前角色配置\n请从左侧角色列表选择角色。",
             gr.update(), "", "打开项目后显示角色绑定状态。",
         )
-
-
-def _reload_v4_session(ss):
-    """重新加载当前 V4 项目到会话（脚本 / 角色可能已变更）。"""
-    if ss is None or not getattr(ss, "is_v4", False):
-        return
-    context = V4ProjectService.open_project(ss.project)
-    if context is not None:
-        ss.set_v4_project(ss.project, context.script, context.speakers)
-
-
-def _v4_role_panel_update(ss):
-    """V4 角色管理面板状态：可见性 + unresolved 表 + 角色下拉。"""
-    if ss is None or not getattr(ss, "is_v4", False):
-        return (
-            gr.update(visible=False), [], gr.update(choices=[]),
-            gr.update(choices=[]), gr.update(choices=[]),
-        )
-    rows = []
-    try:
-        source = (
-            V4ProjectService.root() / ss.project / "source/source.txt"
-        ).read_text(encoding="utf-8")
-        rows = [
-            [item["segment_id"], item["chapter_id"], item["text"]]
-            for item in SpeakerReviewService.unresolved_rows(source, ss.script)
-        ]
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("刷新 V4 角色面板失败: %s", exc)
-    choices = _v4_role_choices(ss)
-    return (
-        gr.update(visible=True),
-        rows,
-        gr.update(choices=choices),
-        gr.update(choices=choices),
-        gr.update(choices=choices),
-    )
-
-
-def v4_role_route(ss):
-    """AI 自动识别角色（复用 V4 路由服务，断点续传）。"""
-    if not ss or not getattr(ss, "is_v4", False):
-        return "请先打开 V4 项目。"
-    try:
-        message = v4_ui.route_v4_speakers(ss.project)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("V4 角色识别失败: %s", exc)
-        return f"❌ 角色识别失败：{str(exc)[:300]}"
-    _reload_v4_session(ss)
-    return message
-
-
-def v4_role_assign(ss, segs, speaker, new, lock):
-    """人工指派片段到角色（V4 稳定角色 ID）。"""
-    if not ss or not getattr(ss, "is_v4", False):
-        return "请先打开 V4 项目。"
-    try:
-        message = v4_ui.assign_v4_speaker(
-            ss.project, segs or "", speaker or "", new or "", bool(lock)
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("V4 角色指派失败: %s", exc)
-        return f"❌ 指派失败：{str(exc)[:300]}"
-    _reload_v4_session(ss)
-    return message
-
-
-def v4_role_merge(ss, source, target):
-    """合并角色（旧角色保留为别名）。"""
-    if not ss or not getattr(ss, "is_v4", False):
-        return "请先打开 V4 项目。"
-    if not source or not target:
-        return "请选择来源角色和目标角色。"
-    if source == target:
-        return "来源与目标角色相同，无需合并。"
-    try:
-        message = v4_ui.merge_v4_speakers(ss.project, source, target)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("V4 角色合并失败: %s", exc)
-        return f"❌ 合并失败：{str(exc)[:300]}"
-    _reload_v4_session(ss)
-    return message
-
-
-def v4_role_toggle_lock(ss, role):
-    """切换角色锁定状态。"""
-    if not ss or not getattr(ss, "is_v4", False) or not role:
-        return "请先选择角色。"
-    from dataclasses import replace
-
-    project = V4ProjectService.root() / ss.project
-    source = (project / "source/source.txt").read_text(encoding="utf-8")
-    speakers = ss.speakers_v4
-    updated = list(speakers.speakers)
-    target = None
-    for index, item in enumerate(updated):
-        if item.speaker_id == role:
-            target = replace(item, locked=not item.locked)
-            updated[index] = target
-            break
-    if target is None:
-        return "角色不存在。"
-    new_speakers = replace(
-        speakers,
-        speakers=updated,
-        revision=speakers.revision + (updated != speakers.speakers),
-    )
-    ProjectV4Repository(V4ProjectService.root()).save_script_and_speakers(
-        project, source, ss.script, new_speakers
-    )
-    _reload_v4_session(ss)
-    return f"角色「{target.display_name}」已{'锁定' if target.locked else '解锁'}。"
-
-
-def v4_role_set_alias(ss, role, aliases):
-    """修改角色别名（逗号分隔）。"""
-    if not ss or not getattr(ss, "is_v4", False) or not role:
-        return "请先选择角色。"
-    from dataclasses import replace
-
-    alias_list = [item.strip() for item in (aliases or "").split(",") if item.strip()]
-    project = V4ProjectService.root() / ss.project
-    source = (project / "source/source.txt").read_text(encoding="utf-8")
-    speakers = ss.speakers_v4
-    updated = list(speakers.speakers)
-    target = None
-    for index, item in enumerate(updated):
-        if item.speaker_id == role:
-            target = replace(item, aliases=alias_list)
-            updated[index] = target
-            break
-    if target is None:
-        return "角色不存在。"
-    new_speakers = replace(
-        speakers,
-        speakers=updated,
-        revision=speakers.revision + (updated != speakers.speakers),
-    )
-    ProjectV4Repository(V4ProjectService.root()).save_script_and_speakers(
-        project, source, ss.script, new_speakers
-    )
-    _reload_v4_session(ss)
-    return f"已保存别名：{', '.join(alias_list) or '（空）'}。"
 
 
 def migrate_v3_to_v4(name):
@@ -2079,10 +1937,6 @@ def _open_chain_rest(event):
     """
     e = event
     e = e.then(refresh_top_status, [ss], [top_status])
-    e = e.then(
-        lambda ss: _v4_role_panel_update(ss), [ss],
-        [v4_role_grp, v4_unresolved_table, v4_assign_speaker, v4_merge_source, v4_merge_target]
-    )
     e = e.then(preview_chapters, [ss], [e_chapter_table, e_seg_audio, e_seg_sel])
     e = e.then(preview_chapter_options, [ss], [e_chapter_sel])
     e = e.then(refresh_queue_list, [ss], [s_queue_list])
@@ -2122,6 +1976,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         nav_export = nav["nav_export"]
         nav_create_project = nav["nav_create_project"]
         nav_v4 = nav["nav_v4"]
+        nav_v4_role = nav["nav_v4_role"]
         nav_settings = nav["nav_settings"]
 
         # ═══ 右侧主工作区 ═══
@@ -2189,6 +2044,34 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             v4_migrate = v4_page["migrate"]
             v4_migration_status = v4_page["migration_status"]
 
+            # ───────── v4 角色工作台（开发模式调试入口） ─────────
+            v4r_page = create_v4_role_page()
+            grp_v4_role = v4r_page["group"]
+            v4r_project = v4r_page["project"]
+            v4r_refresh = v4r_page["refresh"]
+            v4r_open = v4r_page["open"]
+            v4r_summary = v4r_page["summary"]
+            v4r_unresolved_table = v4r_page["unresolved_table"]
+            v4r_route_btn = v4r_page["route_btn"]
+            v4r_route_msg = v4r_page["route_msg"]
+            v4r_assign_segs = v4r_page["assign_segs"]
+            v4r_assign_speaker = v4r_page["assign_speaker"]
+            v4r_assign_new = v4r_page["assign_new"]
+            v4r_assign_lock = v4r_page["assign_lock"]
+            v4r_assign_btn = v4r_page["assign_btn"]
+            v4r_assign_msg = v4r_page["assign_msg"]
+            v4r_merge_source = v4r_page["merge_source"]
+            v4r_merge_target = v4r_page["merge_target"]
+            v4r_merge_btn = v4r_page["merge_btn"]
+            v4r_merge_msg = v4r_page["merge_msg"]
+            v4r_lock_speaker = v4r_page["lock_speaker"]
+            v4r_lock_btn = v4r_page["lock_btn"]
+            v4r_lock_msg = v4r_page["lock_msg"]
+            v4r_alias_speaker = v4r_page["alias_speaker"]
+            v4r_alias = v4r_page["alias"]
+            v4r_alias_btn = v4r_page["alias_btn"]
+            v4r_alias_msg = v4r_page["alias_msg"]
+
             # ───────── 项目 ─────────
             prj_page = create_project_page()
             grp_project = prj_page["group"]
@@ -2212,24 +2095,6 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             v_bind_category = vce_page["v_bind_category"]
             v_audio = vce_page["v_audio"]
             v_role = vce_page["v_role"]
-            v4_role_grp = vce_page["v4_role_grp"]
-            v4_unresolved_table = vce_page["v4_unresolved_table"]
-            v4_route_btn = vce_page["v4_route_btn"]
-            v4_route_msg = vce_page["v4_route_msg"]
-            v4_assign_segs = vce_page["v4_assign_segs"]
-            v4_assign_speaker = vce_page["v4_assign_speaker"]
-            v4_assign_new = vce_page["v4_assign_new"]
-            v4_assign_lock = vce_page["v4_assign_lock"]
-            v4_assign_btn = vce_page["v4_assign_btn"]
-            v4_assign_msg = vce_page["v4_assign_msg"]
-            v4_merge_source = vce_page["v4_merge_source"]
-            v4_merge_target = vce_page["v4_merge_target"]
-            v4_merge_btn = vce_page["v4_merge_btn"]
-            v4_merge_msg = vce_page["v4_merge_msg"]
-            v4_lock_btn = vce_page["v4_lock_btn"]
-            v4_alias = vce_page["v4_alias"]
-            v4_alias_btn = vce_page["v4_alias_btn"]
-            v4_lock_alias_msg = vce_page["v4_lock_alias_msg"]
             v_lib = vce_page["v_lib"]
             v_current = vce_page["v_current"]
             v_bind = vce_page["v_bind"]
@@ -2348,6 +2213,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         grp_overview,
         grp_create_project,
         grp_v4,
+        grp_v4_role,
         grp_project,
         grp_voices,
         grp_production_nav,
@@ -2387,6 +2253,14 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         None,
         [v4_project, v4_v3_project],
     )
+    nav_v4_role.click(
+        lambda: _goto("v4_role"), None, _GROUPS,
+        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-v4-role')?.classList.add('active'); }"
+    ).then(
+        lambda: gr.update(choices=v4_ui.scan_v4_projects()),
+        None,
+        [v4r_project],
+    )
     nav_settings.click(
         lambda: _goto("settings"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-settings')?.classList.add('active'); }").then(
@@ -2394,63 +2268,11 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     nav_voices.click(
         lambda: _goto("voices"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-voices')?.classList.add('active'); }").then(
-        lambda ss: _v4_role_panel_update(ss), [ss],
-        [v4_role_grp, v4_unresolved_table, v4_assign_speaker, v4_merge_source, v4_merge_target]).then(
         refresh_role_list,
         [v_role_search, v_role, ss], [v_table]).then(
         refresh_voice_filters,
         [], [v_bind_category, v_lib_category, v_save_category]).then(
         refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
-    # ── V4 角色管理：AI 识别 / 指派 / 合并 / 锁定 / 别名 ──
-    v4_route_btn.click(
-        v4_role_route, [ss], [v4_route_msg],
-        concurrency_limit=1, concurrency_id="v4-routing",
-    ).then(
-        lambda ss: _v4_role_panel_update(ss), [ss],
-        [v4_role_grp, v4_unresolved_table, v4_assign_speaker, v4_merge_source, v4_merge_target],
-    ).then(
-        refresh_role_list, [v_role_search, v_role, ss], [v_table],
-    ).then(
-        format_v4_role_summary, [ss], [v_status],
-    )
-    v4_assign_btn.click(
-        v4_role_assign,
-        [ss, v4_assign_segs, v4_assign_speaker, v4_assign_new, v4_assign_lock],
-        [v4_assign_msg],
-    ).then(
-        lambda ss: _v4_role_panel_update(ss), [ss],
-        [v4_role_grp, v4_unresolved_table, v4_assign_speaker, v4_merge_source, v4_merge_target],
-    ).then(
-        refresh_role_list, [v_role_search, v_role, ss], [v_table],
-    ).then(
-        format_v4_role_summary, [ss], [v_status],
-    )
-    v4_merge_btn.click(
-        v4_role_merge, [ss, v4_merge_source, v4_merge_target], [v4_merge_msg],
-    ).then(
-        lambda ss: _v4_role_panel_update(ss), [ss],
-        [v4_role_grp, v4_unresolved_table, v4_assign_speaker, v4_merge_source, v4_merge_target],
-    ).then(
-        refresh_role_list, [v_role_search, v_role, ss], [v_table],
-    ).then(
-        format_v4_role_summary, [ss], [v_status],
-    )
-    v4_lock_btn.click(
-        v4_role_toggle_lock, [ss, v_role], [v4_lock_alias_msg],
-    ).then(
-        lambda ss: _v4_role_panel_update(ss), [ss],
-        [v4_role_grp, v4_unresolved_table, v4_assign_speaker, v4_merge_source, v4_merge_target],
-    ).then(
-        refresh_role_list, [v_role_search, v_role, ss], [v_table],
-    )
-    v4_alias_btn.click(
-        v4_role_set_alias, [ss, v_role, v4_alias], [v4_lock_alias_msg],
-    ).then(
-        lambda ss: _v4_role_panel_update(ss), [ss],
-        [v4_role_grp, v4_unresolved_table, v4_assign_speaker, v4_merge_source, v4_merge_target],
-    ).then(
-        refresh_role_list, [v_role_search, v_role, ss], [v_table],
-    )
     nav_synth.click(
         lambda: _goto("synth"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-synth')?.classList.add('active'); }").then(
@@ -2488,8 +2310,6 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     ov_voices.click(
         lambda: _goto("voices"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-voices')?.classList.add('active'); }").then(
-        lambda ss: _v4_role_panel_update(ss), [ss],
-        [v4_role_grp, v4_unresolved_table, v4_assign_speaker, v4_merge_source, v4_merge_target]).then(
         refresh_role_list,
         [v_role_search, v_role, ss], [v_table]).then(
         refresh_voice_filters,
@@ -2695,6 +2515,91 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         v4_ui.migrate_v3_project,
         [v4_v3_project],
         [v4_migration_status, v4_project],
+    )
+    # ── v4 角色工作台：AI 识别 / 指派 / 合并 / 锁定 / 别名 ──
+    v4r_refresh.click(
+        lambda: gr.update(choices=v4_ui.scan_v4_projects()),
+        None,
+        [v4r_project],
+    )
+    v4r_open.click(
+        v4_ui.open_v4_role_project,
+        [v4r_project],
+        [
+            v4r_summary, v4r_unresolved_table, v4r_assign_speaker,
+            v4r_merge_source, v4r_merge_target, v4r_lock_speaker,
+            v4r_alias_speaker,
+        ],
+    )
+    v4r_route_btn.click(
+        v4_ui.route_v4_speakers,
+        [v4r_project],
+        [v4r_route_msg],
+        concurrency_limit=1,
+        concurrency_id="v4-routing",
+    ).then(
+        v4_ui.open_v4_role_project,
+        [v4r_project],
+        [
+            v4r_summary, v4r_unresolved_table, v4r_assign_speaker,
+            v4r_merge_source, v4r_merge_target, v4r_lock_speaker,
+            v4r_alias_speaker,
+        ],
+    )
+    v4r_assign_btn.click(
+        v4_ui.assign_v4_speaker,
+        [
+            v4r_project, v4r_assign_segs, v4r_assign_speaker,
+            v4r_assign_new, v4r_assign_lock,
+        ],
+        [v4r_assign_msg],
+    ).then(
+        v4_ui.open_v4_role_project,
+        [v4r_project],
+        [
+            v4r_summary, v4r_unresolved_table, v4r_assign_speaker,
+            v4r_merge_source, v4r_merge_target, v4r_lock_speaker,
+            v4r_alias_speaker,
+        ],
+    )
+    v4r_merge_btn.click(
+        v4_ui.merge_v4_speakers,
+        [v4r_project, v4r_merge_source, v4r_merge_target],
+        [v4r_merge_msg],
+    ).then(
+        v4_ui.open_v4_role_project,
+        [v4r_project],
+        [
+            v4r_summary, v4r_unresolved_table, v4r_assign_speaker,
+            v4r_merge_source, v4r_merge_target, v4r_lock_speaker,
+            v4r_alias_speaker,
+        ],
+    )
+    v4r_lock_btn.click(
+        v4_ui.set_v4_speaker_lock,
+        [v4r_project, v4r_lock_speaker],
+        [v4r_lock_msg],
+    ).then(
+        v4_ui.open_v4_role_project,
+        [v4r_project],
+        [
+            v4r_summary, v4r_unresolved_table, v4r_assign_speaker,
+            v4r_merge_source, v4r_merge_target, v4r_lock_speaker,
+            v4r_alias_speaker,
+        ],
+    )
+    v4r_alias_btn.click(
+        v4_ui.set_v4_speaker_alias,
+        [v4r_project, v4r_alias_speaker, v4r_alias],
+        [v4r_alias_msg],
+    ).then(
+        v4_ui.open_v4_role_project,
+        [v4r_project],
+        [
+            v4r_summary, v4r_unresolved_table, v4r_assign_speaker,
+            v4r_merge_source, v4r_merge_target, v4r_lock_speaker,
+            v4r_alias_speaker,
+        ],
     )
     cp_json_file.change(
         create_ui.derive_json_project_name,
