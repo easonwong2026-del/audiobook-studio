@@ -1,6 +1,7 @@
 """DeepSeek 剧本导演 Provider。"""
 from __future__ import annotations
 
+import os
 from typing import Any, Dict
 
 from ._remote import RemoteJsonDirectorProvider, parse_json_content
@@ -17,7 +18,14 @@ class DeepSeekProvider(RemoteJsonDirectorProvider):
     default_model = "deepseek-v4-pro"
     default_base_url = "https://api.deepseek.com"
 
-    def _request_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
+    def _request_json(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        task: str = "script_director",
+        reasoning: bool | None = None,
+    ) -> Dict[str, Any]:
         payload = {
             "model": self.model,
             "messages": [
@@ -25,9 +33,14 @@ class DeepSeekProvider(RemoteJsonDirectorProvider):
                 {"role": "user", "content": user_prompt},
             ],
             "response_format": {"type": "json_object"},
-            "thinking": {"type": "disabled"},
             "stream": False,
         }
+        if self._should_enable_reasoning(task, reasoning):
+            payload["thinking"] = {"type": "enabled"}
+        elif task == "legacy_script_director":
+            # Preserve the V3 protocol contract only.  V4 AI-first calls use
+            # explicit task names and never inherit this disabled setting.
+            payload["thinking"] = {"type": "disabled"}
         response = self._transport(
             f"{self.base_url}/chat/completions",
             {
@@ -48,3 +61,28 @@ class DeepSeekProvider(RemoteJsonDirectorProvider):
         except (KeyError, TypeError) as exc:
             raise RuntimeError("DeepSeek 响应缺少 choices[0].message.content") from exc
         return parse_json_content(content)
+
+    def _should_enable_reasoning(
+        self, task: str, reasoning: bool | None
+    ) -> bool:
+        """Only send DeepSeek's thinking field when this model supports it.
+
+        The API rejects the field on non-reasoning models.  Model capability is
+        therefore inferred conservatively from the model id, with an explicit
+        environment override for compatible gateways.  Ordinary connection and
+        formatting calls never opt into reasoning.
+        """
+        if task in {"connection_test", "format", "simple"}:
+            return False
+        if reasoning is not None:
+            return bool(reasoning)
+        override = os.getenv("AUDIOBOOK_STUDIO_DEEPSEEK_REASONING", "auto").lower()
+        if override in {"0", "false", "disabled", "off"}:
+            return False
+        if override in {"1", "true", "enabled", "on"}:
+            return True
+        model = self.model.lower()
+        return any(
+            marker in model
+            for marker in ("reasoner", "reasoning", "think", "deepseek-r1", "-r1")
+        )

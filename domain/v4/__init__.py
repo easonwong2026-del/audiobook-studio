@@ -1,5 +1,15 @@
 """Audiobook Studio v4 source-first domain models."""
 
+from .ai_first import (
+    BibleCharacter,
+    BibleEvidence,
+    BibleRelationship,
+    CharacterBibleDocument,
+    ReviewPatch,
+    ScriptDirectorBatch,
+    ScriptDirectorSegment,
+    ScriptReviewResponse,
+)
 from .character_consolidation import (
     CharacterConsolidationRequest,
     CharacterConsolidationResponse,
@@ -26,7 +36,11 @@ from .models import (
 )
 
 __all__ = [
+    "BibleCharacter",
+    "BibleEvidence",
+    "BibleRelationship",
     "ChapterScript",
+    "CharacterBibleDocument",
     "CharacterCandidate",
     "CharacterCandidatesDocument",
     "CharacterConsolidationRequest",
@@ -37,7 +51,11 @@ __all__ = [
     "ConsolidationCandidate",
     "ExtractedCharacter",
     "ProjectManifest",
+    "ReviewPatch",
+    "ScriptDirectorBatch",
+    "ScriptDirectorSegment",
     "ScriptDocument",
+    "ScriptReviewResponse",
     "SemanticSegment",
     "SourceMetadata",
     "Speaker",

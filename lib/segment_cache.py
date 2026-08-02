@@ -185,6 +185,10 @@ class SpeakerEmbeddingLRU:
         while len(self._store) > self.maxsize:
             self._store.popitem(last=False)
 
+    def clear(self) -> None:
+        """Release all cached embeddings during a service shutdown."""
+        self._store.clear()
+
     def __len__(self) -> int:
         return len(self._store)
 

@@ -275,3 +275,10 @@ def open_data_dir() -> str:
     except Exception as exc:
         return f"❌ 打开数据目录失败：{html.escape(str(exc))}"
     return f"✅ 已打开数据目录：`{d}`"
+
+
+def shutdown_service() -> str:
+    """Request shutdown of this owned Audiobook Studio instance only."""
+    from services.service_lifecycle import ServiceLifecycle
+
+    return ServiceLifecycle.request_shutdown()

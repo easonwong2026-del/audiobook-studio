@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "character-bible-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "source_sha256", "characters", "uncertain_entities"],
+  "properties": {
+    "schema_version": {"enum": ["character-bible-chapter-v1", "character-bible-final-v1"]},
+    "source_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "revision": {"type": "integer", "minimum": 1},
+    "characters": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["character_id", "canonical_name", "aliases", "description", "importance", "relationships", "first_appearance_chapter", "evidence", "confidence"],
+        "properties": {
+          "character_id": {"type": "string", "minLength": 1},
+          "canonical_name": {"type": "string", "minLength": 1},
+          "aliases": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+          "description": {"type": "string"},
+          "importance": {"enum": ["major", "minor", "unknown"]},
+          "relationships": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["character_id", "relation"],
+              "properties": {
+                "character_id": {"type": "string", "minLength": 1},
+                "relation": {"type": "string", "minLength": 1}
+              }
+            }
+          },
+          "first_appearance_chapter": {"type": "string", "minLength": 1},
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["chapter_id", "text"],
+              "properties": {
+                "chapter_id": {"type": "string", "minLength": 1},
+                "text": {"type": "string", "minLength": 1},
+                "source_start": {"type": ["integer", "null"], "minimum": 0},
+                "source_end": {"type": ["integer", "null"], "minimum": 1}
+              }
+            }
+          },
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+          "speaker_id": {"type": "string"}
+        }
+      }
+    },
+    "uncertain_entities": {"type": "array", "items": {"type": "object"}}
+  }
+}

@@ -234,6 +234,27 @@ def empty_cache() -> None:
         pass
 
 
+def close_engine() -> None:
+    """Unload the resident IndexTTS2 object during an owned service shutdown."""
+    global _tts
+    with _ENGINE_LOCK:
+        engine = _tts
+        _tts = None
+        _SPEAKER_EMB_CACHE.clear()
+        close = getattr(engine, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001 - shutdown continues best effort
+                pass
+        try:
+            import gc
+
+            gc.collect()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _extract_speaker_embedding(speaker_audio: str):
     """尝试从参考音频提取 speaker embedding（需引擎已加载且暴露 embedding 接口）。
 

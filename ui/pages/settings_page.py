@@ -128,6 +128,14 @@ def create_settings_page() -> dict:
                         interactive=False,
                         elem_classes=["diagnostics-report"],
                     )
+                    gr.Markdown("##### 服务管理")
+                    gr.Markdown(
+                        "关闭服务会停止当前 AI 分析和音频任务，保存可恢复状态，释放端口，"
+                        "并卸载 TTS/CUDA 资源。不会影响其他 Python 或 WorkBuddy 进程。"
+                    )
+                    with gr.Row():
+                        s_shutdown = gr.Button("关闭服务", variant="stop")
+                        s_shutdown_status = gr.Markdown("")
 
     return {
         "group": grp,
@@ -161,4 +169,6 @@ def create_settings_page() -> dict:
         "s_diagnostics_status": s_diagnostics_status,
         "s_diagnostics_table": s_diagnostics_table,
         "s_diagnostics_report": s_diagnostics_report,
+        "s_shutdown": s_shutdown,
+        "s_shutdown_status": s_shutdown_status,
     }

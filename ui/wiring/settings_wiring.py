@@ -118,3 +118,9 @@ def wire_settings_page(page: dict) -> None:
             page["s_diagnostics_report"],
         ],
     )
+    page["s_shutdown"].click(
+        settings_handlers.shutdown_service,
+        [],
+        [page["s_shutdown_status"]],
+        js="() => window.confirm('关闭服务将停止当前 AI 分析和音频任务，并释放后台端口。确定继续吗？')",
+    )

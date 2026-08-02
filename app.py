@@ -726,6 +726,17 @@ def _wire_v4_role_controls(page: dict) -> None:
         [page["project"]],
         outputs,
     )
+    page["reanalyze_btn"].click(
+        v4_ui.reanalyze_v4_project,
+        [page["project"]],
+        [page["reanalyze_msg"]],
+        concurrency_limit=1,
+        concurrency_id="v4-analysis",
+    ).then(
+        v4_ui.open_v4_role_project,
+        [page["project"]],
+        outputs,
+    )
     page["extract_btn"].click(
         v4_ui.extract_v4_characters,
         [page["project"]],
@@ -2978,6 +2989,8 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
 if __name__ == "__main__":
     os.chdir(BASE)
     from lib.logging_setup import setup_logging
+    from services.service_lifecycle import ServiceLifecycle
+
     setup_logging(log_dir=os.path.join(BASE, "logs"))
     # 数据目录外置后，首次启动把程序目录内的旧克隆音色迁移到外置 voice_library（一次性、安全拷贝）。
     config.migrate_legacy_voice_library()
@@ -2985,5 +2998,36 @@ if __name__ == "__main__":
     # 合成产物、导出）已全部外置到 config.get_data_dir()（如 D:\AudiobookStudio），
     # 不在 cwd 内，返回其下音频路径给 Audio/File 组件会在序列化阶段触发 InvalidPathError
     # 导致前端显示「错误」。将其加入 allowed_paths 白名单，递归放行其下所有子目录。
-    app.queue().launch(server_name="0.0.0.0", server_port=7862, share=False, inbrowser=True,
-                       allowed_paths=[config.get_data_dir()])
+    def _close_runtime_resources():
+        from lib import tts_engine
+        from tts.runtime_cleanup import release_inference_memory
+
+        tts_engine.close_engine()
+        release_inference_memory(clear_cuda_cache=True)
+
+    ServiceLifecycle.configure(
+        pid_path=ServiceLifecycle.pid_path_for_data_dir(config.get_data_dir()),
+        port=7862,
+        # The small delay in ServiceLifecycle lets Gradio return the confirmation
+        # message before the owned process exits.
+        exit_callback=lambda: os._exit(0),
+    )
+    # Hooks are released in reverse registration order: stop workers first,
+    # then unload the resident TTS/CUDA objects they may still reference.
+    ServiceLifecycle.register_cleanup("tts-runtime", _close_runtime_resources)
+    ServiceLifecycle.register_cleanup(
+        "v3-synthesis", lambda: SynthesisService.shutdown_all(timeout=5.0)
+    )
+    ServiceLifecycle.register_cleanup(
+        "v4-synthesis", lambda: V4SynthesisService.shutdown_all(timeout=5.0)
+    )
+
+    demo = app.queue()
+    ServiceLifecycle.register_server(demo.close)
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=7862,
+        share=False,
+        inbrowser=True,
+        allowed_paths=[config.get_data_dir()],
+    )

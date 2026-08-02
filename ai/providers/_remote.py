@@ -261,6 +261,8 @@ class RemoteJsonDirectorProvider(ScriptAnalysisProvider):
                 result = self._request_json(
                     SYSTEM_PROMPT,
                     build_user_prompt(chunk=chunk, title=title, author=author),
+                    task="legacy_script_director",
+                    reasoning=False,
                 )
                 return self._validate_batch(result, chunk)
             except ProviderOutputTruncatedError as exc:

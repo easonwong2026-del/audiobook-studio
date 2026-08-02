@@ -32,10 +32,17 @@
                 "source_end": {"type": "integer", "minimum": 1},
                 "kind": {"enum": ["narration", "dialogue"]},
                 "speaker_id": {"type": ["string", "null"]},
-                "speaker_source": {"enum": ["rule", "router", "manual", "unresolved"]},
+                "speaker_source": {"enum": ["ai", "rule", "router", "manual", "unresolved"]},
                 "status": {"enum": ["confirmed", "unresolved"]},
                 "text_override": {"type": ["string", "null"]},
-                "dialogue_type": {"enum": ["narration", "dialogue", "suspected_dialogue", "quotation"]}
+                "dialogue_type": {"enum": ["narration", "dialogue", "suspected_dialogue", "quotation", "inner_monologue", "stage_direction", "unanalysed"]},
+                "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+                "emotion": {"type": "string"},
+                "emotion_strength": {"type": "number", "minimum": 0, "maximum": 1},
+                "delivery": {"type": "object"},
+                "pause_before": {"type": "integer", "minimum": 0, "maximum": 3000},
+                "pause_after": {"type": "integer", "minimum": 0, "maximum": 3000},
+                "pauses": {"type": "array", "items": {"type": "object"}}
               }
             }
           }

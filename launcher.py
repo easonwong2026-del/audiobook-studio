@@ -122,8 +122,21 @@ def _install_runtime_dependencies(python: str) -> None:
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def main() -> None:
+def _service_pid_path():
+    from lib import config
+    from services.service_lifecycle import ServiceLifecycle
+
+    return ServiceLifecycle.pid_path_for_data_dir(config.get_data_dir())
+
+
+def main(argv=None) -> None:
     """Entry point: prepare runtime environment, check deps, start app."""
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if "--stop" in arguments:
+        from services.service_lifecycle import ServiceLifecycle
+
+        print(ServiceLifecycle.stop_owned_instance(_service_pid_path()))
+        return
     global PYTHON
     PYTHON = _resolve_python()
 

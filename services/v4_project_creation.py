@@ -55,7 +55,15 @@ class V4ProjectCreationService:
         self._report(progress_callback, "正在导入书稿")
         imported = self.importer.import_file(source_path)
         self._report(progress_callback, "正在识别章节")
-        segmented = self.segmenter.segment(imported.text)
+        # V4 creation is source-only until an AI director has read the text.
+        # ``segment`` remains available for the legacy/offline compatibility
+        # path, but it must never seed formal V4 speakers or attributions.
+        source_only = getattr(self.segmenter, "source_only", None)
+        segmented = (
+            source_only(imported.text)
+            if callable(source_only)
+            else SourceSegmenter().source_only(imported.text)
+        )
         project_id = f"project_{uuid.uuid4().hex}"
         directory_name = self._directory_name(name, project_id)
         timestamp = datetime.now(timezone.utc).isoformat()

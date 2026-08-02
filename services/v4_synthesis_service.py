@@ -115,6 +115,10 @@ class V4SynthesisService:
     @classmethod
     def start(cls, project_name: str) -> tuple[bool, str]:
         """启动后台合成。已存在进行中的运行则拒绝重复启动。"""
+        from services.service_lifecycle import ServiceLifecycle
+
+        if ServiceLifecycle.is_stopping():
+            return False, "⚠ 服务正在关闭，不能启动新的合成任务。"
         project_path = _root() / project_name
         with cls._lock:
             run = cls._runs.get(project_name)
@@ -169,6 +173,43 @@ class V4SynthesisService:
         _set_runtime_status(run.project_path, "cancelling")
         count = _cancel_pending(run.project_path)
         return True, f"🛑 正在停止…（已取消 {count} 个尚未开始的任务）"
+
+    @classmethod
+    def shutdown_all(cls, timeout: float = 5.0) -> dict[str, Any]:
+        """Cooperatively stop every V4 run before the process exits."""
+        with cls._lock:
+            runs = [
+                run
+                for run in cls._runs.values()
+                if run.status in {"running", "paused", "cancelling"}
+                or (run.thread is not None and run.thread.is_alive())
+            ]
+        for run in runs:
+            run.cancel_event.set()
+            run.pause_event.clear()
+            run.status = "cancelling"
+            try:
+                _set_runtime_status(run.project_path, "interrupted")
+                _cancel_pending(run.project_path)
+            except Exception:  # noqa: BLE001 - continue stopping other projects
+                continue
+        import time
+
+        until = time.monotonic() + max(0.0, float(timeout))
+        alive: list[str] = []
+        for run in runs:
+            thread = run.thread
+            if thread is None:
+                continue
+            remaining = max(0.0, until - time.monotonic())
+            thread.join(remaining)
+            if thread.is_alive():
+                alive.append(run.project_name)
+            try:
+                RuntimeRepository(run.project_path / "runtime/runtime.db").recover_interrupted_tasks()
+            except Exception:  # noqa: BLE001
+                pass
+        return {"stopped": len(runs) - len(alive), "timed_out": alive}
 
     @classmethod
     def snapshot(cls, project_name: str) -> dict[str, Any]:

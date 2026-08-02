@@ -50,6 +50,65 @@ class SegmentationResult:
 class SourceSegmenter:
     """Produce a lossless baseline; uncertain dialogue remains unresolved."""
 
+    def source_only(self, source_text: str) -> SegmentationResult:
+        """Build the V4 pre-AI document without making semantic decisions.
+
+        This is deliberately separate from :meth:`segment`.  The latter is a
+        compatibility helper for the old offline/rule tests; the V4 creation
+        path must use this method so no name, quote or speech attribution can
+        enter the formal speaker table before an AI director has read the
+        source.  Each chapter is represented by one lossless, unresolved
+        interval.  The interval is a transport placeholder, not narration.
+        """
+        if not source_text.strip():
+            raise ValueError("source text cannot be empty")
+        chapters: list[ChapterScript] = []
+        chapter_ranges, _skip_ranges = self._chapter_ranges(source_text)
+        sequence = 1
+        for chapter_index, (start, end, title) in enumerate(
+            chapter_ranges, start=1
+        ):
+            chapter_id = f"chapter_{chapter_index:04d}"
+            chapters.append(
+                ChapterScript(
+                    chapter_id=chapter_id,
+                    title=title,
+                    start=start,
+                    end=end,
+                    segments=[
+                        SemanticSegment(
+                            segment_id=f"segment_{sequence:06d}",
+                            chapter_id=chapter_id,
+                            start=start,
+                            end=end,
+                            kind="narration",
+                            speaker_id=None,
+                            speaker_source="unresolved",
+                            status="unresolved",
+                            dialogue_type="unanalysed",
+                        )
+                    ],
+                )
+            )
+            sequence += 1
+        script = ScriptDocument(
+            source_sha256=source_sha256(source_text), chapters=chapters
+        )
+        speakers = SpeakersDocument(
+            speakers=[
+                Speaker(
+                    speaker_id="narrator",
+                    display_name="旁白",
+                    status="confirmed",
+                    speaker_type="narrator",
+                    locked=True,
+                )
+            ]
+        )
+        script.validate(source_text)
+        speakers.validate()
+        return SegmentationResult(script=script, speakers=speakers)
+
     def segment(self, source_text: str) -> SegmentationResult:
         if not source_text.strip():
             raise ValueError("source text cannot be empty")

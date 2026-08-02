@@ -21,6 +21,7 @@ class SpeakerReviewService:
             for chapter in script.chapters
             for segment in chapter.segments
             if segment.status == "unresolved"
+            and segment.dialogue_type != "unanalysed"
         ]
 
     @staticmethod

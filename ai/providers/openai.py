@@ -38,13 +38,22 @@ class OpenAIProvider(RemoteJsonDirectorProvider):
             )
         return "".join(texts)
 
-    def _request_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
+    def _request_json(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        task: str = "script_director",
+        reasoning: bool | None = None,
+    ) -> Dict[str, Any]:
         payload = {
             "model": self.model,
             "instructions": system_prompt,
             "input": user_prompt,
             "text": {"format": {"type": "json_object"}},
         }
+        if self._should_enable_reasoning(task, reasoning):
+            payload["reasoning"] = {"effort": "high"}
         response = self._transport(
             f"{self.base_url}/responses",
             {
@@ -74,3 +83,13 @@ class OpenAIProvider(RemoteJsonDirectorProvider):
                 if isinstance(content, dict) and content.get("type") == "refusal":
                     raise RuntimeError("OpenAI Responses 拒绝处理当前批次")
         return parse_json_content(self._extract_output_text(response))
+
+    def _should_enable_reasoning(
+        self, task: str, reasoning: bool | None
+    ) -> bool:
+        if task in {"connection_test", "format", "simple"}:
+            return False
+        if reasoning is not None:
+            return bool(reasoning)
+        model = self.model.lower()
+        return any(marker in model for marker in ("gpt-5", "o1", "o3", "reason"))

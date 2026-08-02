@@ -39,7 +39,7 @@ def create_create_project_page() -> dict:
         with gr.Row():
             cp_config_summary = gr.Markdown(
                 "##### v4 创建流程\n"
-                "导入、章节切分、角色统一、对白归属和一致性检查会自动执行；"
+                "导入后由 AI 顺序阅读全书、建立人物圣经、分析章节剧本并全书复查；"
                 "AI 未配置时项目仍会先保存，可稍后继续分析。"
             )
 

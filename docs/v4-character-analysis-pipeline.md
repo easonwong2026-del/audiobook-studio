@@ -1,34 +1,38 @@
-# V4 角色分析流水线
+# V4 AI-first 角色与剧本导演流水线
 
-V4 项目创建现在按以下顺序自动执行：
+V4 项目创建现在按以下顺序自动执行。创建阶段不运行规则角色识别：
 
 ```text
-本地导入与原文坐标
-  → 逐章角色提取（character-extraction-v1）
-  → 全书角色/别名统一（character-consolidation-v1）
-  → 高可信角色自动确认（默认 confidence >= 0.90）
-  → 按章节/场景/连续对白组路由（speaker-routing-v2）
-  → 一致性复查与待确认摘要
+导入原文、章节边界和坐标
+  → AI 顺序阅读全书并滚动更新人物圣经
+  → AI 直接读取原文生成剧本段落、对白/旁白/内心/引用分类
+  → 本地坐标、覆盖率和 speaker ID 校验
+  → AI 逐章全书审稿并返回修正补丁
+  → 保存正式角色、剧本和声音绑定迁移结果
 ```
 
 ## 安全边界
 
-AI 只能返回候选、候选 ID 和已存在的 `speaker_id`。正式角色仍由
-`CharacterConsolidationService` 的规则写入；未知候选 ID、未知角色 ID、低置信度、
-别名冲突和仅名称相似的合并都会被拒绝或保留为待确认。人工确认、锁定和手工修改
-优先于自动结果。
+新项目的 `speakers.json` 在 AI 运行前只有锁定的 `旁白`，剧本只有
+`dialogue_type=unanalysed` 的原文 pending 区间。`SourceSegmenter.segment()` 仍保留
+给旧离线测试和高级兼容功能，但不再是 V4 默认入口。
 
-全书统一输入保存在 `runtime/character_consolidation/consolidation.json`，包含源指纹、
-候选输入指纹和严格响应。逐章提取检查点保存在
-`runtime/character_extraction/checkpoints.json`；对白路由检查点继续使用
-`runtime/runtime.db`。分析摘要保存在 `runtime/analysis.json`，一致性报告保存在
-`runtime/character_consistency.json`。
+AI 是所有人物、对白归属、内心独白和引用判断的第一语义决策者；规则只负责 JSON
+协议、坐标/原文精确匹配、顺序、重叠/遗漏、speaker ID、非法枚举和人工锁定保护。
+未知 speaker ID、改写原文或覆盖率不足的响应直接失败并保留可恢复检查点。
+
+人物圣经检查点保存在 `runtime/ai_first/book_understanding.json`，正式人物圣经保存在
+`runtime/character_bible.json`；剧本导演和审稿检查点分别保存在
+`runtime/ai_first/script_director.json` 与 `runtime/ai_first/script_review.json`。
+分析摘要保存在 `runtime/analysis.json`。旧提取/路由检查点仍可由高级兼容功能读取，
+但不会成为新主链路的数据源。
 
 ## 角色工作台
 
-「角色与声音」默认展示角色卡片：正式名、别名、主要/次要角色、对白数量、置信度和
-音色绑定状态。AI 未配置时项目仍会先落盘，并显示“继续 AI 分析”；候选确认、合并、
-锁定、别名修改、人工指派和重跑按钮保留在默认折叠的“高级角色整理”中。
+「角色与声音」默认展示整理好的正式角色卡片：正式名、别名、主要/次要角色、对白
+数量、置信度和音色绑定状态。AI 未配置时项目仍会先落盘，并显示“继续 AI 分析”；
+候选确认、合并、锁定、别名修改、人工指派和“重新进行 AI 剧本分析”保留在默认折叠
+的“高级角色整理”中。
 
 ## 准确率评估
 

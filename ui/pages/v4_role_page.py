@@ -23,8 +23,13 @@ def create_v4_role_page(
             v4r_refresh = gr.Button("刷新", size="sm", scale=1)
             v4r_open = gr.Button("打开", variant="primary", scale=1)
         v4r_summary = gr.Markdown("请选择 v4 项目")
+        with gr.Row():
+            v4r_reanalyze_btn = gr.Button(
+                "重新进行 AI 剧本分析", variant="secondary", size="sm"
+            )
+            v4r_reanalyze_msg = gr.Markdown("")
 
-        with gr.Accordion("① 待确认片段与 AI 识别", open=True):
+        with gr.Accordion("① 待确认片段与 AI 识别", open=False):
             v4r_unresolved_table = gr.Dataframe(
                 headers=["segment_id", "chapter_id", "text"],
                 datatype=["str", "str", "str"],
@@ -39,7 +44,7 @@ def create_v4_role_page(
                 v4r_route_btn = gr.Button("🤖 AI 自动识别角色", variant="primary", size="sm")
                 v4r_route_msg = gr.Markdown("")
 
-        with gr.Accordion("② 候选角色确认", open=True):
+        with gr.Accordion("② 候选角色确认", open=False):
             gr.Markdown("AI 候选不会自动创建正式角色；确认前请查看原文证据。")
             v4r_candidates_table = gr.Dataframe(
                 headers=[
@@ -102,6 +107,8 @@ def create_v4_role_page(
         "refresh": v4r_refresh,
         "open": v4r_open,
         "summary": v4r_summary,
+        "reanalyze_btn": v4r_reanalyze_btn,
+        "reanalyze_msg": v4r_reanalyze_msg,
         "unresolved_table": v4r_unresolved_table,
         "route_btn": v4r_route_btn,
         "extract_btn": v4r_extract_btn,

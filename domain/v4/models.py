@@ -109,6 +109,13 @@ class SemanticSegment:
     status: str
     text_override: str | None = None
     dialogue_type: str = "dialogue"
+    confidence: float | None = None
+    emotion: str = "neutral"
+    emotion_strength: float = 0.4
+    delivery: dict[str, Any] = field(default_factory=dict)
+    pause_before: int = 0
+    pause_after: int = 600
+    pauses: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         # Older in-memory callers only supplied ``kind``.  Preserve that
@@ -128,9 +135,15 @@ class SemanticSegment:
             "dialogue",
             "suspected_dialogue",
             "quotation",
+            "inner_monologue",
+            "stage_direction",
+            "unanalysed",
         }:
             raise ValidationError(f"segment {self.segment_id} has invalid dialogue_type")
-        if self.kind == "narration" and self.dialogue_type != "narration":
+        if (
+            self.kind == "narration"
+            and self.dialogue_type not in {"narration", "stage_direction", "unanalysed"}
+        ):
             raise ValidationError(
                 f"narration segment {self.segment_id} needs dialogue_type=narration"
             )
@@ -138,7 +151,9 @@ class SemanticSegment:
             raise ValidationError(
                 f"dialogue segment {self.segment_id} cannot be narration type"
             )
-        if self.speaker_source not in {"rule", "router", "manual", "unresolved"}:
+        if self.speaker_source not in {
+            "ai", "rule", "router", "manual", "unresolved"
+        }:
             raise ValidationError(f"segment {self.segment_id} has invalid speaker_source")
         if self.status not in {"confirmed", "unresolved"}:
             raise ValidationError(f"segment {self.segment_id} has invalid status")
@@ -148,6 +163,32 @@ class SemanticSegment:
             raise ValidationError(
                 f"unresolved segment {self.segment_id} needs unresolved source"
             )
+        if self.confidence is not None and (
+            isinstance(self.confidence, bool)
+            or not isinstance(self.confidence, (int, float))
+            or not 0.0 <= float(self.confidence) <= 1.0
+        ):
+            raise ValidationError(
+                f"segment {self.segment_id} confidence must be between 0 and 1"
+            )
+        if not isinstance(self.emotion, str) or not self.emotion.strip():
+            raise ValidationError(f"segment {self.segment_id} emotion is invalid")
+        if isinstance(self.emotion_strength, bool) or not isinstance(
+            self.emotion_strength, (int, float)
+        ) or not 0.0 <= float(self.emotion_strength) <= 1.0:
+            raise ValidationError(
+                f"segment {self.segment_id} emotion_strength is invalid"
+            )
+        if not isinstance(self.delivery, dict):
+            raise ValidationError(f"segment {self.segment_id} delivery is invalid")
+        for value, label in (
+            (self.pause_before, "pause_before"),
+            (self.pause_after, "pause_after"),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 3000:
+                raise ValidationError(f"segment {self.segment_id} {label} is invalid")
+        if not isinstance(self.pauses, list):
+            raise ValidationError(f"segment {self.segment_id} pauses is invalid")
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SemanticSegment:
@@ -166,6 +207,13 @@ class SemanticSegment:
                     "dialogue_type",
                     "narration" if data.get("kind") == "narration" else "dialogue",
                 ),
+                confidence=data.get("confidence"),
+                emotion=data.get("emotion", "neutral"),
+                emotion_strength=data.get("emotion_strength", 0.4),
+                delivery=data.get("delivery", {}),
+                pause_before=data.get("pause_before", 0),
+                pause_after=data.get("pause_after", 600),
+                pauses=data.get("pauses", []),
             )
         except (KeyError, TypeError) as exc:
             raise ValidationError(f"invalid segment: {exc}") from exc
@@ -182,6 +230,13 @@ class SemanticSegment:
             "status": self.status,
             "text_override": self.text_override,
             "dialogue_type": self.dialogue_type,
+            "confidence": self.confidence,
+            "emotion": self.emotion,
+            "emotion_strength": self.emotion_strength,
+            "delivery": self.delivery,
+            "pause_before": self.pause_before,
+            "pause_after": self.pause_after,
+            "pauses": self.pauses,
         }
 
 

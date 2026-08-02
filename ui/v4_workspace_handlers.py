@@ -139,6 +139,11 @@ def _report_analysis_progress(progress, message: str) -> None:
     labels = {
         "正在导入书稿": 1,
         "正在识别章节": 2,
+        "正在阅读全书": 2,
+        "正在建立人物关系": 3,
+        "正在分析章节剧本": 4,
+        "正在复查对白归属": 5,
+        "正在保存分析结果": 6,
         "正在提取角色": 3,
         "正在统一角色和别名": 4,
         "正在自动确认高可信角色": 4,
@@ -316,6 +321,23 @@ def continue_v4_analysis(project_name: str, progress=None):
         return result.message
     except Exception as exc:  # noqa: BLE001 - project remains openable
         return f"⚠ 项目已保留，但分析未完成：{str(exc)[:500]}"
+
+
+def reanalyze_v4_project(project_name: str, progress=None):
+    """Explicitly rerun AI-first analysis with a durable revision snapshot."""
+    progress = progress or (lambda *_args, **_kwargs: None)
+    if not project_name:
+        return "⚠ 请先选择 v4 项目"
+    try:
+        result = V4ProjectAnalysisPipeline.from_ai_settings(
+            _root() / project_name
+        ).run(
+            progress_callback=lambda message: _report_analysis_progress(progress, message),
+            force_reanalysis=True,
+        )
+        return result.message
+    except Exception as exc:  # noqa: BLE001 - project remains openable
+        return f"⚠ 重分析未完成，原项目已保留：{str(exc)[:500]}"
 
 
 def confirm_v4_candidate(

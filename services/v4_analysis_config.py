@@ -15,6 +15,7 @@ class V4AnalysisConfig:
     routing_scene_gap: int = 1600
     routing_previous_speaker_limit: int = 6
     consistency_unresolved_spike_ratio: float = 0.50
+    ai_max_input_chars: int = 12000
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.auto_confirm_threshold <= 1.0:
@@ -31,6 +32,8 @@ class V4AnalysisConfig:
             raise ValueError("routing_previous_speaker_limit cannot be negative")
         if not 0.0 <= self.consistency_unresolved_spike_ratio <= 1.0:
             raise ValueError("consistency_unresolved_spike_ratio must be between 0 and 1")
+        if self.ai_max_input_chars < 200:
+            raise ValueError("ai_max_input_chars must be at least 200")
 
 
 DEFAULT_V4_ANALYSIS_CONFIG = V4AnalysisConfig()

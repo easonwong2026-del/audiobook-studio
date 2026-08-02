@@ -19,6 +19,10 @@ class V4AccuracyMetrics:
     dialogue_accuracy: float
     auto_coverage: float
     error_categories: dict[str, int]
+    true_role_count: int = 0
+    false_positive_roles: int = 0
+    missed_roles: int = 0
+    alias_merge_correct: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -31,6 +35,10 @@ class V4AccuracyMetrics:
             "dialogue_accuracy": self.dialogue_accuracy,
             "auto_coverage": self.auto_coverage,
             "error_categories": dict(self.error_categories),
+            "true_role_count": self.true_role_count,
+            "false_positive_roles": self.false_positive_roles,
+            "missed_roles": self.missed_roles,
+            "alias_merge_correct": self.alias_merge_correct,
         }
 
 
@@ -58,11 +66,22 @@ def evaluate_v4_accuracy(
         for item in speakers.speakers
         for value in [item.display_name, *item.aliases]
     }
-    expected_roles = {
-        str(item).strip()
-        for item in (ground_truth.get("characters") or [])
-        if str(item).strip()
-    }
+    role_specs: list[tuple[str, set[str]]] = []
+    for item in (ground_truth.get("characters") or []):
+        if isinstance(item, dict):
+            canonical = str(
+                item.get("canonical_name") or item.get("name") or ""
+            ).strip()
+            aliases = {
+                str(value).strip()
+                for value in (item.get("aliases") or [])
+                if str(value).strip()
+            }
+        else:
+            canonical = str(item).strip()
+            aliases = set()
+        if canonical:
+            role_specs.append((canonical, {canonical, *aliases}))
     measured_ids = auto_confirmed_speaker_ids
     if measured_ids is None:
         measured_ids = {
@@ -71,10 +90,29 @@ def evaluate_v4_accuracy(
             if item.speaker_type == "character" and item.status == "confirmed"
         }
     measured_roles = [by_id[item] for item in measured_ids if item in by_id]
-    correct_roles = sum(
-        item.display_name in expected_roles or any(alias in expected_roles for alias in item.aliases)
-        for item in measured_roles
-    )
+    unmatched_expected = set(range(len(role_specs)))
+    correct_roles = 0
+    alias_merge_correct = 0
+    for item in measured_roles:
+        names = {item.display_name, *item.aliases}
+        match = next(
+            (
+                index
+                for index in sorted(unmatched_expected)
+                if names & role_specs[index][1]
+            ),
+            None,
+        )
+        if match is None:
+            continue
+        unmatched_expected.remove(match)
+        correct_roles += 1
+        expected_name, expected_names = role_specs[match]
+        if len(expected_names) > 1 and names & (expected_names - {expected_name}):
+            alias_merge_correct += 1
+    true_role_count = len(role_specs)
+    false_positive_roles = len(measured_roles) - correct_roles
+    missed_roles = len(unmatched_expected)
 
     expected_dialogue = ground_truth.get("dialogue") or {}
     if not isinstance(expected_dialogue, dict):
@@ -87,6 +125,10 @@ def evaluate_v4_accuracy(
     correct_dialogue = 0
     auto_assigned = 0
     errors: Counter[str] = Counter()
+    if false_positive_roles:
+        errors["false_positive_role"] = false_positive_roles
+    if missed_roles:
+        errors["missed_role"] = missed_roles
     for segment_id, expected in expected_dialogue.items():
         segment = segment_lookup.get(str(segment_id))
         if segment is None:
@@ -95,7 +137,7 @@ def evaluate_v4_accuracy(
         if segment.status != "confirmed" or segment.speaker_id is None:
             errors["unresolved"] += 1
             continue
-        if segment.speaker_source not in {"rule", "router"}:
+        if segment.speaker_source not in {"ai", "rule", "router"}:
             errors["manual_assignment"] += 1
             continue
         auto_assigned += 1
@@ -119,4 +161,8 @@ def evaluate_v4_accuracy(
         dialogue_accuracy=(correct_dialogue / auto_assigned) if auto_assigned else 0.0,
         auto_coverage=(auto_assigned / total_dialogue) if total_dialogue else 0.0,
         error_categories=dict(errors),
+        true_role_count=true_role_count,
+        false_positive_roles=false_positive_roles,
+        missed_roles=missed_roles,
+        alias_merge_correct=alias_merge_correct,
     )

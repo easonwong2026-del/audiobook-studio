@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -95,6 +96,8 @@ class SynthesisService:
     """
 
     _executor: ClassVar[ThreadPoolExecutor] = ThreadPoolExecutor(max_workers=1)
+    _active_states: ClassVar[dict[str, SynthesisState]] = {}
+    _state_lock: ClassVar[threading.RLock] = threading.RLock()
 
     @classmethod
     def reset_executor(cls) -> None:
@@ -126,16 +129,27 @@ class SynthesisService:
         Returns:
             task_id。
         """
+        from services.service_lifecycle import ServiceLifecycle
+
+        if ServiceLifecycle.is_stopping():
+            raise RuntimeError("服务正在关闭，不能启动新的合成任务")
         state.status = "pending"
         state.cancel = False
         state.cancel_requested = False
         state.paused = False
         state.error = None
-        state.future = SynthesisService._executor.submit(
-            SynthesisService._run, state, project, bindings,
-            num_beams, emotion, emo_alpha, speech_rate, cb_seg_state,
-            selected_chapters,
-        )
+        with SynthesisService._state_lock:
+            SynthesisService._active_states[state.task_id] = state
+        try:
+            state.future = SynthesisService._executor.submit(
+                SynthesisService._run, state, project, bindings,
+                num_beams, emotion, emo_alpha, speech_rate, cb_seg_state,
+                selected_chapters,
+            )
+        except Exception:
+            with SynthesisService._state_lock:
+                SynthesisService._active_states.pop(state.task_id, None)
+            raise
         # 写入任务状态记录（running）
         try:
             TaskRepository.save_task(TaskRecord(
@@ -148,6 +162,39 @@ class SynthesisService:
         except Exception as exc:
             logger.warning("保存合成任务状态失败: %s", exc)
         return state.task_id
+
+    @classmethod
+    def shutdown_all(cls, timeout: float = 5.0) -> dict[str, Any]:
+        """Stop legacy V3 workers at segment boundaries and persist recovery."""
+        with cls._state_lock:
+            states = list(cls._active_states.values())
+        for state in states:
+            cls.cancel(state)
+            try:
+                TaskRepository.save_task(TaskRecord(
+                    task_id=state.task_id,
+                    task_type="synthesis",
+                    project=state.project,
+                    status="pending",
+                    error_summary="interrupted by service shutdown",
+                    created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                ))
+            except Exception as exc:
+                logger.warning("保存停服恢复状态失败: %s", exc)
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        timed_out: list[str] = []
+        for state in states:
+            future = state.future
+            if future is None:
+                continue
+            remaining = max(0.0, deadline - time.monotonic())
+            try:
+                future.result(timeout=remaining)
+            except Exception:
+                if not future.done():
+                    timed_out.append(state.task_id)
+        cls._executor.shutdown(wait=False, cancel_futures=True)
+        return {"stopped": len(states) - len(timed_out), "timed_out": timed_out}
 
     @staticmethod
     def get_snapshot(state: SynthesisState) -> SynthesisState:
@@ -331,4 +378,5 @@ class SynthesisService:
             except Exception as exc2:
                 logger.warning("保存合成错误状态失败: %s", exc2)
         finally:
-            pass  # empty_cache 移出 finally，避免后台线程中 torch CUDA 访问 segfault
+            with SynthesisService._state_lock:
+                SynthesisService._active_states.pop(state.task_id, None)

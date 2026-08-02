@@ -112,3 +112,5 @@ jobs:
           python -m pytest -q
           tests/v4/test_repositories.py
           tests/v4/test_migration_v3_to_v4.py
+          tests/test_service_lifecycle.py
+          tests/test_launcher.py
