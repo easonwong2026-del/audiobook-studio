@@ -120,10 +120,17 @@ class ProjectV4Repository:
         old_speakers = SpeakersDocument.from_dict(previous_speakers)
         script.validate(source_text)
         speakers.validate()
-        if script.revision <= old_script.revision:
-            raise ValueError("script revision must increase")
+        if script.revision < old_script.revision:
+            raise ValueError("script revision cannot decrease")
         if speakers.revision < old_speakers.revision:
             raise ValueError("speakers revision cannot decrease")
+        if (
+            script.revision == old_script.revision
+            and speakers.revision == old_speakers.revision
+            and script.to_dict() == old_script.to_dict()
+            and speakers.to_dict() == old_speakers.to_dict()
+        ):
+            raise ValueError("script or speakers must change")
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
         snapshot = project / "revisions" / f"routing-{stamp}"
         snapshot.mkdir(parents=True, exist_ok=False)

@@ -280,7 +280,26 @@ def format_v4_role_summary(ss):
         for item in ss.speakers_v4.speakers
         if voices is not None and item.speaker_id in voices.bindings
     )
-    return f"共 **{total}** 个角色 · **{bound}** 已绑定 · **{total - bound}** 待绑定"
+    text = f"共 **{total}** 个角色 · **{bound}** 已绑定 · **{total - bound}** 待绑定"
+    try:
+        from repositories.v4_analysis_repository import V4AnalysisRepository
+
+        state = V4AnalysisRepository(project_path).load(ss.script.source_sha256)
+        summary = (state or {}).get("summary") or {}
+        if state and state.get("status") == "waiting_for_ai":
+            text += "\n\n⚠ AI 尚未配置。配置后点击「继续 AI 分析」。"
+        elif summary:
+            text += (
+                "\n\nAI 分析完成 · "
+                f"识别角色：{summary.get('identified_characters', total)} · "
+                f"自动确认：{summary.get('auto_confirmed_characters', 0)} · "
+                f"需要确认：{summary.get('needs_review_characters', 0) + summary.get('dialogue_unresolved', 0)} · "
+                f"已过滤噪音：{summary.get('filtered_noise', 0)} · "
+                f"对白自动归属：{summary.get('dialogue_coverage', 1.0) * 100:.0f}%"
+            )
+    except Exception:  # noqa: BLE001 - summary is supplementary UI
+        pass
+    return text
 
 
 def format_role_summary(ss):
@@ -608,7 +627,58 @@ def _v4_role_choices(ss):
         bindings = voices.bindings
     except Exception:  # noqa: BLE001 - 卡片刷新不能阻断页面
         bindings = {}
-    return build_v4_role_management_choices(ss.speakers_v4.speakers, bindings)
+    stats = _v4_speaker_stats(ss)
+    return build_v4_role_management_choices(ss.speakers_v4.speakers, bindings, stats)
+
+
+def _v4_speaker_stats(ss):
+    """Build the compact role-card facts without changing the V4 data model."""
+    if ss is None or not getattr(ss, "is_v4", False) or ss.script is None:
+        return {}
+    counts = {item.speaker_id: 0 for item in ss.speakers_v4.speakers}
+    for chapter in ss.script.chapters:
+        for segment in chapter.segments:
+            if segment.kind == "dialogue" and segment.speaker_id in counts:
+                counts[segment.speaker_id] += 1
+    confidence = {}
+    persisted_cards = {}
+    try:
+        from repositories.v4_analysis_repository import V4AnalysisRepository
+        from repositories.character_candidates_repository import CharacterCandidatesRepository
+
+        state = V4AnalysisRepository(
+            V4ProjectService.root() / ss.project
+        ).load(ss.script.source_sha256)
+        persisted_cards = ((state or {}).get("summary") or {}).get("character_cards") or {}
+        candidates = CharacterCandidatesRepository(
+            V4ProjectService.root() / ss.project
+        ).load(ss.script.source_sha256)
+        for candidate in candidates.candidates:
+            if candidate.status != "confirmed":
+                continue
+            for speaker in ss.speakers_v4.speakers:
+                if candidate.display_name in [speaker.display_name, *speaker.aliases]:
+                    confidence[speaker.speaker_id] = max(
+                        confidence.get(speaker.speaker_id, 0.0), candidate.confidence
+                    )
+    except Exception:  # noqa: BLE001 - cards should still render
+        pass
+    return {
+        speaker.speaker_id: {
+            **persisted_cards.get(speaker.speaker_id, {}),
+            "importance": persisted_cards.get(speaker.speaker_id, {}).get(
+                "importance",
+                "主要角色" if counts.get(speaker.speaker_id, 0) >= 3 else "次要角色",
+            ),
+            "dialogue_count": persisted_cards.get(speaker.speaker_id, {}).get(
+                "dialogue_count", counts.get(speaker.speaker_id, 0)
+            ),
+            "confidence": persisted_cards.get(speaker.speaker_id, {}).get(
+                "confidence", confidence.get(speaker.speaker_id, 1.0)
+            ),
+        }
+        for speaker in ss.speakers_v4.speakers
+    }
 
 
 def _v4_speaker_name(ss, speaker_id):
@@ -2256,6 +2326,8 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             vce_page = create_voice_page()
             grp_voices = vce_page["group"]
             v_status = vce_page["v_status"]
+            v_continue_analysis = vce_page["v_continue_analysis"]
+            v_analysis_msg = vce_page["v_analysis_msg"]
             v_table = vce_page["v_table"]
             v_role_search = vce_page["v_role_search"]
             v_role_title = vce_page["v_role_title"]
@@ -2407,8 +2479,8 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         lambda: _goto("create_project"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-create-project')?.classList.add('active'); }").then(
         lambda: (
-            "##### v4 创建边界\n本地导入、规则切分并立即创建；"
-            "远程 AI 仅在后续角色识别阶段使用。"
+            "##### v4 创建流程\n导入、章节切分和角色分析会自动执行；"
+            "AI 未配置时项目仍会先保存，可在角色与声音页面继续分析。"
         ), [], [cp_config_summary])
     nav_v4.click(
         lambda: _goto("v4"), None, _GROUPS,
@@ -2528,24 +2600,25 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         [cp_name],
         [cp_slot_status, cp_cleanup],
     )
-    cp_create.click(
+    creation_chain = cp_create.click(
         v4_ui.create_v4_from_source,
         [cp_name, cp_source, cp_title, cp_author],
         [cp_status, cp_result, v4_project, cp_json_result],
         concurrency_limit=1,
         concurrency_id="project-creation",
     ).then(
-        lambda: _goto("project"), None, _GROUPS
-    ).then(
-        lambda: (
-            gr.update(
-                choices=project_choices(),
-                value=cp_name.value if hasattr(cp_name, "value") else None,
-            ),
-            gr.update(),
+        lambda project_name: gr.update(
+            choices=project_choices(), value=project_name
         ),
-        None,
-        [p_sel, p_migrate_msg],
+        [v4_project],
+        [p_sel],
+    ).then(
+        open_project,
+        [p_sel, ss],
+        [p_summary, v_table, v_role, v_role_title, v_lib, s_log, v_status],
+    )
+    _open_chain_rest(creation_chain).then(
+        lambda: _goto("voices"), None, _GROUPS
     )
     p_migrate.click(
         migrate_v3_to_v4,
@@ -2854,6 +2927,18 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             },
         },
     )
+    analysis_chain = v_continue_analysis.click(
+        v4_ui.continue_v4_analysis,
+        [p_sel],
+        [v_analysis_msg],
+        concurrency_limit=1,
+        concurrency_id="v4-analysis",
+    ).then(
+        open_project,
+        [p_sel, ss],
+        [p_summary, v_table, v_role, v_role_title, v_lib, s_log, v_status],
+    )
+    _open_chain_rest(analysis_chain)
     _wire_v4_role_controls(advanced_role_page)
 
     p_refresh.click(refresh_projects_full, [], [p_sel])

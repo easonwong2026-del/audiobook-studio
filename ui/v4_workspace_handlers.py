@@ -22,6 +22,7 @@ from repositories.production_repository import ProductionRepository
 from repositories.project_v4_repository import ProjectV4Repository
 from repositories.routing_checkpoint_repository import RoutingCheckpointRepository
 from repositories.runtime_repository import RuntimeRepository
+from repositories.v4_analysis_repository import V4AnalysisRepository
 from services.ai_settings import AiSettingsService
 from services.chapter_assembler import ChapterAssembler
 from services.character_candidate_service import (
@@ -41,6 +42,7 @@ from services.speaker_routing_service import SpeakerRoutingService
 from services.synthesis_executor import SynthesisExecutor
 from services.synthesis_planner import SynthesisPlanner
 from services.v4_export import V4ExportService
+from services.v4_project_analysis_pipeline import V4ProjectAnalysisPipeline
 from services.v4_project_creation import V4ProjectCreationService
 from services.v4_voice_service import V4VoiceService
 from tts.indextts2_adapter import IndexTTS2Adapter
@@ -49,6 +51,26 @@ from tts.text_measurement import CharacterMeasurer, ConservativeTokenMeasurer
 
 def _root() -> Path:
     return Path(config.get_projects_root())
+
+
+def _analysis_summary_text(state: dict | None) -> str:
+    if not state:
+        return ""
+    summary = state.get("summary") or {}
+    status = state.get("status")
+    if status == "waiting_for_ai":
+        return "\n\n⚠ AI 尚未配置，可在此页配置后点击“继续分析”。"
+    if not summary:
+        return ""
+    return (
+        "\n\n"
+        f"AI 分析：{status or '未知'} · "
+        f"识别角色 {summary.get('identified_characters', 0)} · "
+        f"自动确认 {summary.get('auto_confirmed_characters', 0)} · "
+        f"需要检查 {summary.get('needs_review_characters', 0) + summary.get('dialogue_unresolved', 0)} · "
+        f"已过滤噪音 {summary.get('filtered_noise', 0)} · "
+        f"对白自动归属 {summary.get('dialogue_coverage', 1.0) * 100:.0f}%"
+    )
 
 
 def scan_v4_projects() -> list[str]:
@@ -69,7 +91,8 @@ def scan_v4_projects() -> list[str]:
     return sorted(names)
 
 
-def create_v4_from_source(name, source_file, title, author):
+def create_v4_from_source(name, source_file, title, author, progress=None):
+    progress = progress or (lambda *_args, **_kwargs: None)
     source = getattr(source_file, "name", None) or source_file
     if not name or not source:
         return "⚠ 请输入项目名称并上传书稿", "", gr.update(), gr.update()
@@ -81,18 +104,25 @@ def create_v4_from_source(name, source_file, title, author):
             str(name),
             title=str(title or ""),
             author=str(author or ""),
+            progress_callback=lambda message: _report_analysis_progress(progress, message),
         )
         manifest = ProjectV4Repository(_root()).load_manifest(result.project_path)
         script = _load_script(result.project_path)
         total = sum(len(item.segments) for item in script.chapters)
+        if result.analysis is not None:
+            analysis_message = result.analysis.message
+        elif result.analysis_error:
+            analysis_message = f"⚠ 项目已创建，但自动分析未完成：{result.analysis_error}"
+        else:
+            analysis_message = "项目已创建，可在角色与声音页面继续分析。"
         message = (
             "### ✅ v4 项目创建成功\n\n"
             f"- 作品：**{manifest.title}**\n"
             f"- 语义片段：{total}\n"
             f"- 待确认角色：{result.unresolved_segments}\n"
             f"- Source SHA：`{script.source_sha256}`\n\n"
-            "已进入「② 项目管理」；请到「③ 角色与声音」确认角色并绑定音色，"
-            "然后在「④ 生产与质检」生成计划并合成。"
+            f"{analysis_message}\n\n"
+            "请到「③ 角色与声音」检查角色并绑定音色，然后在「④ 生产与质检」生成计划并合成。"
         )
         choices = scan_v4_projects()
         return (
@@ -103,6 +133,24 @@ def create_v4_from_source(name, source_file, title, author):
         )
     except Exception as exc:  # noqa: BLE001 - convert create failure for UI
         return f"❌ 创建失败：{str(exc)[:500]}", "", gr.update(), gr.update()
+
+
+def _report_analysis_progress(progress, message: str) -> None:
+    labels = {
+        "正在导入书稿": 1,
+        "正在识别章节": 2,
+        "正在提取角色": 3,
+        "正在统一角色和别名": 4,
+        "正在自动确认高可信角色": 4,
+        "正在分析对白归属": 5,
+        "正在检查分析结果": 6,
+        "分析完成": 6,
+        "分析完成（有阶段需要继续）": 6,
+    }
+    try:
+        progress((labels.get(message, 1), 6), desc=message)
+    except Exception:  # noqa: BLE001 - progress UI is non-critical
+        return
 
 
 def open_v4_project(name: str):
@@ -142,10 +190,13 @@ def open_v4_project(name: str):
     plan = production.load_plan()
     plan_rows = synthesis_plan_rows(plan) if plan else []
     queue_rows = _queue_rows(project)
+    analysis = V4AnalysisRepository(project).load(script.source_sha256)
+    analysis_summary = _analysis_summary_text(analysis)
     summary = (
         f"**{name}** · {len(script.chapters)} 章 · "
         f"{sum(len(item.segments) for item in script.chapters)} 片段 · "
         f"{len(unresolved)} 待确认"
+        f"{analysis_summary}"
     )
     profile_text = (
         f"引擎 `{profile.engine}` · 模型 `{profile.model_version or '目标机实测'}` · "
@@ -251,6 +302,20 @@ def route_v4_speakers(project_name: str):
         f"{result.failed_batches}，待确认 {result.unresolved_segments}"
         f"，候选 {len(result.candidates)}"
     )
+
+
+def continue_v4_analysis(project_name: str, progress=None):
+    """Resume only the incomplete/invalidated analysis stages for a project."""
+    progress = progress or (lambda *_args, **_kwargs: None)
+    if not project_name:
+        return "⚠ 请先选择 v4 项目"
+    try:
+        result = V4ProjectAnalysisPipeline.from_ai_settings(
+            _root() / project_name
+        ).run(progress_callback=lambda message: _report_analysis_progress(progress, message))
+        return result.message
+    except Exception as exc:  # noqa: BLE001 - project remains openable
+        return f"⚠ 项目已保留，但分析未完成：{str(exc)[:500]}"
 
 
 def confirm_v4_candidate(

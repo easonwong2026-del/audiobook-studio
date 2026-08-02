@@ -38,13 +38,13 @@ def create_create_project_page() -> dict:
 
         with gr.Row():
             cp_config_summary = gr.Markdown(
-                "##### v4 创建边界\n"
-                "本地导入并保存唯一原文，规则切分后立即创建；"
-                "未识别角色不会阻止创建，远程角色路由可稍后继续。"
+                "##### v4 创建流程\n"
+                "导入、章节切分、角色统一、对白归属和一致性检查会自动执行；"
+                "AI 未配置时项目仍会先保存，可稍后继续分析。"
             )
 
         with gr.Row():
-            cp_create = gr.Button("创建 v4 项目", variant="primary")
+            cp_create = gr.Button("创建并分析项目（创建 v4 项目）", variant="primary")
 
         cp_status = gr.Markdown("")
         cp_result = gr.Markdown("")

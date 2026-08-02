@@ -72,7 +72,9 @@ def build_role_management_choices(
     return choices
 
 
-def build_v4_role_management_choices(speakers, bindings) -> list[tuple[str, str]]:
+def build_v4_role_management_choices(
+    speakers, bindings, speaker_stats: dict[str, dict] | None = None
+) -> list[tuple[str, str]]:
     """Build the shared card labels for V4 speakers using stable speaker IDs."""
     current_bindings = bindings or {}
     choices = []
@@ -82,6 +84,17 @@ def build_v4_role_management_choices(speakers, bindings) -> list[tuple[str, str]
             label += " 🔒"
         if speaker.aliases:
             label += f"（{'/'.join(speaker.aliases[:3])}）"
+        stat = (speaker_stats or {}).get(speaker.speaker_id, {})
+        if stat:
+            importance = stat.get("importance", "次要角色")
+            count = int(stat.get("dialogue_count", 0) or 0)
+            confidence = stat.get("confidence")
+            confidence_text = (
+                f" · 置信度 {float(confidence):.2f}"
+                if confidence is not None
+                else ""
+            )
+            label += f"\n{importance} · 对白 {count} 段{confidence_text}"
         binding = current_bindings.get(speaker.speaker_id)
         if binding:
             voice_id = getattr(binding, "voice_id", binding)

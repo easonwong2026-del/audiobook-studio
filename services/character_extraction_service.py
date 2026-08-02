@@ -37,6 +37,7 @@ class CharacterExtractionResult:
     candidates: CharacterCandidatesDocument
     completed_chapters: int
     failed_chapters: int
+    filtered_noise_count: int = 0
 
 
 class CharacterExtractionService:
@@ -73,6 +74,7 @@ class CharacterExtractionService:
         )
         completed = 0
         failed = 0
+        filtered_noise = 0
         for checkpoint in checkpoints:
             chapter = chapter_by_id[checkpoint.chapter_id]
             try:
@@ -89,6 +91,13 @@ class CharacterExtractionService:
                         checkpoint.batch_id, response.to_dict()
                     )
                 extracted = self._candidate_values(response.characters)
+                filtered_noise += sum(
+                    1
+                    for item in response.characters
+                    if not item.is_character
+                    or not normalize_speaker_name(item.name)
+                    or not is_likely_character_name(normalize_speaker_name(item.name))
+                )
                 merged = merge_character_candidates(current.candidates, extracted)
                 changed = merged != current.candidates
                 current = CharacterCandidatesDocument(
@@ -107,6 +116,7 @@ class CharacterExtractionService:
             candidates=current,
             completed_chapters=completed,
             failed_chapters=failed,
+            filtered_noise_count=filtered_noise,
         )
 
     @staticmethod

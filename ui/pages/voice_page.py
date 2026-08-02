@@ -12,6 +12,13 @@ def create_voice_page() -> dict:
             with gr.Column(scale=0, min_width=277, elem_classes=["role-list-panel"]):
                 gr.Markdown("### 角色与声音")
                 v_status = gr.Markdown("打开项目后显示角色绑定状态。")
+                with gr.Row():
+                    v_continue_analysis = gr.Button(
+                        "继续 AI 分析",
+                        variant="secondary",
+                        size="sm",
+                    )
+                    v_analysis_msg = gr.Markdown("", visible=False)
                 v_role_search = gr.Textbox(
                     label="搜索角色",
                     placeholder="按名称或描述搜索",
@@ -120,6 +127,8 @@ def create_voice_page() -> dict:
     return {
         "group": grp_voices,
         "v_status": v_status,
+        "v_continue_analysis": v_continue_analysis,
+        "v_analysis_msg": v_analysis_msg,
         "v_table": v_table,
         "v_role_search": v_role_search,
         "v_role_title": v_role_title,

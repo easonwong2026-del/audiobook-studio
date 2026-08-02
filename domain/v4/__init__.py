@@ -1,5 +1,12 @@
 """Audiobook Studio v4 source-first domain models."""
 
+from .character_consolidation import (
+    CharacterConsolidationRequest,
+    CharacterConsolidationResponse,
+    ConsolidatedCharacter,
+    ConsolidationCandidate,
+    UnresolvedCharacterGroup,
+)
 from .character_extraction import (
     CharacterCandidate,
     CharacterCandidatesDocument,
@@ -22,8 +29,12 @@ __all__ = [
     "ChapterScript",
     "CharacterCandidate",
     "CharacterCandidatesDocument",
+    "CharacterConsolidationRequest",
+    "CharacterConsolidationResponse",
     "CharacterEvidence",
     "CharacterExtractionResponse",
+    "ConsolidatedCharacter",
+    "ConsolidationCandidate",
     "ExtractedCharacter",
     "ProjectManifest",
     "ScriptDocument",
@@ -31,5 +42,6 @@ __all__ = [
     "SourceMetadata",
     "Speaker",
     "SpeakersDocument",
+    "UnresolvedCharacterGroup",
     "ValidationError",
 ]

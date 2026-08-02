@@ -27,6 +27,9 @@ from services.speaker_normalization import (
 )
 
 MIN_ROUTING_CONFIDENCE = 0.75
+DEFAULT_SCENE_GAP = 1600
+DEFAULT_PREVIOUS_SPEAKER_LIMIT = 6
+DEFAULT_CONTEXT_RADIUS = 720
 
 
 class RoutingAdapter(Protocol):
@@ -59,7 +62,9 @@ class SpeakerRoutingService:
         checkpoints: RoutingCheckpointRepository,
         *,
         batch_size: int = 24,
-        context_radius: int = 400,
+        context_radius: int = DEFAULT_CONTEXT_RADIUS,
+        scene_gap: int = DEFAULT_SCENE_GAP,
+        previous_speaker_limit: int = DEFAULT_PREVIOUS_SPEAKER_LIMIT,
         min_confidence: float = MIN_ROUTING_CONFIDENCE,
     ):
         if batch_size < 1:
@@ -70,6 +75,8 @@ class SpeakerRoutingService:
         self.checkpoints = checkpoints
         self.batch_size = batch_size
         self.context_radius = max(context_radius, 0)
+        self.scene_gap = max(scene_gap, 0)
+        self.previous_speaker_limit = max(previous_speaker_limit, 0)
         self.min_confidence = min_confidence
 
     def route(
@@ -90,10 +97,7 @@ class SpeakerRoutingService:
             and segment.status == "unresolved"
             and segment.speaker_source != "manual"
         ]
-        batches = [
-            [item.segment_id for item in targets[index:index + self.batch_size]]
-            for index in range(0, len(targets), self.batch_size)
-        ]
+        batches = self._build_batches(source_text, targets)
         checkpoints = self.checkpoints.prepare(
             source_sha256=script.source_sha256,
             script_revision=script.revision,
@@ -104,7 +108,11 @@ class SpeakerRoutingService:
         assignments: list[dict[str, Any]] = []
         completed = 0
         failed = 0
-        segment_index = {item.segment_id: item for item in targets}
+        segment_index = {
+            item.segment_id: item
+            for chapter in script.chapters
+            for item in chapter.segments
+        }
         allowed_speakers = self._allowed_speakers(speakers)
         allowed_ids = {item["speaker_id"] for item in allowed_speakers}
         for batch in checkpoints:
@@ -127,7 +135,12 @@ class SpeakerRoutingService:
             self.checkpoints.mark_running(batch.batch_id)
             try:
                 response = self._call_adapter(
-                    context=self._context(source_text, batch, segment_index),
+                    context=self._context(
+                        source_text,
+                        batch,
+                        segment_index,
+                        speakers=speakers,
+                    ),
                     segment_ids=batch.segment_ids,
                     allowed_speakers=allowed_speakers,
                 )
@@ -233,13 +246,68 @@ class SpeakerRoutingService:
         source_text: str,
         batch: RoutingBatch,
         segment_index: dict[str, SemanticSegment],
+        *,
+        speakers: SpeakersDocument | None = None,
     ) -> str:
         selected = [segment_index[item] for item in batch.segment_ids]
-        start = max(0, min(item.start for item in selected) - self.context_radius)
+        first = min(selected, key=lambda item: item.start)
+        last = max(selected, key=lambda item: item.end)
+        start = max(0, first.start - self.context_radius)
         end = min(
             len(source_text),
-            max(item.end for item in selected) + self.context_radius,
+            last.end + self.context_radius,
         )
+        chapter_id = first.chapter_id
+        chapter_segments = [
+            item
+            for item in segment_index.values()
+            if item.chapter_id == chapter_id
+        ]
+        chapter_segments.sort(key=lambda item: item.start)
+        previous_candidates = [
+            item
+            for item in chapter_segments
+            if item.end <= first.start
+            and item.status == "confirmed"
+            and item.speaker_id
+        ]
+        previous = (
+            previous_candidates[-self.previous_speaker_limit:]
+            if self.previous_speaker_limit
+            else []
+        )
+        possible_ids = {
+            item.speaker_id
+            for item in chapter_segments
+            if item.speaker_id
+            and item.status == "confirmed"
+            and item.start < end
+            and item.end > start
+        }
+        names = {
+            item.speaker_id: item.display_name
+            for item in (speakers.speakers if speakers else [])
+        }
+        lines = [
+            f"=== chapter {chapter_id} / continuous dialogue group ===",
+            "Use only allowed_speakers speaker_id values. Keep unresolved when unsure.",
+            "全书标准角色：",
+        ]
+        if speakers:
+            lines.extend(
+                f"- {item.speaker_id}: {item.display_name}"
+                f" aliases={','.join(item.aliases) or '-'}"
+                for item in speakers.speakers
+                if item.status == "confirmed"
+            )
+        lines.append("当前场景可能角色：")
+        lines.extend(f"- {speaker_id}: {names.get(speaker_id, speaker_id)}" for speaker_id in sorted(possible_ids))
+        lines.append("前几轮已确定说话人：")
+        lines.extend(
+            f"- [{item.segment_id}] {names.get(item.speaker_id, item.speaker_id)}"
+            for item in previous
+        )
+        lines.append("对白与前后叙述：")
         pieces: list[str] = []
         cursor = start
         for segment in sorted(selected, key=lambda item: item.start):
@@ -248,7 +316,49 @@ class SpeakerRoutingService:
             pieces.append(source_text[segment.start:segment.end])
             cursor = segment.end
         pieces.append(source_text[cursor:end])
-        return "".join(pieces)
+        lines.append("".join(pieces))
+        return "\n".join(lines)
+
+    def _build_batches(
+        self, source_text: str, targets: list[SemanticSegment]
+    ) -> list[list[str]]:
+        """Group unresolved dialogue by chapter/scene before applying batch size.
+
+        A batch can still be capped for provider limits, but the cap is applied
+        inside a continuous scene and every request carries the preceding
+        confirmed turns.  This avoids the old arbitrary global 24-item windows.
+        """
+        if not targets:
+            return []
+        ordered = sorted(targets, key=lambda item: (item.chapter_id, item.start))
+        groups: list[list[SemanticSegment]] = []
+        current: list[SemanticSegment] = []
+        for item in ordered:
+            if not current:
+                current = [item]
+                continue
+            previous = current[-1]
+            gap = source_text[previous.end:item.start]
+            same_scene = (
+                item.chapter_id == previous.chapter_id
+                and len(gap) <= self.scene_gap
+                and "\n\n" not in gap
+                and len(gap.strip()) <= 360
+            )
+            if same_scene:
+                current.append(item)
+            else:
+                groups.append(current)
+                current = [item]
+        if current:
+            groups.append(current)
+        batches: list[list[str]] = []
+        for group in groups:
+            for index in range(0, len(group), self.batch_size):
+                batches.append(
+                    [item.segment_id for item in group[index:index + self.batch_size]]
+                )
+        return batches
 
     @staticmethod
     def _apply(
