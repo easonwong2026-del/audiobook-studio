@@ -108,6 +108,13 @@ class SemanticSegment:
     speaker_source: str
     status: str
     text_override: str | None = None
+    dialogue_type: str = "dialogue"
+
+    def __post_init__(self) -> None:
+        # Older in-memory callers only supplied ``kind``.  Preserve that
+        # constructor shape while serializing the explicit classification.
+        if self.kind == "narration" and self.dialogue_type == "dialogue":
+            object.__setattr__(self, "dialogue_type", "narration")
 
     def validate(self, source_length: int) -> None:
         if not self.segment_id or not self.chapter_id:
@@ -116,6 +123,21 @@ class SemanticSegment:
             raise ValidationError(f"segment {self.segment_id} has invalid bounds")
         if self.kind not in {"narration", "dialogue"}:
             raise ValidationError(f"segment {self.segment_id} has invalid kind")
+        if self.dialogue_type not in {
+            "narration",
+            "dialogue",
+            "suspected_dialogue",
+            "quotation",
+        }:
+            raise ValidationError(f"segment {self.segment_id} has invalid dialogue_type")
+        if self.kind == "narration" and self.dialogue_type != "narration":
+            raise ValidationError(
+                f"narration segment {self.segment_id} needs dialogue_type=narration"
+            )
+        if self.kind == "dialogue" and self.dialogue_type == "narration":
+            raise ValidationError(
+                f"dialogue segment {self.segment_id} cannot be narration type"
+            )
         if self.speaker_source not in {"rule", "router", "manual", "unresolved"}:
             raise ValidationError(f"segment {self.segment_id} has invalid speaker_source")
         if self.status not in {"confirmed", "unresolved"}:
@@ -140,6 +162,10 @@ class SemanticSegment:
                 speaker_source=data["speaker_source"],
                 status=data["status"],
                 text_override=data.get("text_override"),
+                dialogue_type=data.get(
+                    "dialogue_type",
+                    "narration" if data.get("kind") == "narration" else "dialogue",
+                ),
             )
         except (KeyError, TypeError) as exc:
             raise ValidationError(f"invalid segment: {exc}") from exc
@@ -155,6 +181,7 @@ class SemanticSegment:
             "speaker_source": self.speaker_source,
             "status": self.status,
             "text_override": self.text_override,
+            "dialogue_type": self.dialogue_type,
         }
 
 

@@ -1,5 +1,12 @@
 """Audiobook Studio v4 source-first domain models."""
 
+from .character_extraction import (
+    CharacterCandidate,
+    CharacterCandidatesDocument,
+    CharacterEvidence,
+    CharacterExtractionResponse,
+    ExtractedCharacter,
+)
 from .models import (
     ChapterScript,
     ProjectManifest,
@@ -13,6 +20,11 @@ from .models import (
 
 __all__ = [
     "ChapterScript",
+    "CharacterCandidate",
+    "CharacterCandidatesDocument",
+    "CharacterEvidence",
+    "CharacterExtractionResponse",
+    "ExtractedCharacter",
     "ProjectManifest",
     "ScriptDocument",
     "SemanticSegment",

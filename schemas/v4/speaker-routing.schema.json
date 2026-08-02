@@ -1,20 +1,22 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "speaker-routing-v1",
+  "$id": "speaker-routing-v2",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "assignments"],
   "properties": {
-    "schema_version": {"const": "speaker-routing-v1"},
+    "schema_version": {"const": "speaker-routing-v2"},
     "assignments": {
       "type": "array",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["segment_id", "speaker"],
+        "required": ["segment_id", "speaker_id", "candidate_name", "confidence"],
         "properties": {
           "segment_id": {"type": "string", "minLength": 1},
-          "speaker": {"type": ["string", "null"]}
+          "speaker_id": {"type": ["string", "null"]},
+          "candidate_name": {"type": ["string", "null"]},
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1}
         }
       }
     }

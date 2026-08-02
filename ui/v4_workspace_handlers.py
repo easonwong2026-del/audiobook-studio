@@ -7,17 +7,31 @@ from pathlib import Path
 
 import gradio as gr
 
+from ai.character_extraction import create_character_extraction_adapter
 from ai.speaker_routing import create_speaker_routing_adapter
 from domain.v4 import ScriptDocument, SpeakersDocument
+from domain.v4.character_extraction import CharacterCandidatesDocument
 from domain.v4.production import VoiceBindings
 from lib import config
 from repositories.audio_cache_repository import AudioCacheRepository
+from repositories.character_candidates_repository import CharacterCandidatesRepository
+from repositories.character_extraction_checkpoint_repository import (
+    CharacterExtractionCheckpointRepository,
+)
 from repositories.production_repository import ProductionRepository
 from repositories.project_v4_repository import ProjectV4Repository
 from repositories.routing_checkpoint_repository import RoutingCheckpointRepository
 from repositories.runtime_repository import RuntimeRepository
 from services.ai_settings import AiSettingsService
 from services.chapter_assembler import ChapterAssembler
+from services.character_candidate_service import (
+    CharacterCandidateReviewService,
+    candidate_rows,
+)
+from services.character_extraction_service import (
+    CharacterExtractionService,
+    merge_character_candidates,
+)
 from services.invalidation_service import InvalidationService
 from services.migration_v3_to_v4 import V3ToV4MigrationService
 from services.plan_preview import synthesis_plan_rows, synthesis_plan_summary
@@ -96,13 +110,15 @@ def open_v4_project(name: str):
         return (
             "请选择 v4 项目", [], gr.update(choices=[]),
             gr.update(choices=[]), gr.update(choices=[]), gr.update(choices=[]),
-            [], [], "", "", gr.update(choices=[]),
+            [], [], "", "", gr.update(choices=[]), [],
+            gr.update(choices=[]), gr.update(choices=[]),
         )
     project = _root() / name
     RuntimeRepository(project / "runtime/runtime.db").initialize()
     source = (project / "source/source.txt").read_text(encoding="utf-8")
     script = _load_script(project, source)
     speakers = _load_speakers(project)
+    candidates = _load_candidates(project, script.source_sha256)
     production = ProductionRepository(project)
     _voices, _performance, _pronunciation, profile = production.load_inputs()
     unresolved = SpeakerReviewService.unresolved_rows(source, script)
@@ -112,6 +128,16 @@ def open_v4_project(name: str):
     ]
     speaker_choices = [
         (item.display_name, item.speaker_id) for item in speakers.speakers
+    ]
+    candidate_choices = [
+        (item.display_name, item.candidate_id)
+        for item in candidates.candidates
+        if item.status == "candidate"
+    ]
+    merge_target_choices = [
+        (item.display_name, item.speaker_id)
+        for item in speakers.speakers
+        if item.speaker_type == "character" and item.status == "confirmed"
     ]
     plan = production.load_plan()
     plan_rows = synthesis_plan_rows(plan) if plan else []
@@ -147,6 +173,40 @@ def open_v4_project(name: str):
         profile_text,
         _queue_summary(project),
         gr.update(choices=chapters, value=chapters[0] if chapters else None),
+        candidate_rows(candidates),
+        gr.update(choices=candidate_choices, value=None),
+        gr.update(choices=merge_target_choices, value=None),
+    )
+
+
+def extract_v4_characters(project_name: str):
+    """Extract chapter candidates; this never mutates the formal speaker table."""
+    if not project_name:
+        return "⚠ 请先选择 v4 项目"
+    project = _root() / project_name
+    source = (project / "source/source.txt").read_text(encoding="utf-8")
+    script = _load_script(project, source)
+    config_values = AiSettingsService.get_effective_provider_config()
+    provider = config_values["provider"]
+    if provider not in {"deepseek", "openai"}:
+        return "⚠ 请在设置中选择并配置 DeepSeek 或 OpenAI"
+    adapter = create_character_extraction_adapter(
+        provider,
+        api_key=config_values["api_key"],
+        model=config_values["model"],
+        base_url=config_values["base_url"],
+        timeout=config_values["timeout"],
+    )
+    result = CharacterExtractionService(
+        adapter,
+        CharacterExtractionCheckpointRepository(
+            project / "runtime/character_extraction"
+        ),
+        CharacterCandidatesRepository(project),
+    ).extract(source, script)
+    return (
+        f"✅ 完成章节 {result.completed_chapters}，失败 "
+        f"{result.failed_chapters}，候选角色 {len(result.candidates.candidates)}"
     )
 
 
@@ -170,6 +230,18 @@ def route_v4_speakers(project_name: str):
         adapter,
         RoutingCheckpointRepository(project / "runtime/runtime.db"),
     ).route(source, script, speakers)
+    candidate_repository = CharacterCandidatesRepository(project)
+    current_candidates = candidate_repository.load(script.source_sha256)
+    merged_candidates = merge_character_candidates(
+        current_candidates.candidates, result.candidates
+    )
+    if merged_candidates != current_candidates.candidates:
+        updated_candidates = CharacterCandidatesDocument(
+            source_sha256=script.source_sha256,
+            candidates=merged_candidates,
+            revision=current_candidates.revision + 1,
+        )
+        candidate_repository.save(updated_candidates)
     if result.script.revision != script.revision:
         ProjectV4Repository(_root()).save_script_and_speakers(
             project, source, result.script, result.speakers
@@ -177,7 +249,56 @@ def route_v4_speakers(project_name: str):
     return (
         f"✅ 完成批次 {result.completed_batches}，失败 "
         f"{result.failed_batches}，待确认 {result.unresolved_segments}"
+        f"，候选 {len(result.candidates)}"
     )
+
+
+def confirm_v4_candidate(
+    project_name: str,
+    candidate_id: str,
+    target_speaker_id: str = "",
+):
+    if not project_name or not candidate_id:
+        return "⚠ 请选择候选角色"
+    project = _root() / project_name
+    source = (project / "source/source.txt").read_text(encoding="utf-8")
+    script = _load_script(project, source)
+    speakers = _load_speakers(project)
+    repository = CharacterCandidatesRepository(project)
+    candidates = repository.load(script.source_sha256)
+    updated_script, updated_speakers, updated_candidates = CharacterCandidateReviewService.confirm(
+        script,
+        speakers,
+        candidates,
+        candidate_id=candidate_id,
+        target_speaker_id=target_speaker_id or None,
+    )
+    ProjectV4Repository(_root()).save_script_and_speakers(
+        project, source, updated_script, updated_speakers
+    )
+    repository.save(updated_candidates)
+    return "✅ 候选角色已确认并写入正式角色表"
+
+
+def merge_v4_candidate(project_name: str, candidate_id: str, target_speaker_id: str):
+    if not target_speaker_id:
+        return "⚠ 请选择要合并到的已有角色"
+    return confirm_v4_candidate(project_name, candidate_id, target_speaker_id)
+
+
+def reject_v4_candidate(project_name: str, candidate_id: str):
+    if not project_name or not candidate_id:
+        return "⚠ 请选择候选角色"
+    project = _root() / project_name
+    source = (project / "source/source.txt").read_text(encoding="utf-8")
+    script = _load_script(project, source)
+    repository = CharacterCandidatesRepository(project)
+    candidates = repository.load(script.source_sha256)
+    updated = CharacterCandidateReviewService.reject(
+        candidates, candidate_id=candidate_id
+    )
+    repository.save(updated)
+    return "✅ 候选角色已拒绝，不会进入正式角色表"
 
 
 def stop_v4_routing(project_name: str):
@@ -263,11 +384,13 @@ def open_v4_role_project(project_name: str):
         return (
             "请选择 v4 项目", [], gr.update(choices=[]), gr.update(choices=[]),
             gr.update(choices=[]), gr.update(choices=[]), gr.update(choices=[]),
+            [], gr.update(choices=[]), gr.update(choices=[]),
         )
     project = _root() / project_name
     source = (project / "source/source.txt").read_text(encoding="utf-8")
     script = _load_script(project, source)
     speakers = _load_speakers(project)
+    candidates = _load_candidates(project, script.source_sha256)
     unresolved = SpeakerReviewService.unresolved_rows(source, script)
     review_rows = [
         [item["segment_id"], item["chapter_id"], item["text"]]
@@ -275,6 +398,16 @@ def open_v4_role_project(project_name: str):
     ]
     speaker_choices = [
         (item.display_name, item.speaker_id) for item in speakers.speakers
+    ]
+    candidate_choices = [
+        (item.display_name, item.candidate_id)
+        for item in candidates.candidates
+        if item.status == "candidate"
+    ]
+    merge_target_choices = [
+        (item.display_name, item.speaker_id)
+        for item in speakers.speakers
+        if item.speaker_type == "character" and item.status == "confirmed"
     ]
     summary = (
         f"**{project_name}** · {len(script.chapters)} 章 · "
@@ -289,6 +422,9 @@ def open_v4_role_project(project_name: str):
         gr.update(choices=speaker_choices, value=None),
         gr.update(choices=speaker_choices, value=None),
         gr.update(choices=speaker_choices, value=None),
+        candidate_rows(candidates),
+        gr.update(choices=candidate_choices, value=None),
+        gr.update(choices=merge_target_choices, value=None),
     )
 
 
@@ -522,6 +658,13 @@ def _load_speakers(project: Path) -> SpeakersDocument:
     return SpeakersDocument.from_dict(
         json.loads((project / "script/speakers.json").read_text(encoding="utf-8"))
     )
+
+
+def _load_candidates(
+    project: Path,
+    source_text_or_sha: str,
+) -> CharacterCandidatesDocument:
+    return CharacterCandidatesRepository(project).load(source_text_or_sha)
 
 
 def _queue_rows(project: Path) -> list[list]:

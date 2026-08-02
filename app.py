@@ -639,6 +639,13 @@ def _v4_role_config_title(ss, speaker_id):
 
 def _wire_v4_role_controls(page: dict) -> None:
     """Wire one advanced-role panel, whether embedded or debug-only."""
+    outputs = [
+        page["summary"], page["unresolved_table"], page["assign_speaker"],
+        page["merge_source"], page["merge_target"], page["lock_speaker"],
+        page["alias_speaker"], page["candidates_table"], page["candidate"],
+        page["candidate_target"],
+    ]
+
     page["refresh"].click(
         lambda: gr.update(choices=v4_ui.scan_v4_projects()),
         None,
@@ -647,11 +654,18 @@ def _wire_v4_role_controls(page: dict) -> None:
     page["open"].click(
         v4_ui.open_v4_role_project,
         [page["project"]],
-        [
-            page["summary"], page["unresolved_table"], page["assign_speaker"],
-            page["merge_source"], page["merge_target"], page["lock_speaker"],
-            page["alias_speaker"],
-        ],
+        outputs,
+    )
+    page["extract_btn"].click(
+        v4_ui.extract_v4_characters,
+        [page["project"]],
+        [page["route_msg"]],
+        concurrency_limit=1,
+        concurrency_id="v4-character-extraction",
+    ).then(
+        v4_ui.open_v4_role_project,
+        [page["project"]],
+        outputs,
     )
     page["route_btn"].click(
         v4_ui.route_v4_speakers,
@@ -662,11 +676,7 @@ def _wire_v4_role_controls(page: dict) -> None:
     ).then(
         v4_ui.open_v4_role_project,
         [page["project"]],
-        [
-            page["summary"], page["unresolved_table"], page["assign_speaker"],
-            page["merge_source"], page["merge_target"], page["lock_speaker"],
-            page["alias_speaker"],
-        ],
+        outputs,
     )
     page["assign_btn"].click(
         v4_ui.assign_v4_speaker,
@@ -678,11 +688,7 @@ def _wire_v4_role_controls(page: dict) -> None:
     ).then(
         v4_ui.open_v4_role_project,
         [page["project"]],
-        [
-            page["summary"], page["unresolved_table"], page["assign_speaker"],
-            page["merge_source"], page["merge_target"], page["lock_speaker"],
-            page["alias_speaker"],
-        ],
+        outputs,
     )
     page["merge_btn"].click(
         v4_ui.merge_v4_speakers,
@@ -691,11 +697,7 @@ def _wire_v4_role_controls(page: dict) -> None:
     ).then(
         v4_ui.open_v4_role_project,
         [page["project"]],
-        [
-            page["summary"], page["unresolved_table"], page["assign_speaker"],
-            page["merge_source"], page["merge_target"], page["lock_speaker"],
-            page["alias_speaker"],
-        ],
+        outputs,
     )
     page["lock_btn"].click(
         v4_ui.set_v4_speaker_lock,
@@ -704,11 +706,7 @@ def _wire_v4_role_controls(page: dict) -> None:
     ).then(
         v4_ui.open_v4_role_project,
         [page["project"]],
-        [
-            page["summary"], page["unresolved_table"], page["assign_speaker"],
-            page["merge_source"], page["merge_target"], page["lock_speaker"],
-            page["alias_speaker"],
-        ],
+        outputs,
     )
     page["alias_btn"].click(
         v4_ui.set_v4_speaker_alias,
@@ -717,11 +715,34 @@ def _wire_v4_role_controls(page: dict) -> None:
     ).then(
         v4_ui.open_v4_role_project,
         [page["project"]],
-        [
-            page["summary"], page["unresolved_table"], page["assign_speaker"],
-            page["merge_source"], page["merge_target"], page["lock_speaker"],
-            page["alias_speaker"],
-        ],
+        outputs,
+    )
+    page["confirm_candidate"].click(
+        v4_ui.confirm_v4_candidate,
+        [page["project"], page["candidate"]],
+        [page["candidate_msg"]],
+    ).then(
+        v4_ui.open_v4_role_project,
+        [page["project"]],
+        outputs,
+    )
+    page["reject_candidate"].click(
+        v4_ui.reject_v4_candidate,
+        [page["project"], page["candidate"]],
+        [page["candidate_msg"]],
+    ).then(
+        v4_ui.open_v4_role_project,
+        [page["project"]],
+        outputs,
+    )
+    page["merge_candidate"].click(
+        v4_ui.merge_v4_candidate,
+        [page["project"], page["candidate"], page["candidate_target"]],
+        [page["candidate_msg"]],
+    ).then(
+        v4_ui.open_v4_role_project,
+        [page["project"]],
+        outputs,
     )
 
 
@@ -2553,6 +2574,35 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             v4_profile,
             v4_queue["summary"],
             v4_chapter,
+            v4_review["candidates_table"],
+            v4_review["candidate"],
+            v4_review["candidate_target"],
+        ],
+    )
+    v4_review["extract"].click(
+        v4_ui.extract_v4_characters,
+        [v4_project],
+        [v4_review["extract_status"]],
+        concurrency_limit=1,
+        concurrency_id="v4-character-extraction",
+    ).then(
+        v4_ui.open_v4_project,
+        [v4_project],
+        [
+            v4_summary,
+            v4_review["table"],
+            v4_review["speaker"],
+            v4_voice_speaker,
+            v4_review["merge_source"],
+            v4_review["merge_target"],
+            v4_plan["table"],
+            v4_queue["table"],
+            v4_profile,
+            v4_queue["summary"],
+            v4_chapter,
+            v4_review["candidates_table"],
+            v4_review["candidate"],
+            v4_review["candidate_target"],
         ],
     )
     v4_review["route"].click(
@@ -2576,6 +2626,9 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             v4_profile,
             v4_queue["summary"],
             v4_chapter,
+            v4_review["candidates_table"],
+            v4_review["candidate"],
+            v4_review["candidate_target"],
         ],
     )
     v4_review["stop_route"].click(
@@ -2608,6 +2661,81 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             v4_profile,
             v4_queue["summary"],
             v4_chapter,
+            v4_review["candidates_table"],
+            v4_review["candidate"],
+            v4_review["candidate_target"],
+        ],
+    )
+    v4_review["confirm_candidate"].click(
+        v4_ui.confirm_v4_candidate,
+        [v4_project, v4_review["candidate"]],
+        [v4_review["candidate_status"]],
+    ).then(
+        v4_ui.open_v4_project,
+        [v4_project],
+        [
+            v4_summary,
+            v4_review["table"],
+            v4_review["speaker"],
+            v4_voice_speaker,
+            v4_review["merge_source"],
+            v4_review["merge_target"],
+            v4_plan["table"],
+            v4_queue["table"],
+            v4_profile,
+            v4_queue["summary"],
+            v4_chapter,
+            v4_review["candidates_table"],
+            v4_review["candidate"],
+            v4_review["candidate_target"],
+        ],
+    )
+    v4_review["reject_candidate"].click(
+        v4_ui.reject_v4_candidate,
+        [v4_project, v4_review["candidate"]],
+        [v4_review["candidate_status"]],
+    ).then(
+        v4_ui.open_v4_project,
+        [v4_project],
+        [
+            v4_summary,
+            v4_review["table"],
+            v4_review["speaker"],
+            v4_voice_speaker,
+            v4_review["merge_source"],
+            v4_review["merge_target"],
+            v4_plan["table"],
+            v4_queue["table"],
+            v4_profile,
+            v4_queue["summary"],
+            v4_chapter,
+            v4_review["candidates_table"],
+            v4_review["candidate"],
+            v4_review["candidate_target"],
+        ],
+    )
+    v4_review["merge_candidate"].click(
+        v4_ui.merge_v4_candidate,
+        [v4_project, v4_review["candidate"], v4_review["candidate_target"]],
+        [v4_review["candidate_status"]],
+    ).then(
+        v4_ui.open_v4_project,
+        [v4_project],
+        [
+            v4_summary,
+            v4_review["table"],
+            v4_review["speaker"],
+            v4_voice_speaker,
+            v4_review["merge_source"],
+            v4_review["merge_target"],
+            v4_plan["table"],
+            v4_queue["table"],
+            v4_profile,
+            v4_queue["summary"],
+            v4_chapter,
+            v4_review["candidates_table"],
+            v4_review["candidate"],
+            v4_review["candidate_target"],
         ],
     )
     v4_review["merge"].click(

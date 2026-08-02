@@ -34,7 +34,8 @@
                 "speaker_id": {"type": ["string", "null"]},
                 "speaker_source": {"enum": ["rule", "router", "manual", "unresolved"]},
                 "status": {"enum": ["confirmed", "unresolved"]},
-                "text_override": {"type": ["string", "null"]}
+                "text_override": {"type": ["string", "null"]},
+                "dialogue_type": {"enum": ["narration", "dialogue", "suspected_dialogue", "quotation"]}
               }
             }
           }

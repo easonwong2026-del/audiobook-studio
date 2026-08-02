@@ -210,6 +210,8 @@ class V3ToV4MigrationService:
                         speaker_id,
                         "manual",
                         "confirmed",
+                        None,
+                        "narration" if speaker_id == "narrator" else "dialogue",
                     )
                 )
                 override = V3ToV4MigrationService._performance_override(raw_segment)

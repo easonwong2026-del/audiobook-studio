@@ -35,8 +35,32 @@ def create_v4_role_page(
                 label="待确认片段（unresolved）",
             )
             with gr.Row():
+                v4r_extract_btn = gr.Button("分析角色候选", variant="primary", size="sm")
                 v4r_route_btn = gr.Button("🤖 AI 自动识别角色", variant="primary", size="sm")
                 v4r_route_msg = gr.Markdown("")
+
+        with gr.Accordion("② 候选角色确认", open=True):
+            gr.Markdown("AI 候选不会自动创建正式角色；确认前请查看原文证据。")
+            v4r_candidates_table = gr.Dataframe(
+                headers=[
+                    "candidate_id", "候选名称", "可能别名", "置信度",
+                    "原文证据", "章节", "来源", "状态",
+                ],
+                datatype=["str"] * 8,
+                row_count=(0, "dynamic"),
+                interactive=False,
+                wrap=True,
+            )
+            with gr.Row():
+                v4r_candidate = gr.Dropdown(label="选择候选角色", choices=[], scale=1)
+                v4r_candidate_target = gr.Dropdown(
+                    label="合并到已有角色", choices=[], scale=1
+                )
+            with gr.Row():
+                v4r_confirm_candidate = gr.Button("确认成为正式角色", variant="primary", size="sm")
+                v4r_reject_candidate = gr.Button("拒绝候选", size="sm")
+                v4r_merge_candidate = gr.Button("合并到已有角色", size="sm")
+                v4r_candidate_msg = gr.Markdown("")
 
         with gr.Accordion("② 人工指派片段", open=False):
             with gr.Row():
@@ -55,12 +79,11 @@ def create_v4_role_page(
                 v4r_assign_btn = gr.Button("指派片段", variant="secondary", size="sm")
                 v4r_assign_msg = gr.Markdown("")
 
-        with gr.Accordion("③ 合并角色", open=False):
-            with gr.Row():
-                v4r_merge_source = gr.Dropdown(label="合并来源角色", choices=[], scale=1)
-                v4r_merge_target = gr.Dropdown(label="合并到角色", choices=[], scale=1)
-                v4r_merge_btn = gr.Button("合并角色", variant="secondary", size="sm")
-                v4r_merge_msg = gr.Markdown("")
+        with gr.Accordion("③ 合并角色", open=False), gr.Row():
+            v4r_merge_source = gr.Dropdown(label="合并来源角色", choices=[], scale=1)
+            v4r_merge_target = gr.Dropdown(label="合并到角色", choices=[], scale=1)
+            v4r_merge_btn = gr.Button("合并角色", variant="secondary", size="sm")
+            v4r_merge_msg = gr.Markdown("")
 
         with gr.Accordion("④ 锁定 / 别名", open=False):
             with gr.Row():
@@ -81,7 +104,15 @@ def create_v4_role_page(
         "summary": v4r_summary,
         "unresolved_table": v4r_unresolved_table,
         "route_btn": v4r_route_btn,
+        "extract_btn": v4r_extract_btn,
         "route_msg": v4r_route_msg,
+        "candidates_table": v4r_candidates_table,
+        "candidate": v4r_candidate,
+        "candidate_target": v4r_candidate_target,
+        "confirm_candidate": v4r_confirm_candidate,
+        "reject_candidate": v4r_reject_candidate,
+        "merge_candidate": v4r_merge_candidate,
+        "candidate_msg": v4r_candidate_msg,
         "assign_segs": v4r_assign_segs,
         "assign_speaker": v4r_assign_speaker,
         "assign_new": v4r_assign_new,

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "audiobook-character-candidates-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "source_sha256", "revision", "candidates"],
+  "properties": {
+    "schema_version": {"const": "audiobook-character-candidates-v1"},
+    "source_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "revision": {"type": "integer", "minimum": 1},
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["candidate_id", "display_name", "aliases", "confidence", "evidence", "source", "status"],
+        "properties": {
+          "candidate_id": {"type": "string", "minLength": 1},
+          "display_name": {"type": "string", "minLength": 1},
+          "aliases": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["chapter_id", "text"],
+              "properties": {
+                "chapter_id": {"type": "string", "minLength": 1},
+                "text": {"type": "string", "minLength": 1}
+              }
+            }
+          },
+          "source": {"enum": ["rule", "ai", "manual"]},
+          "status": {"enum": ["candidate", "confirmed", "rejected"]}
+        }
+      }
+    }
+  }
+}

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from domain.v4 import (
+    CharacterCandidatesDocument,
     ProjectManifest,
     ScriptDocument,
     SourceMetadata,
@@ -28,6 +29,7 @@ _DIRECTORIES = (
     "script",
     "production",
     "runtime/benchmarks",
+    "runtime/character_extraction",
     "audio/chunks",
     "audio/chapters",
     "audio/previews",
@@ -76,6 +78,10 @@ class ProjectV4Repository:
             )
             atomic_write_json(temporary / "script/script.json", script.to_dict())
             atomic_write_json(temporary / "script/speakers.json", speakers.to_dict())
+            atomic_write_json(
+                temporary / "script/character_candidates.json",
+                CharacterCandidatesDocument.empty(source_text).to_dict(),
+            )
             if tts_profile is not None:
                 ProductionRepository(temporary).initialize(tts_profile)
             RuntimeRepository(temporary / "runtime/runtime.db").initialize()

@@ -15,7 +15,7 @@ from repositories.runtime_repository import RuntimeRepository
 class RoutingBatch:
     batch_id: str
     segment_ids: list[str]
-    assignments: list[dict[str, str | None]]
+    assignments: list[dict[str, Any]]
     status: str
     attempts: int
 
@@ -106,7 +106,7 @@ class RoutingCheckpointRepository:
         )
 
     def mark_completed(
-        self, batch_id: str, assignments: list[dict[str, str | None]]
+        self, batch_id: str, assignments: list[dict[str, Any]]
     ) -> None:
         with sqlite3.connect(self.path) as connection:
             connection.execute("BEGIN IMMEDIATE")

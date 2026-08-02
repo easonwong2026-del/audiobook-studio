@@ -42,6 +42,41 @@ def test_unknown_dialogue_does_not_block_creation():
     assert dialogue.speaker_id is None
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "所谓“命运”，不过是自己的选择。",
+        "他低声说：“我们走吧。”",
+        "门外传来一个声音：“有人吗？”",
+        "年轻人连声道谢：“谢谢。”",
+        "系统提示：“操作已完成。”",
+    ],
+)
+def test_ambiguous_quotes_never_create_formal_speakers(text):
+    result, segments = _segments(text)
+    names = {item.display_name for item in result.speakers.speakers}
+    assert names == {"旁白"}
+    dialogue = next(item for item in segments if item.kind == "dialogue")
+    assert dialogue.status == "unresolved"
+    assert dialogue.speaker_id is None
+    assert dialogue.dialogue_type in {"suspected_dialogue", "quotation"}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "林晚说道：“我们走吧。”",
+        "“我不同意。”顾川回答。",
+    ],
+)
+def test_high_confidence_dialogue_keeps_named_rule_speaker(text):
+    _result, segments = _segments(text)
+    dialogue = next(item for item in segments if item.kind == "dialogue")
+    assert dialogue.status == "confirmed"
+    assert dialogue.dialogue_type == "dialogue"
+    assert dialogue.speaker_id != "narrator"
+
+
 def test_multiple_and_continuous_dialogue_are_separate():
     text = "“甲。”“乙。”旁白。“丙。”"
     _, segments = _segments(text)

@@ -16,7 +16,19 @@ def test_project_creation_is_local_and_allows_unresolved(tmp_path):
     assert (result.project_path / "project.json").is_file()
     assert (result.project_path / "production/voices.json").is_file()
     assert (result.project_path / "production/tts_profile.json").is_file()
+    assert (result.project_path / "script/character_candidates.json").is_file()
     manifest = ProjectV4Repository(projects).load_manifest(result.project_path)
     assert (manifest.title, manifest.author) == ("作品名", "作者")
     assert not any(path.name.startswith(".tmp_v4_") for path in projects.iterdir())
     assert isinstance(result.project_path, Path)
+
+
+def test_legacy_project_without_candidates_loads_as_empty(tmp_path):
+    from repositories.character_candidates_repository import (
+        CharacterCandidatesRepository,
+    )
+
+    source = "旧项目文本。"
+    repository = CharacterCandidatesRepository(tmp_path)
+    document = repository.load(source)
+    assert document.candidates == []

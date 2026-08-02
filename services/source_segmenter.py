@@ -12,7 +12,10 @@ from domain.v4 import (
     SpeakersDocument,
 )
 from domain.v4.models import source_sha256, stable_speaker_id
-from services.speaker_normalization import normalize_speaker_name
+from services.speaker_normalization import (
+    is_likely_character_name,
+    normalize_speaker_name,
+)
 
 _CHAPTER_RE = re.compile(
     r"(?m)^(?:第[零〇一二三四五六七八九十百千万两\d]+[章节回卷部篇]|"
@@ -21,14 +24,18 @@ _CHAPTER_RE = re.compile(
 )
 _QUOTE_PAIRS = {"“": "”", "「": "」", "『": "』", '"': '"'}
 _SPEAKER_BEFORE_RE = re.compile(
-    r"([\w\u3400-\u9fff·]{1,8}?)(?:说道|问道|答道|说|问|答|喊|(?<![名作做])叫|道)"
+    r"([\w\u3400-\u9fff·]{1,8}?)(?:说道|问道|答道|回答|说|问|答|喊|(?<![名作做])叫|道)"
     r"[：:，,\s]*$"
 )
 _SPEAKER_AFTER_RE = re.compile(
     r"^\s*[，,。.!！?？]?\s*([\w\u3400-\u9fff·]{1,8}?)"
-    r"(?:说道|问道|答道|说|问|答|喊|(?<![名作做])叫|道)(?=[：:，,。])"
+    r"(?:说道|问道|答道|回答|说|问|答|喊|(?<![名作做])叫|道)(?=[：:，,。]|$)"
 )
 _PRONOUNS = {"他", "她", "它", "他们", "她们", "它们", "我", "你", "我们", "你们"}
+_DIALOGUE_CUES = (
+    "说道", "问道", "答道", "回答", "说", "问", "答", "喊", "叫", "道",
+    "传来", "提示", "声音",
+)
 
 # 题名页行的判定上限：书名 / 作者等短行（无句末标点、无引号）视为题名页
 _TITLE_LINE_MAX = 24
@@ -55,7 +62,7 @@ class SourceSegmenter:
         ):
             chapter_id = f"chapter_{chapter_index:04d}"
             segments: list[SemanticSegment] = []
-            for item_start, item_end, kind, speaker_name in self._scan(
+            for item_start, item_end, kind, speaker_name, dialogue_type in self._scan(
                 source_text, start, end, skip_ranges
             ):
                 if not source_text[item_start:item_end].strip():
@@ -65,6 +72,7 @@ class SourceSegmenter:
                     speaker_id = "narrator"
                     speaker_source = "rule"
                     status = "confirmed"
+                    dialogue_type = "narration"
                 elif speaker_name:
                     speaker_id = stable_speaker_id(speaker_name)
                     speaker_source = "rule"
@@ -92,6 +100,7 @@ class SourceSegmenter:
                         speaker_id=speaker_id,
                         speaker_source=speaker_source,
                         status=status,
+                        dialogue_type=dialogue_type,
                     )
                 )
                 sequence += 1
@@ -185,8 +194,8 @@ class SourceSegmenter:
         start: int,
         end: int,
         skip_ranges: list[tuple[int, int]] | tuple[tuple[int, int], ...] = (),
-    ) -> list[tuple[int, int, str, str | None]]:
-        items: list[tuple[int, int, str, str | None]] = []
+    ) -> list[tuple[int, int, str, str | None, str]]:
+        items: list[tuple[int, int, str, str | None, str]] = []
         cursor = start
         index = start
         skip = _clip_ranges(skip_ranges, start, end)
@@ -199,7 +208,7 @@ class SourceSegmenter:
             close = self._find_close(text, index + 1, end, opener, closer)
             if cursor < index:
                 items.extend(
-                    (na, nb, "narration", None)
+                    (na, nb, "narration", None, "narration")
                     for na, nb in _narration_ranges(cursor, index, skip)
                 )
             quote_end = close + 1 if close is not None else end
@@ -209,12 +218,21 @@ class SourceSegmenter:
             if not name and close is not None:
                 name = self._speaker_after(text, quote_end, end)
                 name = normalize_speaker_name(name) or None
-            items.append((index, quote_end, "dialogue", name))
+            dialogue_type = (
+                "dialogue"
+                if name
+                else (
+                    "suspected_dialogue"
+                    if self._has_dialogue_cue(text, start, index, quote_end, end)
+                    else "quotation"
+                )
+            )
+            items.append((index, quote_end, "dialogue", name, dialogue_type))
             cursor = quote_end
             index = quote_end
         if cursor < end:
             items.extend(
-                (na, nb, "narration", None)
+                (na, nb, "narration", None, "narration")
                 for na, nb in _narration_ranges(cursor, end, skip)
             )
         return items
@@ -238,14 +256,32 @@ class SourceSegmenter:
         context = text[max(chapter_start, quote_start - 64):quote_start]
         match = _SPEAKER_BEFORE_RE.search(context)
         name = match.group(1) if match else None
-        return None if name in _PRONOUNS else name
+        if name in _PRONOUNS:
+            return None
+        cleaned = normalize_speaker_name(name) if name else ""
+        return cleaned if cleaned and is_likely_character_name(cleaned) else None
 
     @staticmethod
     def _speaker_after(text: str, quote_end: int, chapter_end: int) -> str | None:
         context = text[quote_end:min(chapter_end, quote_end + 64)]
         match = _SPEAKER_AFTER_RE.search(context)
         name = match.group(1) if match else None
-        return None if name in _PRONOUNS else name
+        if name in _PRONOUNS:
+            return None
+        cleaned = normalize_speaker_name(name) if name else ""
+        return cleaned if cleaned and is_likely_character_name(cleaned) else None
+
+    @staticmethod
+    def _has_dialogue_cue(
+        text: str,
+        chapter_start: int,
+        quote_start: int,
+        quote_end: int,
+        chapter_end: int,
+    ) -> bool:
+        before = text[max(chapter_start, quote_start - 32):quote_start]
+        after = text[quote_end:min(chapter_end, quote_end + 32)]
+        return any(cue in before or cue in after for cue in _DIALOGUE_CUES)
 
 
 def _clip_ranges(

@@ -10,6 +10,10 @@ def test_phase2_review_page_is_isolated_and_has_required_controls():
     assert "新建角色" in source
     assert "锁定角色" in source
     assert "应用到选中片段" in source
+    assert "候选角色" in source
+    assert "确认成为正式角色" in source
+    assert "拒绝候选" in source
+    assert "合并到已有角色" in source
     assert "create_v4_speaker_review_page" not in (
         root / "app.py"
     ).read_text(encoding="utf-8")

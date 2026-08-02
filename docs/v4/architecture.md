@@ -15,7 +15,8 @@
 Source import
   -> immutable source/source.txt + source.meta.json
   -> deterministic semantic segmentation
-  -> script/script.json + speakers.json
+  -> script/script.json + speakers.json + character_candidates.json
+  -> chapter character extraction + candidate review
   -> speaker router (Phase 2)
   -> synthesis planner (Phase 3)
   -> TTS adapter and runtime tasks (Phase 4)
@@ -32,11 +33,13 @@ source/source.txt
 source/source.meta.json
 script/script.json
 script/speakers.json
+script/character_candidates.json
 production/voices.json
 production/performance.json
 production/pronunciation.json
 production/tts_profile.json
 runtime/runtime.db
+runtime/character_extraction/checkpoints.json
 runtime/benchmarks/
 audio/chunks/
 audio/chapters/
@@ -45,11 +48,12 @@ output/
 revisions/
 ```
 
-Phase 1 只创建核心文件、运行时数据库和空目录。后续生产文件由相应阶段创建。
+项目创建同时写入空的候选文件；后续角色分析和生产文件由相应阶段创建。
 
 ## 接口边界
 
-- `SpeakerRouter` 输入脚本与说话人目录，输出 `speaker-routing-v1`；协议只含片段 ID 与 speaker ID。
+- `CharacterExtractor` 按章节输出严格的 `character-extraction-v1` 候选协议；候选包含置信度和原文证据，不直接创建 Speaker。
+- `SpeakerRouter` 输入脚本与已确认说话人目录，输出 `speaker-routing-v2`；协议优先使用受限的 `speaker_id`，新人物只能返回候选名或 null。
 - `TtsAdapter` 输入已规划任务和 TTS profile，输出音频结果；不读取 UI 状态。
 - Phase 1 仅提供 Protocol 和 fake 实现测试边界，不连接远端服务。
 
@@ -106,7 +110,7 @@ Phase 1 只冻结这份 contract；局部失效执行器和测试在 Phase 3。
 
 ## 角色路由协议
 
-`speaker-routing-v1` 只允许 `{segment_id, speaker_id|null}`。adapter 必须拒绝未知或重复 segment ID、未知 speaker ID，忽略缺失 assignment，且不得覆盖 `speaker_source=manual` 或已锁定 speaker。请求可携带必要上下文，但 checkpoint 和错误日志不得复制整本书。
+`speaker-routing-v2` 的请求显式提供 `allowed_speakers[{speaker_id,name,aliases}]`。响应使用 `{segment_id,speaker_id,candidate_name,confidence}`；未知/重复 segment ID、未知 speaker ID、额外字段或非法置信度使批次失败。`speaker_id=null` 与低置信度均保持 unresolved；候选名只能写入候选区，不能直接创建 Speaker。请求可携带必要上下文，但 checkpoint 和错误日志不得复制整本书。
 
 ## TTS 规划、缓存和装配 contract
 

@@ -12,6 +12,8 @@
 """
 from __future__ import annotations
 
+import re
+
 # 多字修饰后缀（动作 / 情绪 / 语气 / 叙述状语，长的优先匹配）
 _MULTI_SUFFIXES = (
     "自言自语",
@@ -41,7 +43,17 @@ _INVALID_NAMES = {
     "旁白", "叙述", "作者", "声音", "内心", "画外音", "路人", "群众", "众人",
     "年轻人", "中年人", "老年人", "老人", "女人", "男人", "小孩", "孩子",
     "路人甲", "某人", "顾客", "店员", "老板", "老板娘", "男子", "女子",
+    "轻声", "缓缓", "脸色阴沉", "门外", "系统提示", "第一章", "项目名称",
 }
+
+# 这些词让一个字符串更像叙述短语而不是稳定人物称呼。规则只使用
+# 结构过滤，不把不断扩大的黑名单当作角色识别器。
+_NAME_PARTICLES = {
+    "的", "地", "得", "在", "从", "向", "传来", "正在", "已经", "将", "把", "被",
+    "和", "与", "或", "声音", "提示", "项目", "名称",
+}
+_NAME_CHARS_RE = re.compile(r"^[A-Za-z\u3400-\u9fff·]+$")
+_CHAPTER_NAME_RE = re.compile(r"^第[零〇一二三四五六七八九十百千万两\d]+章$")
 
 # 单字动词 / 助词残留（「名叫」→「名」）
 _SINGLE_NOISE = {
@@ -79,7 +91,30 @@ def normalize_speaker_name(name: str) -> str:
         return ""
     if len(text) == 1 and text in _SINGLE_NOISE:
         return ""
+    if not is_likely_character_name(text):
+        return ""
     return text
+
+
+def is_likely_character_name(name: str) -> bool:
+    """Return whether a cleaned value has the shape of a stable character name.
+
+    This deliberately stays structural: names must be a short word-like token,
+    not a sentence fragment, chapter label, field name, or generic descriptor.
+    """
+    text = (name or "").strip()
+    if not text or len(text) > _MAX_NAME_LENGTH:
+        return False
+    if text in _INVALID_NAMES or _CHAPTER_NAME_RE.fullmatch(text):
+        return False
+    if not _NAME_CHARS_RE.fullmatch(text):
+        return False
+    if text in _NAME_PARTICLES:
+        return False
+    return not any(
+        text.endswith(token)
+        for token in ("的", "地", "得", "在", "从", "向", "将", "把", "被", "和", "与", "或")
+    )
 
 
 def _strip_modifier(text: str) -> str:

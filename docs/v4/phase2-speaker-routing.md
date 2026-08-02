@@ -8,8 +8,8 @@
 SourceSegmenter 规则确认
   → unresolved dialogue
   → bounded context + segment IDs
-  → DeepSeek/OpenAI speaker-routing adapter
-  → strict speaker-routing-v1 validation
+  → DeepSeek/OpenAI speaker-routing-v2 adapter
+  → strict allowed-speaker validation
   → checkpoint
   → local speaker ID mapping
   → review/lock
@@ -17,23 +17,35 @@ SourceSegmenter 规则确认
 
 ## 协议
 
-响应只允许：
+请求先提供正式角色和别名白名单，响应只允许：
 
 ```json
 {
-  "schema_version": "speaker-routing-v1",
+  "schema_version": "speaker-routing-v2",
   "assignments": [
-    {"segment_id": "segment_000002", "speaker": "林晚"},
-    {"segment_id": "segment_000005", "speaker": null}
+    {
+      "segment_id": "segment_000002",
+      "speaker_id": "speaker_xxx",
+      "candidate_name": null,
+      "confidence": 0.93
+    },
+    {
+      "segment_id": "segment_000005",
+      "speaker_id": null,
+      "candidate_name": "新人物",
+      "confidence": 0.42
+    }
   ]
 }
 ```
 
 - 未知、重复 segment ID 或额外字段使当前批次失败。
-- 缺失 assignment 与 `speaker: null` 均保留 unresolved，不使全书失败。
+- 缺失 assignment、`speaker_id: null` 与低置信度均保留 unresolved，不使全书失败。
 - adapter 只收到当前批次 ID 和有限上下文。
 - 已 confirmed/manual 的片段不会进入远程批次。
-- 本地按显示名和 aliases 查找 speaker；新名字映射为稳定 speaker ID。
+- `speaker_id` 必须属于请求白名单；新名字只能进入 `character_candidates.json`，不得映射为正式 speaker ID。
+
+角色候选使用独立的 `character-extraction-v1` 协议逐章提取，再按同名和明确别名合并；每个候选至少保留一条原文证据，人工确认后才写入 `speakers.json`。
 
 ## 检查点
 

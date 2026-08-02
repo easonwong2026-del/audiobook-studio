@@ -1,6 +1,12 @@
 from domain.v4 import ProjectManifest, SourceMetadata
+from domain.v4.character_extraction import (
+    CharacterCandidate,
+    CharacterCandidatesDocument,
+    CharacterEvidence,
+)
 from domain.v4.models import source_sha256
 from repositories.project_v4_repository import ProjectV4Repository
+from services.character_candidate_service import CharacterCandidateReviewService
 from services.source_segmenter import SourceSegmenter
 from services.speaker_review_service import SpeakerReviewService
 
@@ -84,3 +90,48 @@ def test_review_persistence_creates_pre_edit_snapshot(tmp_path):
     assert '"revision": 2' in (
         project / "script/script.json"
     ).read_text(encoding="utf-8")
+
+
+def test_ai_candidate_requires_explicit_human_confirmation_and_can_merge():
+    text = "林晚推开门。"
+    segmented = SourceSegmenter().segment(text)
+    candidate = CharacterCandidate(
+        candidate_id="candidate_late",
+        display_name="林晚",
+        aliases=["小晚"],
+        confidence=0.92,
+        evidence=[CharacterEvidence("chapter_0001", "林晚推开门。")],
+        source="ai",
+    )
+    candidates = CharacterCandidatesDocument(
+        source_sha256=source_sha256(text), candidates=[candidate]
+    )
+    script, speakers, updated_candidates = CharacterCandidateReviewService.confirm(
+        segmented.script,
+        segmented.speakers,
+        candidates,
+        candidate_id="candidate_late",
+    )
+    assert [item.display_name for item in speakers.speakers] == ["旁白", "林晚"]
+    assert updated_candidates.candidates[0].status == "confirmed"
+    assert script.revision == 2
+
+def test_ai_candidate_can_be_rejected_without_creating_speaker():
+    text = "“待确认。”"
+    segmented = SourceSegmenter().segment(text)
+    candidate = CharacterCandidate(
+        candidate_id="candidate_noise",
+        display_name="系统提示",
+        aliases=[],
+        confidence=0.88,
+        evidence=[CharacterEvidence("chapter_0001", "“待确认。”")],
+        source="ai",
+    )
+    candidates = CharacterCandidatesDocument(
+        source_sha256=source_sha256(text), candidates=[candidate]
+    )
+    updated = CharacterCandidateReviewService.reject(
+        candidates, candidate_id="candidate_noise"
+    )
+    assert updated.candidates[0].status == "rejected"
+    assert len(segmented.speakers.speakers) == 1
