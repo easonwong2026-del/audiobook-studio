@@ -20,7 +20,11 @@ from services.source_segmenter import SourceSegmenter
 
 def test_filesystem_path_preserves_non_windows():
     path = Path("/tmp/test")
-    assert str(v4_atomic._filesystem_path(path)) == "/tmp/test"
+    converted = v4_atomic._filesystem_path(path)
+    if os.name == "nt":
+        assert str(converted).startswith("\\\\?\\")
+    else:
+        assert str(converted) == "/tmp/test"
 
 
 def test_filesystem_path_does_not_double_prefix():
@@ -129,6 +133,45 @@ def test_atomic_project_creation_and_runtime_schema(tmp_path):
     } <= tables
 
 
+def test_runtime_initialize_closes_wal_sidecars_before_project_move(tmp_path):
+    project = tmp_path / "project"
+    runtime = RuntimeRepository(project / "runtime/runtime.db")
+    runtime.initialize()
+    assert runtime.schema_version() == RUNTIME_SCHEMA_VERSION
+    moved = tmp_path / "moved-project"
+    os.replace(project, moved)
+    moved_runtime = RuntimeRepository(moved / "runtime/runtime.db")
+    assert moved_runtime.schema_version() == RUNTIME_SCHEMA_VERSION
+    with sqlite3.connect(moved_runtime.path) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+
+def test_replace_with_retry_handles_windows_sharing_violation(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.write_text("payload", encoding="utf-8")
+    attempts = 0
+
+    def replace(source_path, target_path):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            error = PermissionError(32, "sharing violation")
+            error.winerror = 32
+            raise error
+        target_path.write_bytes(source_path.read_bytes())
+        source_path.unlink()
+
+    monkeypatch.setattr(v4_atomic.os, "name", "nt")
+    monkeypatch.setattr(v4_atomic, "_filesystem_path", lambda path: path)
+    monkeypatch.setattr(v4_atomic.os, "replace", replace)
+    monkeypatch.setattr(v4_atomic.time, "sleep", lambda _delay: None)
+
+    v4_atomic.replace_with_retry(source, target)
+    assert attempts == 3
+    assert target.read_text(encoding="utf-8") == "payload"
+
+
 def test_duplicate_and_windows_style_names_are_rejected(tmp_path):
     manifest, metadata, segmented = _documents()
     repository = ProjectV4Repository(tmp_path)
@@ -194,7 +237,7 @@ def test_runtime_migration_fields_and_interrupted_task_recovery(tmp_path):
             """
         )
         connection.commit()
-    assert {"started_at", "completed_at"} <= task_columns
+    assert {"started_at", "completed_at", "segment_ids_json"} <= task_columns
     assert {
         "file_path", "file_sha256", "duration", "sample_rate", "channels", "valid"
     } <= cache_columns

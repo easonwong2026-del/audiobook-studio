@@ -53,6 +53,7 @@ class SynthesisExecutor:
         profile: TtsProfile,
         *,
         should_cancel: Callable[[], bool] | None = None,
+        should_pause: Callable[[], bool] | None = None,
     ) -> ExecutionSummary:
         if profile.concurrency != 1:
             raise ValueError("GPU synthesis concurrency must remain one")
@@ -66,6 +67,18 @@ class SynthesisExecutor:
             if should_cancel and should_cancel():
                 cancelled = True
                 break
+            # 协作暂停：在任务边界挂起；暂停期间仍响应取消。
+            if should_pause and should_pause():
+                self.runtime.set_run_status("paused")
+                while should_pause():
+                    if should_cancel and should_cancel():
+                        cancelled = True
+                        break
+                    time.sleep(0.5)
+                if cancelled:
+                    break
+                self.runtime.set_run_status("running")
+                continue
             task = self.runtime.claim_next_task()
             if task is None:
                 break

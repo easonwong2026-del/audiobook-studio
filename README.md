@@ -1,4 +1,4 @@
-# 有声书合成工作台 (Audiobook Studio) · v4.0.0
+# 有声书合成工作台 (Audiobook Studio) · v4.1.0
 
 [![Tests](https://github.com/easonwong2026-del/audiobook-studio/actions/workflows/tests.yml/badge.svg)](https://github.com/easonwong2026-del/audiobook-studio/actions/workflows/tests.yml)
 
@@ -13,7 +13,7 @@
 
 | 项 | 说明 |
 |----|------|
-| 当前版本 | **v4.0.0**（source-first 原文、角色路由、计划与运行时解耦） |
+| 当前版本 | **v4.1.0**（source-first 原文、角色路由、计划与运行时解耦） |
 | 产品定位 | **AI 驱动的本地有声书制作工作台** |
 | 是否独立安装软件 | **否** —— 不提供 Windows 安装包，也不内置模型 / Torch / CUDA / FFmpeg / IndexTTS2 本体 |
 | 部署方式 | **轻量工作台源码 + 外部推理环境**（IndexTTS2 仓库及其虚拟环境由用户单独准备） |

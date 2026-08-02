@@ -87,6 +87,23 @@ class AudioCacheRepository:
             connection.commit()
         return path
 
+    def invalidate(self, cache_key: str) -> bool:
+        """使指定缓存条目失效（仅标记，不删物理文件），返回是否有条目被标记。
+
+        用于「重新生成指定 segment」：把对应任务的缓存作废，使其下次必重新合成，
+        且不影响其他缓存条目。
+        """
+        with sqlite3.connect(self.database_path) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE cache_entries SET valid = 0, last_used_at = CURRENT_TIMESTAMP
+                 WHERE cache_key = ? AND valid = 1
+                """,
+                (cache_key,),
+            )
+            connection.commit()
+            return cursor.rowcount > 0
+
     @staticmethod
     def _sha256(path: Path) -> str:
         digest = hashlib.sha256()

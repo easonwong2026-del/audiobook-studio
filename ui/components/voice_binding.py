@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from lib import project_manager as _pm
 
 
@@ -58,10 +60,36 @@ def build_role_management_choices(
     search: str = "",
 ) -> list[tuple[str, str]]:
     """把角色管理行转换为单列 Radio 选项（显示值，实际值）。"""
-    return [
-        (f"{role}\n{description}\n{status}", role)
-        for role, description, status in build_role_management_rows(script, bindings, search)
-    ]
+    current_bindings = bindings or {}
+    choices = []
+    for role, description, status in build_role_management_rows(
+        script, current_bindings, search
+    ):
+        label = f"{role}\n{description}\n{status}"
+        if current_bindings.get(role):
+            label += f"\n音色：{Path(str(current_bindings[role])).name}"
+        choices.append((label, role))
+    return choices
+
+
+def build_v4_role_management_choices(speakers, bindings) -> list[tuple[str, str]]:
+    """Build the shared card labels for V4 speakers using stable speaker IDs."""
+    current_bindings = bindings or {}
+    choices = []
+    for speaker in speakers or []:
+        label = speaker.display_name
+        if speaker.locked:
+            label += " 🔒"
+        if speaker.aliases:
+            label += f"（{'/'.join(speaker.aliases[:3])}）"
+        binding = current_bindings.get(speaker.speaker_id)
+        if binding:
+            voice_id = getattr(binding, "voice_id", binding)
+            label += f"\n✅ 已绑定\n音色：{Path(str(voice_id)).name}"
+        else:
+            label += "\n⚠ 待绑定"
+        choices.append((label, speaker.speaker_id))
+    return choices
 
 
 def format_role_choices(

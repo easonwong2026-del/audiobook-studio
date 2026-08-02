@@ -135,6 +135,26 @@ class ProjectService:
         return dest
 
     @staticmethod
+    def unbind_voice(project: str, role: str) -> bool:
+        """Remove a V3 role binding without deleting the reusable audio asset."""
+        if not project or not role:
+            return False
+        project_dir = ProjectRepository.get_project_dir(project)
+        data = ProjectRepository.load_bindings(project_dir)
+        bindings = data.get("bindings")
+        if not isinstance(bindings, dict) or not bindings.get(role):
+            return False
+        bindings.pop(role, None)
+        categories = data.get("role_categories")
+        if isinstance(categories, dict):
+            categories.pop(role, None)
+        verified = data.get("verified")
+        if isinstance(verified, list):
+            data["verified"] = [item for item in verified if item != role]
+        ProjectRepository.save_bindings(project_dir, data)
+        return True
+
+    @staticmethod
     def save_to_lib(recorded: Optional[str], uploaded: Optional[str], name: str,
                     category: str = "") -> str:
         """把录制 / 上传的音频保存到 ``voice_library``，返回目标绝对路径。

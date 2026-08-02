@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,30 @@ def _filesystem_path(path: Path) -> Path:
     return Path("\\\\?\\" + raw)
 
 
+def replace_with_retry(
+    source: Path,
+    target: Path,
+    *,
+    attempts: int = 5,
+    delay: float = 0.05,
+) -> None:
+    """Replace a file or directory, retrying only transient Windows locks."""
+    if attempts < 1:
+        raise ValueError("attempts must be positive")
+    source_path = _filesystem_path(source)
+    target_path = _filesystem_path(target)
+    for attempt in range(attempts):
+        try:
+            os.replace(source_path, target_path)
+            return
+        except PermissionError as exc:
+            winerror = getattr(exc, "winerror", None)
+            retryable = os.name == "nt" and winerror in {5, 32}
+            if not retryable or attempt == attempts - 1:
+                raise
+            time.sleep(delay * (attempt + 1))
+
+
 def atomic_write_text(path: Path, text: str) -> None:
     parent = _filesystem_path(path.parent)
     parent.mkdir(parents=True, exist_ok=True)
@@ -34,7 +59,7 @@ def atomic_write_text(path: Path, text: str) -> None:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, _filesystem_path(path))
+        replace_with_retry(temporary, path)
     finally:
         if temporary.exists():
             temporary.unlink()

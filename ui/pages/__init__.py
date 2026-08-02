@@ -13,6 +13,7 @@ from .review_page import create_review_page
 from .settings_page import create_settings_page
 from .supplement_page import create_supplement_page
 from .synthesis_page import create_synthesis_page
+from .v4_role_page import create_v4_role_page
 from .v4_workspace_page import create_v4_workspace_page
 from .voice_page import create_voice_page
 
@@ -25,6 +26,7 @@ __all__ = [
     "create_settings_page",
     "create_supplement_page",
     "create_synthesis_page",
+    "create_v4_role_page",
     "create_v4_workspace_page",
     "create_voice_page",
 ]

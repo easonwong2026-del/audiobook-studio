@@ -75,7 +75,7 @@ class TestProviderSwitch:
             deepseek_model="deepseek-test",
             timeout=120)
 
-        from ui.director_handlers import update_provider_config_fields
+        from ui.settings_handlers import update_provider_config_fields
         result = update_provider_config_fields("openai")
         assert len(result) == 5, f"应返回 5 个值，得到 {len(result)}"
         status, model_upd, key_upd, url_upd, btn_upd = result
@@ -94,7 +94,7 @@ class TestProviderSwitch:
             deepseek_base_url="https://deepseek.test",
             timeout=120)
 
-        from ui.director_handlers import update_provider_config_fields
+        from ui.settings_handlers import update_provider_config_fields
         result = update_provider_config_fields("deepseek")
         assert len(result) == 5
         _, model_upd, _, url_upd, _ = result
@@ -105,7 +105,7 @@ class TestProviderSwitch:
     def test_switch_local_hides_all_fields(self, monkeypatch):
         """Local 切换时隐藏 API Key、Base URL、清除按钮。"""
         _patch_secrets(monkeypatch)
-        from ui.director_handlers import update_provider_config_fields
+        from ui.settings_handlers import update_provider_config_fields
         status, model_upd, key_upd, url_upd, btn_upd = update_provider_config_fields("local")
         assert key_upd["visible"] is False
         assert url_upd["visible"] is False
@@ -116,7 +116,7 @@ class TestProviderSwitch:
         """切换返回值中不包含完整 API Key。"""
         _patch_secrets(monkeypatch, {"openai": "sk-super-secret-test-value"})
         _save_provider_config(monkeypatch, default_provider="openai")
-        from ui.director_handlers import update_provider_config_fields
+        from ui.settings_handlers import update_provider_config_fields
         result_tuple = update_provider_config_fields("openai")
         serialized = str(result_tuple)
         assert "sk-super-secret-test-value" not in serialized
@@ -130,7 +130,7 @@ class TestLoadSettings:
     def test_load_returns_7_values(self, monkeypatch):
         """load_ai_settings 严格返回 7 个值。"""
         _patch_secrets(monkeypatch)
-        from ui.director_handlers import load_ai_settings
+        from ui.settings_handlers import load_ai_settings
         result = load_ai_settings()
         assert isinstance(result, tuple)
         assert len(result) == 7, f"应返回 7 个值，得到 {len(result)}"
@@ -144,7 +144,7 @@ class TestLoadSettings:
             openai_base_url="https://custom.openai.com",
             timeout=90)
 
-        from ui.director_handlers import load_ai_settings
+        from ui.settings_handlers import load_ai_settings
         provider, model, url_upd, timeout, status, key_upd, btn_upd = load_ai_settings()
         assert provider == "openai"
         assert model == "gpt-4-turbo"
@@ -156,7 +156,7 @@ class TestLoadSettings:
         """加载返回内容中不包含完整密钥。"""
         _patch_secrets(monkeypatch, {"openai": "sk-hidden-key-value"})
         _save_provider_config(monkeypatch, default_provider="openai")
-        from ui.director_handlers import load_ai_settings
+        from ui.settings_handlers import load_ai_settings
         serialized = str(load_ai_settings())
         assert "sk-hidden-key-value" not in serialized
 
@@ -164,7 +164,7 @@ class TestLoadSettings:
         """Keyring 有密钥时显示清除按钮。"""
         _patch_secrets(monkeypatch, {"openai": "sk-test"})
         _save_provider_config(monkeypatch, default_provider="openai")
-        from ui.director_handlers import load_ai_settings
+        from ui.settings_handlers import load_ai_settings
         *_, btn_upd = load_ai_settings()
         assert btn_upd["visible"] is True
 
@@ -172,7 +172,7 @@ class TestLoadSettings:
         """Keyring 无密钥时不显示清除按钮。"""
         _patch_secrets(monkeypatch)  # no keys
         _save_provider_config(monkeypatch, default_provider="openai")
-        from ui.director_handlers import load_ai_settings
+        from ui.settings_handlers import load_ai_settings
         *_, btn_upd = load_ai_settings()
         assert btn_upd["visible"] is False
 
@@ -185,14 +185,14 @@ class TestSaveSettings:
     def test_save_returns_4_values(self, monkeypatch):
         """save_ai_settings 严格返回 4 个值。"""
         _patch_secrets(monkeypatch)
-        from ui.director_handlers import save_ai_settings
+        from ui.settings_handlers import save_ai_settings
         result = save_ai_settings("openai", "gpt-4", "sk-test", "", 120)
         assert len(result) == 4, f"应返回 4 个值，得到 {len(result)}"
 
     def test_save_key_clears_input_and_shows_button(self, monkeypatch):
         """新密钥保存后 API Key 输入框被清空，清除按钮可见。"""
         _patch_secrets(monkeypatch)
-        from ui.director_handlers import save_ai_settings
+        from ui.settings_handlers import save_ai_settings
         msg, status_html, key_upd, btn_upd = save_ai_settings(
             "openai", "gpt-4", "sk-new-test", "https://api.openai.com/v1", 120)
         assert "✅" in msg or "已保存" in msg
@@ -203,7 +203,7 @@ class TestSaveSettings:
         """空 Key 保存不覆盖已有密钥。"""
         _patch_secrets(monkeypatch, {"openai": "sk-existing"})
         from services.ai_settings import AiSettingsService
-        from ui.director_handlers import save_ai_settings
+        from ui.settings_handlers import save_ai_settings
 
         # Save non-empty key first
         AiSettingsService.set_api_key("openai", "sk-existing-key")
@@ -216,7 +216,7 @@ class TestSaveSettings:
     def test_save_no_key_leak(self, monkeypatch):
         """保存返回内容中不包含完整密钥。"""
         _patch_secrets(monkeypatch)
-        from ui.director_handlers import save_ai_settings
+        from ui.settings_handlers import save_ai_settings
         result = save_ai_settings("openai", "gpt-4", "sk-confidential-99999", "", 120)
         serialized = str(result)
         assert "sk-confidential-99999" not in serialized
@@ -253,14 +253,14 @@ class TestKeySource:
         """环境变量来源时不显示清除按钮。"""
         _patch_secrets(monkeypatch)
         monkeypatch.setenv("OPENAI_API_KEY", "sk-env-value")
-        from ui.director_handlers import update_provider_config_fields
+        from ui.settings_handlers import update_provider_config_fields
         _, _, _, _, btn_upd = update_provider_config_fields("openai")
         assert btn_upd["visible"] is False
 
     def test_keyring_status_shows_clear_button(self, monkeypatch):
         """Keyring 来源时显示清除按钮。"""
         _patch_secrets(monkeypatch, {"openai": "sk-keyring"})
-        from ui.director_handlers import update_provider_config_fields
+        from ui.settings_handlers import update_provider_config_fields
         _, _, _, _, btn_upd = update_provider_config_fields("openai")
         assert btn_upd["visible"] is True
 
@@ -273,7 +273,7 @@ class TestClearKey:
     def test_clear_returns_4_values(self, monkeypatch):
         """clear_ai_api_key 严格返回 4 个值。"""
         _patch_secrets(monkeypatch, {"openai": "sk-test"})
-        from ui.director_handlers import clear_ai_api_key
+        from ui.settings_handlers import clear_ai_api_key
         result = clear_ai_api_key("openai")
         assert len(result) == 4, f"应返回 4 个值，得到 {len(result)}"
 
@@ -281,7 +281,7 @@ class TestClearKey:
         """清除后 Keyring 中密钥不存在。"""
         _patch_secrets(monkeypatch, {"openai": "sk-test"})
         from services.ai_settings import AiSettingsService
-        from ui.director_handlers import clear_ai_api_key
+        from ui.settings_handlers import clear_ai_api_key
         assert AiSettingsService.has_stored_api_key("openai") is True
         clear_ai_api_key("openai")
         assert AiSettingsService.has_stored_api_key("openai") is False
@@ -289,7 +289,7 @@ class TestClearKey:
     def test_clear_clears_input_and_hides_button(self, monkeypatch):
         """清除后输入框清空、按钮隐藏、成功提示。"""
         _patch_secrets(monkeypatch, {"openai": "sk-test"})
-        from ui.director_handlers import clear_ai_api_key
+        from ui.settings_handlers import clear_ai_api_key
         status, key_upd, btn_upd, msg = clear_ai_api_key("openai")
         assert key_upd["value"] == ""
         assert btn_upd["visible"] is False
@@ -304,7 +304,7 @@ class TestClearKey:
             raise RuntimeError("test failure")
         monkeypatch.setattr(svc, "_delete_secret", broken_delete)
 
-        from ui.director_handlers import clear_ai_api_key
+        from ui.settings_handlers import clear_ai_api_key
         _, _, _, msg = clear_ai_api_key("openai")
         assert "❌" in msg
         assert "失败" in msg
@@ -313,7 +313,7 @@ class TestClearKey:
     def test_clear_no_key_leak(self, monkeypatch):
         """清除返回值中不包含完整密钥。"""
         _patch_secrets(monkeypatch, {"openai": "sk-super-secret-12345"})
-        from ui.director_handlers import clear_ai_api_key
+        from ui.settings_handlers import clear_ai_api_key
         serialized = str(clear_ai_api_key("openai"))
         assert "sk-super-secret-12345" not in serialized
 
@@ -481,7 +481,7 @@ class TestModelDiscovery:
             "list_models",
             lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
         )
-        from ui.director_handlers import refresh_ai_models
+        from ui.settings_handlers import refresh_ai_models
 
         model_update, status, source = refresh_ai_models(
             "openai", "private-model", "", "", 30

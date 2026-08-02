@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,8 +15,13 @@ from domain.v4 import (
 from domain.v4.production import TtsProfile
 from repositories.production_repository import ProductionRepository
 from repositories.runtime_repository import RuntimeRepository
-from repositories.v4_atomic import atomic_write_json, atomic_write_text
-from repositories.v4_atomic import _short_tmp
+from repositories.v4_atomic import (
+    _filesystem_path,
+    _short_tmp,
+    atomic_write_json,
+    atomic_write_text,
+    replace_with_retry,
+)
 
 _DIRECTORIES = (
     "source",
@@ -52,17 +56,19 @@ class ProjectV4Repository:
     ) -> Path:
         self._validate_directory_name(directory_name)
         target = self.root / directory_name
-        if target.exists():
+        if _filesystem_path(target).exists():
             raise V4ProjectAlreadyExistsError(f"project already exists: {directory_name}")
         source_metadata.validate(source_text)
         script.validate(source_text)
         speakers.validate()
         manifest.validate()
-        self.root.mkdir(parents=True, exist_ok=True)
+        _filesystem_path(self.root).mkdir(parents=True, exist_ok=True)
         temporary = self.root / f".tmp_v4_{_short_tmp()}"
         try:
             for directory in _DIRECTORIES:
-                (temporary / directory).mkdir(parents=True, exist_ok=True)
+                _filesystem_path(temporary / directory).mkdir(
+                    parents=True, exist_ok=True
+                )
             atomic_write_json(temporary / "project.json", manifest.to_dict())
             atomic_write_text(temporary / "source/source.txt", source_text)
             atomic_write_json(
@@ -73,11 +79,15 @@ class ProjectV4Repository:
             if tts_profile is not None:
                 ProductionRepository(temporary).initialize(tts_profile)
             RuntimeRepository(temporary / "runtime/runtime.db").initialize()
-            os.replace(temporary, target)
+            replace_with_retry(temporary, target)
             return target
-        except Exception:
-            if temporary.exists():
-                shutil.rmtree(temporary)
+        except Exception as exc:
+            temporary_path = _filesystem_path(temporary)
+            try:
+                if temporary_path.exists():
+                    shutil.rmtree(temporary_path)
+            except OSError as cleanup_error:
+                raise exc from cleanup_error
             raise
 
     def load_manifest(self, project_path: str | Path) -> ProjectManifest:
@@ -118,12 +128,13 @@ class ProjectV4Repository:
 
     def cleanup_temporary_projects(self) -> list[Path]:
         removed: list[Path] = []
-        if not self.root.exists():
+        root_path = _filesystem_path(self.root)
+        if not root_path.exists():
             return removed
-        for path in self.root.iterdir():
+        for path in root_path.iterdir():
             if path.is_dir() and path.name.startswith(".tmp_v4_"):
                 shutil.rmtree(path)
-                removed.append(path)
+                removed.append(self.root / path.name)
         return removed
 
     @staticmethod

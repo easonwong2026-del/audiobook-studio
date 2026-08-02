@@ -1,7 +1,7 @@
 """新建项目页面的 UI 回调。
 
 处理从原始书稿创建项目和从 JSON 创建项目的 Gradio 事件。
-不负责导演编辑、声音推荐和试听回调（保留在 director_handlers.py）。
+不负责导演编辑、声音推荐和试听回调；设置页回调位于 ``settings_handlers.py``。
 """
 from __future__ import annotations
 

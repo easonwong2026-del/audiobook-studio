@@ -1,9 +1,7 @@
 """Thin Gradio adapters for the integrated v4 project shell."""
 from __future__ import annotations
 
-import hashlib
 import json
-import shutil
 import sqlite3
 from pathlib import Path
 
@@ -11,7 +9,7 @@ import gradio as gr
 
 from ai.speaker_routing import create_speaker_routing_adapter
 from domain.v4 import ScriptDocument, SpeakersDocument
-from domain.v4.production import VoiceBinding, VoiceBindings
+from domain.v4.production import VoiceBindings
 from lib import config
 from repositories.audio_cache_repository import AudioCacheRepository
 from repositories.production_repository import ProductionRepository
@@ -30,6 +28,7 @@ from services.synthesis_executor import SynthesisExecutor
 from services.synthesis_planner import SynthesisPlanner
 from services.v4_export import V4ExportService
 from services.v4_project_creation import V4ProjectCreationService
+from services.v4_voice_service import V4VoiceService
 from tts.indextts2_adapter import IndexTTS2Adapter
 from tts.text_measurement import CharacterMeasurer, ConservativeTokenMeasurer
 
@@ -78,7 +77,8 @@ def create_v4_from_source(name, source_file, title, author):
             f"- 语义片段：{total}\n"
             f"- 待确认角色：{result.unresolved_segments}\n"
             f"- Source SHA：`{script.source_sha256}`\n\n"
-            "进入「v4 工作流」继续角色确认、音色、计划和合成。"
+            "已进入「② 项目管理」；请到「③ 角色与声音」确认角色并绑定音色，"
+            "然后在「④ 生产与质检」生成计划并合成。"
         )
         choices = scan_v4_projects()
         return (
@@ -220,39 +220,147 @@ def merge_v4_speakers(project_name: str, source_id: str, target_id: str):
     source_text = (project / "source/source.txt").read_text(encoding="utf-8")
     script = _load_script(project, source_text)
     speakers = _load_speakers(project)
+    production = ProductionRepository(project)
+    voices, _performance, _pronunciation, _profile = production.load_inputs()
     updated_script, updated_speakers = SpeakerReviewService.merge_speakers(
         script,
         speakers,
         source_speaker_id=source_id,
         target_speaker_id=target_id,
     )
+    bindings = dict(voices.bindings)
+    source_binding = bindings.pop(source_id, None)
+    binding_message = ""
+    if source_binding is not None:
+        if target_id not in bindings:
+            bindings[target_id] = source_binding
+            binding_message = "；已将来源角色音色迁移到目标角色"
+        else:
+            binding_message = "；目标角色已有音色，保留目标绑定"
+        production.save_document(
+            "voices.json",
+            VoiceBindings(bindings, revision=voices.revision + 1).to_dict(),
+        )
     ProjectV4Repository(_root()).save_script_and_speakers(
         project, source_text, updated_script, updated_speakers
     )
-    return "✅ 角色已合并；旧角色名已保留为 alias"
+    refresh_message = ""
+    try:
+        stale_count = V4VoiceService._refresh_plan(project)
+        if stale_count:
+            refresh_message = f"；已重建计划并局部失效 {stale_count} 个旧任务"
+    except Exception as exc:  # noqa: BLE001 - keep merge durable and explain refresh
+        refresh_message = f"；⚠ 计划刷新失败：{exc}"
+    return (
+        "✅ 角色已合并；旧角色名已保留为 alias"
+        f"{binding_message}{refresh_message}"
+    )
+
+
+def open_v4_role_project(project_name: str):
+    """V4 角色工作台：加载 unresolved 表与全部角色下拉（复用薄服务）。"""
+    if not project_name:
+        return (
+            "请选择 v4 项目", [], gr.update(choices=[]), gr.update(choices=[]),
+            gr.update(choices=[]), gr.update(choices=[]), gr.update(choices=[]),
+        )
+    project = _root() / project_name
+    source = (project / "source/source.txt").read_text(encoding="utf-8")
+    script = _load_script(project, source)
+    speakers = _load_speakers(project)
+    unresolved = SpeakerReviewService.unresolved_rows(source, script)
+    review_rows = [
+        [item["segment_id"], item["chapter_id"], item["text"]]
+        for item in unresolved
+    ]
+    speaker_choices = [
+        (item.display_name, item.speaker_id) for item in speakers.speakers
+    ]
+    summary = (
+        f"**{project_name}** · {len(script.chapters)} 章 · "
+        f"{sum(len(item.segments) for item in script.chapters)} 片段 · "
+        f"{len(unresolved)} 待确认"
+    )
+    return (
+        summary,
+        review_rows,
+        gr.update(choices=speaker_choices, value=None),
+        gr.update(choices=speaker_choices, value=None),
+        gr.update(choices=speaker_choices, value=None),
+        gr.update(choices=speaker_choices, value=None),
+        gr.update(choices=speaker_choices, value=None),
+    )
+
+
+def set_v4_speaker_lock(project_name: str, speaker_id: str):
+    """切换角色锁定状态（V4 稳定角色 ID）。"""
+    from dataclasses import replace
+
+    if not project_name or not speaker_id:
+        return "请先选择要锁定/解锁的角色。"
+    project = _root() / project_name
+    source = (project / "source/source.txt").read_text(encoding="utf-8")
+    script = _load_script(project, source)
+    speakers = _load_speakers(project)
+    updated = list(speakers.speakers)
+    target = None
+    for index, item in enumerate(updated):
+        if item.speaker_id == speaker_id:
+            target = replace(item, locked=not item.locked)
+            updated[index] = target
+            break
+    if target is None:
+        return "角色不存在。"
+    new_speakers = replace(
+        speakers,
+        speakers=updated,
+        revision=speakers.revision + (updated != speakers.speakers),
+    )
+    ProjectV4Repository(_root()).save_script_and_speakers(
+        project, source, script, new_speakers
+    )
+    return f"角色「{target.display_name}」已{'锁定' if target.locked else '解锁'}。"
+
+
+def set_v4_speaker_alias(project_name: str, speaker_id: str, aliases: str):
+    """修改角色别名（逗号分隔）。"""
+    from dataclasses import replace
+
+    if not project_name or not speaker_id:
+        return "请先选择要修改别名的角色。"
+    alias_list = [item.strip() for item in (aliases or "").split(",") if item.strip()]
+    project = _root() / project_name
+    source = (project / "source/source.txt").read_text(encoding="utf-8")
+    script = _load_script(project, source)
+    speakers = _load_speakers(project)
+    updated = list(speakers.speakers)
+    target = None
+    for index, item in enumerate(updated):
+        if item.speaker_id == speaker_id:
+            target = replace(item, aliases=alias_list)
+            updated[index] = target
+            break
+    if target is None:
+        return "角色不存在。"
+    new_speakers = replace(
+        speakers,
+        speakers=updated,
+        revision=speakers.revision + (updated != speakers.speakers),
+    )
+    ProjectV4Repository(_root()).save_script_and_speakers(
+        project, source, script, new_speakers
+    )
+    return f"已保存别名：{', '.join(alias_list) or '（空）'}。"
 
 
 def bind_v4_voice(project_name: str, speaker_id: str, audio_file):
     source = getattr(audio_file, "name", None) or audio_file
     if not source:
         return "⚠ 请选择参考音频"
-    project = _root() / project_name
-    production = ProductionRepository(project)
-    voices, _performance, _pronunciation, _profile = production.load_inputs()
-    raw = Path(source).read_bytes()
-    fingerprint = hashlib.sha256(raw).hexdigest()
-    target = project / "assets/voices" / f"{fingerprint[:16]}{Path(source).suffix}"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, target)
-    bindings = dict(voices.bindings)
-    bindings[speaker_id] = VoiceBinding(
-        target.relative_to(project).as_posix(), fingerprint
+    _ok, message = V4VoiceService.bind_voice(
+        _root() / project_name, speaker_id, source
     )
-    production.save_document(
-        "voices.json",
-        VoiceBindings(bindings, revision=voices.revision + 1).to_dict(),
-    )
-    return "✅ 音色已绑定；仅该角色相关任务会失效"
+    return message
 
 
 def generate_v4_plan(project_name: str):
@@ -367,17 +475,24 @@ def refresh_v4_queue(project_name: str):
 
 
 def chapter_audio(project_name: str, chapter_id: str):
+    if not project_name or not chapter_id:
+        return None
     path = _root() / project_name / "audio/chapters" / f"{chapter_id}.wav"
     return str(path) if path.is_file() else None
 
 
 def export_v4(project_name: str, output_format: str, bitrate: str):
-    path = V4ExportService.export(
-        _root() / project_name,
-        output_format=output_format,
-        bitrate=bitrate,
-    )
-    return str(path), f"✅ 已导出：`{path}`"
+    if not project_name:
+        return "", "⚠ 请先打开一个 v4 项目"
+    try:
+        path = V4ExportService.export(
+            _root() / project_name,
+            output_format=output_format,
+            bitrate=bitrate,
+        )
+        return str(path), f"✅ 已导出：`{path}`"
+    except Exception as exc:  # noqa: BLE001 - 导出失败转用户可读消息
+        return "", f"❌ 导出失败：{str(exc)[:400]}"
 
 
 def migrate_v3_project(v3_name: str):

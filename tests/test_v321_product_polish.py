@@ -10,6 +10,7 @@ from lib import __version__
 from ui.components.voice_binding import (
     build_role_management_choices,
     build_role_management_rows,
+    build_v4_role_management_choices,
     format_bound_role_choices,
     format_role_choices,
 )
@@ -22,8 +23,8 @@ def _text(relative: str) -> str:
 
 
 def test_runtime_version_has_one_current_source():
-    assert __version__ == "4.0.0"
-    assert '__version__ = "4.0.0"' in _text("lib/__init__.py")
+    assert __version__ == "4.1.0"
+    assert '__version__ = "4.1.0"' in _text("lib/__init__.py")
     assert 'title=f"Audiobook Studio v{__version__}"' in _text("app.py")
     launcher = _text("launcher.py")
     assert "from lib import __version__" in launcher
@@ -75,6 +76,45 @@ def test_role_management_choices_keep_role_value_and_multiline_summary():
         {"妈妈": None},
     )
     assert choices == [("妈妈\n温柔女声，30岁\n⚠ 待绑定", "妈妈")]
+
+
+def test_v3_and_v4_cards_share_in_place_binding_state_labels():
+    v3_choices = build_role_management_choices(
+        {"voices": {"同名": {"description": "A"}}},
+        {"同名": "/data/voice-a.wav"},
+    )
+    assert v3_choices[0][1] == "同名"
+    assert "✅ 已绑定" in v3_choices[0][0]
+    assert "音色：voice-a.wav" in v3_choices[0][0]
+
+    speakers = [
+        SimpleNamespace(
+            speaker_id="speaker-a", display_name="同名", locked=False, aliases=[]
+        ),
+        SimpleNamespace(
+            speaker_id="speaker-b", display_name="同名", locked=True, aliases=["别名"]
+        ),
+    ]
+    unbound = build_v4_role_management_choices(speakers, {})
+    bound = build_v4_role_management_choices(
+        speakers,
+        {"speaker-b": SimpleNamespace(voice_id="assets/voice-b.wav")},
+    )
+    assert [value for _, value in unbound] == ["speaker-a", "speaker-b"]
+    assert "⚠ 待绑定" in unbound[0][0]
+    assert "✅ 已绑定" in bound[1][0]
+    assert "音色：voice-b.wav" in bound[1][0]
+    assert "speaker-a" not in bound[1][0]
+
+
+def test_role_page_keeps_one_card_entry_and_embeds_advanced_v4_tools():
+    voice_page = _text("ui/pages/voice_page.py")
+    workspace_page = _text("ui/pages/v4_workspace_page.py")
+    assert "v_table = gr.Radio" in voice_page
+    assert '"高级角色整理（AI 识别、人工指派、合并、锁定、别名）"' in voice_page
+    assert '"v_unbind": v_unbind' in voice_page
+    assert 'voice_speaker = gr.Dropdown(label="角色", choices=[], visible=False)' in workspace_page
+    assert "voice_status = gr.Markdown(\"\", visible=False)" in workspace_page
 
 
 def test_role_list_selection_loads_right_hand_configuration(monkeypatch):
@@ -130,7 +170,7 @@ def test_production_stage_has_internal_navigation_and_check():
         and any(isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)
                 and target.value.id == "_GROUPS" for target in node.targets)
     ]
-    assert assignments and len(assignments[0].value.elts) == 11
+    assert assignments and len(assignments[0].value.elts) == 12
 
 
 def test_project_onboarding_and_user_facing_quality_labels_exist():

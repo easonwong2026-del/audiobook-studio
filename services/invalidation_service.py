@@ -66,6 +66,7 @@ class InvalidationService:
                     "task_id": item.task_id,
                     "chapter_id": item.chapter_id,
                     "speaker_id": item.speaker_id,
+                    "segment_ids": item.source_segments,
                     "voice_id": item.voice_id,
                     "actual_text": item.actual_text,
                     "text_length": item.text_length,

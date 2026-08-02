@@ -23,10 +23,14 @@ def create_v4_workspace_page() -> dict:
                     label="要修改的 segment IDs（逗号分隔）"
                 )
             with gr.Tab("2 角色与声音"):
-                voice_speaker = gr.Dropdown(label="角色", choices=[])
-                voice_file = gr.Audio(label="参考音频", type="filepath")
-                bind_voice = gr.Button("绑定声音")
-                voice_status = gr.Markdown("")
+                gr.Markdown(
+                    "角色与声音统一使用主导航「③ 角色与声音」中的卡片式绑定入口；"
+                    "这里不再重复显示角色选择器。"
+                )
+                voice_speaker = gr.Dropdown(label="角色", choices=[], visible=False)
+                voice_file = gr.Audio(label="参考音频", type="filepath", visible=False)
+                bind_voice = gr.Button("绑定声音", visible=False)
+                voice_status = gr.Markdown("", visible=False)
             with gr.Tab("3 TTS 设置与计划"):
                 profile = gr.Markdown("")
                 plan = create_v4_plan_page(visible=True)

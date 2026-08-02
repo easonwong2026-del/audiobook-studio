@@ -17,6 +17,7 @@ from repositories.routing_checkpoint_repository import (
     RoutingBatch,
     RoutingCheckpointRepository,
 )
+from services.speaker_normalization import normalize_speaker_name
 
 
 class RoutingAdapter(Protocol):
@@ -149,11 +150,17 @@ class SpeakerRoutingService:
         speakers: SpeakersDocument,
         assignments: list[dict[str, str | None]],
     ) -> tuple[ScriptDocument, SpeakersDocument]:
-        by_segment = {
-            item["segment_id"]: item["speaker"]
-            for item in assignments
-            if item.get("speaker")
-        }
+        by_segment: dict[str, str] = {}
+        for item in assignments:
+            raw = item.get("speaker")
+            if not raw:
+                continue
+            # 规整 AI 返回的角色名：剥离情绪 / 动作 / 语气后缀，
+            # 纯叙述词 / 代词等噪音保持 unresolved，不写入 speakers.json
+            name = normalize_speaker_name(str(raw))
+            if not name:
+                continue
+            by_segment[item["segment_id"]] = name
         if not by_segment:
             return script, speakers
         speaker_list = list(speakers.speakers)

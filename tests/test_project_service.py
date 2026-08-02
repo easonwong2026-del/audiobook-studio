@@ -88,6 +88,18 @@ def test_bind_voice_mutates_json_and_returns_path(project):
     assert bd["bindings"]["旁白"] == dest
 
 
+def test_unbind_voice_removes_binding_but_keeps_audio_asset(project):
+    d = pm.get_project_dir("t1")
+    vo = os.path.join(d, "voices", "ref.wav")
+    _dummy(vo)
+    dest = ProjectService.bind_voice("t1", "旁白", vo)
+    assert ProjectService.unbind_voice("t1", "旁白") is True
+    assert os.path.isfile(dest)
+    bindings = ProjectService.open_project("t1")[2]["bindings"]
+    assert not bindings.get("旁白")
+    assert ProjectService.unbind_voice("t1", "旁白") is False
+
+
 def test_save_to_lib(project, tmp_path):
     rec = tmp_path / "rec.wav"
     _dummy(str(rec))

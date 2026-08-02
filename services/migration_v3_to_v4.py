@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import shutil
 import uuid
 from dataclasses import dataclass
@@ -28,7 +27,12 @@ from domain.v4.production import (
 )
 from repositories.production_repository import ProductionRepository
 from repositories.project_v4_repository import ProjectV4Repository
-from repositories.v4_atomic import _short_tmp, atomic_write_json
+from repositories.v4_atomic import (
+    _filesystem_path,
+    _short_tmp,
+    atomic_write_json,
+    replace_with_retry,
+)
 
 
 @dataclass(frozen=True)
@@ -130,14 +134,19 @@ class V3ToV4MigrationService:
             }
             atomic_write_json(staged / "revisions/migration-v3.json", marker_data)
             root.mkdir(parents=True, exist_ok=True)
-            os.replace(staged, target)
-        except Exception:
-            if staging_root.exists():
-                shutil.rmtree(staging_root)
+            replace_with_retry(staged, target)
+        except Exception as exc:
+            staging_path = _filesystem_path(staging_root)
+            try:
+                if staging_path.exists():
+                    shutil.rmtree(staging_path)
+            except OSError as cleanup_error:
+                raise exc from cleanup_error
             raise
         finally:
-            if staging_root.exists():
-                shutil.rmtree(staging_root)
+            staging_path = _filesystem_path(staging_root)
+            if staging_path.exists():
+                shutil.rmtree(staging_path)
         return MigrationResult(
             target,
             backup,
