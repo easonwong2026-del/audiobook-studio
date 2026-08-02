@@ -159,6 +159,23 @@ def test_unresolved_and_unbound_are_reported_not_planned():
     assert result.plan.tasks == []
 
 
+def test_source_only_pending_interval_reports_unbound_confirmed_roles():
+    text = "本地旁白。"
+    segmented = SourceSegmenter().source_only(text)
+    result = SynthesisPlanner(CharacterMeasurer()).plan(
+        text,
+        segmented.script,
+        segmented.speakers,
+        VoiceBindings({}),
+        PerformanceOverrides(),
+        PronunciationRules(),
+        _profile(),
+    )
+    assert result.unresolved_segments
+    assert result.unbound_speakers == ["narrator"]
+    assert result.plan.tasks == []
+
+
 def test_profile_metric_must_match_pluggable_measurer():
     text = "正文。"
     segmented, voices, performance, pronunciation, profile = _inputs(text)

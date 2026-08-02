@@ -111,6 +111,21 @@ class SynthesisPlanner:
                     chapter_tasks.append(task)
                     offset += len(chunk)
             tasks.extend(self._merge(chapter_tasks, profile, source_text))
+        # A source-only V4 project deliberately has no semantic speaker on its
+        # pending interval. Keep that distinction in the script, but still
+        # surface confirmed roles without voice bindings in the planning UI so
+        # the user sees that production cannot start yet.
+        if any(
+            segment.status == "unresolved" and segment.dialogue_type == "unanalysed"
+            for chapter in script.chapters
+            for segment in chapter.segments
+        ):
+            unbound.update(
+                speaker.speaker_id
+                for speaker in speakers.speakers
+                if speaker.status == "confirmed"
+                and speaker.speaker_id not in voices.bindings
+            )
         dependencies = PlanDependencies(
             source_sha256=script.source_sha256,
             script_revision=script.revision,
