@@ -158,7 +158,9 @@ class AIScriptDirectorService:
                 chapter_state[chapter.chapter_id] = entry
                 failed.append(chapter.chapter_id)
                 self.checkpoint.save(state)
-                break
+                # 一章失败不应中断整本书：保留 failed 状态，继续处理剩余章节；
+                # 下次运行（断点续传）会对 failed 章节重试。
+                continue
 
         completed = sum(
             item.get("status") == "completed" for item in chapter_state.values()

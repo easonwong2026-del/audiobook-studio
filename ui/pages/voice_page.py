@@ -24,7 +24,8 @@ def create_voice_page() -> dict:
                         size="sm",
                         visible=False,
                     )
-                    v_analysis_msg = gr.Markdown("", visible=False)
+                v_analysis_msg = gr.Markdown("点击「继续 AI 分析」开始或继续角色分析。")
+                v_analysis_progress = gr.Markdown("打开项目后显示 AI 分析进度。")
                 v_role_search = gr.Textbox(
                     label="搜索角色",
                     placeholder="按名称或描述搜索",
@@ -136,6 +137,7 @@ def create_voice_page() -> dict:
         "v_continue_analysis": v_continue_analysis,
         "v_reanalyze": v_reanalyze,
         "v_analysis_msg": v_analysis_msg,
+        "v_analysis_progress": v_analysis_progress,
         "v_table": v_table,
         "v_role_search": v_role_search,
         "v_role_title": v_role_title,

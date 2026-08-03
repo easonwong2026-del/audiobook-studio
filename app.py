@@ -2249,6 +2249,9 @@ def _open_chain_rest(event):
     e = e.then(
         v4_ui.refresh_v4_reanalyze_visibility, [p_sel], [v_reanalyze]
     )
+    e = e.then(
+        v4_ui.analysis_progress_text, [p_sel], [v_analysis_progress]
+    )
     return e
 
 
@@ -2369,6 +2372,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             v_continue_analysis = vce_page["v_continue_analysis"]
             v_reanalyze = vce_page["v_reanalyze"]
             v_analysis_msg = vce_page["v_analysis_msg"]
+            v_analysis_progress = vce_page["v_analysis_progress"]
             v_table = vce_page["v_table"]
             v_role_search = vce_page["v_role_search"]
             v_role_title = vce_page["v_role_title"]
@@ -2558,7 +2562,8 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             [p_sel],
             [advanced_role_page["project"]],
         ).then(
-        v4_ui.refresh_v4_reanalyze_visibility, [p_sel], [v_reanalyze])
+        v4_ui.refresh_v4_reanalyze_visibility, [p_sel], [v_reanalyze]).then(
+        v4_ui.analysis_progress_text, [p_sel], [v_analysis_progress])
     nav_synth.click(
         lambda: _goto("synth"), None, _GROUPS,
         js=activate_js("synth")).then(
@@ -2606,7 +2611,8 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             _refresh_embedded_v4_role_project,
             [p_sel],
             [advanced_role_page["project"]],
-        )
+        ).then(
+        v4_ui.analysis_progress_text, [p_sel], [v_analysis_progress])
     ov_synth.click(
         lambda: _goto("synth"), None, _GROUPS,
         js=activate_js("synth")).then(
@@ -2973,9 +2979,11 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         },
     )
     analysis_chain = v_continue_analysis.click(
+        lambda: "⏳ 开始分析…", None, [v_analysis_msg]
+    ).then(
         v4_ui.continue_v4_analysis,
         [p_sel],
-        [v_analysis_msg],
+        [v_analysis_msg, v_analysis_progress],
         concurrency_limit=1,
         concurrency_id="v4-analysis",
     ).then(
@@ -2985,9 +2993,11 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     )
     _open_chain_rest(analysis_chain)
     reanalysis_chain = v_reanalyze.click(
+        lambda: "⏳ 开始重新分析…", None, [v_analysis_msg]
+    ).then(
         v4_ui.reanalyze_v4_project,
         [p_sel],
-        [v_analysis_msg],
+        [v_analysis_msg, v_analysis_progress],
         concurrency_limit=1,
         concurrency_id="v4-analysis",
     ).then(

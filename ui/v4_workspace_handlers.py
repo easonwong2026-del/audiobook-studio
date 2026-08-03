@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 import gradio as gr
@@ -104,6 +105,167 @@ def _reason_lines(state: dict | None) -> list[str]:
     return lines
 
 
+# ── AI 分析实时进展（读 analysis.json stages 渲染，切换页面不丢失）──
+
+_STAGE_LABELS = {
+    "book_understanding": "阅读全书（人物记忆）",
+    "script_director": "分析章节剧本",
+    "script_review": "复查对白归属",
+    "character_extraction": "提取角色",
+    "character_consolidation": "统一角色和别名",
+    "auto_confirmation": "自动确认高可信角色",
+    "speaker_routing": "分析对白归属",
+    "consistency_check": "检查分析结果",
+    "import": "导入书稿",
+}
+
+_STAGE_SLOTS = {
+    "book_understanding": 1,
+    "script_director": 2,
+    "script_review": 3,
+    "character_extraction": 1,
+    "character_consolidation": 2,
+    "auto_confirmation": 3,
+    "speaker_routing": 4,
+    "consistency_check": 5,
+}
+
+# AI-first 管线固定 6 步展示：前 3 步对应 analysis.json 的 stages 键，
+# 后 3 步为保存/检查/完成（无独立持久化阶段）。
+_AI_FIRST_STAGE_ROWS = (
+    ("book_understanding", "阅读全书（人物记忆）"),
+    ("script_director", "分析章节剧本"),
+    ("script_review", "复查对白归属"),
+)
+_AI_FIRST_TAIL_ROWS = ("保存分析结果", "一致性检查", "分析完成")
+
+
+def _stage_label(stage_name: str) -> str:
+    return _STAGE_LABELS.get(stage_name, stage_name or "未知")
+
+
+def _stage_slot(stage_name: str) -> int:
+    return _STAGE_SLOTS.get(stage_name, 0)
+
+
+def _elapsed_text(started_at: str) -> str:
+    """把 ISO started_at 转成「N 分钟 / N 秒」已耗时文本（无时区容错）。"""
+    if not started_at:
+        return ""
+    try:
+        start = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return ""
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    seconds = max(0, int((now - start).total_seconds()))
+    if seconds < 60:
+        return f"{seconds} 秒"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} 分钟"
+    hours = minutes // 60
+    return f"{hours} 小时 {minutes % 60} 分钟"
+
+
+def _format_duration(duration_ms) -> str:
+    """把 stages[*].duration_ms 转成「N 分 N 秒」完成耗时文本。"""
+    try:
+        seconds = max(0, int(duration_ms) // 1000)
+    except (TypeError, ValueError):
+        return ""
+    if seconds <= 0:
+        return ""
+    if seconds < 60:
+        return f"{seconds} 秒"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} 分 {seconds % 60} 秒"
+    hours = minutes // 60
+    return f"{hours} 小时 {minutes % 60} 分"
+
+
+def _stage_status_text(stage: dict | None) -> str:
+    """单个持久化阶段的用户可读状态（含已耗时/用时）。"""
+    stage = stage or {}
+    status = stage.get("status") or "unknown"
+    if status == "completed":
+        duration = _format_duration(stage.get("duration_ms"))
+        return f"✅ 完成 · 用时 {duration}" if duration else "✅ 完成"
+    if status in {"running", "partial"}:
+        elapsed = _elapsed_text(stage.get("started_at", ""))
+        return f"🔄 进行中 · 从 {elapsed}前开始" if elapsed else "🔄 进行中"
+    if status == "failed":
+        return "❌ 失败"
+    if status == "skipped":
+        return "⏭ 跳过"
+    if status == "invalidated":
+        return "♻ 已失效"
+    return "⏳ 等待"
+
+
+def _analysis_progress_text(state: dict | None) -> str:
+    """从 analysis.json 状态渲染可见进展区：状态 + 当前阶段 x/6 + 阶段明细。"""
+    if not state:
+        return "打开项目后显示 AI 分析进度。"
+    status = state.get("status") or ""
+    if status == "waiting_for_ai":
+        return "⚠ AI 尚未配置，可在此页配置后点击“继续分析”。"
+    stages = state.get("stages") or {}
+    current_stage = str(state.get("current_stage") or "")
+    if status == "completed":
+        header = "### ✅ AI 分析已完成"
+    elif status == "running":
+        header = "### ⏳ AI 分析进行中"
+    elif status == "partial":
+        header = "### ⚠ AI 分析未完成（部分章节失败，可继续分析重试）"
+    elif status == "needs_attention":
+        header = "### ⚠ AI 分析需要人工确认，可继续分析重试"
+    else:
+        header = f"### AI 分析状态：{status or '未知'}"
+    lines = [header]
+    if current_stage and current_stage not in {"completed", "needs_attention", "awaiting_ai"}:
+        slot = _stage_slot(current_stage)
+        slot_text = f"（第 {slot}/6 步）" if slot else ""
+        elapsed = _elapsed_text((stages.get(current_stage) or {}).get("started_at", ""))
+        elapsed_text = f" · 已进行 **{elapsed}**" if elapsed else ""
+        lines.append(
+            f"当前阶段：**{_stage_label(current_stage)}**{slot_text}{elapsed_text}"
+        )
+    for index, (stage_key, label) in enumerate(_AI_FIRST_STAGE_ROWS, start=1):
+        lines.append(f"{index}. {label}：{_stage_status_text(stages.get(stage_key))}")
+    tail_status = "✅ 完成" if status == "completed" else "⏳ 等待"
+    for index, label in enumerate(_AI_FIRST_TAIL_ROWS, start=4):
+        lines.append(f"{index}. {label}：{tail_status}")
+    covered = {key for key, _label in _AI_FIRST_STAGE_ROWS}
+    extra = [
+        (key, value)
+        for key, value in stages.items()
+        if key not in covered and key not in {"completed", "needs_attention"}
+    ]
+    if extra:
+        lines.append("")
+        lines.append("其他阶段：")
+        for key, stage in extra:
+            lines.append(f"- {_stage_label(key)}：{_stage_status_text(stage)}")
+    return "\n".join(lines)
+
+
+def analysis_progress_text(project_name: str) -> str:
+    """从磁盘读取 analysis.json 渲染真实阶段与耗时（切换页面时显示真实状态）。"""
+    if not project_name:
+        return "打开项目后显示 AI 分析进度。"
+    try:
+        project = _root() / project_name
+        source = (project / "source/source.txt").read_text(encoding="utf-8")
+        script = _load_script(project, source)
+        state = V4AnalysisRepository(project).load(script.source_sha256)
+    except (OSError, ValueError, TypeError):
+        state = None
+    return _analysis_progress_text(state)
+
+
 def v4_analysis_buttons_visibility(state: dict | None) -> dict:
     """按分析状态返回「继续 AI 分析 / 重新分析」按钮可见性。
 
@@ -153,7 +315,7 @@ def scan_v4_projects() -> list[str]:
     return sorted(names)
 
 
-def create_v4_from_source(name, source_file, title, author, progress=None):
+def create_v4_from_source(name, source_file, title, author, progress=gr.Progress()):
     progress = progress or (lambda *_args, **_kwargs: None)
     source = getattr(source_file, "name", None) or source_file
     if not name or not source:
@@ -371,23 +533,30 @@ def route_v4_speakers(project_name: str):
     )
 
 
-def continue_v4_analysis(project_name: str, progress=None):
+def _analysis_result_text(result) -> str:
+    """把 pipeline 结果转成用户可读消息：result.message + 明确 errors（去重）。"""
+    parts = [str(getattr(result, "message", "") or "")]
+    for error in getattr(result, "errors", None) or []:
+        if error and error not in parts[0]:
+            parts.append(f"- {error}")
+    return "\n".join(parts)
+
+
+def continue_v4_analysis(project_name: str, progress=gr.Progress()):
     """Resume only the incomplete/invalidated analysis stages for a project."""
-    progress = progress or (lambda *_args, **_kwargs: None)
     if not project_name:
         return "⚠ 请先选择 v4 项目"
     try:
         result = V4ProjectAnalysisPipeline.from_ai_settings(
             _root() / project_name
         ).run(progress_callback=lambda message: _report_analysis_progress(progress, message))
-        return result.message
+        return _analysis_result_text(result)
     except Exception as exc:  # noqa: BLE001 - project remains openable
         return f"⚠ 项目已保留，但分析未完成：{str(exc)[:500]}"
 
 
-def reanalyze_v4_project(project_name: str, progress=None):
+def reanalyze_v4_project(project_name: str, progress=gr.Progress()):
     """Explicitly rerun AI-first analysis with a durable revision snapshot."""
-    progress = progress or (lambda *_args, **_kwargs: None)
     if not project_name:
         return "⚠ 请先选择 v4 项目"
     try:
@@ -397,7 +566,7 @@ def reanalyze_v4_project(project_name: str, progress=None):
             progress_callback=lambda message: _report_analysis_progress(progress, message),
             force_reanalysis=True,
         )
-        return result.message
+        return _analysis_result_text(result)
     except Exception as exc:  # noqa: BLE001 - project remains openable
         return f"⚠ 重分析未完成，原项目已保留：{str(exc)[:500]}"
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from domain.v4 import (
     CharacterBibleDocument,
     ProjectManifest,
@@ -13,6 +15,7 @@ from domain.v4.ai_first import BibleCharacter, BibleEvidence
 from domain.v4.models import source_sha256, stable_speaker_id
 from repositories.project_v4_repository import ProjectV4Repository
 from repositories.v4_analysis_repository import V4AnalysisRepository
+from services.book_understanding_service import BookUnderstandingService
 from services.source_segmenter import SourceSegmenter
 from services.v4_project_analysis_pipeline import V4ProjectAnalysisPipeline
 from services.v4_project_creation import V4ProjectCreationService
@@ -426,3 +429,199 @@ def test_valid_ai_result_keeps_ai_first_and_resume_is_not_broken(tmp_path):
     ).run()
     assert resumed.status == "completed"
     assert (len(book.calls), len(director.calls), len(reviewer.calls)) == calls
+
+
+# ── PR #22 实测反馈 R-4：证据校验容错 + 失败章节继续处理 ──
+
+
+def _bible_with_evidence(source: str, evidence: BibleEvidence) -> CharacterBibleDocument:
+    char = BibleCharacter(
+        character_id="char_林晚",
+        canonical_name="林晚",
+        aliases=[],
+        description="故事人物",
+        importance="major",
+        relationships=[],
+        first_appearance_chapter=evidence.chapter_id,
+        evidence=[evidence],
+        confidence=0.97,
+        speaker_id=stable_speaker_id("林晚"),
+    )
+    return CharacterBibleDocument(
+        source_sha256=source_sha256(source), characters=[char]
+    )
+
+
+def test_evidence_shifted_coordinates_are_relocated_not_fatal():
+    """证据文本与原文坐标不一致但文本可查 → 校验通过并修正坐标（不再判死整章）。"""
+    source = "第一章\n林晚说道：‘我们走吧。’"
+    script = SourceSegmenter().source_only(source).script
+    chapter = script.chapters[0]
+    real_start = source.index("林晚")
+    wrong = BibleEvidence(
+        chapter.chapter_id, "林晚", real_start + 2, real_start + 4
+    )
+    bible = _bible_with_evidence(source, wrong)
+    corrected = BookUnderstandingService._validate_evidence(
+        bible, source, script.chapters
+    )
+    evidence = corrected.characters[0].evidence[0]
+    assert evidence.source_start == real_start
+    assert evidence.source_end == real_start + len("林晚")
+    assert source[evidence.source_start:evidence.source_end] == "林晚"
+
+
+def test_evidence_whitespace_normalized_coordinates_are_relocated():
+    """空白规范化后证据文本可查 → 修正坐标（容忍 AI 对空白/标点的偏差）。"""
+    source = "第一章\n林 晚 说 道：‘我们走吧。’"
+    script = SourceSegmenter().source_only(source).script
+    chapter = script.chapters[0]
+    evidence_text = "林晚说道"
+    wrong = BibleEvidence(chapter.chapter_id, evidence_text, 0, 4)
+    bible = _bible_with_evidence(source, wrong)
+    corrected = BookUnderstandingService._validate_evidence(
+        bible, source, script.chapters
+    )
+    evidence = corrected.characters[0].evidence[0]
+    assert evidence.source_start != 0 or evidence.source_end != 4
+    assert (
+        source[evidence.source_start:evidence.source_end].replace(" ", "")
+        == evidence_text
+    )
+
+
+def test_evidence_missing_from_source_still_raises():
+    """证据文本在原文中不存在 → 仍抛错（真实性保护不被放宽）。"""
+    source = "第一章\n林晚说道：‘我们走吧。’"
+    script = SourceSegmenter().source_only(source).script
+    chapter = script.chapters[0]
+    wrong = BibleEvidence(chapter.chapter_id, "不存在的人物", 0, 4)
+    bible = _bible_with_evidence(source, wrong)
+    with pytest.raises(ValueError, match="人物证据"):
+        BookUnderstandingService._validate_evidence(bible, source, script.chapters)
+
+
+def test_evidence_without_coordinates_missing_from_source_raises():
+    """无坐标证据文本不在原文中 → 抛错（真实性保护）。"""
+    source = "第一章\n林晚说道：‘我们走吧。’"
+    script = SourceSegmenter().source_only(source).script
+    chapter = script.chapters[0]
+    wrong = BibleEvidence(chapter.chapter_id, "不存在的人物")
+    bible = _bible_with_evidence(source, wrong)
+    with pytest.raises(ValueError, match="不在原文中"):
+        BookUnderstandingService._validate_evidence(bible, source, script.chapters)
+
+
+class PartialFailBookUnderstanding:
+    """全书阅读第 1 章失败（模拟请求/校验异常），第 2 章正常返回。"""
+
+    name = "fake-partial-book"
+    model = "fake-reasoner"
+
+    def __init__(self):
+        self.calls = []
+
+    def read_chapter(self, **kwargs):
+        self.calls.append(kwargs)
+        chapter_id = kwargs["chapter_id"]
+        if chapter_id == "chapter_0001":
+            raise ValueError("人物证据文本与原文不一致")
+        values = [_entry("顾川", chapter_id, "顾川")]
+        return CharacterBibleDocument(
+            source_sha256=kwargs["source_sha256"],
+            characters=values,
+            schema_version="character-bible-chapter-v1",
+        )
+
+    def finalize(self, *, source_sha256, memory):
+        return CharacterBibleDocument.from_dict(memory)
+
+
+def test_pipeline_continues_after_one_failed_chapter(tmp_path):
+    """多章书稿一章失败不中断整本：失败章节记录 failed，其余章节继续处理。"""
+    source = "第一章\n林晚说道：‘我们走吧。’\n第二章\n顾川回答：‘我不同意。’"
+    project = _project(tmp_path, source)
+    book = PartialFailBookUnderstanding()
+    director = FakeScriptDirector()
+    reviewer = FakeReviewer()
+    result = V4ProjectAnalysisPipeline(
+        project,
+        book_understanding_adapter=book,
+        script_director_adapter=director,
+        script_review_adapter=reviewer,
+    ).run()
+    # continue 语义：第 2 章仍被读取，不再停在失败章节
+    assert any(call["chapter_id"] == "chapter_0002" for call in book.calls)
+    # 第 2 章角色进入结果 → 不再只剩旁白
+    assert result.summary["identified_characters"] >= 1
+    assert "顾川" in [item.display_name for item in result.speakers.speakers]
+    checkpoint = json.loads(
+        (project / "runtime/ai_first/book_understanding.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    # 失败章节保留 failed（下次运行重试），成功章节 completed（断点续传跳过）
+    assert checkpoint["chapters"]["chapter_0001"]["status"] == "failed"
+    assert checkpoint["chapters"]["chapter_0002"]["status"] == "completed"
+
+
+class ShiftedEvidenceBookUnderstanding:
+    """AI 返回的证据坐标与原文不一致但文本可查——校验层应修正坐标而非判死。"""
+
+    name = "fake-shifted-book"
+    model = "fake-reasoner"
+
+    def __init__(self):
+        self.calls = []
+
+    def read_chapter(self, **kwargs):
+        self.calls.append(kwargs)
+        chapter_id = kwargs["chapter_id"]
+        text = kwargs["text"]
+        source_start = kwargs["source_start"]
+        name = "林晚" if chapter_id == "chapter_0001" else "顾川"
+        idx = text.find(name)
+        character = BibleCharacter(
+            character_id=f"char_{name}",
+            canonical_name=name,
+            aliases=[],
+            description="故事人物",
+            importance="major",
+            relationships=[],
+            first_appearance_chapter=chapter_id,
+            evidence=[
+                BibleEvidence(
+                    chapter_id, name, source_start + idx + 2, source_start + idx + 4
+                )
+            ],
+            confidence=0.97,
+            speaker_id=stable_speaker_id(name),
+        )
+        return CharacterBibleDocument(
+            source_sha256=kwargs["source_sha256"],
+            characters=[character],
+            schema_version="character-bible-chapter-v1",
+        )
+
+    def finalize(self, *, source_sha256, memory):
+        return CharacterBibleDocument.from_dict(memory)
+
+
+def test_pipeline_succeeds_when_ai_returns_shifted_evidence_coordinates(tmp_path):
+    """端到端：AI 证据坐标偏移（文本可查）→ 校验层修正 → 全书完成，不再只剩旁白。"""
+    source = "第一章\n林晚说道：‘我们走吧。’\n第二章\n顾川回答：‘我不同意。’"
+    project = _project(tmp_path, source)
+    book = ShiftedEvidenceBookUnderstanding()
+    director = FakeScriptDirector()
+    reviewer = FakeReviewer()
+    result = V4ProjectAnalysisPipeline(
+        project,
+        book_understanding_adapter=book,
+        script_director_adapter=director,
+        script_review_adapter=reviewer,
+    ).run()
+    assert result.status == "completed"
+    assert [item.display_name for item in result.speakers.speakers] == [
+        "旁白", "林晚", "顾川"
+    ]
+    assert result.summary["identified_characters"] == 2

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -56,7 +57,7 @@ class BookUnderstandingService:
         if state is not None:
             try:
                 memory = self._load_memory(state.get("memory"), source_sha)
-                self._validate_evidence(memory, source_text, script.chapters)
+                memory = self._validate_evidence(memory, source_text, script.chapters)
             except (TypeError, ValueError):
                 # A partial write or stale semantic memory must never be
                 # treated as a completed chapter. Rebuild from the source.
@@ -131,7 +132,9 @@ class BookUnderstandingService:
                 chapters_state[chapter.chapter_id] = entry
                 failed.append(chapter.chapter_id)
                 self.checkpoint.save({**state, "memory": memory.to_dict()})
-                break
+                # 一章失败不应中断整本书：保留 failed 状态，继续处理剩余章节；
+                # 下次运行（断点续传）会对 failed 章节重试。
+                continue
 
         completed = sum(
             item.get("status") == "completed" for item in chapters_state.values()
@@ -241,7 +244,7 @@ class BookUnderstandingService:
         if value.source_sha256 != source_sha:
             raise ValueError(f"人物圣经 source SHA 与项目不匹配（{chapter_id}）")
         if source_text is not None:
-            BookUnderstandingService._validate_evidence(
+            value = BookUnderstandingService._validate_evidence(
                 value, source_text, chapters or []
             )
         return BookUnderstandingService._with_stable_ids(value)
@@ -249,28 +252,106 @@ class BookUnderstandingService:
     @staticmethod
     def _validate_evidence(
         bible: CharacterBibleDocument, source_text: str, chapters
-    ) -> None:
+    ) -> CharacterBibleDocument:
+        """校验并修正证据坐标，返回修正后的 bible（语义不变：证据必须真实存在）。
+
+        当证据文本与原文坐标不一致（AI 常给出轻微偏移的坐标）时，不直接判死：
+        先在对应章节范围内查找证据文本（原文精确查找 → 空白规范化查找），
+        找到则修正 ``source_start`` / ``source_end`` 并继续；找不到才抛错
+        （真实性保护：证据必须真实存在于原文，只是允许坐标偏移）。
+        """
         chapter_ranges = {
             item.chapter_id: (item.start, item.end) for item in chapters
         }
+        characters: list = []
         for character in bible.characters:
-            for evidence in character.evidence:
-                if evidence.source_start is None or evidence.source_end is None:
-                    if evidence.text not in source_text:
+            evidence = list(character.evidence)
+            for index, item in enumerate(evidence):
+                if item.source_start is None or item.source_end is None:
+                    if item.text not in source_text:
                         raise ValueError(
                             f"人物证据不在原文中：{character.canonical_name}"
                         )
                     continue
-                start, end = evidence.source_start, evidence.source_end
+                start, end = item.source_start, item.source_end
                 if not 0 <= start < end <= len(source_text):
                     raise ValueError("人物证据坐标超出原文范围")
-                chapter_range = chapter_ranges.get(evidence.chapter_id)
+                chapter_range = chapter_ranges.get(item.chapter_id)
                 if chapter_range and not (
                     chapter_range[0] <= start < end <= chapter_range[1]
                 ):
                     raise ValueError("人物证据坐标不属于对应章节")
-                if source_text[start:end] != evidence.text:
+                if source_text[start:end] == item.text:
+                    continue
+                corrected = BookUnderstandingService._relocate_evidence(
+                    item, source_text, chapter_range
+                )
+                if corrected is None:
                     raise ValueError("人物证据文本与原文不一致")
+                evidence[index] = corrected
+            characters.append(
+                replace(character, evidence=evidence)
+                if evidence != character.evidence
+                else character
+            )
+        if characters == bible.characters:
+            return bible
+        return replace(bible, characters=characters)
+
+    @staticmethod
+    def _relocate_evidence(item, source_text: str, chapter_range) -> Any | None:
+        """在章节范围内重新定位证据文本；找不到返回 None。
+
+        策略 1：原文精确查找（``str.find``）；
+        策略 2：空白规范化后查找（``re.sub(r"\\s+", "", text)``），再把规范化
+        偏移映射回原始坐标——容忍 AI 对空白/标点边界的轻微偏差。
+        """
+        if chapter_range is None:
+            chapter_start, chapter_end = 0, len(source_text)
+        else:
+            chapter_start, chapter_end = chapter_range
+        raw_index = source_text.find(item.text, chapter_start, chapter_end)
+        if raw_index != -1:
+            return replace(
+                item,
+                source_start=raw_index,
+                source_end=raw_index + len(item.text),
+            )
+        normalized = re.sub(r"\s+", "", item.text)
+        if not normalized:
+            return None
+        chapter_slice = source_text[chapter_start:chapter_end]
+        normalized_source = re.sub(r"\s+", "", chapter_slice)
+        normalized_index = normalized_source.find(normalized)
+        if normalized_index == -1:
+            return None
+        real_start = BookUnderstandingService._map_normalized_index(
+            chapter_slice, normalized_index
+        )
+        real_end = BookUnderstandingService._map_normalized_index(
+            chapter_slice, normalized_index + len(normalized)
+        )
+        if real_start is None or real_end is None or real_end <= real_start:
+            return None
+        return replace(
+            item,
+            source_start=chapter_start + real_start,
+            source_end=chapter_start + real_end,
+        )
+
+    @staticmethod
+    def _map_normalized_index(text: str, normalized_index: int) -> int | None:
+        """把空白规范化后的偏移映射回原始文本偏移（跳过空白字符）。"""
+        seen = 0
+        for offset, char in enumerate(text):
+            if char.isspace():
+                continue
+            if seen == normalized_index:
+                return offset
+            seen += 1
+        if seen == normalized_index:
+            return len(text)
+        return None
 
     @staticmethod
     def _with_stable_ids(value: CharacterBibleDocument) -> CharacterBibleDocument:
