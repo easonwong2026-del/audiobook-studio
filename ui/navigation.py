@@ -71,6 +71,41 @@ def _goto(which: str) -> tuple:
     )
 
 
+def go(which: str) -> tuple:
+    """兼容别名：与 ``_goto`` 完全一致（页面可见性单源）。"""
+    return _goto(which)
+
+
+def nav_active_elem_id(page_id: str) -> str:
+    """从目标页面值推导左侧导航高亮 elem_id（单源；生产内部页映射 nav-synth）。
+
+    映射规则（DESIGN §6.7）：``synth/review/supplement/production-nav`` 均高亮
+    ``nav-synth``；其余页面按 ``NAV_ITEMS`` / ``_SETTINGS_ITEM`` 一一对应。
+    """
+    if page_id in {"synth", "review", "supplement", "production-nav"}:
+        return "nav-synth"
+    if page_id == "settings":
+        return _SETTINGS_ITEM[2]
+    for pid, _label, elem_id in NAV_ITEMS:
+        if pid == page_id:
+            return elem_id
+    raise ValueError(f"unknown page_id: {page_id}")
+
+
+def activate_js(page_id: str) -> str:
+    """唯一一份 `.active` 高亮 JS 模板（由 ``nav_active_elem_id`` 生成）。
+
+    所有程序化跳转（nav_*.click / ov_* / 书架 / 打开链 / creation_chain）都
+    必须使用 ``js=activate_js(page_id)``，保证页面可见性与左侧高亮来自同一目标值。
+    """
+    elem_id = nav_active_elem_id(page_id)
+    return (
+        "(x) => { document.querySelectorAll('.nav-btn').forEach(b => "
+        "b.classList.remove('active')); document.getElementById('"
+        f"{elem_id}')?.classList.add('active'); }}"
+    )
+
+
 def create_nav_buttons() -> dict[str, gr.Button]:
     """创建侧边栏导航按钮。"""
     buttons: dict[str, gr.Button] = {}

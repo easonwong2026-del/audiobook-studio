@@ -47,6 +47,52 @@ def test_workspace_create_open_and_plan_without_ai_or_tts(tmp_path, monkeypatch)
     )
 
 
+def test_v4_analysis_buttons_visibility_for_needs_attention():
+    """needs_attention 下「继续 AI 分析 / 重新分析」均可见（PRD 待明确事项 6）。"""
+    visible = handlers.v4_analysis_buttons_visibility({"status": "needs_attention"})
+    assert visible["v_continue_analysis"]["visible"] is True
+    assert visible["v_reanalyze"]["visible"] is True
+    hidden = handlers.v4_analysis_buttons_visibility({"status": "completed"})
+    assert hidden["v_continue_analysis"]["visible"] is True
+    assert hidden["v_reanalyze"]["visible"] is False
+    empty = handlers.v4_analysis_buttons_visibility(None)
+    assert empty["v_reanalyze"]["visible"] is False
+
+
+def test_v4_analysis_summary_text_never_prints_100_for_zero_dialogue():
+    """0 对白时 _analysis_summary_text 不打印 100%，显示未知文案。"""
+    text = handlers._analysis_summary_text(
+        {
+            "status": "completed",
+            "summary": {
+                "identified_characters": 0,
+                "dialogue_total": 0,
+                "dialogue_unresolved": 0,
+                "dialogue_coverage": None,
+            },
+        }
+    )
+    assert "100%" not in text
+    assert "未识别到对白" in text
+
+
+def test_v4_analysis_summary_text_renders_reason_codes():
+    """needs_attention + reason_codes 时展示用户可读原因。"""
+    text = handlers._analysis_summary_text(
+        {
+            "status": "needs_attention",
+            "validity": {"reason_codes": ["dialogue_signal_no_dialogue"]},
+            "summary": {
+                "identified_characters": 0,
+                "dialogue_total": 0,
+                "dialogue_unresolved": 0,
+                "dialogue_coverage": None,
+            },
+        }
+    )
+    assert "原文存在明显对白信号" in text
+
+
 def test_v4_wav_export_uses_assembled_chapter_order(tmp_path):
     project = tmp_path / "book"
     (project / "script").mkdir(parents=True)

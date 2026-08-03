@@ -42,6 +42,11 @@ from services.speaker_routing_service import SpeakerRoutingService
 from services.synthesis_executor import SynthesisExecutor
 from services.synthesis_planner import SynthesisPlanner
 from services.v4_export import V4ExportService
+from services.v4_analysis_validity import (
+    DIALOGUE_COVERAGE_UNKNOWN_LABEL,
+    REASON_MESSAGES,
+    ReasonCode,
+)
 from services.v4_project_analysis_pipeline import V4ProjectAnalysisPipeline
 from services.v4_project_creation import V4ProjectCreationService
 from services.v4_voice_service import V4VoiceService
@@ -62,15 +67,72 @@ def _analysis_summary_text(state: dict | None) -> str:
         return "\n\n⚠ AI 尚未配置，可在此页配置后点击“继续分析”。"
     if not summary:
         return ""
-    return (
+    coverage = summary.get("dialogue_coverage")
+    coverage_text = (
+        f"{coverage * 100:.0f}%"
+        if coverage is not None
+        else DIALOGUE_COVERAGE_UNKNOWN_LABEL
+    )
+    text = (
         "\n\n"
         f"AI 分析：{status or '未知'} · "
         f"识别角色 {summary.get('identified_characters', 0)} · "
         f"自动确认 {summary.get('auto_confirmed_characters', 0)} · "
         f"需要检查 {summary.get('needs_review_characters', 0) + summary.get('dialogue_unresolved', 0)} · "
         f"已过滤噪音 {summary.get('filtered_noise', 0)} · "
-        f"对白自动归属 {summary.get('dialogue_coverage', 1.0) * 100:.0f}%"
+        f"对白自动归属 {coverage_text}"
     )
+    reason_lines = _reason_lines(state)
+    if reason_lines:
+        text += "\n" + "\n".join(f"⚠ {line}" for line in reason_lines)
+    return text
+
+
+def _reason_lines(state: dict | None) -> list[str]:
+    """从 analysis.json 的 validity.reason_codes 生成用户可读原因行。"""
+    if not state:
+        return []
+    reason_codes = ((state.get("validity") or {}).get("reason_codes")) or []
+    lines: list[str] = []
+    for code_value in reason_codes:
+        code = ReasonCode.from_value(code_value)
+        if code is None or code == ReasonCode.OK:
+            continue
+        text = REASON_MESSAGES.get(code, "")
+        if text:
+            lines.append(text)
+    return lines
+
+
+def v4_analysis_buttons_visibility(state: dict | None) -> dict:
+    """按分析状态返回「继续 AI 分析 / 重新分析」按钮可见性。
+
+    ``status == "needs_attention"`` 时两者均可见（PRD 待明确事项 6）。
+    """
+    status = (state or {}).get("status")
+    if status == "needs_attention":
+        return {
+            "v_continue_analysis": gr.update(visible=True),
+            "v_reanalyze": gr.update(visible=True),
+        }
+    return {
+        "v_continue_analysis": gr.update(visible=True),
+        "v_reanalyze": gr.update(visible=False),
+    }
+
+
+def refresh_v4_reanalyze_visibility(project_name: str):
+    """按 analysis.json 状态返回「重新分析」按钮可见性（薄封装，供接线）。"""
+    state = None
+    if project_name:
+        try:
+            project = _root() / project_name
+            source = (project / "source/source.txt").read_text(encoding="utf-8")
+            script = _load_script(project, source)
+            state = V4AnalysisRepository(project).load(script.source_sha256)
+        except (OSError, ValueError, TypeError):
+            state = None
+    return v4_analysis_buttons_visibility(state)["v_reanalyze"]
 
 
 def scan_v4_projects() -> list[str]:

@@ -9,7 +9,7 @@ from ui.pages.v4_role_page import create_v4_role_page
 def create_voice_page() -> dict:
     with gr.Group(visible=False, elem_id="grp-voices") as grp_voices:
         with gr.Row(equal_height=False, elem_classes=["voice-workspace"]):
-            with gr.Column(scale=0, min_width=277, elem_classes=["role-list-panel"]):
+            with gr.Column(scale=1, min_width=280, elem_classes=["role-list-panel"]):
                 gr.Markdown("### 角色与声音")
                 v_status = gr.Markdown("打开项目后显示角色绑定状态。")
                 with gr.Row():
@@ -17,6 +17,12 @@ def create_voice_page() -> dict:
                         "继续 AI 分析",
                         variant="secondary",
                         size="sm",
+                    )
+                    v_reanalyze = gr.Button(
+                        "重新分析",
+                        variant="secondary",
+                        size="sm",
+                        visible=False,
                     )
                     v_analysis_msg = gr.Markdown("", visible=False)
                 v_role_search = gr.Textbox(
@@ -34,7 +40,7 @@ def create_voice_page() -> dict:
                     elem_classes=["role-management-list"],
                 )
 
-            with gr.Column(scale=1, min_width=0, elem_classes=["voice-config-panel"]):
+            with gr.Column(scale=3, min_width=600, elem_classes=["voice-config-panel"]):
                 v_role_title = gr.Markdown("### 当前角色配置\n请从左侧角色列表选择角色。")
                 with gr.Group(elem_classes=["binding-workspace"]):
                     gr.Markdown(
@@ -128,6 +134,7 @@ def create_voice_page() -> dict:
         "group": grp_voices,
         "v_status": v_status,
         "v_continue_analysis": v_continue_analysis,
+        "v_reanalyze": v_reanalyze,
         "v_analysis_msg": v_analysis_msg,
         "v_table": v_table,
         "v_role_search": v_role_search,

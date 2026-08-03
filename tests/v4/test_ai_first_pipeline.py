@@ -12,6 +12,7 @@ from domain.v4 import (
 from domain.v4.ai_first import BibleCharacter, BibleEvidence
 from domain.v4.models import source_sha256, stable_speaker_id
 from repositories.project_v4_repository import ProjectV4Repository
+from repositories.v4_analysis_repository import V4AnalysisRepository
 from services.source_segmenter import SourceSegmenter
 from services.v4_project_analysis_pipeline import V4ProjectAnalysisPipeline
 from services.v4_project_creation import V4ProjectCreationService
@@ -93,6 +94,68 @@ class FakeScriptDirector:
 
 class FakeReviewer:
     name = "fake-review"
+    model = "fake-reasoner"
+
+    def __init__(self):
+        self.calls = []
+
+    def review_chapter(self, **_kwargs):
+        self.calls.append(_kwargs)
+        return {"schema_version": "ai-script-review-v1", "patches": []}
+
+
+class EmptyBookUnderstanding:
+    """AI 返回空人物圣经（0 角色）——用于模拟"假成功"缺陷。"""
+
+    name = "fake-empty-book"
+    model = "fake-reasoner"
+
+    def __init__(self):
+        self.calls = []
+
+    def read_chapter(self, **kwargs):
+        self.calls.append(kwargs)
+        return CharacterBibleDocument(
+            source_sha256=kwargs["source_sha256"],
+            characters=[],
+            schema_version="character-bible-chapter-v1",
+        )
+
+    def finalize(self, *, source_sha256, memory):
+        return CharacterBibleDocument.from_dict(memory)
+
+
+class EmptyScriptDirector:
+    """AI 剧本导演全旁白化（0 对白、0 角色归属）。"""
+
+    name = "fake-empty-script"
+    model = "fake-reasoner"
+
+    def __init__(self):
+        self.calls = []
+
+    def analyze_batch(self, **kwargs):
+        self.calls.append(kwargs)
+        start = kwargs["source_start"]
+        end = kwargs["source_end"]
+        return ScriptDirectorBatch.from_dict({
+            "schema_version": "ai-script-director-v4",
+            "chapter_id": kwargs["chapter_id"],
+            "source_start": start,
+            "source_end": end,
+            "segments": [{
+                "source_start": start,
+                "source_end": end,
+                "segment_type": "narration",
+                "speaker_id": "narrator",
+                "text": kwargs["text"],
+                "confidence": 0.95,
+            }],
+        })
+
+
+class EmptyReviewer:
+    name = "fake-empty-review"
     model = "fake-reasoner"
 
     def __init__(self):
@@ -199,3 +262,167 @@ def test_ai_first_pipeline_reads_source_builds_script_and_resumes(tmp_path):
     assert len(director.calls) == calls_before[1] + 2
     assert len(reviewer.calls) == 4
     assert list((project / "revisions").glob("ai-analysis-*/script.json"))
+
+
+# ── PR #22：AI 分析"假成功"回归（P0-12 ①~⑤）──
+
+
+def test_empty_ai_result_is_not_completed_and_retries_once(tmp_path):
+    """① 明显多对白书稿 + AI 返回空人物/全旁白 → 不 completed、自动重试一次、
+    仍空则 needs_attention（含 reason_code 与用户可读 message）。"""
+    source = (
+        "第一章\n林晚说道：“我们走吧。”\n顾川问道：“去哪？”\n"
+        "林晚回答：“回家。”\n顾川喊道：“快跑！”"
+    )
+    project = _project(tmp_path, source)
+    book = EmptyBookUnderstanding()
+    director = EmptyScriptDirector()
+    reviewer = EmptyReviewer()
+    pipeline = V4ProjectAnalysisPipeline(
+        project,
+        book_understanding_adapter=book,
+        script_director_adapter=director,
+        script_review_adapter=reviewer,
+    )
+    result = pipeline.run()
+    assert result.status != "completed"
+    assert result.status == "needs_attention"
+    state = V4AnalysisRepository(project).load(result.script.source_sha256)
+    assert state["status"] == "needs_attention"
+    assert state["current_stage"] == "needs_attention"
+    reason_codes = state["validity"]["reason_codes"]
+    assert "empty_result_suspected" in reason_codes
+    assert "dialogue_signal_no_dialogue" in reason_codes
+    assert "dialogue_signal_no_characters" in reason_codes
+    assert state["stats"]["retries"] == 1
+    assert len(state["attempts"]) >= 2
+    # 模型调用恰 2 次（1 次原分析 + 1 次重试），单章书稿下每阶段每次 1 次
+    assert len(book.calls) == 2
+    assert len(director.calls) == 2
+    assert len(reviewer.calls) == 2
+    assert "请重试或检查 Provider" in result.message
+
+
+def test_narration_only_book_does_not_report_100_percent_coverage(tmp_path):
+    """② 人物圣经空 + 剧本全旁白（原文无对白信号）→ dialogue_coverage 为
+    None，不显示 100%，消息显示"未识别到对白"。"""
+    source = "第一章\n清晨的阳光洒满大地。\n第二章\n他独自走在田间小路上。"
+    project = _project(tmp_path, source)
+    book = EmptyBookUnderstanding()
+    director = EmptyScriptDirector()
+    reviewer = EmptyReviewer()
+    pipeline = V4ProjectAnalysisPipeline(
+        project,
+        book_understanding_adapter=book,
+        script_director_adapter=director,
+        script_review_adapter=reviewer,
+    )
+    result = pipeline.run()
+    assert result.status == "completed"
+    assert result.summary["dialogue_coverage"] is None
+    assert "100%" not in result.message
+    assert "未识别到对白" in result.message
+    state = V4AnalysisRepository(project).load(result.script.source_sha256)
+    assert state["summary"]["dialogue_coverage"] is None
+
+
+def test_true_pure_narration_completes_without_fake_characters(tmp_path):
+    """③ 真纯旁白短文 → 正常完成、无虚假人物、不因人物数 0 无条件失败。"""
+    source = "第一章\n晨雾散去，他推开门。\n第二章\n远处传来钟声。"
+    project = _project(tmp_path, source)
+    book = EmptyBookUnderstanding()
+    director = EmptyScriptDirector()
+    reviewer = EmptyReviewer()
+    pipeline = V4ProjectAnalysisPipeline(
+        project,
+        book_understanding_adapter=book,
+        script_director_adapter=director,
+        script_review_adapter=reviewer,
+    )
+    result = pipeline.run()
+    assert result.status == "completed"
+    assert [item.display_name for item in result.speakers.speakers] == ["旁白"]
+    assert result.summary["identified_characters"] == 0
+    assert result.summary["character_bible_count"] == 0
+    assert result.summary["analysis_mode"] == "ai-first"
+
+
+def test_suspicious_completed_cache_is_invalidated_and_reanalyzed(tmp_path):
+    """④ 可疑空结果已缓存 completed → 再次分析不直接复用，旧缓存失效重执行，
+    且保留人工快照（不删除用户数据）。"""
+    source = "第一章\n林晚说道：“我们走吧。”\n顾川问道：“去哪？”"
+    project = _project(tmp_path, source)
+    sha = source_sha256(source)
+    repo = V4AnalysisRepository(project)
+    repo.save({
+        "schema_version": "v4-analysis-state-v1",
+        "source_sha256": sha,
+        "status": "completed",
+        "current_stage": "completed",
+        "analysis_mode": "ai-first",
+        "provider": "fake-empty-book",
+        "stages": {},
+        "summary": {"identified_characters": 0, "dialogue_total": 0},
+        "errors": [],
+        "message": "✅ 分析已完成",
+    })
+    (project / "runtime/character_bible.json").write_text(
+        json.dumps({
+            "schema_version": "character-bible-final-v1",
+            "source_sha256": sha,
+            "characters": [],
+            "uncertain_entities": [],
+            "revision": 1,
+        }),
+        encoding="utf-8",
+    )
+    book = EmptyBookUnderstanding()
+    director = EmptyScriptDirector()
+    reviewer = EmptyReviewer()
+    result = V4ProjectAnalysisPipeline(
+        project,
+        book_understanding_adapter=book,
+        script_director_adapter=director,
+        script_review_adapter=reviewer,
+    ).run()
+    assert result.status != "completed"
+    assert book.calls, "缓存失效后应重新请求模型"
+    state = V4AnalysisRepository(project).load(sha)
+    assert "cache_invalidated" in state["validity"]["reason_codes"]
+    assert state["message"] != "✅ 分析已完成"
+    # 快照保留（不删除人工锁定/指派/声音绑定）
+    assert list((project / "revisions").glob("ai-analysis-*/script.json"))
+
+
+def test_valid_ai_result_keeps_ai_first_and_resume_is_not_broken(tmp_path):
+    """⑤ 有效 AI 结果 → 保持 AI-first、正常写入 stats/validity、断点续传不破坏。"""
+    source = "第一章\n林晚说道：‘我们走吧。’\n第二章\n顾川回答：‘我不同意。’"
+    project = _project(tmp_path, source)
+    book = FakeBookUnderstanding()
+    director = FakeScriptDirector()
+    reviewer = FakeReviewer()
+    pipeline = V4ProjectAnalysisPipeline(
+        project,
+        book_understanding_adapter=book,
+        script_director_adapter=director,
+        script_review_adapter=reviewer,
+    )
+    result = pipeline.run()
+    assert result.status == "completed"
+    assert result.summary["analysis_mode"] == "ai-first"
+    state = V4AnalysisRepository(project).load(result.script.source_sha256)
+    assert state["stats"]["ai_requests"] > 0
+    assert state["stats"]["shards_total"] > 0
+    assert state["validity"]["checked"] is True
+    assert state["validity"]["is_suspicious"] is False
+    assert state["validity"]["reason_codes"] == []
+    assert state["model"] == "fake-reasoner"
+    calls = (len(book.calls), len(director.calls), len(reviewer.calls))
+    resumed = V4ProjectAnalysisPipeline(
+        project,
+        book_understanding_adapter=book,
+        script_director_adapter=director,
+        script_review_adapter=reviewer,
+    ).run()
+    assert resumed.status == "completed"
+    assert (len(book.calls), len(director.calls), len(reviewer.calls)) == calls

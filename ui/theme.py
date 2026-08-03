@@ -340,9 +340,11 @@ button[aria-label*="Play"] {{ border-radius:999px!important; background:{ACCENT}
 .voice-flow-steps span {{ display:inline-flex; align-items:center; gap:5px; padding:8px 12px; border-radius:999px; background:{PANEL}; color:{TEXT_MUTED}; font-size:12px; font-weight:600; }}
 .voice-flow-steps span.is-active {{ background:{ACCENT_SOFT}; color:{ACCENT_DEEP}; }}
 .voice-flow-steps b {{ color:{ACCENT_DEEP}; }}
-.voice-workspace {{ gap:16px!important; align-items:start!important; flex-wrap:nowrap!important; }}
-.role-list-panel,.voice-config-panel {{ min-width:0!important; align-self:start!important; }}
-.voice-workspace > .role-list-panel {{ flex:0 0 277px!important; }}
+.voice-workspace {{ gap:16px!important; align-items:start!important; flex-wrap:wrap!important; }}
+.voice-workspace > .role-list-panel {{ flex:0 0 300px!important; min-width:280px!important; }}
+.voice-workspace > .voice-config-panel {{ flex:1 1 600px!important; min-width:600px!important; max-width:100%!important; }}
+.advanced-role-accordion, #grp-v4-role-embedded {{ width:100%!important; max-width:100%!important; min-width:0!important; }}
+#grp-v4-role-embedded .gr-row {{ flex-wrap:wrap!important; }}
 .role-list-panel {{ padding:16px!important; border:1px solid {BORDER}!important; border-radius:14px!important; background:{PANEL}!important; }}
 .role-list-panel > .gr-markdown:first-child h3 {{ margin-top:0!important; margin-bottom:6px!important; }}
 .role-list-panel > .gr-markdown:nth-child(2) {{ color:{TEXT_MUTED}!important; font-size:12px!important; margin:0 0 10px!important; }}
@@ -396,6 +398,7 @@ button[aria-label*="Play"] {{ border-radius:999px!important; background:{ACCENT}
   .workbench-hero {{ padding:22px; }}.hero-progress {{ display:none; }}
   .main-area {{ padding:8px 12px 20px!important; }}
   .voice-workspace {{ flex-wrap:wrap!important; }}
+  .voice-workspace > .voice-config-panel {{ min-width:0!important; flex-basis:100%!important; }}
   .voice-binding-layout {{ flex-wrap:wrap!important; }}
   .voice-config-footer {{ flex-wrap:wrap!important; }}
   .voice-config-footer > * {{ flex:1 1 100%!important; min-width:0!important; }}

@@ -55,7 +55,7 @@ from ui.components import (
     format_role_management_summary,
     project_dashboard_html,
 )
-from ui.navigation import _GROUPS, _goto, create_nav_buttons
+from ui.navigation import _GROUPS, _goto, activate_js, create_nav_buttons
 from ui.pages import (
     create_create_project_page,
     create_export_page,
@@ -267,6 +267,11 @@ def format_v4_role_summary(ss):
     if ss is None or not getattr(ss, "is_v4", False) or ss.speakers_v4 is None:
         return "打开 V4 项目后显示角色状态。"
     from repositories.production_repository import ProductionRepository
+    from services.v4_analysis_validity import (
+        DIALOGUE_COVERAGE_UNKNOWN_LABEL,
+        REASON_MESSAGES,
+        ReasonCode,
+    )
 
     project_path = V4ProjectService.root() / ss.project
     try:
@@ -289,14 +294,35 @@ def format_v4_role_summary(ss):
         if state and state.get("status") == "waiting_for_ai":
             text += "\n\n⚠ AI 尚未配置。配置后点击「继续 AI 分析」。"
         elif summary:
+            status = state.get("status") if state else ""
+            status_label = (
+                "AI 分析完成" if status == "completed" else f"AI 分析：{status or '未知'}"
+            )
+            coverage = summary.get("dialogue_coverage")
+            coverage_text = (
+                f"{coverage * 100:.0f}%"
+                if coverage is not None
+                else DIALOGUE_COVERAGE_UNKNOWN_LABEL
+            )
             text += (
-                "\n\nAI 分析完成 · "
+                f"\n\n{status_label} · "
                 f"识别角色：{summary.get('identified_characters', total)} · "
                 f"自动确认：{summary.get('auto_confirmed_characters', 0)} · "
                 f"需要确认：{summary.get('needs_review_characters', 0) + summary.get('dialogue_unresolved', 0)} · "
                 f"已过滤噪音：{summary.get('filtered_noise', 0)} · "
-                f"对白自动归属：{summary.get('dialogue_coverage', 1.0) * 100:.0f}%"
+                f"对白自动归属：{coverage_text}"
             )
+            reason_codes = ((state or {}).get("validity") or {}).get("reason_codes") or []
+            reason_lines: list[str] = []
+            for code_value in reason_codes:
+                code = ReasonCode.from_value(code_value)
+                if code is None or code == ReasonCode.OK:
+                    continue
+                reason_lines.append(REASON_MESSAGES.get(code, ""))
+            if reason_lines:
+                text += "\n\n" + "\n".join(
+                    f"⚠ {line}" for line in reason_lines if line
+                )
     except Exception:  # noqa: BLE001 - summary is supplementary UI
         pass
     return text
@@ -2220,6 +2246,9 @@ def _open_chain_rest(event):
         [ov_status, ov_progress, ov_task, ov_issues, ov_bookshelf],
     )
     e = e.then(refresh_p_sel, [p_sel], [p_sel])
+    e = e.then(
+        v4_ui.refresh_v4_reanalyze_visibility, [p_sel], [v_reanalyze]
+    )
     return e
 
 
@@ -2338,6 +2367,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             grp_voices = vce_page["group"]
             v_status = vce_page["v_status"]
             v_continue_analysis = vce_page["v_continue_analysis"]
+            v_reanalyze = vce_page["v_reanalyze"]
             v_analysis_msg = vce_page["v_analysis_msg"]
             v_table = vce_page["v_table"]
             v_role_search = vce_page["v_role_search"]
@@ -2481,21 +2511,21 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
 
     nav_overview.click(
         lambda: _goto("overview"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-overview')?.classList.add('active'); }").then(
+        js=activate_js("overview")).then(
         refresh_overview, [ss], [ov_status, ov_progress, ov_task, ov_issues, ov_bookshelf])
     nav_project.click(
         lambda: _goto("project"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-project')?.classList.add('active'); }")
+        js=activate_js("project"))
     nav_create_project.click(
         lambda: _goto("create_project"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-create-project')?.classList.add('active'); }").then(
+        js=activate_js("create_project")).then(
         lambda: (
             "##### v4 创建流程\n导入、章节切分和角色分析会自动执行；"
             "AI 未配置时项目仍会先保存，可在角色与声音页面继续分析。"
         ), [], [cp_config_summary])
     nav_v4.click(
         lambda: _goto("v4"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-v4')?.classList.add('active'); }"
+        js=activate_js("v4")
     ).then(
         lambda: (
             gr.update(choices=v4_ui.scan_v4_projects()),
@@ -2506,7 +2536,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     )
     nav_v4_role.click(
         lambda: _goto("v4_role"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-v4-role')?.classList.add('active'); }"
+        js=activate_js("v4_role")
     ).then(
         lambda: gr.update(choices=v4_ui.scan_v4_projects()),
         None,
@@ -2514,11 +2544,11 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     )
     nav_settings.click(
         lambda: _goto("settings"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-settings')?.classList.add('active'); }").then(
+        js=activate_js("settings")).then(
         settings_ui.load_ai_settings, [], [s_provider, s_model, s_base_url, s_timeout, s_provider_config, s_api_key, s_clear_key])
     nav_voices.click(
         lambda: _goto("voices"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-voices')?.classList.add('active'); }").then(
+        js=activate_js("voices")).then(
         refresh_role_list,
         [v_role_search, v_role, ss], [v_table]).then(
         refresh_voice_filters,
@@ -2527,10 +2557,11 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             _refresh_embedded_v4_role_project,
             [p_sel],
             [advanced_role_page["project"]],
-        )
+        ).then(
+        v4_ui.refresh_v4_reanalyze_visibility, [p_sel], [v_reanalyze])
     nav_synth.click(
         lambda: _goto("synth"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-synth')?.classList.add('active'); }").then(
+        js=activate_js("synth")).then(
         lambda: gr.update(value="synth"), None, [production_stage]).then(
         refresh_production_voice_choices, [], [e_voice, sup_voice]).then(
         refresh_production_check, [ss], [production_check]).then(
@@ -2540,10 +2571,12 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         refresh_supplement_roles, [ss], [sup_role])
     nav_export.click(
         lambda: _goto("export"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-export')?.classList.add('active'); }").then(
+        js=activate_js("export")).then(
         refresh_export_default_dir, [ss], [e_save_dir_hint])
 
     # ── 生产阶段内部导航：合成中心 / 试听质检 / 角色补录 ──
+    # 内部切换不移动高亮：nav_active_elem_id 保证 synth/review/supplement
+    # 均映射到 nav-synth，故此处不附加 activate_js。
     production_stage.change(_goto, [production_stage], _GROUPS).then(
         refresh_production_check, [ss], [production_check]
     )
@@ -2554,17 +2587,17 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     ).then(open_project, [p_sel, ss], [p_summary, v_table, v_role, v_role_title, v_lib, s_log, v_status])
     _open_chain_rest(chain).then(
         lambda: _goto("project"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-project')?.classList.add('active'); }"
+        js=activate_js("project")
     )
 
     # ── 概览页快捷操作：「打开项目」切页 → open_project 首步 → 打开链刷新 ──
     chain = ov_open.click(
         lambda: _goto("project"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-project')?.classList.add('active'); }"    ).then(open_project, [p_sel, ss], [p_summary, v_table, v_role, v_role_title, v_lib, s_log, v_status])
+        js=activate_js("project")).then(open_project, [p_sel, ss], [p_summary, v_table, v_role, v_role_title, v_lib, s_log, v_status])
     _open_chain_rest(chain)
     ov_voices.click(
         lambda: _goto("voices"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-voices')?.classList.add('active'); }").then(
+        js=activate_js("voices")).then(
         refresh_role_list,
         [v_role_search, v_role, ss], [v_table]).then(
         refresh_voice_filters,
@@ -2576,7 +2609,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         )
     ov_synth.click(
         lambda: _goto("synth"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-synth')?.classList.add('active'); }").then(
+        js=activate_js("synth")).then(
         lambda: gr.update(value="synth"), None, [production_stage]).then(
         refresh_production_voice_choices, [], [e_voice, sup_voice]).then(
         refresh_production_check, [ss], [production_check]).then(
@@ -2586,7 +2619,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         refresh_supplement_roles, [ss], [sup_role])
     ov_export.click(
         lambda: _goto("export"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-export')?.classList.add('active'); }").then(
+        js=activate_js("export")).then(
         refresh_export_default_dir, [ss], [e_save_dir_hint])
 
     # ═══════════ events（业务接线，沿用 v2） ═══════════
@@ -2629,7 +2662,8 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         [p_summary, v_table, v_role, v_role_title, v_lib, s_log, v_status],
     )
     _open_chain_rest(creation_chain).then(
-        lambda: _goto("voices"), None, _GROUPS
+        lambda: _goto("voices"), None, _GROUPS,
+        js=activate_js("voices")
     )
     p_migrate.click(
         migrate_v3_to_v4,
@@ -2950,6 +2984,18 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         [p_summary, v_table, v_role, v_role_title, v_lib, s_log, v_status],
     )
     _open_chain_rest(analysis_chain)
+    reanalysis_chain = v_reanalyze.click(
+        v4_ui.reanalyze_v4_project,
+        [p_sel],
+        [v_analysis_msg],
+        concurrency_limit=1,
+        concurrency_id="v4-analysis",
+    ).then(
+        open_project,
+        [p_sel, ss],
+        [p_summary, v_table, v_role, v_role_title, v_lib, s_log, v_status],
+    )
+    _open_chain_rest(reanalysis_chain)
     _wire_v4_role_controls(advanced_role_page)
 
     p_refresh.click(refresh_projects_full, [], [p_sel])

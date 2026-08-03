@@ -3,11 +3,18 @@
 The pipeline owns the user-facing order of operations.  Individual services
 remain usable for the advanced workbench, but a newly imported project only
 needs this one entry point.
+
+PR #22（AI-first 假成功修复）：``_run_ai_first`` 重构为 attempt 编排层——
+单次三阶段执行后做结果有效性检查（``AnalysisValidityChecker``），可疑结果
+自动重试一次（``force_restart=True``，重新请求模型、不读刚写空 checkpoint），
+仍异常则写 ``needs_attention`` + 稳定 ``reason_code`` + 用户可读 message；
+completed 缓存复用前先校验，可疑历史缓存自动失效转入可恢复重分析。
 """
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +42,7 @@ from repositories.project_v4_repository import ProjectV4Repository
 from repositories.routing_checkpoint_repository import RoutingCheckpointRepository
 from repositories.v4_analysis_repository import V4AnalysisRepository
 from repositories.v4_atomic import atomic_write_json
+from services.ai_first_source import split_source_range
 from services.ai_script_director_service import AIScriptDirectorService
 from services.ai_script_review_service import AIScriptReviewService
 from services.ai_settings import AiSettingsService
@@ -58,6 +66,17 @@ from services.v4_analysis_config import (
     DEFAULT_V4_ANALYSIS_CONFIG,
     V4AnalysisConfig,
 )
+from services.v4_analysis_validity import (
+    AnalysisRunStats,
+    AnalysisValidityChecker,
+    CountingAdapterProxy,
+    DIALOGUE_COVERAGE_UNKNOWN_LABEL,
+    PIPELINE_VERSION,
+    REASON_MESSAGES,
+    ReasonCode,
+    ValidityReport,
+    compute_input_fingerprint,
+)
 from services.v4_reanalysis_service import (
     migrate_voice_bindings,
     protect_manual_assignments,
@@ -78,6 +97,22 @@ class V4AnalysisResult:
     summary: dict[str, Any]
     errors: list[str]
     message: str
+    reason_codes: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class _AiFirstAttempt:
+    """单次 AI-first 三阶段执行的产物（attempt 编排层的原子单元）。"""
+
+    script: ScriptDocument
+    speakers: SpeakersDocument
+    candidates: CharacterCandidatesDocument
+    bible: CharacterBibleDocument
+    summary: dict[str, Any]
+    state: dict[str, Any]
+    errors: list[str]
+    stats: AnalysisRunStats | None = None
+    report: ValidityReport | None = None
 
 
 class V4ProjectAnalysisPipeline:
@@ -115,6 +150,7 @@ class V4ProjectAnalysisPipeline:
         self.configuration_message = configuration_message
         self.analysis_repository = V4AnalysisRepository(self.project_path)
         self.project_repository = ProjectV4Repository(self.project_path.parent)
+        self.validity_checker = AnalysisValidityChecker(config)
 
     @property
     def _ai_first_enabled(self) -> bool:
@@ -440,6 +476,12 @@ class V4ProjectAnalysisPipeline:
         or any of the legacy candidate/routing services.  Their code remains
         available to the advanced compatibility workbench, but the default V4
         machine result comes only from the three AI-first stages below.
+
+        PR #22：本次重构为 attempt 编排层——
+        1. completed 缓存复用前先做有效性校验（P0-6）；
+        2. 单次三阶段执行（``_run_ai_first_attempt``）；
+        3. 可疑结果自动重试一次（``force_restart=True``）；
+        4. 最终写 status/current_stage/reason_codes/message + stats/validity/attempts。
         """
         source_sha = old_script.source_sha256
         previous_state = self.analysis_repository.load(source_sha)
@@ -448,6 +490,7 @@ class V4ProjectAnalysisPipeline:
             and previous_state.get("analysis_mode") == "ai-first"
             and not force_reanalysis
         )
+        cache_invalidated = False
         if (
             not force_reanalysis
             and previous_state
@@ -455,19 +498,50 @@ class V4ProjectAnalysisPipeline:
             and previous_state.get("status") == "completed"
             and (self.project_path / "runtime/character_bible.json").is_file()
         ):
-            return V4AnalysisResult(
-                "completed",
-                old_script,
-                old_speakers,
-                candidates,
-                dict(previous_state.get("summary") or {}),
-                list(previous_state.get("errors") or []),
-                str(previous_state.get("message") or "✅ 分析已完成"),
+            cached_report = self.validity_checker.check_cached_state(
+                previous_state, source
             )
+            if not cached_report.is_suspicious:
+                return V4AnalysisResult(
+                    "completed",
+                    old_script,
+                    old_speakers,
+                    candidates,
+                    dict(previous_state.get("summary") or {}),
+                    list(previous_state.get("errors") or []),
+                    str(previous_state.get("message") or "✅ 分析已完成"),
+                    reason_codes=list(
+                        (previous_state.get("validity") or {}).get("reason_codes") or []
+                    ),
+                )
+            cache_invalidated = True
+            self._report(
+                progress_callback,
+                "检测到历史可疑的空分析缓存，正在自动失效并重新分析",
+            )
+
+        provider = getattr(self.book_understanding_adapter, "name", "")
+        model = getattr(self.book_understanding_adapter, "model", "")
         state = self.analysis_repository.start(
             source_sha,
-            provider=getattr(self.book_understanding_adapter, "name", ""),
+            provider=provider,
+            model=model,
+            analysis_mode="ai-first",
         )
+        attempts: list[dict[str, Any]] = []
+        if cache_invalidated:
+            state.setdefault("validity", {})["reason_codes"] = [
+                ReasonCode.CACHE_INVALIDATED.value
+            ]
+            attempts.append(
+                {
+                    "status": "cache_invalidated",
+                    "reason_codes": [ReasonCode.CACHE_INVALIDATED.value],
+                    "summary": {},
+                    "at": self._now_iso(),
+                }
+            )
+
         errors: list[str] = []
         baseline = SourceSegmenter().source_only(source).script
         baseline = replace(baseline, revision=max(1, old_script.revision))
@@ -476,7 +550,7 @@ class V4ProjectAnalysisPipeline:
             self._contains_machine_result(old_script, old_speakers)
             and (not previous_state or previous_state.get("analysis_mode") != "ai-first")
         )
-        if force_reanalysis or adopting_legacy_machine_result:
+        if force_reanalysis or adopting_legacy_machine_result or cache_invalidated:
             try:
                 snapshot_reanalysis(
                     self.project_path,
@@ -507,18 +581,174 @@ class V4ProjectAnalysisPipeline:
             )
         script = baseline
 
+        book_proxy = CountingAdapterProxy(self.book_understanding_adapter)
+        director_proxy = CountingAdapterProxy(self.script_director_adapter)
+        review_proxy = (
+            CountingAdapterProxy(self.script_review_adapter)
+            if self.script_review_adapter is not None
+            else None
+        )
+        shards_total = self._compute_shards_total(source, script)
+        started_at = self._now_iso()
+
+        retries = 0
+        final_attempt: _AiFirstAttempt | None = None
+        final_report: ValidityReport | None = None
+        while True:
+            calls_before = self._proxy_call_count(book_proxy, director_proxy, review_proxy)
+            attempt = self._run_ai_first_attempt(
+                source,
+                baseline,
+                old_script,
+                old_speakers,
+                candidates_repository,
+                state,
+                book_adapter=book_proxy,
+                director_adapter=director_proxy,
+                review_adapter=review_proxy,
+                force_restart=force_reanalysis or retries > 0,
+                progress_callback=progress_callback,
+            )
+            attempt_calls = (
+                self._proxy_call_count(book_proxy, director_proxy, review_proxy)
+                - calls_before
+            )
+            attempt_stats = self._attempt_stats(
+                attempt,
+                attempt_calls=attempt_calls,
+                shards_total=shards_total,
+                retries=retries,
+                started_at=started_at,
+                finished_at=self._now_iso(),
+            )
+            report = self.validity_checker.check(
+                source_text=source,
+                script=attempt.script,
+                speakers=attempt.speakers,
+                candidates=attempt.candidates,
+                bible_count=len(attempt.bible.characters),
+                summary=attempt.summary,
+                stats=attempt_stats,
+                errors=attempt.errors,
+            )
+            attempt = replace(attempt, stats=attempt_stats, report=report)
+            attempts.append(self._attempt_summary(attempt, attempt_calls))
+            if not report.is_suspicious:
+                final_attempt = attempt
+                final_report = report
+                break
+            if not self.config.validity_retry_enabled or retries >= self.config.validity_retry_max:
+                final_attempt = attempt
+                final_report = report
+                break
+            retries += 1
+            self._report(
+                progress_callback,
+                "检测到可疑的空分析结果，正在自动重试一次（重新请求模型）",
+            )
+
+        attempt = final_attempt
+        report = final_report
+        script = attempt.script
+        speakers = attempt.speakers
+        candidates = attempt.candidates
+        summary = attempt.summary
+        errors = attempt.errors
+        status = "completed" if (not report.is_suspicious and not errors) else "needs_attention"
+        summary["analysis_status"] = status
+        reason_codes = [
+            issue.code.value
+            for issue in report.issues
+            if issue.code != ReasonCode.OK
+        ]
+        if cache_invalidated and ReasonCode.CACHE_INVALIDATED.value not in reason_codes:
+            reason_codes.insert(0, ReasonCode.CACHE_INVALIDATED.value)
+        message = self._message(status, summary, errors, reason_codes=reason_codes)
+        finished_at = self._now_iso()
+        total_calls = self._proxy_call_count(book_proxy, director_proxy, review_proxy)
+        state.update(
+            {
+                "source_sha256": script.source_sha256,
+                "status": status,
+                "current_stage": "completed" if status == "completed" else "needs_attention",
+                "summary": summary,
+                "errors": errors,
+                "message": message,
+                "analysis_mode": "ai-first",
+                "provider": provider,
+                "model": model,
+                "pipeline_version": PIPELINE_VERSION,
+                "input_fingerprint": compute_input_fingerprint(
+                    source_sha, provider=provider, model=model, config=self.config
+                ),
+                "stats": {
+                    "ai_requests": total_calls,
+                    "chapters_total": len(script.chapters),
+                    "chapters_completed": attempt_stats.chapters_completed,
+                    "chapters_failed": attempt_stats.chapters_failed,
+                    "shards_total": shards_total,
+                    "retries": retries,
+                    "failures": len(errors),
+                    "started_at": started_at,
+                    "finished_at": finished_at,
+                },
+                "validity": {
+                    "checked": True,
+                    "is_suspicious": report.is_suspicious,
+                    "reason_codes": reason_codes,
+                    "source_dialogue_signals": (
+                        report.source_signals.to_dict()
+                        if report.source_signals is not None
+                        else {}
+                    ),
+                },
+                "attempts": attempts,
+            }
+        )
+        self._report(progress_callback, "正在保存分析结果")
+        self.analysis_repository.save(state)
+        self._report(
+            progress_callback,
+            "分析完成" if status == "completed" else "分析未完成，需要人工确认",
+        )
+        return V4AnalysisResult(
+            status, script, speakers, candidates, summary, errors, message,
+            reason_codes=reason_codes,
+        )
+
+    def _run_ai_first_attempt(
+        self,
+        source: str,
+        baseline: ScriptDocument,
+        old_script: ScriptDocument,
+        old_speakers: SpeakersDocument,
+        candidates_repository: CharacterCandidatesRepository,
+        state: dict[str, Any],
+        *,
+        book_adapter: Any,
+        director_adapter: Any,
+        review_adapter: Any | None,
+        force_restart: bool,
+        progress_callback: ProgressCallback | None,
+    ) -> _AiFirstAttempt:
+        """单次执行 book_understanding → script_director → script_review。"""
+        source_sha = baseline.source_sha256
+        errors: list[str] = []
+        empty_bible = CharacterBibleDocument(source_sha256=source_sha)
+
         self._report(progress_callback, "正在阅读全书")
         self._stage(state, "book_understanding", "running")
+        bible = empty_bible
         try:
             understanding = BookUnderstandingService(
-                self.book_understanding_adapter,
+                book_adapter,
                 BookUnderstandingCheckpointRepository(self.project_path),
                 max_input_chars=self.config.ai_max_input_chars,
             ).understand(
                 source,
                 baseline,
                 progress_callback=progress_callback,
-                force_restart=force_reanalysis,
+                force_restart=force_restart,
             )
             bible = understanding.bible
             self._stage(
@@ -542,9 +772,10 @@ class V4ProjectAnalysisPipeline:
         speakers = reconciliation.speakers
         self._report(progress_callback, "正在分析章节剧本")
         self._stage(state, "script_director", "running")
+        script = baseline
         try:
             directed = AIScriptDirectorService(
-                self.script_director_adapter,
+                director_adapter,
                 ScriptDirectorCheckpointRepository(self.project_path),
                 max_input_chars=self.config.ai_max_input_chars,
             ).direct(
@@ -552,7 +783,7 @@ class V4ProjectAnalysisPipeline:
                 baseline,
                 bible,
                 progress_callback=progress_callback,
-                force_restart=force_reanalysis,
+                force_restart=force_restart,
             )
             script = remap_script_speakers(
                 directed.script, reconciliation.speaker_id_map
@@ -598,12 +829,12 @@ class V4ProjectAnalysisPipeline:
         self._report(progress_callback, "正在复查对白归属")
         self._stage(state, "script_review", "running")
         review_result = None
-        if self.script_review_adapter is None:
+        if review_adapter is None:
             self._stage(state, "script_review", "skipped", patches=0)
         else:
             try:
                 review_result = AIScriptReviewService(
-                    self.script_review_adapter,
+                    review_adapter,
                     ScriptReviewCheckpointRepository(self.project_path),
                     min_confidence=self.config.routing_min_confidence,
                 ).review(
@@ -612,7 +843,7 @@ class V4ProjectAnalysisPipeline:
                     speakers,
                     bible,
                     progress_callback=progress_callback,
-                    force_restart=force_reanalysis,
+                    force_restart=force_restart,
                 )
                 script = review_result.script
                 self._stage(
@@ -659,26 +890,14 @@ class V4ProjectAnalysisPipeline:
                 card["importance"] = (
                     "主要角色" if character.importance == "major" else "次要角色"
                 )
-        status = "partial" if errors else "completed"
-        summary["analysis_status"] = status
-        message = self._message(status, summary, errors)
-        state.update({
-            "source_sha256": script.source_sha256,
-            "status": status,
-            "current_stage": "completed" if not errors else "needs_attention",
-            "summary": summary,
-            "errors": errors,
-            "message": message,
-            "analysis_mode": "ai-first",
-        })
-        self._report(progress_callback, "正在保存分析结果")
-        self.analysis_repository.save(state)
-        self._report(
-            progress_callback,
-            "分析完成" if not errors else "分析完成（有阶段需要继续）",
-        )
-        return V4AnalysisResult(
-            status, script, speakers, candidates, summary, errors, message
+        return _AiFirstAttempt(
+            script=script,
+            speakers=speakers,
+            candidates=candidates,
+            bible=bible,
+            summary=summary,
+            state=state,
+            errors=errors,
         )
 
     @staticmethod
@@ -778,10 +997,35 @@ class V4ProjectAnalysisPipeline:
         )
 
     def _stage(self, state: dict[str, Any], name: str, status: str, **extra: Any) -> None:
-        value = {"status": status, **extra}
-        state.setdefault("stages", {})[name] = value
+        stages = state.setdefault("stages", {})
+        previous = stages.get(name) or {}
+        now = self._now_iso()
+        value: dict[str, Any] = {"status": status, **extra}
+        if status == "running":
+            value["started_at"] = previous.get("started_at") or now
+            value["finished_at"] = ""
+            value["duration_ms"] = 0
+        else:
+            started_at = previous.get("started_at") or now
+            value["started_at"] = started_at
+            value["finished_at"] = now
+            value["duration_ms"] = self._duration_ms(started_at, now)
+        stages[name] = value
         state["current_stage"] = name
         self.analysis_repository.save(state)
+
+    @staticmethod
+    def _now_iso() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    @staticmethod
+    def _duration_ms(started_at: str, finished_at: str) -> int:
+        try:
+            start = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+            finish = datetime.fromisoformat(str(finished_at).replace("Z", "+00:00"))
+            return max(0, int((finish - start).total_seconds() * 1000))
+        except (TypeError, ValueError):
+            return 0
 
     @staticmethod
     def _report(callback: ProgressCallback | None, message: str) -> None:
@@ -791,6 +1035,91 @@ class V4ProjectAnalysisPipeline:
             callback(message)
         except TypeError:
             callback(str(message))
+
+    def _compute_shards_total(self, source: str, script: ScriptDocument) -> int:
+        """确定性分片数：按章节对 split_source_range 求和（DESIGN §6.6）。"""
+        return sum(
+            len(
+                split_source_range(
+                    source, chapter.start, chapter.end, self.config.ai_max_input_chars
+                )
+            )
+            for chapter in script.chapters
+        )
+
+    @staticmethod
+    def _proxy_call_count(
+        book: CountingAdapterProxy,
+        director: CountingAdapterProxy,
+        review: CountingAdapterProxy | None,
+    ) -> int:
+        total = book.calls + director.calls
+        if review is not None:
+            total += review.calls
+        return total
+
+    @staticmethod
+    def _attempt_stats(
+        attempt: _AiFirstAttempt,
+        *,
+        attempt_calls: int,
+        shards_total: int,
+        retries: int,
+        started_at: str,
+        finished_at: str,
+    ) -> AnalysisRunStats:
+        stages = attempt.state.get("stages") or {}
+        book = stages.get("book_understanding") or {}
+        director = stages.get("script_director") or {}
+        chapters_completed = int(book.get("completed_chapters", 0) or 0)
+        chapters_failed = int(book.get("failed_chapters", 0) or 0) + int(
+            director.get("failed_chapters", 0) or 0
+        )
+        return AnalysisRunStats(
+            ai_requests=attempt_calls,
+            chapters_total=len(attempt.script.chapters),
+            chapters_completed=chapters_completed,
+            chapters_failed=chapters_failed,
+            shards_total=shards_total,
+            retries=retries,
+            failures=len(attempt.errors),
+            started_at=started_at,
+            finished_at=finished_at,
+        )
+
+    @staticmethod
+    def _attempt_summary(attempt: _AiFirstAttempt, attempt_calls: int) -> dict[str, Any]:
+        report = attempt.report
+        if report is None:
+            status = "partial" if attempt.errors else "completed"
+            reason_codes: list[str] = []
+        elif report.is_suspicious:
+            status = "suspicious"
+            reason_codes = [
+                issue.code.value
+                for issue in report.issues
+                if issue.code != ReasonCode.OK
+            ]
+        else:
+            status = "partial" if attempt.errors else "completed"
+            reason_codes = [
+                issue.code.value
+                for issue in report.issues
+                if issue.code != ReasonCode.OK
+            ]
+        return {
+            "status": status,
+            "reason_codes": reason_codes,
+            "summary": {
+                "identified_characters": attempt.summary.get("identified_characters", 0),
+                "dialogue_total": attempt.summary.get("dialogue_total", 0),
+                "dialogue_auto_routed": attempt.summary.get("dialogue_auto_routed", 0),
+                "dialogue_unresolved": attempt.summary.get("dialogue_unresolved", 0),
+                "character_bible_count": attempt.summary.get("character_bible_count", 0),
+            },
+            "ai_requests": attempt_calls,
+            "at": V4ProjectAnalysisPipeline._now_iso(),
+        }
 
     @staticmethod
     def _summary(
@@ -860,7 +1189,7 @@ class V4ProjectAnalysisPipeline:
             "dialogue_total": len(dialogue),
             "dialogue_auto_routed": auto_routed,
             "dialogue_unresolved": unresolved,
-            "dialogue_coverage": (auto_routed / len(dialogue)) if dialogue else 1.0,
+            "dialogue_coverage": (auto_routed / len(dialogue)) if dialogue else None,
             "character_cards": character_cards,
             "consistency_auto_fixed": len(consistency.auto_fixed) if consistency else 0,
             "consistency_ai_review": len(consistency.ai_review) if consistency else 0,
@@ -869,15 +1198,33 @@ class V4ProjectAnalysisPipeline:
         }
 
     @staticmethod
-    def _message(status: str, summary: dict[str, Any], errors: list[str]) -> str:
-        prefix = "✅ 分析完成" if status == "completed" else "⚠ 分析完成，但有阶段需要继续"
+    def _message(
+        status: str,
+        summary: dict[str, Any],
+        errors: list[str],
+        reason_codes: list[str] | None = None,
+    ) -> str:
+        prefix = "✅ 分析完成" if status == "completed" else "⚠ 分析未完成，需要人工确认"
+        coverage = summary.get("dialogue_coverage")
+        coverage_text = (
+            f"{coverage * 100:.0f}%"
+            if coverage is not None
+            else DIALOGUE_COVERAGE_UNKNOWN_LABEL
+        )
         lines = [
             prefix,
             f"识别角色：{summary.get('identified_characters', 0)}",
             f"自动确认：{summary.get('auto_confirmed_characters', 0)}",
             f"需要检查：{summary.get('needs_review_characters', 0) + summary.get('dialogue_unresolved', 0)}",
             f"已过滤噪音：{summary.get('filtered_noise', 0)}",
-            f"对白自动归属：{summary.get('dialogue_coverage', 1.0) * 100:.0f}%",
+            f"对白自动归属：{coverage_text}",
         ]
+        for code_value in reason_codes or []:
+            code = ReasonCode.from_value(code_value)
+            if code is None or code == ReasonCode.OK:
+                continue
+            text = REASON_MESSAGES.get(code, "")
+            if text:
+                lines.append(text)
         lines.extend(f"- {item}" for item in errors)
         return "\n".join(lines)
