@@ -4,7 +4,6 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 APP = (ROOT / "app.py").read_text(encoding="utf-8")
 APP_TREE = ast.parse(APP)
@@ -58,11 +57,13 @@ def test_groups_match_navigation_items_in_order():
     assert '"settings"' in APP
 
 
-def test_settings_page_has_full_width_classes_and_three_tabs():
+def test_settings_page_has_full_width_classes_and_local_tabs():
     assert 'elem_classes=["settings-page"]' in SETTINGS
     assert 'elem_classes=["settings-card"]' in SETTINGS
-    for label in ("AI 模型", "数据与存储", "系统信息"):
+    for label in ("数据与项目", "TTS 与导出", "系统信息"):
         assert f'gr.Tab("{label}")' in SETTINGS
+    for forbidden in ("AI 模型", "Provider", "API Key", "模型刷新", "连接测试"):
+        assert forbidden not in SETTINGS
     theme = (ROOT / "ui/theme.py").read_text(encoding="utf-8")
     assert ".settings-page" in theme
     assert '[role="tabpanel"]' in theme

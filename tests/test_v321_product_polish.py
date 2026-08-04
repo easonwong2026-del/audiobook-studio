@@ -140,7 +140,9 @@ def test_project_onboarding_and_user_facing_quality_labels_exist():
     synthesis_page = _text("ui/pages/synthesis_page.py")
     export_page = _text("ui/pages/export_page.py")
     assert "gr.File" in create_page
-    assert "TXT/DOCX/EPUB" in create_page
+    assert 'file_types=[".json"]' in create_page
+    assert "AI 分析并创建项目" not in create_page
+    assert "高级" not in create_page
     assert '("快速", 1)' in synthesis_page
     assert '("标准", 2)' in synthesis_page
     assert '("高质量", 3)' in synthesis_page

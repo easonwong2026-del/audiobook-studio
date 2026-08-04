@@ -2,9 +2,9 @@ import json
 import sys
 from types import SimpleNamespace
 
-from services import environment_diagnostics as diagnostics
-from lib import environment
 import launcher
+from lib import environment
+from services import environment_diagnostics as diagnostics
 
 
 def _item(report, name):
@@ -51,13 +51,12 @@ def test_platform_branches_do_not_crash(monkeypatch):
         assert diagnostics.run_environment_diagnostics()["checks"]
 
 
-def test_api_keys_never_leak(monkeypatch):
-    secret = "sk-super-secret-value"
-    monkeypatch.setenv("OPENAI_API_KEY", secret)
+def test_diagnostics_have_no_external_provider_check():
     report = diagnostics.run_environment_diagnostics()
     rendered = json.dumps(report, ensure_ascii=False) + diagnostics.diagnostics_to_markdown(report)
-    assert secret not in rendered
-    assert _item(report, "API Provider")["details"]["openai_key_configured"] is True
+    assert "API Provider" not in rendered
+    assert "OPENAI" not in rendered
+    assert "DEEPSEEK" not in rendered
 
 
 def test_single_check_exception_isolated(monkeypatch):
@@ -180,17 +179,6 @@ def test_diagnostics_invalid_env_fallback_remains_ok(monkeypatch, tmp_path):
         )(),
     )
     monkeypatch.setattr(diagnostics.shutil, "which", lambda _: None)
-    monkeypatch.setattr(
-        diagnostics.AiSettingsService,
-        "get_provider_config",
-        lambda: {"default_provider": "local"},
-    )
-    monkeypatch.setattr(
-        diagnostics.AiSettingsService, "has_api_key", lambda _: False,
-    )
-    monkeypatch.setattr(
-        diagnostics.AiSettingsService, "get_api_key_source", lambda _: "none",
-    )
     monkeypatch.setitem(
         sys.modules,
         "torch",

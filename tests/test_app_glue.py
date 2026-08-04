@@ -100,32 +100,21 @@ def test_create_project_returns_4tuple():
     print(f"[B5] create_project 共 {len(returns)} 处 return，均为 4 元组 ✔")
 
 
-def test_create_project_click_wiring():
-    """B5/B13: 新建项目页面通过 cp_create 触发创建，cp_json_create 触发 JSON 创建。"""
-    node = find_click("cp_create")
-    assert node is not None, "未找到 cp_create.click（新建项目入口）"
+def test_json_create_click_wiring():
+    """新建项目只有 JSON 检查和 JSON 创建入口。"""
+    node = find_click("cp_json_create")
+    assert node is not None, "未找到 cp_json_create.click（JSON 导入入口）"
     assert len(node.args) >= 2, "cp_create.click 参数不足"
     inputs = node.args[1]
     assert isinstance(inputs, ast.List)
     ids = _arg_ids(inputs)
-    print(f"[B13] cp_create.click inputs = {ids}")
-    assert len(ids) >= 2, f"inputs 应包含项目名和源文件，实际 {len(ids)}"
-
-    node2 = find_click("cp_json_create")
-    assert node2 is not None, "未找到 cp_json_create.click（JSON 高级导入）"
-    assert len(node2.args) >= 2, "cp_json_create.click 参数不足"
+    assert ids == ["cp_json_name", "cp_json_file", "ss"], ids
     outputs = node.args[2]
     assert isinstance(outputs, ast.List)
     ids = _arg_ids(outputs)
-    print(f"[B13] cp_create.click outputs = {ids}")
-    assert len(ids) >= 2, f"outputs 应包含状态和结果，实际 {len(ids)}"
-    assert len(node.args) >= 3, "p_create.click 参数不足"
-    outputs = node.args[2]
-    assert isinstance(outputs, ast.List)
-    ids = _arg_ids(outputs)
-    print(f"[B5] p_create.click outputs = {ids}")
-    assert len(ids) == 4, f"outputs 应为 4 个，实际 {len(ids)}"
+    assert len(ids) == 2, f"outputs 应为 2 个，实际 {len(ids)}"
     assert ids.count("p_sel") == 1, "p_sel 在 outputs 中应只出现一次"
+    assert find_click("cp_json_check") is not None
 
 
 def test_do_export_signature():
@@ -196,12 +185,13 @@ def test_preview_bound_voice_uses_full_three_sentences():
     print("[D4] preview_bound_voice 合成并拼接完整三句测试句 ✔")
 
 
-def test_script_loader_import_and_validate_wired():
+def test_json_import_service_is_wired_without_source_analysis():
     assert has_import_from("lib", "script_loader"), "app.py 未 import script_loader（B12 缺失）"
-    fn = find_func("create_project")
-    assert fn is not None
-    calls = [n.func.attr for n in ast.walk(fn)
-             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)]
-    print(f"[B12] create_project 内调用: {calls}")
-    assert "load_script" in calls, "create_project 未调用 script_loader.load_script（B12 接线缺失）"
-    assert "validate_script" in calls, "create_project 未调用 script_loader.validate_script（B12 接线缺失）"
+    assert "create_ui.inspect_json" in SRC
+    with open(
+        os.path.join(PROJECT_ROOT, "services", "structured_script_import.py"),
+        encoding="utf-8",
+    ) as service_file:
+        assert "StructuredScriptImportService" in service_file.read()
+    assert "create_from_source" not in SRC
+    assert "AI 分析并创建项目" not in SRC

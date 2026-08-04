@@ -21,7 +21,7 @@ _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-import launcher  # noqa: E402  (import after sys.path is prepared)
+import launcher
 
 
 def _make_fake_run():
@@ -49,9 +49,8 @@ def test_launcher_print_order_and_app_start():
     saved_cwd = os.getcwd()
 
     try:
-        with mock.patch("subprocess.run", side_effect=fake_run):
-            with contextlib.redirect_stdout(buffer):
-                launcher.main()
+        with mock.patch("subprocess.run", side_effect=fake_run), contextlib.redirect_stdout(buffer):
+            launcher.main()
     finally:
         # launcher.main() calls os.chdir(APP_DIR); restore to avoid leaking cwd.
         os.chdir(saved_cwd)
@@ -87,9 +86,8 @@ def test_launcher_dependency_check_runs_first():
     saved_cwd = os.getcwd()
 
     try:
-        with mock.patch("subprocess.run", side_effect=fake_run):
-            with contextlib.redirect_stdout(buffer):
-                launcher.main()
+        with mock.patch("subprocess.run", side_effect=fake_run), contextlib.redirect_stdout(buffer):
+            launcher.main()
     finally:
         os.chdir(saved_cwd)
 
@@ -134,9 +132,8 @@ def test_launcher_prints_startup_banner_before_env_check():
     saved_cwd = os.getcwd()
 
     try:
-        with mock.patch("subprocess.run", side_effect=fake_run):
-            with contextlib.redirect_stdout(buffer):
-                launcher.main()
+        with mock.patch("subprocess.run", side_effect=fake_run), contextlib.redirect_stdout(buffer):
+            launcher.main()
     finally:
         os.chdir(saved_cwd)
 
@@ -187,7 +184,6 @@ def test_launcher_skips_pip_when_all_runtime_dependencies_import(monkeypatch):
 
 
 def test_launcher_installs_requirements_with_resolved_python(monkeypatch, capsys):
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-never-print-this")
     calls = _run_launcher_with_results(monkeypatch, [1, 0, 0, 0])
     saved_cwd = os.getcwd()
     try:
@@ -199,8 +195,9 @@ def test_launcher_installs_requirements_with_resolved_python(monkeypatch, capsys
     assert pip_calls == [[
         "/tmp/target-python", "-m", "pip", "install", "-r", launcher.REQUIREMENTS_FILE,
     ]]
-    assert "gradio>=5.50,<6" in open(os.path.join(_PROJECT_ROOT, "requirements.txt"), encoding="utf-8").read()
-    assert "sk-never-print-this" not in capsys.readouterr().out
+    with open(os.path.join(_PROJECT_ROOT, "requirements.txt"), encoding="utf-8") as requirements:
+        assert "gradio>=5.50,<6" in requirements.read()
+    assert "API Key" not in capsys.readouterr().out
 
 
 def test_launcher_exits_when_requirements_install_fails(monkeypatch, capsys):

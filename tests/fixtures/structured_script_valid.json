@@ -1,0 +1,98 @@
+{
+  "version": "3.0",
+  "project_name": "外部 Agent 示例",
+  "meta": {
+    "title": "外部 Agent 示例",
+    "author": "测试作者",
+    "total_chapters": 2,
+    "total_segments": 4
+  },
+  "voices": {
+    "旁白": {
+      "description": "沉稳叙事"
+    },
+    "小雨": {
+      "description": "清亮女声"
+    }
+  },
+  "chapters": [
+    {
+      "id": 1,
+      "title": "第一章",
+      "segments": [
+        {
+          "id": "1-001",
+          "speaker": "旁白",
+          "role": "旁白",
+          "text": "故事从清晨开始。",
+          "emotion": "neutral",
+          "emo_alpha": 0.4,
+          "speech_rate": 1.0,
+          "delivery": {
+            "speed": 1.0,
+            "pitch": 0,
+            "intensity": 0.4,
+            "breath": "light"
+          },
+          "pause_before": 0,
+          "pause_after": 400,
+          "pauses": []
+        },
+        {
+          "id": "1-002",
+          "speaker": "小雨",
+          "role": "小雨",
+          "text": "你终于来了。",
+          "emotion": "happy",
+          "emo_alpha": 0.6,
+          "speech_rate": 1.05,
+          "delivery": {
+            "speed": 1.05,
+            "pitch": 1,
+            "intensity": 0.6,
+            "breath": "light"
+          },
+          "pause_before": 100,
+          "pause_after": 500,
+          "pauses": [
+            {
+              "position": 3,
+              "duration": 250,
+              "type": "pause_short"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "第二章",
+      "segments": [
+        {
+          "id": "2-001",
+          "speaker": "旁白",
+          "role": "旁白",
+          "text": "两个人一起走进了街角的书店。",
+          "emotion": "neutral",
+          "emo_alpha": 0.4,
+          "speech_rate": 1.0,
+          "pause_before": 0,
+          "pause_after": 300,
+          "pauses": []
+        },
+        {
+          "id": "2-002",
+          "speaker": "小雨",
+          "role": "小雨",
+          "text": "今天会是很特别的一天。",
+          "emotion": "confident",
+          "emo_alpha": 0.5,
+          "speech_rate": 1.05,
+          "pause_before": 0,
+          "pause_after": 500,
+          "pauses": []
+        }
+      ]
+    }
+  ]
+}

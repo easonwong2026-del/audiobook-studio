@@ -3,8 +3,9 @@ from services.script_consistency import check_script_consistency
 
 def script(voices=None, segments=None):
     return {
+        "meta": {"title": "一致性测试"},
         "voices": voices or {"旁白": {}, "张国强": {}, "老张": {}},
-        "chapters": [{"id": 1, "segments": segments or [
+        "chapters": [{"id": 1, "title": "一", "segments": segments or [
             {"id": "1-001", "role": "旁白", "text": "正常文本", "speech_rate": 1.0},
             {"id": "1-002", "role": "张国强", "text": "他说了一句话", "speech_rate": 1.4},
         ]}],
@@ -57,27 +58,31 @@ def test_v3_intensity_pause_and_empty_id_boundaries():
 
 
 def test_warning_does_not_block_project_creation(monkeypatch, tmp_path):
-    from services.project_creation import ProjectCreationService
     import json
+
+    from services.project_creation import ProjectCreationService
     source = tmp_path / "script.json"
     source.write_text(json.dumps(script(voices={"旁白": {}, "未使用": {}}, segments=[
         {"id": "1", "role": "旁白", "text": "正常文本"},
     ]), ensure_ascii=False), encoding="utf-8")
-    monkeypatch.setattr("services.project_creation.config.get_projects_root", lambda: str(tmp_path / "projects"))
-    monkeypatch.setattr("services.project_creation.ProjectRepository.create_project", lambda *a: None)
+    monkeypatch.setattr(
+        "services.structured_script_import.ProjectRepository.create_project",
+        lambda *a: None,
+    )
     result = ProjectCreationService.create_from_structured_script("ok", str(source))
     assert result.warnings
 
 
 def test_error_blocks_project_creation(monkeypatch, tmp_path):
-    from services.project_creation import ProjectCreationService
     import json
+
     import pytest
+
+    from services.project_creation import ProjectCreationService
     source = tmp_path / "script.json"
     source.write_text(json.dumps(script(voices={"旁白": {}}, segments=[
         {"id": "same", "role": "旁白", "text": "一"},
         {"id": "same", "role": "旁白", "text": "二"},
     ]), ensure_ascii=False), encoding="utf-8")
-    monkeypatch.setattr("services.project_creation.config.get_projects_root", lambda: str(tmp_path / "projects"))
-    with pytest.raises(ValueError, match="一致性"):
+    with pytest.raises(ValueError, match="校验"):
         ProjectCreationService.create_from_structured_script("bad", str(source))
