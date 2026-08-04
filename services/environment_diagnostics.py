@@ -2,19 +2,17 @@
 from __future__ import annotations
 
 import importlib.metadata
-import json
 import os
 import platform
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from lib import config
 from lib.environment import resolve_python_interpreter
-from services.ai_settings import AiSettingsService
-
 
 STATUS_RANK = {"ok": 0, "warning": 1, "error": 2}
 
@@ -30,7 +28,7 @@ def _check(name: str, callback: Callable[[], dict[str, Any]]) -> dict[str, Any]:
             "details": result.get("details", {}),
             "suggestion": str(result.get("suggestion", "")),
         }
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - isolate one diagnostic from the rest
         return {
             "name": name,
             "status": "error",
@@ -60,7 +58,7 @@ def _path_state(path: str, *, empty_is_warning: bool = False) -> dict[str, Any]:
 
 
 def run_environment_diagnostics() -> dict[str, Any]:
-    """返回可序列化诊断对象；永不包含 API Key 内容。"""
+    """返回可序列化的本地运行环境诊断对象。"""
     checks: list[dict[str, Any]] = []
     add = lambda name, fn: checks.append(_check(name, fn))
 
@@ -174,22 +172,6 @@ def run_environment_diagnostics() -> dict[str, Any]:
             "suggestion": "检查 Torch/CUDA/驱动版本兼容性。" if not cuda else "",
         }
     add("Torch / CUDA", torch_check)
-
-    def provider_check():
-        saved = AiSettingsService.get_provider_config()
-        provider = saved.get("default_provider", "local")
-        return {
-            "status": "ok",
-            "message": f"默认 Provider：{provider}",
-            "details": {
-                "provider": provider,
-                "openai_key_configured": AiSettingsService.has_api_key("openai"),
-                "deepseek_key_configured": AiSettingsService.has_api_key("deepseek"),
-                "openai_key_source": AiSettingsService.get_api_key_source("openai"),
-                "deepseek_key_source": AiSettingsService.get_api_key_source("deepseek"),
-            },
-        }
-    add("API Provider", provider_check)
 
     def projects_check():
         root = Path(config.get_projects_root())

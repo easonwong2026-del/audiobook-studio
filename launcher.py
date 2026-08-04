@@ -36,7 +36,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 PYTHON: str = ""   # will be filled by _resolve_python()
 
-REQUIRED_MODULES = ("gradio", "numpy", "scipy", "pyloudnorm", "mutagen", "keyring")
+REQUIRED_MODULES = ("gradio", "numpy", "scipy", "pyloudnorm", "mutagen")
 REQUIREMENTS_FILE = os.path.join(BASE_DIR, "requirements.txt")
 
 

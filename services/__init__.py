@@ -16,22 +16,25 @@ from lib.snapshot import ProjectSnapshot
 
 from .export import ExportService
 from .project import ProjectService
-from .script_director import ScriptDirectorService
 from .session import SessionState
+from .structured_script_import import (
+    StructuredScriptCreationResult,
+    StructuredScriptImportService,
+    StructuredScriptPreview,
+)
 from .supplement import SupplementService, SupplementTaskState
 from .synthesis import SynthesisService, SynthesisState
-from .voice_director import DirectorAuditionService, VoiceDirectorService
 
 __all__ = [
-    "SessionState",
-    "ProjectSnapshot",
-    "SynthesisState",
-    "SynthesisService",
-    "ProjectService",
     "ExportService",
+    "ProjectService",
+    "ProjectSnapshot",
+    "SessionState",
+    "StructuredScriptCreationResult",
+    "StructuredScriptImportService",
+    "StructuredScriptPreview",
     "SupplementService",
     "SupplementTaskState",
-    "ScriptDirectorService",
-    "DirectorAuditionService",
-    "VoiceDirectorService",
+    "SynthesisService",
+    "SynthesisState",
 ]

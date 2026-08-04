@@ -1,4 +1,4 @@
-"""角色与声音阶段 UI builder — 角色绑定、音色管理与 AI 声音推荐。"""
+"""角色与声音阶段 UI builder — 角色绑定与音色管理。"""
 from __future__ import annotations
 
 import gradio as gr
@@ -34,8 +34,7 @@ def create_voice_page() -> dict:
                         "<span>② 确认绑定</span>"
                         "</div>"
                     )
-                    with gr.Row(equal_height=False, elem_classes=["voice-binding-layout"]):
-                        with gr.Column(elem_classes=["voice-step-card", "voice-choice-card"]):
+                    with gr.Row(equal_height=False, elem_classes=["voice-binding-layout"]), gr.Column(elem_classes=["voice-step-card", "voice-choice-card"]):
                             gr.Markdown("##### 选择声音")
                             gr.Markdown("先筛选音色分类，再选择、上传或录制参考音频。")
                             v_bind_category = gr.Dropdown(
@@ -54,20 +53,6 @@ def create_voice_page() -> dict:
                                 sources=["upload", "microphone"],
                                 elem_classes=["voice-reference-upload"],
                             )
-
-                            # AI 声音建议
-                            with gr.Accordion("AI 声音建议", open=False):
-                                v_recommend = gr.Button("刷新推荐", variant="secondary", size="sm")
-                                v_recommendations = gr.Dataframe(
-                                    headers=["voice_name", "category", "score", "reasons"],
-                                    datatype=["str", "str", "number", "str"],
-                                    row_count=(0, "dynamic"),
-                                    col_count=(4, "fixed"),
-                                    interactive=False,
-                                    wrap=True,
-                                    label="推荐候选",
-                                )
-                                v_recommend_status = gr.Markdown("选择角色后点击「刷新推荐」")
 
                     with gr.Row(equal_height=False, elem_classes=["voice-config-footer"]):
                         v_current = gr.Markdown("当前参考音频：未选择")
@@ -120,9 +105,6 @@ def create_voice_page() -> dict:
         "v_bind_msg": v_bind_msg,
         "v_preview_btn": v_preview_btn,
         "v_preview_audio": v_preview_audio,
-        "v_recommend": v_recommend,
-        "v_recommendations": v_recommendations,
-        "v_recommend_status": v_recommend_status,
         "v_record": v_record,
         "v_upload_clone": v_upload_clone,
         "v_save_name": v_save_name,

@@ -13,5 +13,4 @@ mutagen            # D2 ID3 / M4B 章节标签（纯 Python）
 #   - torch / indextts / IndexTTS2 由 index-tts 的 venv 提供，不在此列出。
 #   - ffmpeg 是系统二进制，需自行下载并加入 PATH（不能通过 pip 安装）。
 #     下载：https://ffmpeg.org/download.html
-#     缺失时导出会回退为 WAV，并在 launcher.py 中给出明确警告。
-keyring>=24.0       # AI Provider API Key 安全存储
+#     缺失时导出会在运行时给出明确诊断。

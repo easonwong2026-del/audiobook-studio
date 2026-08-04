@@ -1,9 +1,4 @@
-"""新建项目页面 — 从原始书稿或结构化 JSON 创建项目。
-
-分成两个入口：
-- 主入口：从原始书稿（TXT/DOCX/EPUB）创建
-- 高级入口：从 structured_script.json 创建（折叠）
-"""
+"""新建项目页面：外部 Agent JSON 是唯一入口。"""
 from __future__ import annotations
 
 import gradio as gr
@@ -11,83 +6,52 @@ import gradio as gr
 
 def create_create_project_page() -> dict:
     with gr.Group(visible=False, elem_id="grp-create-project") as grp:
-        gr.Markdown("### 从原始书稿创建")
+        gr.Markdown("### 从剧本分析 JSON 创建项目")
+        gr.Markdown(
+            "请先使用有声书分析 Skill 将小说分析为 `structured_script.json`，"
+            "再导入工作台完成角色声音绑定、合成、试听质检和导出。"
+        )
 
         with gr.Row(equal_height=True, elem_classes=["stage-row"]):
-            with gr.Column(scale=1, elem_classes=["stage-card"]):
-                cp_name = gr.Textbox(label="项目名称", placeholder="例如：甲方来了")
-
             with gr.Column(scale=2, elem_classes=["stage-card"]):
-                cp_source = gr.File(
-                    label="原始书稿文件",
-                    file_types=[".txt", ".docx", ".epub"],
+                cp_json_file = gr.File(
+                    label="structured_script.json",
+                    file_types=[".json"],
                     type="filepath",
                 )
+            with gr.Column(scale=1, elem_classes=["stage-card"]):
+                cp_json_name = gr.Textbox(
+                    label="项目名称",
+                    placeholder="上传后自动填写，可手动修改",
+                )
 
-        with gr.Row():
-            cp_title = gr.Textbox(label="作品名（可选）", placeholder="默认使用文件名")
-            cp_author = gr.Textbox(label="作者（可选）")
-
-        cp_slot_status = gr.Markdown("⚪ 上传书稿或输入项目名称后，将立即检查名称状态")
-        cp_cleanup = gr.Button(
-            "清理残留并重试",
+        cp_json_slot_status = gr.Markdown("⚪ 上传 JSON 后立即检查项目槽位")
+        cp_json_cleanup = gr.Button(
+            "将异常目录移到回收站并重新检查",
             variant="stop",
             size="sm",
             visible=False,
         )
-
+        cp_json_preview = gr.Markdown(
+            "### 等待导入\n上传 JSON 后显示作品、角色、章节和校验结果。"
+        )
         with gr.Row():
-            cp_config_summary = gr.Markdown(
-                "##### 当前 AI 配置\n"
-                "默认 Provider：**Local**（离线分析）\n\n"
-                "前往 *设置 → AI 模型* 配置远程 Provider。"
+            cp_json_check = gr.Button("检查 JSON", variant="secondary")
+            cp_json_create = gr.Button(
+                "创建并前往角色与声音",
+                variant="primary",
+                interactive=False,
             )
-
-        with gr.Row():
-            cp_create = gr.Button("AI 分析并创建项目", variant="primary")
-
-        cp_status = gr.Markdown("")
-        cp_result = gr.Markdown("")
-
-        with gr.Accordion("高级：从结构化剧本创建", open=False):
-            with gr.Row(equal_height=True, elem_classes=["stage-row"]):
-                with gr.Column(scale=1, elem_classes=["stage-card"]):
-                    cp_json_name = gr.Textbox(label="项目名称", placeholder="例如：甲方来了")
-                with gr.Column(scale=2, elem_classes=["stage-card"]):
-                    cp_json_file = gr.File(
-                        label="structured_script.json",
-                        file_types=[".json"],
-                        type="filepath",
-                    )
-            cp_json_status = gr.Markdown("")
-            cp_json_slot_status = gr.Markdown("⚪ 上传 JSON 或输入项目名称后检查")
-            with gr.Row():
-                cp_json_create = gr.Button("从 JSON 创建", variant="primary")
-                cp_json_cleanup = gr.Button(
-                    "清理残留并重试",
-                    variant="stop",
-                    size="sm",
-                    visible=False,
-                )
-            cp_json_result = gr.Markdown("")
+        cp_json_result = gr.Markdown("")
 
     return {
         "group": grp,
-        "cp_name": cp_name,
-        "cp_source": cp_source,
-        "cp_title": cp_title,
-        "cp_author": cp_author,
-        "cp_slot_status": cp_slot_status,
-        "cp_cleanup": cp_cleanup,
-        "cp_config_summary": cp_config_summary,
-        "cp_create": cp_create,
-        "cp_status": cp_status,
-        "cp_result": cp_result,
-        "cp_json_name": cp_json_name,
         "cp_json_file": cp_json_file,
-        "cp_json_status": cp_json_status,
+        "cp_json_name": cp_json_name,
         "cp_json_slot_status": cp_json_slot_status,
         "cp_json_cleanup": cp_json_cleanup,
+        "cp_json_preview": cp_json_preview,
+        "cp_json_check": cp_json_check,
         "cp_json_create": cp_json_create,
         "cp_json_result": cp_json_result,
     }

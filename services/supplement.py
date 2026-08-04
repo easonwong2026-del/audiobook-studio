@@ -20,11 +20,11 @@ import re
 import shutil
 import time
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass, field
 
-from lib import script_loader
-from lib import config
-from repositories.task_repo import TaskRepository, TaskRecord
+from lib import config, script_loader
+from repositories.task_repo import TaskRecord, TaskRepository
 
 logger = logging.getLogger(__name__)
 
@@ -168,13 +168,31 @@ class SupplementService:
         if not isinstance(raw, dict):
             return ["小 JSON 不是合法对象（顶层应为 {...}）"]
 
-        # 复用 script_loader 的解析 + 校验（角色 / 章节完整性 + 可读诊断）
-        parsed = script_loader.from_dict(raw)
+        # 补录 JSON 是已有的内部“片段子集”：保留原有允许省略 meta / 章标题 / 章 ID
+        # 的行为，同时仍复用同一套结构校验规则，不把这个子集当成项目交换协议。
+        normalized = deepcopy(raw)
+        normalized.setdefault("meta", {})
+        chapter_key = "chapters" if "chapters" in normalized else next(
+            (key for key in ("sections", "episodes", "scenes") if key in normalized),
+            "chapters",
+        )
+        chapters = normalized.get(chapter_key)
+        if isinstance(chapters, list):
+            normalized[chapter_key] = [
+                {
+                    **chapter,
+                    "id": chapter.get("id", index + 1),
+                    "title": chapter.get("title") or "补录",
+                }
+                if isinstance(chapter, dict) else chapter
+                for index, chapter in enumerate(chapters)
+            ]
+        parsed = script_loader.from_dict(normalized)
         errors.extend(script_loader.validate_script(parsed))
 
         parent_voices = ((script or {}).get("voices")
                          if isinstance(script, dict) else {}) or {}
-        for r in parsed.voices.keys():
+        for r in parsed.voices:
             if r not in parent_voices:
                 errors.append(
                     f"角色 '{r}' 未在项目剧本 voices 中定义"
@@ -240,7 +258,9 @@ class SupplementService:
             ValueError: role 缺失 / 不在父剧本 voices / lines 缺失或含空文本 / 非法 JSON。
         """
         if not isinstance(raw, dict):
-            raise ValueError("补录 JSON 顶层应为对象 {...}（紧凑格式为 role + lines）。")
+            raise ValueError(  # noqa: TRY004
+                "补录 JSON 顶层应为对象 {...}（紧凑格式为 role + lines）。"
+            )
 
         role = raw.get("role")
         if not isinstance(role, str) or not role.strip():
@@ -278,7 +298,7 @@ class SupplementService:
             elif isinstance(item, str):
                 text = item
             else:
-                raise ValueError(
+                raise ValueError(  # noqa: TRY004
                     f"lines 第 {i + 1} 项格式错误（应为字符串或含 'text' 字段的对象）。"
                 )
             if not isinstance(text, str) or not text.strip():
@@ -337,7 +357,9 @@ class SupplementService:
             ValueError: 无法识别格式或解析失败（含可读诊断）。
         """
         if not isinstance(raw, dict):
-            raise ValueError("补录 JSON 顶层应为对象 {...}（紧凑=role+lines；标准=voices+chapters）。")
+            raise ValueError(  # noqa: TRY004
+                "补录 JSON 顶层应为对象 {...}（紧凑=role+lines；标准=voices+chapters）。"
+            )
 
         has_role = "role" in raw
         has_lines = ("lines" in raw) or ("text" in raw)
@@ -357,7 +379,7 @@ class SupplementService:
     def synthesize_lines(role: str, lines: list[str], speaker_audio: str,
                          overrides: dict | None = None, num_beams: int = 2,
                          cache_dir: str = "",
-                         task: "SupplementTaskState | None" = None) -> list[dict]:
+                         task: SupplementTaskState | None = None) -> list[dict]:
         """逐句合成补录文本，返回每句结果（状态 + wav 路径 / 错误）。
 
         逐句调用 ``tts_engine.synthesize_segment``（引擎互斥锁自含，调用方无需加锁）。
@@ -416,7 +438,7 @@ class SupplementService:
                 artifact_dir=task_dir,
                 created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
             ))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("保存补录任务状态失败: %s", exc)
 
         results: list[dict] = []
@@ -448,7 +470,7 @@ class SupplementService:
                 })
                 items.append(SupplementItemResult(
                     index=i, text=text, wav_path=wav, status="ok", error=""))
-            except Exception as exc:  # pylint: disable=broad-except
+            except Exception as exc:  # noqa: BLE001
                 results.append({
                     "index": i, "text": text, "wav_path": None,
                     "status": "failed",
@@ -475,7 +497,7 @@ class SupplementService:
                 error_summary="\n".join(error_lines)[:500] if error_lines else "",
                 created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
             ))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("保存补录完成状态失败: %s", exc)
 
         return results

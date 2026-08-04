@@ -1,7 +1,11 @@
-"""设置页面 — AI 模型、数据存储、系统信息。"""
+"""设置页面 — 数据、TTS/导出、系统与环境诊断。"""
 from __future__ import annotations
 
+import platform
+
 import gradio as gr
+
+from lib import __version__, config
 
 
 def create_settings_page() -> dict:
@@ -13,68 +17,10 @@ def create_settings_page() -> dict:
         gr.Markdown("### 设置")
 
         with gr.Tabs(elem_classes=["settings-tabs"]):
-            with gr.Tab("AI 模型"):
-                with gr.Group(elem_classes=["settings-card"]):
-                    gr.Markdown("##### 默认 Provider")
-                    with gr.Row(elem_classes=["settings-provider-row"]):
-                        s_provider = gr.Dropdown(
-                            label="Provider",
-                            choices=[
-                                ("本地离线基线", "local"),
-                                ("OpenAI", "openai"),
-                                ("DeepSeek", "deepseek"),
-                            ],
-                            value="local",
-                            scale=2,
-                        )
-                        s_model = gr.Dropdown(
-                            label="模型",
-                            choices=[],
-                            allow_custom_value=True,
-                            info="可从账户模型列表选择，也可输入兼容代理的自定义模型 ID",
-                            scale=2,
-                        )
-                    with gr.Row(elem_classes=["settings-model-actions"]):
-                        s_models_refresh = gr.Button("刷新模型列表", size="sm")
-                        s_model_default = gr.Button("恢复 Provider 默认模型", size="sm")
-                    s_model_source = gr.Markdown("当前模型来源：Provider 默认")
-                    s_provider_config = gr.HTML(value="<p>当前 Provider 无需配置密钥。</p>")
-
-                    s_api_key = gr.Textbox(
-                        label="API Key",
-                        type="password",
-                        placeholder="输入新密钥以替换已有密钥，留空保留已有密钥",
-                        visible=False,
-                    )
-                    s_base_url = gr.Textbox(
-                        label="Base URL（可选）",
-                        placeholder="自定义 API 地址，留空使用默认地址",
-                        visible=False,
-                    )
-
-                    s_timeout = gr.Slider(
-                        label="请求超时（秒）",
-                        minimum=30,
-                        maximum=600,
-                        value=180,
-                        step=10,
-                    )
-
-                    with gr.Row(elem_classes=["settings-actions"]):
-                        s_save = gr.Button("保存配置", variant="primary")
-                        s_test = gr.Button("测试当前配置", variant="secondary")
-                        s_clear_key = gr.Button("清除已保存密钥", variant="stop", size="sm", visible=False)
-
-                    s_status = gr.Markdown("")
-
-            with gr.Tab("数据与存储"):
+            with gr.Tab("数据与项目"):
                 with gr.Group(elem_classes=["settings-card"]):
                     gr.Markdown("##### 数据保存位置")
-                    from lib import config
-                    s_data_dir = gr.Textbox(
-                        label="数据目录",
-                        value=config.get_data_dir(),
-                    )
+                    s_data_dir = gr.Textbox(label="数据目录", value=config.get_data_dir())
                     with gr.Row(elem_classes=["settings-data-actions"]):
                         s_data_apply = gr.Button("应用", variant="primary")
                         s_data_open = gr.Button("打开数据文件夹")
@@ -91,26 +37,41 @@ def create_settings_page() -> dict:
                         interactive=False,
                         wrap=True,
                     )
-                    s_orphan_name = gr.Dropdown(
-                        label="选择要处理的异常项目",
-                        choices=[],
-                    )
+                    s_orphan_name = gr.Dropdown(label="选择要处理的异常项目", choices=[])
                     with gr.Row():
                         s_orphan_refresh = gr.Button("刷新")
                         s_orphan_open = gr.Button("打开目录")
                         s_orphan_archive = gr.Button("移动到回收站", variant="stop")
                     s_orphan_status = gr.Markdown("")
 
-            with gr.Tab("系统信息"):
-                with gr.Group(elem_classes=["settings-card"]):
-                    from lib import __version__
+            with gr.Tab("TTS 与导出"), gr.Group(elem_classes=["settings-card"]):
+                    gr.Markdown(
+                        "##### 本地生产环境\n"
+                        "Audiobook Studio 只使用本地 TTS 与 FFmpeg 完成合成和导出，"
+                        "不会在启动、导入或绑定声音时连接外部模型服务。"
+                    )
+                    s_model_dir = gr.Textbox(
+                        label="IndexTTS2 模型目录",
+                        value=config.get_model_dir(),
+                        interactive=False,
+                    )
+                    s_ffmpeg_path = gr.Textbox(
+                        label="FFmpeg",
+                        value=config.get_ffmpeg_path(),
+                        interactive=False,
+                    )
+                    gr.Markdown(
+                        "合成参数（情绪、强度、语速、质量和章节范围）位于「生产与质检」；"
+                        "导出格式、码率、字幕和输出目录位于「交付」。"
+                    )
+
+            with gr.Tab("系统信息"), gr.Group(elem_classes=["settings-card"]):
                     s_version = gr.Markdown(f"**版本**：v{__version__}")
-                    import platform
                     s_python = gr.Markdown(f"**Python**：{platform.python_version()}")
                     s_status_info = gr.Markdown("")
                     gr.Markdown("##### 环境诊断")
                     gr.Markdown(
-                        "只读取环境状态，不安装 CUDA、Torch、模型，也不会执行 GPU 推理。"
+                        "只读取本地环境状态，不安装 CUDA、Torch、模型，也不会执行 GPU 推理。"
                     )
                     s_diagnostics_run = gr.Button("运行环境诊断", variant="primary")
                     s_diagnostics_status = gr.Markdown("")
@@ -131,19 +92,6 @@ def create_settings_page() -> dict:
 
     return {
         "group": grp,
-        "s_provider": s_provider,
-        "s_model": s_model,
-        "s_models_refresh": s_models_refresh,
-        "s_model_default": s_model_default,
-        "s_model_source": s_model_source,
-        "s_provider_config": s_provider_config,
-        "s_api_key": s_api_key,
-        "s_base_url": s_base_url,
-        "s_timeout": s_timeout,
-        "s_save": s_save,
-        "s_test": s_test,
-        "s_clear_key": s_clear_key,
-        "s_status": s_status,
         "s_data_dir": s_data_dir,
         "s_data_apply": s_data_apply,
         "s_data_open": s_data_open,
@@ -154,6 +102,8 @@ def create_settings_page() -> dict:
         "s_orphan_open": s_orphan_open,
         "s_orphan_archive": s_orphan_archive,
         "s_orphan_status": s_orphan_status,
+        "s_model_dir": s_model_dir,
+        "s_ffmpeg_path": s_ffmpeg_path,
         "s_version": s_version,
         "s_python": s_python,
         "s_status_info": s_status_info,

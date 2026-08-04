@@ -1,21 +1,22 @@
-"""新建项目页面的 UI 回调。
-
-处理从原始书稿创建项目和从 JSON 创建项目的 Gradio 事件。
-不负责导演编辑、声音推荐和试听回调（保留在 director_handlers.py）。
-"""
+"""UI adapters for the single-file structured-script import workflow."""
 from __future__ import annotations
 
 import html
 import logging
 import os
 
-import gradio as gr
-
 from repositories.project_repo import ProjectRepository, sanitize_project_name
-from services.ai_settings import AiSettingsService
 from services.project_creation import ProjectCreationService
+from services.structured_script_import import StructuredScriptImportService
 
 logger = logging.getLogger(__name__)
+
+
+def _update(**kwargs):
+    """Keep pure name/preview helpers importable without loading the UI runtime."""
+    import gradio as gr
+
+    return gr.update(**kwargs)
 
 
 def _file_value_path(value):
@@ -30,12 +31,7 @@ def _original_file_name(value) -> str:
     if isinstance(value, str):
         candidate = value
     elif isinstance(value, dict):
-        candidate = (
-            value.get("orig_name")
-            or value.get("name")
-            or value.get("path")
-            or ""
-        )
+        candidate = value.get("orig_name") or value.get("name") or value.get("path") or ""
     else:
         candidate = (
             getattr(value, "orig_name", None)
@@ -46,213 +42,184 @@ def _original_file_name(value) -> str:
     return str(candidate).replace("\\", "/").rsplit("/", 1)[-1]
 
 
-def derive_project_fields(
-    file_value,
-    current_name: str = "",
-    current_title: str = "",
-) -> tuple[str, str]:
-    """Derive editable defaults from the original upload filename."""
-    filename = _original_file_name(file_value)
-    if not filename:
-        return current_name or "", current_title or ""
-    stem = os.path.splitext(filename)[0]
+def derive_json_project_name(file_value, current_name: str = "") -> str:
+    """Fill a name only while the user has not entered one manually."""
+    if str(current_name or "").strip():
+        return str(current_name).strip()
+    source = _file_value_path(file_value)
+    if source and os.path.isfile(source):
+        try:
+            return StructuredScriptImportService.inspect(source).suggested_project_name
+        except (OSError, ValueError, TypeError):
+            return ""
+    filename = os.path.splitext(_original_file_name(file_value))[0]
     try:
-        derived = sanitize_project_name(stem)
+        return sanitize_project_name(filename) if filename else ""
     except ValueError:
-        derived = ""
+        return ""
+
+
+def _slot_status_text(inspection) -> str:
+    if inspection is None:
+        return "⚪ 请输入项目名称后检查项目槽位"
+    labels = {
+        "available": "✅ 项目槽位可用",
+        "valid": "⚠ 已存在合法项目，不会覆盖",
+        "legacy": "⚠ 发现 Legacy 项目，不会覆盖",
+        "incomplete": "⚠ 发现不完整项目目录，不会自动删除",
+        "temporary": "⚠ 发现临时项目目录，不会自动删除",
+        "corrupted": "⚠ 发现损坏项目目录，不会自动删除",
+    }
+    text = labels.get(inspection.status, f"⚠ 项目槽位状态：{inspection.status}")
+    details = [*inspection.missing_files, *inspection.invalid_files]
+    if details:
+        text += "；" + "、".join(html.escape(item) for item in details)
+    return text
+
+
+def format_json_preview(preview) -> str:
+    """Render the complete preflight summary, including every blocking error."""
+    heading = "✅ JSON 检查通过" if preview.valid else "❌ JSON 检查未通过"
+    narrator = "已定义" if preview.narrator_defined else "未定义"
+    lines = [
+        f"### {heading}",
+        f"- **作品**：{html.escape(preview.title)}",
+        f"- **作者**：{html.escape(preview.author)}",
+        f"- **章节**：{preview.chapter_count}",
+        f"- **片段**：{preview.segment_count:,}",
+        f"- **角色**：{preview.role_count}",
+        f"- **旁白**：{narrator}",
+        f"- **警告**：{len(preview.warnings)}",
+        f"- **错误**：{len(preview.errors)}",
+    ]
+    if preview.unknown_roles:
+        lines.append(
+            "- **未知角色**：" + "、".join(html.escape(role) for role in preview.unknown_roles)
+        )
+    if preview.warnings:
+        lines.extend(["", "#### 可继续创建的警告"])
+        lines.extend(f"- {html.escape(item)}" for item in preview.warnings)
+    if preview.errors:
+        lines.extend(["", "#### 必须修复的错误"])
+        lines.extend(f"- {html.escape(item)}" for item in preview.errors)
+    return "\n".join(lines)
+
+
+def inspect_json(json_file, project_name: str = "") -> tuple[str, str, dict, dict]:
+    """Inspect JSON and return preview, slot status, cleanup visibility, create state."""
+    source = _file_value_path(json_file)
+    name = str(project_name or "").strip()
+    if not source or not os.path.isfile(source):
+        return (
+            "### 等待导入\n请上传外部 Agent 生成的 `structured_script.json`。",
+            "⚪ 尚未选择 JSON 文件",
+            _update(visible=False),
+            _update(interactive=False),
+        )
+    try:
+        preview = StructuredScriptImportService.inspect(source, name or None)
+    except (OSError, ValueError, TypeError) as exc:
+        return (
+            f"### ❌ JSON 检查失败\n{html.escape(str(exc))}",
+            "⚪ 无法检查项目槽位",
+            _update(visible=False),
+            _update(interactive=False),
+        )
+    slot = preview.slot
+    can_create = preview.valid and slot is not None and slot.status == "available" and bool(name)
+    cleanup_visible = bool(slot and slot.status in {"incomplete", "corrupted", "temporary"})
+    if not name:
+        slot_text = "⚪ 请确认项目名称后检查槽位"
+    else:
+        slot_text = _slot_status_text(slot)
     return (
-        current_name if str(current_name or "").strip() else derived,
-        current_title if str(current_title or "").strip() else derived,
+        format_json_preview(preview),
+        slot_text,
+        _update(visible=cleanup_visible),
+        _update(interactive=can_create),
     )
 
 
-def derive_json_project_name(file_value, current_name: str = "") -> str:
-    name, _title = derive_project_fields(file_value, current_name, "")
-    return name
-
-
 def inspect_project_name(project_name: str) -> tuple[str, dict]:
-    """Return immediate slot status and whether orphan cleanup is available."""
+    """Keep an immediate name-only slot check for keyboard edits."""
     name = str(project_name or "").strip()
     if not name:
-        return "⚪ 请输入项目名称", gr.update(visible=False)
+        return "⚪ 请输入项目名称", _update(visible=False)
     try:
         inspection = ProjectRepository.inspect_project_slot(name)
     except ValueError as exc:
-        return f"❌ 名称不可用：{html.escape(str(exc))}", gr.update(visible=False)
-
-    if inspection.status == "available":
-        return f"✅ 名称「{html.escape(inspection.name)}」可用", gr.update(visible=False)
-    if inspection.status == "valid":
-        return (
-            f"⚠ 项目「{html.escape(inspection.name)}」已存在，请打开已有项目或更换名称",
-            gr.update(visible=False),
-        )
-    if inspection.status == "legacy":
-        return (
-            f"⚠ 旧版项目「{html.escape(inspection.name)}」已存在，不会被覆盖",
-            gr.update(visible=False),
-        )
-    details = ""
-    if inspection.missing_files:
-        details = "；缺失：" + "、".join(inspection.missing_files)
-    if inspection.invalid_files:
-        details = "；损坏：" + "、".join(inspection.invalid_files)
-    return (
-        f"⚠ 发现{inspection.status}残留目录「{html.escape(inspection.name)}」{details}",
-        gr.update(visible=True),
+        return f"❌ 名称不可用：{html.escape(str(exc))}", _update(visible=False)
+    return _slot_status_text(inspection), _update(
+        visible=inspection.status in {"incomplete", "corrupted", "temporary"}
     )
 
 
 def archive_orphan_and_recheck(project_name: str) -> tuple[str, dict]:
-    """Archive only an explicitly selected orphan; never restart an AI call."""
+    """Archive only an explicitly selected orphan; never delete valid projects."""
     try:
         archived = ProjectRepository.archive_orphan_project(project_name)
         return (
-            "✅ 残留目录已移动到回收站，名称现已可用。"
-            f"\n\n归档位置：`{html.escape(archived)}`\n\n"
-            "请确认后再次点击创建；本操作不会自动发起 AI 请求。",
-            gr.update(visible=False),
+            ("✅ 残留目录已移动到回收站，名称现已可用。"
+             f"\n\n归档位置：`{html.escape(archived)}`"),
+            _update(visible=False),
         )
-    except Exception as exc:
-        return (
-            f"❌ 无法归档残留：{html.escape(str(exc))}",
-            gr.update(visible=True),
-        )
-
-
-def _config_summary_text() -> str:
-    """返回当前 AI 配置摘要的 Markdown 文本。"""
-    try:
-        config = AiSettingsService.get_provider_config()
-        provider = config.get("default_provider", "local")
-        model = config.get(f"{provider}_model", "")
-        api_key = AiSettingsService.get_api_key(provider)
-        key_status = "已配置" if api_key else "使用环境变量或本地分析"
-
-        lines = [
-            "##### 当前 AI 配置",
-            f"- **Provider**：`{provider}`",
-        ]
-        if model:
-            lines.append(f"- **模型**：`{model}`")
-        is_local = provider == "local"
-        if is_local:
-            lines.append("- 本地离线基线无需密钥")
-        else:
-            lines.append(f"- **密钥状态**：{key_status}")
-            lines.append("- 项目创建前建议先前往 **设置 → AI 模型** 测试连接和保存密钥")
-
-        return "\n".join(lines)
-    except Exception:
-        return "##### 当前 AI 配置\n默认 Provider：**Local**（离线分析）"
-
-
-def refresh_config_summary() -> str:
-    return _config_summary_text()
+    except (OSError, ValueError, RuntimeError) as exc:
+        return f"❌ 无法归档残留：{html.escape(str(exc))}", _update(visible=True)
 
 
 def format_creation_warnings(warnings: list[str], limit: int = 10) -> str:
-    """统一格式化创建质量提示，限制长篇项目的 UI 输出。"""
     if not warnings:
         return ""
     safe = [html.escape(str(item)) for item in warnings[:limit]]
-    lines = [
-        f"\n**质量检查**：共 {len(warnings)} 项 warning，不阻止创建\n",
-        *(f"- {item}" for item in safe),
-    ]
+    lines = [f"\n\n#### 导入警告：共 {len(warnings)} 项 warning", *(f"- {item}" for item in safe)]
     hidden = len(warnings) - len(safe)
     if hidden:
-        lines.append(f"\n另有 {hidden} 条未展示，可在项目管理或验收工具中查看。")
+        lines.append(f"另有 {hidden} 条未展示。")
     return "\n".join(lines)
 
 
-def create_from_source(
-    project_name, source_file, title, author, progress=gr.Progress()
-) -> tuple:
-    """从原始书稿创建项目的主入口。"""
-    source = _file_value_path(source_file)
-    name = (project_name or "").strip()
-
-    if not name:
-        return ("", "### ⚠ 请输入项目名称", "", gr.update())
-    if not source or not os.path.isfile(source):
-        return ("", "### ⚠ 请先上传小说文件", "", gr.update())
-
-    try:
-        def report(message: str) -> None:
-            try:
-                stage = int(str(message).split("/", 1)[0])
-            except (TypeError, ValueError):
-                stage = 4
-            progress((stage, 6), desc=str(message))
-
-        result = ProjectCreationService.create_from_source(
-            project_name=name,
-            source_path=source,
-            title=(title or "").strip() or None,
-            author=(author or "").strip() or None,
-            progress_callback=report,
-        )
-
-        msg = (
-            f"### ✅ 项目创建成功\n\n"
-            f"- **项目名称**：`{result.project_name}`\n"
-            f"- **作品名**：{result.title}\n"
-            f"- **章节数**：{result.chapter_count}\n"
-            f"- **段落数**：{result.segment_count}\n"
-            f"- **角色数**：{result.role_count}\n"
-        )
-        msg += format_creation_warnings(result.warnings)
-        msg += "\n\n👉 **下一步**：进入「角色与声音」页面配置角色音色。"
-
-        return (
-            f"✅ 项目 `{result.project_name}` 已创建",
-            msg,
-            result.project_name,
-            gr.update(choices=[], value=None),  # 通知顶部刷新
-        )
-    except ValueError as e:
-        return ("", f"### ❌ 创建失败\n{html.escape(str(e))}", "", gr.update())
-    except Exception as e:
-        logger.exception("项目创建失败")
-        return ("", f"### ❌ 创建异常\n{html.escape(str(e)[:500])}", "", gr.update())
-
-
-def create_from_json(project_name, json_file) -> tuple:
-    """从结构化 JSON 创建项目。"""
+def create_from_json(project_name, json_file, ss=None) -> tuple[str, dict]:
+    """Create one V3 project from one validated structured JSON file."""
     source = _file_value_path(json_file)
-    name = (project_name or "").strip()
-
+    name = str(project_name or "").strip()
     if not name:
-        return ("", "### ⚠ 请输入项目名称", gr.update())
+        return "### ⚠ 请输入项目名称", _update()
     if not source or not os.path.isfile(source):
-        return ("", "### ⚠ 请上传 structured_script.json", gr.update())
-
+        return "### ⚠ 请上传 structured_script.json", _update()
     try:
-        result = ProjectCreationService.create_from_structured_script(
-            project_name=name,
-            script_path=source,
-        )
+        result = ProjectCreationService.create_from_structured_script(name, source)
+        if ss is not None:
+            from services import ProjectService
 
-        msg = (
-            f"### ✅ 项目创建成功\n\n"
-            f"- **项目名称**：`{result.project_name}`\n"
-            f"- **作品名**：{result.title}\n"
-            f"- **章节数**：{result.chapter_count}\n"
-            f"- **段落数**：{result.segment_count}\n"
-            f"- **角色数**：{result.role_count}\n"
+            snapshot = ProjectService.open_project_as_snapshot(result.project_name)
+            ss.set_project(result.project_name, snapshot.script, snapshot.bindings)
+            ss.set_snapshot(snapshot)
+        message = (
+            "### ✅ 项目创建成功\n\n"
+            f"- **项目名称**：`{html.escape(result.project_name)}`\n"
+            f"- **作品**：{html.escape(result.title)}\n"
+            f"- **章节**：{result.chapter_count}\n"
+            f"- **片段**：{result.segment_count:,}\n"
+            f"- **角色**：{result.role_count}\n"
+            "\n**下一步**：前往「角色与声音」完成声音绑定。"
+            + format_creation_warnings(result.warnings)
         )
-        msg += format_creation_warnings(result.warnings)
-        msg += "\n\n👉 **下一步**：进入「角色与声音」页面配置角色音色。"
+        return message, _update(
+            choices=ProjectRepository.scan_projects(),
+            value=result.project_name,
+        )
+    except ValueError as exc:
+        return f"### ❌ 创建失败\n{html.escape(str(exc))}", _update()
+    except Exception as exc:  # pragma: no cover - final UI safety net
+        logger.exception("JSON 项目创建失败")
+        return f"### ❌ 创建异常\n{html.escape(str(exc)[:800])}", _update()
 
-        return (
-            msg,
-            result.project_name,
-            gr.update(choices=[], value=None),
-        )
-    except ValueError as e:
-        return (f"### ❌ 创建失败\n{html.escape(str(e))}", "", gr.update())
-    except Exception as e:
-        logger.exception("JSON 创建失败")
-        return (f"### ❌ 创建异常\n{html.escape(str(e)[:500])}", "", gr.update())
+
+__all__ = [
+    "archive_orphan_and_recheck",
+    "create_from_json",
+    "derive_json_project_name",
+    "format_json_preview",
+    "inspect_json",
+    "inspect_project_name",
+]

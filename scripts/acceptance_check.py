@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""v3.3.1 真实环境验收入口（默认不产生 API 消费）。"""
+"""V3 本地环境、项目和导出验收入口。"""
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -12,10 +11,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from lib import config, script_loader, segment_cache
-from services.ai_settings import AiSettingsService
-from services.environment_diagnostics import diagnostics_to_markdown, run_environment_diagnostics
-from services.script_consistency import check_script_consistency
+from lib import segment_cache
+from services.environment_diagnostics import (
+    diagnostics_to_markdown,
+    run_environment_diagnostics,
+)
+from services.structured_script_import import (
+    StructuredScriptImportService,
+)
 
 
 def check_environment() -> tuple[int, dict]:
@@ -26,14 +29,11 @@ def check_environment() -> tuple[int, dict]:
 
 def _project_dir(name: str) -> Path:
     from repositories.project_repo import ProjectRepository
+
     return Path(ProjectRepository.get_project_dir(name))
 
 
-def find_existing_segment_audio(
-    segments_dir: Path,
-    segment: dict,
-) -> Path | None:
-    """按正式导出链路的缓存参数查找当前 segment 音频。"""
+def find_existing_segment_audio(segments_dir: Path, segment: dict) -> Path | None:
     delivery = segment.get("delivery") if isinstance(segment.get("delivery"), dict) else {}
     found = segment_cache.find_segment_wav(
         str(segments_dir),
@@ -59,16 +59,13 @@ def check_project(name: str) -> tuple[int, dict]:
     script_path = project / "structured_script.json"
     if script_path.is_file():
         try:
-            raw = json.loads(script_path.read_text(encoding="utf-8"))
-            validation = script_loader.validate_script(script_loader.from_dict(raw))
-            if validation:
-                report["errors"].extend(validation)
-            consistency = check_script_consistency(raw)
-            report["errors"].extend(i["message"] for i in consistency["issues"] if i["severity"] == "error")
-            report["warnings"].extend(i["message"] for i in consistency["issues"] if i["severity"] == "warning")
+            preview = StructuredScriptImportService.inspect(str(script_path), name)
+            report["errors"].extend(preview.errors)
+            report["warnings"].extend(preview.warnings)
+            raw = preview.raw
             segments = [
-                seg for chapter in raw.get("chapters", [])
-                for seg in chapter.get("segments", [])
+                seg for chapter in raw.get("chapters", []) if isinstance(chapter, dict)
+                for seg in chapter.get("segments", []) if isinstance(seg, dict)
             ]
             roles = set(raw.get("voices", {}))
             bindings_path = project / "voice_bindings.json"
@@ -96,56 +93,10 @@ def check_project(name: str) -> tuple[int, dict]:
                 report["warnings"].append("缺失音色角色：" + ", ".join(missing_voices))
             if missing_audio:
                 report["warnings"].append(f"缺失 {len(missing_audio)} 个段落音频")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - acceptance must report every failure
             report["errors"].append(f"读取项目失败：{type(exc).__name__}: {exc}")
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return (2 if report["errors"] else 0), report
-
-
-def check_provider(provider: str, allow_real_request: bool, timeout: float) -> tuple[int, dict]:
-    if provider not in {"openai", "deepseek"}:
-        report = {"provider": provider, "status": "error", "message": "仅支持 openai / deepseek"}
-        print(json.dumps(report, ensure_ascii=False, indent=2))
-        return 2, report
-    configured = AiSettingsService.has_api_key(provider)
-    cfg = AiSettingsService.get_effective_provider_config(provider)
-    report = {
-        "provider": provider,
-        "model": cfg.get("model") or "Provider 默认模型",
-        "base_url": cfg.get("base_url") or "Provider 默认地址",
-        "key_configured": configured,
-        "key_source": AiSettingsService.get_api_key_source(provider),
-        "real_request_sent": False,
-    }
-    if not configured:
-        report.update(status="error", message="Provider API Key 未配置")
-    elif not allow_real_request:
-        report.update(status="ok", message="配置存在；未传 --allow-real-request，因此未发送网络请求")
-    else:
-        print(
-            f"即将对 {provider} / {report['model']} 执行连接与认证检查；"
-            "不验证具体模型推理能力。",
-            file=sys.stderr,
-        )
-        api_key = cfg.get("api_key", "")
-        try:
-            result = AiSettingsService.check_connection(
-                provider,
-                api_key=api_key,
-                base_url=cfg.get("base_url", ""),
-                timeout=timeout,
-            )
-        except Exception as exc:
-            result = f"❌ 连接失败：{type(exc).__name__}: {exc}"
-        if api_key:
-            result = result.replace(api_key, "***")
-        report.update(
-            status="ok" if result.startswith("✅") else "error",
-            message=result,
-            real_request_sent=True,
-        )
-    print(json.dumps(report, ensure_ascii=False, indent=2))
-    return (0 if report["status"] == "ok" else 2), report
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -153,19 +104,14 @@ def main(argv: list[str] | None = None) -> int:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--environment", action="store_true")
     group.add_argument("--project")
-    group.add_argument("--provider", choices=["openai", "deepseek"])
     group.add_argument("--export-check", metavar="PROJECT")
-    parser.add_argument("--allow-real-request", action="store_true")
-    parser.add_argument("--timeout", type=float, default=30.0)
     args = parser.parse_args(argv)
     if args.environment:
         return check_environment()[0]
     if args.project:
         return check_project(args.project)[0]
-    if args.export_check:
-        code, report = check_project(args.export_check)
-        return 0 if code == 0 and report.get("export_ready") else 2
-    return check_provider(args.provider, args.allow_real_request, args.timeout)[0]
+    code, report = check_project(args.export_check)
+    return 0 if code == 0 and report.get("export_ready") else 2
 
 
 if __name__ == "__main__":

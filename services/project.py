@@ -13,17 +13,14 @@
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 import shutil
 import time
-from typing import Optional
 
-from lib import script_loader
-from lib import config
-from repositories.project_repo import ProjectRepository
+from lib import config, script_loader
 from repositories.config_repo import ConfigRepository
+from repositories.project_repo import ProjectRepository
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +46,10 @@ class ProjectService:
 
     @staticmethod
     def create_project(name: str, script_file: str) -> None:
-        """创建项目（包 ``ProjectRepository.create_project``）。"""
-        ProjectRepository.create_project(name, script_file)
+        """创建项目（统一委托结构化 JSON 导入服务）。"""
+        from services.project_creation import ProjectCreationService
+
+        ProjectCreationService.create_from_structured_script(name, script_file)
 
     @staticmethod
     def open_project(name: str):
@@ -135,7 +134,7 @@ class ProjectService:
         return dest
 
     @staticmethod
-    def save_to_lib(recorded: Optional[str], uploaded: Optional[str], name: str,
+    def save_to_lib(recorded: str | None, uploaded: str | None, name: str,
                     category: str = "") -> str:
         """把录制 / 上传的音频保存到 ``voice_library``，返回目标绝对路径。
 

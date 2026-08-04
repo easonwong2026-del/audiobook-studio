@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Audiobook Studio UI -- 有声书生产工作台。
-
-本次重构把模块式导航改为「工作台 → 项目 → 角色与声音 → 生产与质检 → 交付」
-的生产流程。页面 Builder 负责布局，既有 handler 继续委托给 Service；不改变 TTS、
-队列、持久化或数据协议。
-"""
+"""Audiobook Studio UI -- 外部 Agent JSON 驱动的本地有声书生产工作台。"""
 from __future__ import annotations
 
 import json
@@ -34,7 +29,6 @@ from services import (
 from services.session import SessionState
 from services.synthesis import SynthesisState
 from ui import create_project_handlers as create_ui
-from ui import director_handlers as director_ui
 from ui.wiring.settings_wiring import wire_settings_page
 from ui.wiring.voice_wiring import wire_voice_page
 from ui.components import (
@@ -84,28 +78,19 @@ def _audio_pipeline():
 # ═══════════ callbacks (unchanged logic, 业务编排迁入 services) ═══════════
 
 def create_project(name, script_file, ss):
-    import json as _json
+    """Compatibility wrapper for the single structured-script import path."""
     if not name or not script_file:
         return name, None, "### ⚠ 请输入项目名称并上传 JSON 文件", gr.update()
     try:
-        # B12: 先在导入阶段校验剧本，避免非法剧本在合成中途 KeyError 崩溃
-        script = script_loader.load_script(script_file)
-        errors = script_loader.validate_script(script)
-        if errors:
-            err_msg = "### ❌ 剧本校验失败：\n" + "\n".join(f"- {e}" for e in errors)
-            return name, None, err_msg, gr.update()
-        # 业务委托 ProjectService（写 workspace + 写 project.json）
-        ProjectService.create_project(name, script_file)
+        from services.project_creation import ProjectCreationService
+
+        result = ProjectCreationService.create_from_structured_script(name, script_file)
         # 写入会话态（多标签各自独立，不共享全局可变 S）
-        ss.set_project(name, None, {})
-        return "", None, f"### ✅ 项目「{name}」创建成功！请在右侧下拉框选中它，点击「打开项目」", gr.update(choices=ProjectService.scan_projects())
-    except _json.JSONDecodeError:
-        # 文件不是合法 JSON（如用户传了 TXT 改名）：给出明确、可操作的提示
-        return name, None, (
-            "### ❌ 创建失败：上传的文件不是合法 JSON。\n"
-            "请确认上传的是由 WorkBuddy 生成的 `structured_script.json`，"
-            "而非 .txt / .md 等文本文件改名而来。"
-        ), gr.update()
+        ss.set_project(result.project_name, None, {})
+        return "", None, (
+            f"### ✅ 项目「{result.project_name}」创建成功！"
+            "下一步：前往角色与声音。"
+        ), gr.update(choices=ProjectService.scan_projects(), value=result.project_name)
     except Exception as e:
         return name, None, f"### ❌ 创建失败: {e}", gr.update()
 
@@ -1270,32 +1255,18 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             # ───────── 新建项目 ─────────
             cr_page = create_create_project_page()
             grp_create_project = cr_page["group"]
-            cp_name = cr_page["cp_name"]
-            cp_source = cr_page["cp_source"]
-            cp_title = cr_page["cp_title"]
-            cp_author = cr_page["cp_author"]
-            cp_slot_status = cr_page["cp_slot_status"]
-            cp_cleanup = cr_page["cp_cleanup"]
-            cp_config_summary = cr_page["cp_config_summary"]
-            cp_create = cr_page["cp_create"]
-            cp_status = cr_page["cp_status"]
-            cp_result = cr_page["cp_result"]
             cp_json_name = cr_page["cp_json_name"]
             cp_json_file = cr_page["cp_json_file"]
-            cp_json_status = cr_page["cp_json_status"]
             cp_json_slot_status = cr_page["cp_json_slot_status"]
             cp_json_cleanup = cr_page["cp_json_cleanup"]
+            cp_json_preview = cr_page["cp_json_preview"]
+            cp_json_check = cr_page["cp_json_check"]
             cp_json_create = cr_page["cp_json_create"]
             cp_json_result = cr_page["cp_json_result"]
 
             # ───────── 项目 ─────────
             prj_page = create_project_page()
             grp_project = prj_page["group"]
-            d_edit_chapter = prj_page["d_edit_chapter"]
-            d_editor = prj_page["d_editor"]
-            d_apply = prj_page["d_apply"]
-            d_undo = prj_page["d_undo"]
-            d_history = prj_page["d_history"]
             p_sel = prj_page["p_sel"]
             p_refresh = prj_page["p_refresh"]
             p_open = prj_page["p_open"]
@@ -1329,9 +1300,6 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             v_lib_search = vce_page["v_lib_search"]
             v_lib_category = vce_page["v_lib_category"]
             v_lib_browser = vce_page["v_lib_browser"]
-            v_recommend = vce_page["v_recommend"]
-            v_recommendations = vce_page["v_recommendations"]
-            v_recommend_status = vce_page["v_recommend_status"]
 
             # ───────── 生产阶段内部导航 ─────────
             production_nav = create_production_navigation()
@@ -1419,13 +1387,6 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             # ───────── 设置 ─────────
             set_page = create_settings_page()
             grp_settings = set_page["group"]
-            s_provider = set_page["s_provider"]
-            s_model = set_page["s_model"]
-            s_provider_config = set_page["s_provider_config"]
-            s_api_key = set_page["s_api_key"]
-            s_base_url = set_page["s_base_url"]
-            s_timeout = set_page["s_timeout"]
-            s_clear_key = set_page["s_clear_key"]
 
     # 填充 _GROUPS（运行时装载，供 navigation._goto 使用）
     _GROUPS[:] = [
@@ -1454,12 +1415,10 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-project')?.classList.add('active'); }")
     nav_create_project.click(
         lambda: _goto("create_project"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-create-project')?.classList.add('active'); }").then(
-        create_ui.refresh_config_summary, [], [cp_config_summary])
+        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-create-project')?.classList.add('active'); }")
     nav_settings.click(
         lambda: _goto("settings"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-settings')?.classList.add('active'); }").then(
-        director_ui.load_ai_settings, [], [s_provider, s_model, s_base_url, s_timeout, s_provider_config, s_api_key, s_clear_key])
+        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-settings')?.classList.add('active'); }")
     nav_voices.click(
         lambda: _goto("voices"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-voices')?.classList.add('active'); }").then(
@@ -1528,74 +1487,44 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     # ═══════════ events（业务接线，沿用 v2） ═══════════
 
     # ═══════════ 新建项目页面 ═══════════
-    cp_source.change(
-        create_ui.derive_project_fields,
-        [cp_source, cp_name, cp_title],
-        [cp_name, cp_title],
-    ).then(
-        create_ui.inspect_project_name,
-        [cp_name],
-        [cp_slot_status, cp_cleanup],
-    )
-    cp_name.change(
-        create_ui.inspect_project_name,
-        [cp_name],
-        [cp_slot_status, cp_cleanup],
-    )
-    cp_cleanup.click(
-        create_ui.archive_orphan_and_recheck,
-        [cp_name],
-        [cp_slot_status, cp_cleanup],
-    )
-    cp_create.click(
-        create_ui.create_from_source,
-        [cp_name, cp_source, cp_title, cp_author],
-        [cp_status, cp_result, p_sel, cp_json_result],
-        concurrency_limit=1,
-        concurrency_id="project-creation",
-    )
     cp_json_file.change(
         create_ui.derive_json_project_name,
         [cp_json_file, cp_json_name],
         [cp_json_name],
     ).then(
-        create_ui.inspect_project_name,
-        [cp_json_name],
-        [cp_json_slot_status, cp_json_cleanup],
+        create_ui.inspect_json,
+        [cp_json_file, cp_json_name],
+        [cp_json_preview, cp_json_slot_status, cp_json_cleanup, cp_json_create],
     )
     cp_json_name.change(
-        create_ui.inspect_project_name,
-        [cp_json_name],
-        [cp_json_slot_status, cp_json_cleanup],
+        create_ui.inspect_json,
+        [cp_json_file, cp_json_name],
+        [cp_json_preview, cp_json_slot_status, cp_json_cleanup, cp_json_create],
+    )
+    cp_json_check.click(
+        create_ui.inspect_json,
+        [cp_json_file, cp_json_name],
+        [cp_json_preview, cp_json_slot_status, cp_json_cleanup, cp_json_create],
     )
     cp_json_cleanup.click(
         create_ui.archive_orphan_and_recheck,
         [cp_json_name],
         [cp_json_slot_status, cp_json_cleanup],
+    ).then(
+        create_ui.inspect_json,
+        [cp_json_file, cp_json_name],
+        [cp_json_preview, cp_json_slot_status, cp_json_cleanup, cp_json_create],
     )
     cp_json_create.click(
         create_ui.create_from_json,
-        [cp_json_name, cp_json_file],
-        [cp_json_result, p_sel, cp_result],
+        [cp_json_name, cp_json_file, ss],
+        [cp_json_result, p_sel],
         concurrency_limit=1,
         concurrency_id="project-creation",
-    )
-
-    # ═══════════ 项目管理（人工校正） ═══════════
-    d_edit_chapter.change(
-        director_ui.refresh_director_editor_for_project,
-        [p_sel, d_edit_chapter],
-        [d_editor],
-    )
-    d_apply.click(
-        director_ui.apply_director_edits_for_project,
-        [p_sel, d_editor, d_edit_chapter],
-        [p_summary, d_editor, d_history],
-    )
-    d_undo.click(
-        director_ui.undo_director_edits_for_project,
-        [p_sel, d_history, d_edit_chapter],
-        [p_summary, d_editor, d_history],
+    ).then(
+        lambda: _goto("voices"), None, _GROUPS,
+    ).then(
+        refresh_role_list, [v_role_search, v_role, ss], [v_table],
     )
 
     # ═══════════ 设置页面 ═══════════

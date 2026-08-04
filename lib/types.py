@@ -39,6 +39,9 @@ class Script:
     meta: dict             # title, author, total_segments...
     voices: dict[str, VoiceInfo]
     chapters: list[Chapter]
+    # The import/diagnostics path keeps the original object so that validation
+    # can report JSON paths without creating a second schema parser.
+    raw: object = field(default=None, repr=False, compare=False)
 
 
 @dataclass

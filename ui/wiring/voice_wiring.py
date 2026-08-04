@@ -1,26 +1,18 @@
 """角色与声音页面事件接线。
 
 本模块只注册 Gradio 事件；业务逻辑仍由 ``app.py`` 的既有回调和
-``ui.voice_handlers`` / service 层负责。
+项目 / 音色库 service 层负责。
 """
 from __future__ import annotations
 
 import os
 
-from ui import voice_handlers
-
 
 def wire_voice_page(page: dict, context: dict) -> None:
-    """Register role selection, filtering, recommendation and binding events."""
+    """Register role selection, filtering, audition and binding events."""
     cb = context["callbacks"]
-    project = context["project"]
     session = context["session"]
 
-    page["v_recommend"].click(
-        voice_handlers.recommend_voice,
-        [project, page["v_role"]],
-        [page["v_recommendations"], page["v_recommend_status"]],
-    )
     page["v_table"].change(
         cb["select_role_from_list"],
         [page["v_table"], session],
