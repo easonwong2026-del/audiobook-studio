@@ -75,6 +75,10 @@ class SpeakerReviewService:
                         speaker_id=speaker.speaker_id,
                         speaker_source="manual",
                         status="confirmed",
+                        candidate_speaker_id=None,
+                        candidate_speaker_name=None,
+                        candidate_confidence=None,
+                        uncertainty_reason=None,
                     )
                 segments.append(segment)
             chapters.append(replace(chapter, segments=segments))

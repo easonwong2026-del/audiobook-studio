@@ -6,7 +6,9 @@ AI-first workflow and is never consulted by this service.
 """
 from __future__ import annotations
 
+import json
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -19,6 +21,7 @@ from ai.providers.exceptions import (
     ProviderOutputTruncatedError,
 )
 from domain.v4 import (
+    ActingResponse,
     ChapterAnalysisResponse,
     ChapterScript,
     ScriptDocument,
@@ -32,7 +35,6 @@ from domain.v4.models import stable_speaker_id
 from repositories.chapter_analysis_repository import ChapterAnalysisStateRepository
 from repositories.production_repository import ProductionRepository
 from repositories.project_v4_repository import ProjectV4Repository
-
 from services.ai_settings import AiSettingsService
 from services.chapter_analysis_validator import (
     ChapterAnalysisValidationError,
@@ -41,6 +43,8 @@ from services.chapter_analysis_validator import (
 )
 
 ProgressCallback = Callable[[str], None]
+CHAPTER_ANALYSIS_PROMPT_VERSION = "chapter-analysis-core-v1"
+CHAPTER_ANALYSIS_PROTOCOL_VERSION = "chapter-analysis-protocol-v1"
 
 
 @dataclass(frozen=True)
@@ -72,6 +76,10 @@ class ChapterAnalysisService:
         project_repository: ProjectV4Repository | None = None,
         state_repository: ChapterAnalysisStateRepository | None = None,
         validator: ChapterAnalysisValidator | None = None,
+        reasoning_mode: str = "high",
+        analysis_depth: str = "quick",
+        auto_upgrade_max: bool = True,
+        prompt_supplement: str = "",
     ):
         self.project_path = Path(project_path)
         self.adapter = adapter
@@ -85,6 +93,10 @@ class ChapterAnalysisService:
             self.project_path
         )
         self.validator = validator or ChapterAnalysisValidator()
+        self.reasoning_mode = reasoning_mode or "high"
+        self.analysis_depth = analysis_depth if analysis_depth in {"quick", "standard", "deep"} else "quick"
+        self.auto_upgrade_max = bool(auto_upgrade_max)
+        self.prompt_supplement = prompt_supplement
 
     @classmethod
     def from_ai_settings(cls, project_path: str | Path) -> ChapterAnalysisService:
@@ -98,9 +110,26 @@ class ChapterAnalysisService:
             )
         provider = str(values.get("provider") or "local").strip().lower()
         api_key = str(values.get("api_key") or "").strip()
+        selected_model = str(
+            values.get("model") or AiSettingsService.get_default_model(provider) or ""
+        )
+        try:
+            analysis_values = AiSettingsService.get_effective_analysis_config(provider)
+        except Exception:  # noqa: BLE001 - use safe defaults if settings are damaged
+            analysis_values = {
+                "reasoning_mode": "high",
+                "depth": "quick",
+                "auto_upgrade_max": True,
+                "prompt_supplement": "",
+            }
         if provider not in {"deepseek", "openai"} or not api_key:
             return cls(
                 project,
+                provider=provider,
+                model=selected_model,
+                reasoning_mode=analysis_values.get("reasoning_mode", "high"),
+                analysis_depth=analysis_values.get("depth", "quick"),
+                auto_upgrade_max=analysis_values.get("auto_upgrade_max", True),
                 configuration_message=(
                     "AI 尚未配置。章节已保存；请配置 DeepSeek 或 OpenAI 后，"
                     "点击“快速分析当前章节”。"
@@ -110,15 +139,22 @@ class ChapterAnalysisService:
             adapter = create_chapter_analysis_adapter(
                 provider,
                 api_key=api_key,
-                model=values.get("model") or "",
+                model=selected_model,
                 base_url=values.get("base_url") or "",
                 timeout=values.get("timeout", 180),
+                reasoning_mode=analysis_values.get("reasoning_mode", "high"),
+                auto_upgrade_max=analysis_values.get("auto_upgrade_max", True),
+                prompt_supplement=analysis_values.get("prompt_supplement", ""),
             )
             return cls(
                 project,
                 adapter,
                 provider=adapter.name,
                 model=adapter.model,
+                reasoning_mode=analysis_values.get("reasoning_mode", "high"),
+                analysis_depth=analysis_values.get("depth", "quick"),
+                auto_upgrade_max=analysis_values.get("auto_upgrade_max", True),
+                prompt_supplement=analysis_values.get("prompt_supplement", ""),
             )
         except Exception as exc:  # noqa: BLE001 - keep imported project usable
             return cls(
@@ -222,6 +258,10 @@ class ChapterAnalysisService:
                 ai_requests=0,
                 retries=0,
                 started_at=datetime.now(timezone.utc).isoformat(),
+                reasoning_mode=self.reasoning_mode,
+                analysis_depth=self.analysis_depth,
+                prompt_version=CHAPTER_ANALYSIS_PROMPT_VERSION,
+                protocol_version=CHAPTER_ANALYSIS_PROTOCOL_VERSION,
                 message="正在分析当前章节（1/3）",
             )
             self._report(progress_callback, "正在分析当前章节（1/3）")
@@ -241,6 +281,19 @@ class ChapterAnalysisService:
                     )
                     self._report(progress_callback, "正在修复章节结果（重试 1/1）")
                 try:
+                    request_started = time.perf_counter()
+                    self._append_trace(
+                        chapter_id,
+                        stage="phase1_structure",
+                        event="request_started",
+                        request_index=attempt + 1,
+                        request_kind="repair" if attempt else "normal",
+                        reasoning_mode=(
+                            "max"
+                            if attempt and self.auto_upgrade_max
+                            else self.reasoning_mode
+                        ),
+                    )
                     output = self.adapter.analyze_chapter(
                         chapter_id=request.chapter_id,
                         chapter_title=request.chapter_title,
@@ -248,6 +301,11 @@ class ChapterAnalysisService:
                         chapter_text=request.chapter_text,
                         previous_response=raw_first if attempt else None,
                         errors=errors if attempt else None,
+                        reasoning_mode=(
+                            "max"
+                            if attempt and self.auto_upgrade_max
+                            else self.reasoning_mode
+                        ),
                     )
                     raw = output.to_dict() if isinstance(output, ChapterAnalysisResponse) else output
                     raw_first = raw if isinstance(raw, dict) else {}
@@ -261,8 +319,31 @@ class ChapterAnalysisService:
                         source_text=chapter_text,
                         allowed_speaker_ids=allowed,
                     )
+                    self._append_trace(
+                        chapter_id,
+                        stage="phase1_structure",
+                        event="validation_succeeded",
+                        request_index=attempt + 1,
+                        request_kind="repair" if attempt else "normal",
+                        duration_ms=int((time.perf_counter() - request_started) * 1000),
+                        segment_count=len(validated.segments),
+                        character_count=len(validated.response.character_updates),
+                        coverage=1.0,
+                    )
                     break
                 except Exception as exc:  # noqa: BLE001 - convert to visible state
+                    self._append_trace(
+                        chapter_id,
+                        stage="phase1_structure",
+                        event="request_failed",
+                        request_index=attempt + 1,
+                        request_kind="repair" if attempt else "normal",
+                        duration_ms=int((time.perf_counter() - request_started) * 1000)
+                        if "request_started" in locals()
+                        else 0,
+                        error_code=self._reason_code(exc),
+                        error=str(exc)[:300],
+                    )
                     errors = self._error_list(exc)
                     if attempt == 0 and self._repairable(exc):
                         continue
@@ -301,6 +382,17 @@ class ChapterAnalysisService:
                 chapter,
                 validated,
             )
+            updated_script, phase2 = self._run_acting_stage(
+                source, updated_script, chapter_id, progress_callback
+            )
+            summary.update(
+                {
+                    "phase2_status": phase2.get("status", "skipped"),
+                    "phase3_status": "interface_only"
+                    if self.analysis_depth == "deep"
+                    else "not_run",
+                }
+            )
             self.project_repository.save_script_and_speakers(
                 self.project_path,
                 source,
@@ -313,6 +405,14 @@ class ChapterAnalysisService:
                 item for item in updated_script.chapters if item.chapter_id == chapter_id
             )
             unresolved = sum(item.status == "unresolved" for item in selected.segments)
+            candidate_segments = sum(
+                bool(item.candidate_speaker_id) for item in selected.segments
+            )
+            candidate_roles = sum(
+                item.status == "unresolved"
+                and item.source == "ai"
+                for item in updated_speakers.speakers
+            )
             unbound = sorted(
                 {
                     item.speaker_id
@@ -323,17 +423,41 @@ class ChapterAnalysisService:
             summary.update(
                 {
                     "unresolved_segments": unresolved,
+                    "candidate_segments": candidate_segments,
+                    "candidate_roles": candidate_roles,
                     "unbound_speakers": unbound,
-                    "ai_requests": 2 if state.get("retries", 0) else 1,
+                    "phase2_requests": 1
+                    if phase2.get("status") in {"completed", "failed"}
+                    else 0,
+                    "ai_requests": (2 if state.get("retries", 0) else 1)
+                    + (
+                        1
+                        if phase2.get("status") in {"completed", "failed"}
+                        else 0
+                    ),
                     "retries": state.get("retries", 0),
                     "analysis_mode": "chapter-fast",
                 }
             )
-            final_status = "ready_for_synthesis" if unresolved == 0 and not unbound else "analyzed"
+            phase2_failed = phase2.get("status") in {"failed", "not_available"}
+            final_status = (
+                "needs_attention"
+                if phase2_failed and self.analysis_depth != "quick"
+                else "ready_for_synthesis"
+                if unresolved == 0 and not unbound
+                else "analyzed"
+            )
             message = (
                 f"✅ 当前章节分析完成：{len(selected.segments)} 个片段，"
                 f"识别角色 {summary['identified_characters']}；"
-                + ("可绑定音色后合成。" if final_status == "analyzed" else "已可生成本章合成计划。")
+                + (
+                    f"演绎导演阶段未完成：{phase2.get('error', '请稍后重试')}。"
+                    if phase2_failed
+                    else
+                    f"有 {candidate_roles} 个候选角色需要确认。"
+                    if candidate_roles
+                    else "已可生成本章合成计划。"
+                )
             )
             state = self._save_state(
                 chapter_id,
@@ -341,20 +465,39 @@ class ChapterAnalysisService:
                 status=final_status,
                 provider=self.provider,
                 model=self.model,
-                ai_requests=2 if state.get("retries", 0) else 1,
                 retries=state.get("retries", 0),
+                phase2={**phase2, "contract": "chapter-acting-v1"},
+                phase2_requests=1
+                if phase2.get("status") in {"completed", "failed"}
+                else 0,
+                ai_requests=(2 if state.get("retries", 0) else 1)
+                + (1 if phase2.get("status") in {"completed", "failed"} else 0),
                 completed_at=datetime.now(timezone.utc).isoformat(),
                 message=message,
-                errors=[],
+                errors=[phase2["error"]] if phase2.get("error") else [],
                 stats=summary,
             )
+            self._append_trace(
+                chapter_id,
+                stage="phase1_structure",
+                event="final_state",
+                final_status=final_status,
+                segment_count=summary.get("segments", 0),
+                candidate_roles=summary.get("candidate_roles", 0),
+                unresolved_segments=summary.get("unresolved_segments", 0),
+                coverage=summary.get("coverage", 0.0),
+                ai_requests=state.get("ai_requests", 0),
+                retries=state.get("retries", 0),
+                phase2_status=phase2.get("status", "skipped"),
+            )
+            state = self.state_repository.load(chapter_id) or state
             return self._result(
                 final_status,
                 updated_script,
                 updated_speakers,
                 chapter_id,
                 message,
-                [],
+                [phase2["error"]] if phase2.get("error") else [],
                 state,
                 summary,
             )
@@ -396,7 +539,24 @@ class ChapterAnalysisService:
                 speaker = speaker_map.get("narrator")
             if speaker is None and speaker_id is not None:
                 speaker_id = None
-            status = "confirmed" if speaker_id and speaker and speaker.status == "confirmed" else "unresolved"
+            confirmed = bool(
+                speaker_id and speaker and speaker.status == "confirmed"
+            )
+            candidate_id = (
+                None
+                if confirmed or speaker_id == "narrator"
+                else item.speaker_id
+            )
+            candidate = speaker_map.get(candidate_id) if candidate_id else None
+            candidate_name = candidate.display_name if candidate else item.speaker_name
+            candidate_confidence = None
+            if candidate_id:
+                candidate_confidence = (
+                    item.confidence
+                    if item.confidence is not None
+                    else candidate.confidence if candidate else None
+                )
+            status = "confirmed" if confirmed else "unresolved"
             segment = SemanticSegment(
                 segment_id=f"segment_{chapter.chapter_id}_{item.index:06d}",
                 chapter_id=chapter.chapter_id,
@@ -409,6 +569,12 @@ class ChapterAnalysisService:
                 dialogue_type=item.segment_type,
                 confidence=item.confidence,
                 emotion=item.emotion,
+                candidate_speaker_id=candidate_id,
+                candidate_speaker_name=candidate_name,
+                candidate_confidence=candidate_confidence,
+                speaker_evidence=list(item.speaker_evidence),
+                uncertainty_reason=item.uncertainty_reason
+                or (candidate.candidate_reason if candidate else None),
             )
             segment = self._protect_manual(segment, old_protected)
             segments.append(segment)
@@ -431,6 +597,245 @@ class ChapterAnalysisService:
         }
         return updated_script, updated_speakers, summary
 
+    def _run_acting_stage(
+        self,
+        source: str,
+        script: ScriptDocument,
+        chapter_id: str,
+        progress_callback: ProgressCallback | None,
+    ) -> tuple[ScriptDocument, dict[str, Any]]:
+        """Run the separate phase-2 acting contract when the selected depth asks for it."""
+        if self.analysis_depth == "quick":
+            self._append_trace(
+                chapter_id,
+                stage="phase2_acting",
+                event="skipped",
+                reason="quick_depth_only_runs_phase1_structure",
+            )
+            return script, {"status": "skipped", "reason": "quick_depth"}
+        act = getattr(self.adapter, "act_chapter", None)
+        if not callable(act):
+            message = "当前 Provider 未提供独立的演绎导演接口；结构分析已保留。"
+            self._append_trace(
+                chapter_id,
+                stage="phase2_acting",
+                event="not_available",
+                error=message,
+            )
+            return script, {"status": "not_available", "error": message}
+        selected = next(
+            item for item in script.chapters if item.chapter_id == chapter_id
+        )
+        request_segments = [
+            {
+                "index": index,
+                "segment_id": segment.segment_id,
+                "segment_type": segment.dialogue_type,
+                "speaker_id": segment.speaker_id,
+                "text": source[segment.start:segment.end],
+            }
+            for index, segment in enumerate(selected.segments)
+        ]
+        self._report(progress_callback, "正在生成当前章节演绎参数（2/3）")
+        self._save_state(
+            chapter_id,
+            phase2={"status": "running", "contract": "chapter-acting-v1"},
+        )
+        self._append_trace(
+            chapter_id,
+            stage="phase2_acting",
+            event="request_started",
+            request_kind="acting_director",
+            reasoning_mode=self.reasoning_mode,
+            segment_count=len(request_segments),
+        )
+        started = time.perf_counter()
+        try:
+            response = act(
+                chapter_id=chapter_id,
+                segments=request_segments,
+                reasoning_mode=self.reasoning_mode,
+            )
+            acting = (
+                ActingResponse.from_dict(response)
+                if isinstance(response, dict)
+                else response
+            )
+            if not hasattr(acting, "segments"):
+                raise ValidationError("演绎导演返回缺少 segments")
+            if len(acting.segments) != len(selected.segments):
+                raise ValidationError("演绎导演必须覆盖全部章节片段")
+            by_index = {item.index: item for item in acting.segments}
+            if set(by_index) != set(range(len(selected.segments))):
+                raise ValidationError("演绎导演片段 index 不完整")
+            chapters = []
+            for chapter in script.chapters:
+                if chapter.chapter_id != chapter_id:
+                    chapters.append(chapter)
+                    continue
+                new_segments = []
+                for index, segment in enumerate(chapter.segments):
+                    item = by_index[index]
+                    new_segments.append(
+                        replace(
+                            segment,
+                            emotion_strength=item.emotion_strength,
+                            delivery={
+                                "speed": item.speed,
+                                "pitch": item.pitch,
+                                "intensity": item.intensity,
+                                "breath": item.breath,
+                                "performance_note": item.performance_note,
+                            },
+                            pause_before=item.pause_before,
+                            pause_after=item.pause_after,
+                        )
+                    )
+                chapters.append(replace(chapter, segments=new_segments))
+            updated = replace(script, chapters=chapters, revision=script.revision + 1)
+            updated.validate(source)
+            duration = int((time.perf_counter() - started) * 1000)
+            self._append_trace(
+                chapter_id,
+                stage="phase2_acting",
+                event="validation_succeeded",
+                duration_ms=duration,
+                segment_count=len(selected.segments),
+            )
+            return updated, {"status": "completed", "duration_ms": duration}
+        except Exception as exc:  # noqa: BLE001 - preserve safe phase1 result
+            duration = int((time.perf_counter() - started) * 1000)
+            message = str(exc)[:300] or exc.__class__.__name__
+            self._append_trace(
+                chapter_id,
+                stage="phase2_acting",
+                event="request_failed",
+                duration_ms=duration,
+                error=message,
+            )
+            return script, {"status": "failed", "error": message}
+
+    @classmethod
+    def confirm_candidate(
+        cls, project_path: str | Path, speaker_id: str
+    ) -> tuple[ScriptDocument, SpeakersDocument, int]:
+        """Promote one fast-flow candidate and attach its retained segments."""
+        project = Path(project_path)
+        source = (project / "source/source.txt").read_text(encoding="utf-8")
+        repository = ProjectV4Repository(project.parent)
+        script = ScriptDocument.from_dict(
+            json.loads((project / "script/script.json").read_text(encoding="utf-8")),
+            source,
+        )
+        speakers_data = json.loads(
+            (project / "script/speakers.json").read_text(encoding="utf-8")
+        )
+        speakers = SpeakersDocument.from_dict(speakers_data)
+        target = next(
+            (item for item in speakers.speakers if item.speaker_id == speaker_id),
+            None,
+        )
+        if target is None or target.review_status != "candidate":
+            raise ValueError("请选择一个待确认的 AI 候选角色")
+        updated_speakers = replace(
+            speakers,
+            speakers=[
+                replace(
+                    item,
+                    status="confirmed",
+                    source="manual",
+                    review_status="confirmed",
+                )
+                if item.speaker_id == speaker_id
+                else item
+                for item in speakers.speakers
+            ],
+            revision=speakers.revision + 1,
+        )
+        attached = 0
+        chapters = []
+        for chapter in script.chapters:
+            segments = []
+            for segment in chapter.segments:
+                if segment.candidate_speaker_id == speaker_id:
+                    attached += 1
+                    segment = replace(
+                        segment,
+                        speaker_id=speaker_id,
+                        speaker_source="manual",
+                        status="confirmed",
+                        candidate_speaker_id=None,
+                        candidate_speaker_name=None,
+                        candidate_confidence=None,
+                        uncertainty_reason=None,
+                    )
+                segments.append(segment)
+            chapters.append(replace(chapter, segments=segments))
+        updated_script = replace(script, chapters=chapters, revision=script.revision + 1)
+        updated_script.validate(source)
+        updated_speakers.validate()
+        repository.save_script_and_speakers(
+            project, source, updated_script, updated_speakers
+        )
+        return updated_script, updated_speakers, attached
+
+    @classmethod
+    def reject_candidate(
+        cls, project_path: str | Path, speaker_id: str
+    ) -> tuple[ScriptDocument, SpeakersDocument, int]:
+        """Record a human denial without turning the segment into narration."""
+        project = Path(project_path)
+        source = (project / "source/source.txt").read_text(encoding="utf-8")
+        repository = ProjectV4Repository(project.parent)
+        import json
+
+        script = ScriptDocument.from_dict(
+            json.loads((project / "script/script.json").read_text(encoding="utf-8")),
+            source,
+        )
+        speakers = SpeakersDocument.from_dict(
+            json.loads((project / "script/speakers.json").read_text(encoding="utf-8"))
+        )
+        target = next(
+            (item for item in speakers.speakers if item.speaker_id == speaker_id),
+            None,
+        )
+        if target is None or target.review_status != "candidate":
+            raise ValueError("请选择一个待确认的 AI 候选角色")
+        updated_speakers = replace(
+            speakers,
+            speakers=[
+                replace(item, review_status="rejected")
+                if item.speaker_id == speaker_id
+                else item
+                for item in speakers.speakers
+            ],
+            revision=speakers.revision + 1,
+        )
+        cleared = 0
+        chapters = []
+        for chapter in script.chapters:
+            segments = []
+            for segment in chapter.segments:
+                if segment.candidate_speaker_id == speaker_id:
+                    cleared += 1
+                    segment = replace(
+                        segment,
+                        candidate_speaker_id=None,
+                        candidate_speaker_name=None,
+                        candidate_confidence=None,
+                        uncertainty_reason="人工拒绝该候选角色，等待重新确认",
+                    )
+                segments.append(segment)
+            chapters.append(replace(chapter, segments=segments))
+        updated_script = replace(script, chapters=chapters, revision=script.revision + 1)
+        updated_script.validate(source)
+        updated_speakers.validate()
+        repository.save_script_and_speakers(
+            project, source, updated_script, updated_speakers
+        )
+        return updated_script, updated_speakers, cleared
+
     @staticmethod
     def _protect_manual(
         segment: SemanticSegment, protected: list[SemanticSegment]
@@ -444,6 +849,11 @@ class ChapterAnalysisService:
                     status=old.status,
                     kind=old.kind,
                     dialogue_type=old.dialogue_type,
+                    candidate_speaker_id=old.candidate_speaker_id,
+                    candidate_speaker_name=old.candidate_speaker_name,
+                    candidate_confidence=old.candidate_confidence,
+                    speaker_evidence=old.speaker_evidence,
+                    uncertainty_reason=old.uncertainty_reason,
                 )
         return segment
 
@@ -477,6 +887,17 @@ class ChapterAnalysisService:
                     display_name=update.canonical_name,
                     aliases=aliases,
                     status="confirmed" if update.confidence >= 0.75 else previous.status,
+                    confidence=max(
+                        float(previous.confidence or 0.0), update.confidence
+                    ),
+                    candidate_reason=update.uncertainty_reason,
+                    source=previous.source if previous.source == "manual" else "ai",
+                    review_status=(
+                        "confirmed"
+                        if previous.status == "confirmed"
+                        or update.confidence >= 0.75
+                        else "candidate"
+                    ),
                 )
                 by_name.update(
                     {name: target for name in [update.canonical_name, *update.aliases]}
@@ -486,9 +907,19 @@ class ChapterAnalysisService:
             current[target] = Speaker(
                 speaker_id=target,
                 display_name=update.canonical_name,
-                aliases=list(update.aliases),
+                aliases=list(
+                    dict.fromkeys(
+                        alias
+                        for alias in update.aliases
+                        if alias != update.canonical_name
+                    )
+                ),
                 status=status,
                 speaker_type="character",
+                confidence=update.confidence,
+                candidate_reason=update.uncertainty_reason,
+                source="ai",
+                review_status="candidate" if status == "unresolved" else "confirmed",
             )
             known_ids.add(target)
             by_name.update(
@@ -577,10 +1008,42 @@ class ChapterAnalysisService:
                 "analysis_mode": "chapter-fast",
                 "provider": self.provider,
                 "model": self.model,
+                "reasoning_mode": self.reasoning_mode,
+                "analysis_depth": self.analysis_depth,
+                "prompt_version": CHAPTER_ANALYSIS_PROMPT_VERSION,
+                "protocol_version": CHAPTER_ANALYSIS_PROTOCOL_VERSION,
                 **values,
             }
         )
         return self.state_repository.save(state)
+
+    def _append_trace(self, chapter_id: str, **event: Any) -> None:
+        """Persist sanitized request metadata without raw prompts or reasoning content."""
+        state = self.state_repository.load(chapter_id) or {"chapter_id": chapter_id}
+        trace = list(state.get("trace") or [])
+        safe: dict[str, Any] = {
+            "at": datetime.now(timezone.utc).isoformat(),
+            "provider": self.provider,
+            "model": self.model,
+            "reasoning_mode": self.reasoning_mode,
+            "prompt_version": CHAPTER_ANALYSIS_PROMPT_VERSION,
+            "protocol_version": CHAPTER_ANALYSIS_PROTOCOL_VERSION,
+        }
+        for key, value in event.items():
+            if key in {"raw_prompt", "reasoning_content", "response", "raw_output"}:
+                continue
+            safe[key] = value
+        trace.append(safe)
+        state.update(
+            {
+                "chapter_id": chapter_id,
+                "analysis_mode": "chapter-fast",
+                "provider": self.provider,
+                "model": self.model,
+                "trace": trace[-40:],
+            }
+        )
+        self.state_repository.save(state)
 
     def _result(
         self,

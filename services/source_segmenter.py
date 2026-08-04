@@ -12,7 +12,6 @@ from domain.v4 import (
     SpeakersDocument,
 )
 from domain.v4.models import source_sha256, stable_speaker_id
-
 from services.speaker_normalization import (
     is_likely_character_name,
     normalize_speaker_name,

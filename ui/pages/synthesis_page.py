@@ -8,7 +8,7 @@ from lib import progress as synth_progress
 
 def create_synthesis_page() -> dict:
     """创建以生产状态和队列追踪为中心的合成界面。"""
-    with gr.Group(visible=False, elem_id="grp-synth") as grp_synth:
+    with gr.Group(visible=False, elem_id="grp-synth", elem_classes=["page-shell", "page-shell-wide"]) as grp_synth:
         with gr.Group(elem_classes=["production-command"]):
             with gr.Row(equal_height=True):
                 with gr.Column(scale=3):

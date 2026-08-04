@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import gradio as gr
+
 from ai.character_extraction import create_character_extraction_adapter
 from ai.speaker_routing import create_speaker_routing_adapter
 from domain.v4 import ScriptDocument, SpeakersDocument
@@ -43,14 +44,15 @@ from services.speaker_review_service import SpeakerReviewService
 from services.speaker_routing_service import SpeakerRoutingService
 from services.synthesis_executor import SynthesisExecutor
 from services.synthesis_planner import SynthesisPlanner
-from services.v4_export import V4ExportService
 from services.v4_analysis_validity import (
     DIALOGUE_COVERAGE_UNKNOWN_LABEL,
     REASON_MESSAGES,
     ReasonCode,
 )
+from services.v4_export import V4ExportService
 from services.v4_project_analysis_pipeline import V4ProjectAnalysisPipeline
 from services.v4_project_creation import V4ProjectCreationService
+from services.v4_project_service import V4ProjectService
 from services.v4_synthesis_service import V4SynthesisService
 from services.v4_voice_service import V4VoiceService
 from tts.indextts2_adapter import IndexTTS2Adapter
@@ -263,9 +265,71 @@ def analysis_progress_text(project_name: str) -> str:
         source = (project / "source/source.txt").read_text(encoding="utf-8")
         script = _load_script(project, source)
         state = V4AnalysisRepository(project).load(script.source_sha256)
+        if state is None:
+            chapter_states = [
+                ChapterAnalysisStateRepository(project).load(item.chapter_id)
+                for item in script.chapters
+            ]
+            state = next((item for item in reversed(chapter_states) if item), None)
+            if state:
+                status = state.get("status") or "unknown"
+                phase2 = (state.get("phase2") or {}).get("status") or (
+                    state.get("stats") or {}
+                ).get("phase2_status", "skipped")
+                if status == "waiting_for_ai":
+                    return "### ⚠ 当前章节等待 AI\n章节原文已保存，配置 Provider 后可继续。"
+                return (
+                    f"### {'✅' if status in {'analyzed', 'ready_for_synthesis', 'completed'} else '⚠'} 当前章节分析：{status}"
+                    f"\n阶段：结构分析已完成 · 演绎导演：{phase2}"
+                    f"\n请求 {state.get('ai_requests', 0)} · 修复 {state.get('retries', 0)} · "
+                    f"Provider {state.get('provider') or '未配置'} · 模型 {state.get('model') or '默认'}"
+                    + (f"\n⚠ {state.get('message')}" if state.get("message") else "")
+                )
     except (OSError, ValueError, TypeError):
         state = None
     return _analysis_progress_text(state)
+
+
+def analysis_trace_text(project_name: str) -> str:
+    """Render sanitized analysis trace: stage, model, mode, timing and outcome."""
+    if not project_name:
+        return "分析追踪会显示在这里。"
+    try:
+        project = _root() / project_name
+        source = (project / "source/source.txt").read_text(encoding="utf-8")
+        script = _load_script(project, source)
+        states = [
+            ChapterAnalysisStateRepository(project).load(item.chapter_id)
+            for item in script.chapters
+        ]
+        state = next((item for item in reversed(states) if item), None)
+    except (OSError, ValueError, TypeError):
+        state = None
+    if not state:
+        return "分析追踪会显示在这里。"
+    trace = state.get("trace") or []
+    lines = [
+        "#### 本章分析追踪",
+        (
+            f"Provider：`{state.get('provider') or '未配置'}` · 模型：`{state.get('model') or '默认'}` · "
+            f"推理：`{state.get('reasoning_mode') or '未设置'}`"
+        ),
+        (
+            f"协议：`{state.get('protocol_version') or '未知'}` · 核心提示词：`{state.get('prompt_version') or '未知'}` · "
+            f"最终状态：**{state.get('status') or '未知'}**"
+        ),
+    ]
+    if not trace:
+        return "\n".join(lines + ["暂无请求记录。"])
+    lines.append("请求记录：")
+    for item in trace[-8:]:
+        event = item.get("event", "event")
+        stage = item.get("stage", "phase1_structure")
+        duration = item.get("duration_ms")
+        suffix = f" · {duration} ms" if duration is not None else ""
+        detail = item.get("error") or item.get("final_status") or ""
+        lines.append(f"- `{stage}` · {event}{suffix} {detail}".rstrip())
+    return "\n".join(lines)
 
 
 def v4_analysis_buttons_visibility(state: dict | None) -> dict:
@@ -315,10 +379,11 @@ def _chapter_analysis_summary(project: Path, script: ScriptDocument) -> str:
         "\n\n"
         f"快速章节分析：{status} · 请求 {state.get('ai_requests', 0)} · "
         f"重试 {state.get('retries', 0)} · 片段 {stats.get('segments', 0)} · "
-        f"待确认 {stats.get('unresolved_segments', 0)} · "
+        f"待确认 {stats.get('unresolved_segments', 0)} · AI 候选 {stats.get('candidate_roles', 0)} · "
+        f"阶段 2 {stats.get('phase2_status', 'skipped')} · "
         f"未绑定音色 {len(stats.get('unbound_speakers', []))} · "
         f"Provider {state.get('provider') or '未配置'} · "
-        f"模型 {state.get('model') or '默认'} · "
+        f"模型 {state.get('model') or '默认'} · 推理 {state.get('reasoning_mode') or '未设置'} · "
         f"更新时间 {state.get('updated_at', '')[:19]}"
         + (f"\n\n⚠ {state.get('message')}" if status in {"needs_attention", "failed"} else "")
     )
@@ -342,10 +407,57 @@ def scan_v4_projects() -> list[str]:
     return sorted(names)
 
 
+def _ensure_progress(progress):
+    return progress or gr.Progress()
+
+
+def _refresh_session_v4(project_name: str, session) -> None:
+    if session is None:
+        return
+    try:
+        context = V4ProjectService.open_project(project_name)
+        if context is not None:
+            session.set_v4_project(project_name, context.script, context.speakers)
+    except Exception:  # noqa: BLE001 - disk refresh is supplementary
+        return
+
+
+def confirm_v4_speaker_candidate(
+    project_name: str, speaker_id: str, session=None
+) -> str:
+    """Normal voice page action for promoting an AI candidate."""
+    if not project_name or not speaker_id:
+        return "⚠ 请先选择一个待确认的 AI 候选角色"
+    try:
+        _script, _speakers, attached = ChapterAnalysisService.confirm_candidate(
+            _root() / project_name, str(speaker_id)
+        )
+        _refresh_session_v4(project_name, session)
+        return f"✅ 已确认候选角色；{attached} 个章节片段已归属该角色。"
+    except Exception as exc:  # noqa: BLE001 - visible user action error
+        return f"❌ 确认候选角色失败：{str(exc)[:300]}"
+
+
+def reject_v4_speaker_candidate(
+    project_name: str, speaker_id: str, session=None
+) -> str:
+    """Normal voice page action for denying an AI candidate."""
+    if not project_name or not speaker_id:
+        return "⚠ 请先选择一个待确认的 AI 候选角色"
+    try:
+        _script, _speakers, cleared = ChapterAnalysisService.reject_candidate(
+            _root() / project_name, str(speaker_id)
+        )
+        _refresh_session_v4(project_name, session)
+        return f"✅ 已拒绝候选角色；{cleared} 个片段回到未知说话人状态，未改成旁白。"
+    except Exception as exc:  # noqa: BLE001 - visible user action error
+        return f"❌ 拒绝候选角色失败：{str(exc)[:300]}"
+
+
 def create_v4_from_source(
-    name, source_file, title, author, source_text="", progress=gr.Progress()
+    name, source_file, title, author, source_text="", progress=None
 ):
-    progress = progress or (lambda *_args, **_kwargs: None)
+    progress = _ensure_progress(progress)
     source = getattr(source_file, "name", None) or source_file
     pasted = str(source_text or "").strip()
     if not name or (not source and not pasted):
@@ -581,8 +693,9 @@ def _analysis_result_text(result) -> str:
     return "\n".join(parts)
 
 
-def continue_v4_analysis(project_name: str, progress=gr.Progress()):
+def continue_v4_analysis(project_name: str, progress=None):
     """Default entry point: analyze only the current/pending chapter."""
+    progress = _ensure_progress(progress)
     if not project_name:
         return "⚠ 请先选择 v4 项目"
     try:
@@ -598,7 +711,7 @@ def continue_v4_analysis(project_name: str, progress=gr.Progress()):
 
 def analyze_v4_chapter(project_name: str, chapter_id: str = "", progress=None):
     """Analyze one explicitly selected chapter through the fast contract."""
-    progress = progress or (lambda *_args, **_kwargs: None)
+    progress = _ensure_progress(progress)
     if not project_name:
         return "⚠ 请先选择 v4 项目"
     try:
@@ -613,7 +726,7 @@ def analyze_v4_chapter(project_name: str, chapter_id: str = "", progress=None):
 
 def reanalyze_v4_chapter(project_name: str, chapter_id: str = "", progress=None):
     """Force one new chapter request; repair remains capped at one retry."""
-    progress = progress or (lambda *_args, **_kwargs: None)
+    progress = _ensure_progress(progress)
     if not project_name:
         return "⚠ 请先选择 v4 项目"
     try:
@@ -640,16 +753,27 @@ def view_v4_chapter_script(project_name: str, chapter_id: str = ""):
     if selected is None:
         return "⚠ 未找到当前章节"
     lines = [f"### {selected.title or selected.chapter_id}"]
-    lines.extend(
-        f"{index + 1}. **{item.dialogue_type}** · "
-        f"`{item.speaker_id or '待确认'}` · {source[item.start:item.end]}"
-        for index, item in enumerate(selected.segments)
-    )
+    for index, item in enumerate(selected.segments):
+        confidence = (
+            f" · 置信度 {item.confidence:.2f}"
+            if item.confidence is not None
+            else ""
+        )
+        lines.append(
+            f"{index + 1}. **{item.dialogue_type}** · "
+            f"`{item.speaker_id or item.candidate_speaker_name or '未知说话人'}`"
+            f"{confidence} · {source[item.start:item.end]}"
+        )
+        if item.candidate_speaker_id and item.speaker_evidence:
+            lines.append(f"   - 证据：{'；'.join(item.speaker_evidence[:3])}")
+        if item.uncertainty_reason:
+            lines.append(f"   - 判断：{item.uncertainty_reason}")
     return "\n".join(lines)
 
 
-def reanalyze_v4_project(project_name: str, progress=gr.Progress()):
+def reanalyze_v4_project(project_name: str, progress=None):
     """Explicitly rerun AI-first analysis with a durable revision snapshot."""
+    progress = _ensure_progress(progress)
     if not project_name:
         return "⚠ 请先选择 v4 项目"
     try:

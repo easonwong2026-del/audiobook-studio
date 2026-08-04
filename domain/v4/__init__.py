@@ -1,5 +1,11 @@
 """Audiobook Studio v4 source-first domain models."""
 
+from .acting import (
+    ACTING_REQUEST_SCHEMA,
+    ACTING_RESPONSE_SCHEMA,
+    ActingResponse,
+    ActingSegment,
+)
 from .ai_first import (
     BibleCharacter,
     BibleEvidence,
@@ -44,8 +50,12 @@ from .models import (
 )
 
 __all__ = [
+    "ACTING_REQUEST_SCHEMA",
+    "ACTING_RESPONSE_SCHEMA",
     "CHAPTER_ANALYSIS_REQUEST_SCHEMA",
     "CHAPTER_ANALYSIS_RESPONSE_SCHEMA",
+    "ActingResponse",
+    "ActingSegment",
     "BibleCharacter",
     "BibleEvidence",
     "BibleRelationship",

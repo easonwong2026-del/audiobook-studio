@@ -221,11 +221,22 @@ class RemoteScriptReviewV4Adapter:
 
 
 def _provider_request(provider: Any) -> RequestJson:
-    def request(system: str, user: str, *, task: str = "script_director"):
+    def request(
+        system: str,
+        user: str,
+        *,
+        task: str = "script_director",
+        reasoning_mode: str | None = None,
+    ):
         last_error = None
         for _attempt in range(2):
             try:
-                return provider._request_json(system, user, task=task)
+                return provider._request_json(
+                    system,
+                    user,
+                    task=task,
+                    reasoning_mode=reasoning_mode,
+                )
             except ProviderOutputTruncatedError as exc:
                 last_error = exc
         raise ProviderOutputTruncatedError(

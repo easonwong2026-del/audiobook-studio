@@ -10,7 +10,7 @@ import gradio as gr
 
 
 def create_create_project_page() -> dict:
-    with gr.Group(visible=False, elem_id="grp-create-project") as grp:
+    with gr.Group(visible=False, elem_id="grp-create-project", elem_classes=["page-shell"]) as grp:
         gr.Markdown("### 创建 v4 Source-first 项目")
 
         with gr.Row(equal_height=True, elem_classes=["stage-row"]):
@@ -47,7 +47,7 @@ def create_create_project_page() -> dict:
             cp_config_summary = gr.Markdown(
                 "##### v4 创建流程\n"
                 "默认快速章节分析：一次只提交当前章节，完成校验后立即保存角色、剧本和合成入口；"
-                "AI 未配置时章节仍会先保存，可稍后继续分析。高级全书分析保留在角色工作台中。"
+                "AI 未配置时章节仍会先保存，可稍后继续分析。"
             )
 
         with gr.Row():

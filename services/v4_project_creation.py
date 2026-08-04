@@ -11,7 +11,6 @@ from pathlib import Path
 from domain.v4 import ProjectManifest
 from domain.v4.production import TtsProfile
 from repositories.project_v4_repository import ProjectV4Repository
-
 from services.chapter_analysis_service import (
     ChapterAnalysisResult,
     ChapterAnalysisService,

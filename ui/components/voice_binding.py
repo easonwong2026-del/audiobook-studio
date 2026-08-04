@@ -82,9 +82,26 @@ def build_v4_role_management_choices(
         label = speaker.display_name
         if speaker.locked:
             label += " 🔒"
+        review_status = getattr(speaker, "review_status", "confirmed")
+        if speaker.status != "confirmed" and review_status == "confirmed":
+            review_status = "unknown"
+        status_label = {
+            "confirmed": "✅ 已确认",
+            "candidate": "🟡 AI 候选 · 需确认",
+            "rejected": "⛔ 已拒绝",
+            "unknown": "⚪ 未知说话人 · 待确认",
+        }.get(review_status, "⚠ 待确认")
+        label += f"\n{status_label}"
         if speaker.aliases:
             label += f"（{'/'.join(speaker.aliases[:3])}）"
         stat = (speaker_stats or {}).get(speaker.speaker_id, {})
+        card_status = stat.get("status", review_status)
+        if card_status != review_status:
+            status_label = {
+                "confirmed": "✅ 已确认",
+                "candidate": "🟡 AI 候选 · 需确认",
+                "rejected": "⛔ 已拒绝",
+            }.get(card_status, status_label)
         if stat:
             importance = stat.get("importance", "次要角色")
             count = int(stat.get("dialogue_count", 0) or 0)

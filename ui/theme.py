@@ -235,8 +235,10 @@ button:hover, .gr-button:hover {{ transform:translateY(-1px)!important; }}
 }}
 
 /* ===== 主工作区（浅色 + 大圆角 + 统一分区间距） ===== */
-.main-area {{ border:none!important; width:100%!important; max-width:100%!important; min-width:0!important; padding:8px 20px 24px!important; background:transparent!important; box-sizing:border-box!important; }}
+.main-area {{ border:none!important; width:100%!important; max-width:1280px!important; min-width:0!important; margin:0 auto!important; padding:8px 20px 24px!important; background:transparent!important; box-sizing:border-box!important; overflow-x:hidden!important; }}
 .main-area > * {{ width:100%!important; max-width:100%!important; min-width:0!important; box-sizing:border-box!important; }}
+.page-shell {{ width:100%!important; max-width:1180px!important; min-width:0!important; margin:0 auto!important; box-sizing:border-box!important; overflow-x:hidden!important; }}
+.page-shell-wide {{ max-width:1280px!important; }}
 .settings-page, .settings-page > *, .settings-card {{ width:100%!important; max-width:100%!important; min-width:0!important; box-sizing:border-box!important; }}
 .settings-page .tabs, .settings-page .settings-tabs, .settings-page [role="tabpanel"] {{ width:100%!important; max-width:100%!important; min-width:0!important; box-sizing:border-box!important; }}
 .settings-provider-row, .settings-actions, .settings-data-actions {{ flex-wrap:wrap!important; gap:10px!important; }}
@@ -342,7 +344,7 @@ button[aria-label*="Play"] {{ border-radius:999px!important; background:{ACCENT}
 .voice-flow-steps b {{ color:{ACCENT_DEEP}; }}
 .voice-workspace {{ gap:16px!important; align-items:start!important; flex-wrap:wrap!important; }}
 .voice-workspace > .role-list-panel {{ flex:0 0 300px!important; min-width:280px!important; }}
-.voice-workspace > .voice-config-panel {{ flex:1 1 600px!important; min-width:600px!important; max-width:100%!important; }}
+.voice-workspace > .voice-config-panel {{ flex:1 1 600px!important; min-width:0!important; max-width:100%!important; }}
 .advanced-role-accordion, #grp-v4-role-embedded {{ width:100%!important; max-width:100%!important; min-width:0!important; }}
 #grp-v4-role-embedded .gr-row {{ flex-wrap:wrap!important; }}
 .role-list-panel {{ padding:16px!important; border:1px solid {BORDER}!important; border-radius:14px!important; background:{PANEL}!important; }}
@@ -350,14 +352,18 @@ button[aria-label*="Play"] {{ border-radius:999px!important; background:{ACCENT}
 .role-list-panel > .gr-markdown:nth-child(2) {{ color:{TEXT_MUTED}!important; font-size:12px!important; margin:0 0 10px!important; }}
 .role-list-search {{ margin-bottom:8px!important; }}
 .role-list-search input {{ background:{CARD}!important; }}
-.role-management-list {{ max-height:560px!important; overflow:auto!important; border:1px solid {BORDER}!important; border-radius:12px!important; background:{CARD}!important; padding:4px!important; }}
-.role-management-list .wrap {{ display:flex!important; flex-direction:column!important; width:100%!important; max-height:550px!important; overflow:auto!important; }}
-.role-management-list label {{ display:flex!important; align-items:flex-start!important; width:100%!important; box-sizing:border-box!important; min-height:46px!important; padding:10px 12px!important; margin:0!important; border-bottom:1px solid #edf0ed!important; border-radius:9px!important; background:{CARD}!important; white-space:pre-line!important; line-height:1.35!important; color:{TEXT_PRIMARY}!important; cursor:pointer!important; transition:background .12s ease,border-color .12s ease!important; }}
+.role-management-list {{ max-height:560px!important; min-width:0!important; overflow-y:auto!important; overflow-x:hidden!important; border:1px solid {BORDER}!important; border-radius:12px!important; background:{CARD}!important; padding:4px!important; }}
+.role-management-list .wrap {{ display:flex!important; flex-direction:column!important; width:100%!important; min-width:0!important; max-height:550px!important; overflow-y:auto!important; overflow-x:hidden!important; }}
+.role-management-list label {{ display:flex!important; align-items:flex-start!important; width:100%!important; box-sizing:border-box!important; min-width:0!important; min-height:46px!important; padding:10px 12px!important; margin:0!important; border-bottom:1px solid #edf0ed!important; border-radius:9px!important; background:{CARD}!important; white-space:pre-wrap!important; overflow-wrap:anywhere!important; word-break:break-word!important; line-height:1.35!important; color:{TEXT_PRIMARY}!important; cursor:pointer!important; transition:background .12s ease,border-color .12s ease!important; }}
 .role-management-list label:hover {{ background:#eef6e7!important; }}
 .role-management-list label:has(input:checked) {{ background:{ACCENT_SOFT}!important; border-left:3px solid {ACCENT_DEEP}!important; color:{TEXT_PRIMARY}!important; }}
-.role-management-list label span {{ white-space:pre-line!important; }}
+.role-management-list label span {{ min-width:0!important; max-width:100%!important; white-space:pre-wrap!important; overflow-wrap:anywhere!important; word-break:break-word!important; }}
 .role-management-list input {{ accent-color:{ACCENT_DEEP}!important; margin-top:4px!important; }}
 .role-list-panel > .gr-markdown:last-child {{ color:{TEXT_MUTED}!important; font-size:12px!important; margin:8px 0 0!important; }}
+.candidate-actions {{ gap:8px!important; flex-wrap:wrap!important; margin-top:8px!important; }}
+.candidate-actions > * {{ flex:1 1 140px!important; min-width:0!important; }}
+.analysis-settings-card {{ overflow-x:hidden!important; }}
+.analysis-settings-card textarea {{ white-space:pre-wrap!important; overflow-wrap:anywhere!important; }}
 .voice-config-panel > .gr-markdown:first-child h3 {{ margin-top:4px!important; margin-bottom:12px!important; }}
 .voice-config-steps {{ display:flex!important; flex-direction:column!important; gap:10px!important; }}
 .voice-binding-layout {{ gap:12px!important; align-items:start!important; flex-wrap:nowrap!important; }}

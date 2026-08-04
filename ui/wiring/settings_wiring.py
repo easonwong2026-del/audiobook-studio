@@ -37,6 +37,42 @@ def wire_settings_page(page: dict) -> None:
         [page["s_provider"], page["s_model"]],
         [page["s_model_source"]],
     )
+    page["s_provider"].change(
+        settings_handlers.load_ai_analysis_settings,
+        [page["s_provider"]],
+        [
+            page["s_analysis_provider_info"], page["s_analysis_depth"],
+            page["s_analysis_reasoning"], page["s_analysis_auto_upgrade"],
+            page["s_analysis_capability"], page["s_analysis_prompt_core"],
+            page["s_analysis_prompt_supplement"],
+            page["s_analysis_prompt_preview"], page["s_analysis_prompt_version"],
+        ],
+    )
+    page["s_analysis_prompt_supplement"].change(
+        settings_handlers.preview_ai_analysis_prompt,
+        [page["s_analysis_prompt_supplement"]],
+        [page["s_analysis_prompt_preview"]],
+    )
+    page["s_analysis_save"].click(
+        settings_handlers.save_ai_analysis_settings,
+        [
+            page["s_provider"], page["s_analysis_depth"],
+            page["s_analysis_reasoning"], page["s_analysis_auto_upgrade"],
+            page["s_analysis_prompt_supplement"],
+        ],
+        [
+            page["s_analysis_status"], page["s_analysis_provider_info"],
+            page["s_analysis_prompt_preview"],
+        ],
+    )
+    page["s_analysis_reset"].click(
+        settings_handlers.reset_ai_analysis_prompt,
+        [],
+        [
+            page["s_analysis_prompt_supplement"],
+            page["s_analysis_prompt_preview"], page["s_analysis_status"],
+        ],
+    )
     page["s_models_refresh"].click(
         settings_handlers.refresh_ai_models,
         [

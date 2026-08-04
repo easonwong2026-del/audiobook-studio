@@ -8,7 +8,7 @@ from services import ProjectService
 
 def create_project_page() -> dict:
     """创建项目管理页面（不含新建项目入口）。"""
-    with gr.Group(visible=False, elem_id="grp-project") as grp_project:
+    with gr.Group(visible=False, elem_id="grp-project", elem_classes=["page-shell"]) as grp_project:
         with gr.Row(equal_height=True, elem_classes=["stage-row"]):
             with gr.Column(scale=1, elem_classes=["stage-card"]):
                 gr.Markdown("#### 选择项目")

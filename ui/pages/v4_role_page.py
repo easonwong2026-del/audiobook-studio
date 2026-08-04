@@ -12,7 +12,11 @@ def create_v4_role_page(
     *, visible: bool = False, elem_id: str = "grp-v4-role"
 ) -> dict:
     """创建 V4 角色工作台；高级全书入口保持折叠。"""
-    with gr.Group(visible=visible, elem_id=elem_id) as grp_v4_role:
+    with gr.Group(
+        visible=visible,
+        elem_id=elem_id,
+        elem_classes=["page-shell", "page-shell-wide"],
+    ) as grp_v4_role:
         gr.Markdown("## V4 角色工作台")
         gr.Markdown(
             "V4 项目使用稳定角色 ID。默认按当前章节快速分析，校验后可直接查看剧本、"

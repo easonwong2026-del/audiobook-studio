@@ -14,9 +14,102 @@ import os
 import gradio as gr
 
 from lib import config
+from services.ai_analysis_settings import (
+    ANALYSIS_DEPTHS,
+    ANALYSIS_PROTOCOL_VERSION,
+    CORE_PROMPT,
+    CORE_PROMPT_VERSION,
+    AiAnalysisSettingsService,
+)
 from services.ai_settings import AiSettingsService
 
 logger = logging.getLogger(__name__)
+
+
+def _analysis_reasoning_choices(provider: str) -> list[tuple[str, str]]:
+    normalized = str(provider or "custom").strip().lower()
+    if normalized == "deepseek":
+        return [("关闭", "off"), ("高", "high"), ("最大", "max")]
+    if normalized == "openai":
+        return [
+            ("自动", "auto"),
+            ("关闭", "off"),
+            ("低", "low"),
+            ("中", "medium"),
+            ("高", "high"),
+        ]
+    return [("自动", "auto"), ("关闭", "off")]
+
+
+def _analysis_provider_info(provider: str) -> str:
+    values = AiSettingsService.get_effective_provider_config(str(provider or "local"))
+    name = str(values.get("provider") or provider or "local")
+    model = str(values.get("model") or AiSettingsService.get_default_model(name) or "未配置")
+    base_url = str(values.get("base_url") or AiSettingsService.get_default_base_url(name) or "—")
+    return f"Provider：**{html.escape(name)}** · 模型：`{html.escape(model)}` · Base URL：`{html.escape(base_url)}`"
+
+
+def load_ai_analysis_settings(provider: str = "") -> tuple:
+    selected = str(provider or AiSettingsService.get_effective_provider_config().get("provider", "local"))
+    values = AiAnalysisSettingsService.for_provider(selected)
+    modes = _analysis_reasoning_choices(selected)
+    capability = values.get("capabilities") or {}
+    mode_text = "、".join(label for label, _value in modes)
+    return (
+        _analysis_provider_info(selected),
+        values.get("depth", "quick"),
+        gr.update(choices=modes, value=values.get("reasoning_mode", "auto")),
+        bool(values.get("auto_upgrade_max", True)),
+        f"当前 Provider 支持：{html.escape(str(capability.get('label', '未注册')))}；可用模式：{mode_text}",
+        CORE_PROMPT,
+        values.get("prompt_supplement", ""),
+        AiAnalysisSettingsService.prompt_preview(values.get("prompt_supplement", "")),
+        f"核心提示词版本：{CORE_PROMPT_VERSION} · 协议：{ANALYSIS_PROTOCOL_VERSION} · 更新：随协议版本发布",
+    )
+
+
+def preview_ai_analysis_prompt(supplement: str) -> str:
+    return AiAnalysisSettingsService.prompt_preview(supplement)
+
+
+def save_ai_analysis_settings(
+    provider: str,
+    depth: str,
+    reasoning_mode: str,
+    auto_upgrade_max: bool,
+    prompt_supplement: str,
+) -> tuple:
+    try:
+        normalized = str(provider or "local").strip().lower()
+        values = AiAnalysisSettingsService.get_config()
+        values.update(
+            {
+                "depth": depth if depth in ANALYSIS_DEPTHS else "quick",
+                "auto_upgrade_max": bool(auto_upgrade_max),
+                "prompt_supplement": str(prompt_supplement or "").strip(),
+            }
+        )
+        if normalized == "deepseek":
+            values["deepseek_reasoning_mode"] = reasoning_mode
+        elif normalized == "openai":
+            values["openai_reasoning_mode"] = reasoning_mode
+        AiAnalysisSettingsService.save_config(values)
+        return (
+            "✅ AI 剧本分析设置已保存；下次章节分析生效。",
+            _analysis_provider_info(normalized),
+            AiAnalysisSettingsService.prompt_preview(values["prompt_supplement"]),
+        )
+    except Exception as exc:  # noqa: BLE001 - user configuration feedback
+        return (
+            f"❌ 分析设置保存失败：{html.escape(str(exc)[:300])}",
+            _analysis_provider_info(provider),
+            AiAnalysisSettingsService.prompt_preview(prompt_supplement),
+        )
+
+
+def reset_ai_analysis_prompt() -> tuple:
+    AiAnalysisSettingsService.save_config({"prompt_supplement": ""})
+    return "", CORE_PROMPT, "✅ 已恢复默认自定义补充；核心提示词未修改。"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -185,6 +278,7 @@ def describe_ai_model_source(provider: str, model: str) -> str:
 
 def refresh_abnormal_projects() -> tuple:
     from datetime import datetime
+
     from repositories.project_repo import ProjectRepository
 
     inspections = ProjectRepository.list_abnormal_projects()

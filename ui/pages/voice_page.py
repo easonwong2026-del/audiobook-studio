@@ -7,7 +7,7 @@ from ui.pages.v4_role_page import create_v4_role_page
 
 
 def create_voice_page() -> dict:
-    with gr.Group(visible=False, elem_id="grp-voices") as grp_voices:
+    with gr.Group(visible=False, elem_id="grp-voices", elem_classes=["page-shell", "page-shell-wide"]) as grp_voices:
         with gr.Row(equal_height=False, elem_classes=["voice-workspace"]):
             with gr.Column(scale=1, min_width=280, elem_classes=["role-list-panel"]):
                 gr.Markdown("### 角色与声音")
@@ -26,6 +26,7 @@ def create_voice_page() -> dict:
                     )
                 v_analysis_msg = gr.Markdown("点击「继续 AI 分析」开始或继续角色分析。")
                 v_analysis_progress = gr.Markdown("打开项目后显示 AI 分析进度。")
+                v_analysis_trace = gr.Markdown("分析追踪会显示在这里。")
                 v_role_search = gr.Textbox(
                     label="搜索角色",
                     placeholder="按名称或描述搜索",
@@ -39,6 +40,20 @@ def create_voice_page() -> dict:
                     show_label=False,
                     interactive=True,
                     elem_classes=["role-management-list"],
+                )
+                with gr.Row(elem_classes=["candidate-actions"]):
+                    v_confirm_candidate = gr.Button(
+                        "确认 AI 候选",
+                        variant="primary",
+                        size="sm",
+                    )
+                    v_reject_candidate = gr.Button(
+                        "拒绝候选",
+                        variant="secondary",
+                        size="sm",
+                    )
+                v_candidate_msg = gr.Markdown(
+                    "选择标有“AI 候选 · 需确认”的角色后，可在此确认或拒绝。"
                 )
 
             with gr.Column(scale=3, min_width=600, elem_classes=["voice-config-panel"]):
@@ -138,7 +153,11 @@ def create_voice_page() -> dict:
         "v_reanalyze": v_reanalyze,
         "v_analysis_msg": v_analysis_msg,
         "v_analysis_progress": v_analysis_progress,
+        "v_analysis_trace": v_analysis_trace,
         "v_table": v_table,
+        "v_confirm_candidate": v_confirm_candidate,
+        "v_reject_candidate": v_reject_candidate,
+        "v_candidate_msg": v_candidate_msg,
         "v_role_search": v_role_search,
         "v_role_title": v_role_title,
         "v_bind_category": v_bind_category,

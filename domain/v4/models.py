@@ -116,6 +116,13 @@ class SemanticSegment:
     pause_before: int = 0
     pause_after: int = 600
     pauses: list[dict[str, Any]] = field(default_factory=list)
+    # A low-confidence AI attribution is kept as evidence, but is deliberately
+    # not promoted to ``speaker_id`` until a person confirms it.
+    candidate_speaker_id: str | None = None
+    candidate_speaker_name: str | None = None
+    candidate_confidence: float | None = None
+    speaker_evidence: list[str] = field(default_factory=list)
+    uncertainty_reason: str | None = None
 
     def __post_init__(self) -> None:
         # Older in-memory callers only supplied ``kind``.  Preserve that
@@ -189,6 +196,27 @@ class SemanticSegment:
                 raise ValidationError(f"segment {self.segment_id} {label} is invalid")
         if not isinstance(self.pauses, list):
             raise ValidationError(f"segment {self.segment_id} pauses is invalid")
+        if self.candidate_speaker_id is not None and not self.candidate_speaker_id.strip():
+            raise ValidationError(f"segment {self.segment_id} candidate speaker is invalid")
+        if self.candidate_speaker_name is not None and not self.candidate_speaker_name.strip():
+            raise ValidationError(f"segment {self.segment_id} candidate name is invalid")
+        if self.candidate_confidence is not None and (
+            isinstance(self.candidate_confidence, bool)
+            or not isinstance(self.candidate_confidence, (int, float))
+            or not 0.0 <= float(self.candidate_confidence) <= 1.0
+        ):
+            raise ValidationError(
+                f"segment {self.segment_id} candidate confidence is invalid"
+            )
+        if not isinstance(self.speaker_evidence, list) or any(
+            not isinstance(item, str) or not item.strip()
+            for item in self.speaker_evidence
+        ):
+            raise ValidationError(f"segment {self.segment_id} speaker evidence is invalid")
+        if self.uncertainty_reason is not None and not isinstance(
+            self.uncertainty_reason, str
+        ):
+            raise ValidationError(f"segment {self.segment_id} uncertainty reason is invalid")
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SemanticSegment:
@@ -214,6 +242,11 @@ class SemanticSegment:
                 pause_before=data.get("pause_before", 0),
                 pause_after=data.get("pause_after", 600),
                 pauses=data.get("pauses", []),
+                candidate_speaker_id=data.get("candidate_speaker_id"),
+                candidate_speaker_name=data.get("candidate_speaker_name"),
+                candidate_confidence=data.get("candidate_confidence"),
+                speaker_evidence=list(data.get("speaker_evidence", [])),
+                uncertainty_reason=data.get("uncertainty_reason"),
             )
         except (KeyError, TypeError) as exc:
             raise ValidationError(f"invalid segment: {exc}") from exc
@@ -237,6 +270,11 @@ class SemanticSegment:
             "pause_before": self.pause_before,
             "pause_after": self.pause_after,
             "pauses": self.pauses,
+            "candidate_speaker_id": self.candidate_speaker_id,
+            "candidate_speaker_name": self.candidate_speaker_name,
+            "candidate_confidence": self.candidate_confidence,
+            "speaker_evidence": self.speaker_evidence,
+            "uncertainty_reason": self.uncertainty_reason,
         }
 
 
@@ -351,6 +389,10 @@ class Speaker:
     speaker_type: str = "character"
     aliases: list[str] = field(default_factory=list)
     locked: bool = False
+    confidence: float | None = None
+    candidate_reason: str | None = None
+    source: str = "system"
+    review_status: str = "confirmed"
 
     def validate(self) -> None:
         if not self.speaker_id or not self.display_name:
@@ -365,6 +407,20 @@ class Speaker:
             raise ValidationError("speaker aliases cannot repeat the display name")
         if self.locked and self.status != "confirmed":
             raise ValidationError("locked speaker must be confirmed")
+        if self.source not in {"system", "ai", "manual"}:
+            raise ValidationError("invalid speaker source")
+        if self.review_status not in {"candidate", "confirmed", "rejected"}:
+            raise ValidationError("invalid speaker review status")
+        if self.confidence is not None and (
+            isinstance(self.confidence, bool)
+            or not isinstance(self.confidence, (int, float))
+            or not 0.0 <= float(self.confidence) <= 1.0
+        ):
+            raise ValidationError("speaker confidence must be between 0 and 1")
+        if self.candidate_reason is not None and not isinstance(self.candidate_reason, str):
+            raise ValidationError("speaker candidate reason is invalid")
+        if self.locked and self.review_status != "confirmed":
+            raise ValidationError("locked speaker must be confirmed in review")
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Speaker:
@@ -376,6 +432,10 @@ class Speaker:
                 speaker_type=data["type"],
                 aliases=list(data["aliases"]),
                 locked=data["locked"],
+                confidence=data.get("confidence"),
+                candidate_reason=data.get("candidate_reason"),
+                source=data.get("source", "system"),
+                review_status=data.get("review_status", "confirmed"),
             )
         except (KeyError, TypeError) as exc:
             raise ValidationError(f"invalid speaker: {exc}") from exc
@@ -390,6 +450,10 @@ class Speaker:
             "aliases": self.aliases,
             "status": self.status,
             "locked": self.locked,
+            "confidence": self.confidence,
+            "candidate_reason": self.candidate_reason,
+            "source": self.source,
+            "review_status": self.review_status,
         }
 
 

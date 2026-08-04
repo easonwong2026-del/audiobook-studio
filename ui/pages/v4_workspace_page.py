@@ -9,7 +9,7 @@ from ui.pages.v4_speaker_review_page import create_v4_speaker_review_page
 
 
 def create_v4_workspace_page() -> dict:
-    with gr.Group(visible=False, elem_id="grp-v4-workspace") as group:
+    with gr.Group(visible=False, elem_id="grp-v4-workspace", elem_classes=["page-shell", "page-shell-wide"]) as group:
         gr.Markdown("## v4 Source-first 工作流")
         with gr.Row():
             project = gr.Dropdown(label="v4 项目", choices=[])

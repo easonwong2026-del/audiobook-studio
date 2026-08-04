@@ -17,7 +17,12 @@ import json
 
 import pytest
 
-from domain.v4 import CharacterCandidatesDocument, ScriptDocument, Speaker, SpeakersDocument
+from domain.v4 import (
+    CharacterCandidatesDocument,
+    ScriptDocument,
+    Speaker,
+    SpeakersDocument,
+)
 from domain.v4.models import source_sha256
 from repositories.v4_analysis_repository import (
     ANALYSIS_SCHEMA,
@@ -26,11 +31,11 @@ from repositories.v4_analysis_repository import (
 )
 from services.v4_analysis_config import V4AnalysisConfig
 from services.v4_analysis_validity import (
+    DIALOGUE_COVERAGE_UNKNOWN_LABEL,
+    PIPELINE_VERSION,
     AnalysisRunStats,
     AnalysisValidityChecker,
     CountingAdapterProxy,
-    DIALOGUE_COVERAGE_UNKNOWN_LABEL,
-    PIPELINE_VERSION,
     ReasonCode,
     SourceDialogueSignals,
     compute_input_fingerprint,

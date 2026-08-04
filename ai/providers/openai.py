@@ -1,10 +1,11 @@
 """OpenAI Responses API 剧本导演 Provider。"""
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any
 
 from ._remote import RemoteJsonDirectorProvider, parse_json_content
 from .exceptions import ProviderOutputTruncatedError
+from .reasoning import resolve_reasoning_mode
 
 
 class OpenAIProvider(RemoteJsonDirectorProvider):
@@ -17,12 +18,31 @@ class OpenAIProvider(RemoteJsonDirectorProvider):
     default_model = "gpt-5.6"
     default_base_url = "https://api.openai.com/v1"
 
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        model: str | None = None,
+        base_url: str | None = None,
+        timeout: float = 180.0,
+        reasoning_mode: str | bool | None = None,
+        **kwargs: Any,
+    ):
+        super().__init__(
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            timeout=timeout,
+            **kwargs,
+        )
+        self.reasoning_mode = reasoning_mode
+
     @staticmethod
-    def _extract_output_text(response: Dict[str, Any]) -> str:
+    def _extract_output_text(response: dict[str, Any]) -> str:
         direct = response.get("output_text")
         if isinstance(direct, str) and direct.strip():
             return direct
-        texts: List[str] = []
+        texts: list[str] = []
         for item in response.get("output", []):
             if not isinstance(item, dict):
                 continue
@@ -45,15 +65,25 @@ class OpenAIProvider(RemoteJsonDirectorProvider):
         *,
         task: str = "script_director",
         reasoning: bool | None = None,
-    ) -> Dict[str, Any]:
-        payload = {
+        reasoning_mode: str | None = None,
+    ) -> dict[str, Any]:
+        mode = resolve_reasoning_mode(
+            self.name,
+            task,
+            reasoning_mode
+            if reasoning_mode is not None
+            else reasoning if reasoning is not None else self.reasoning_mode,
+        )
+        payload: dict[str, Any] = {
             "model": self.model,
             "instructions": system_prompt,
             "input": user_prompt,
             "text": {"format": {"type": "json_object"}},
         }
-        if self._should_enable_reasoning(task, reasoning):
-            payload["reasoning"] = {"effort": "high"}
+        if mode not in {"off", "auto"}:
+            payload["reasoning"] = {"effort": mode}
+        elif mode == "auto":
+            payload["reasoning"] = {"effort": "auto"}
         response = self._transport(
             f"{self.base_url}/responses",
             {
@@ -83,13 +113,3 @@ class OpenAIProvider(RemoteJsonDirectorProvider):
                 if isinstance(content, dict) and content.get("type") == "refusal":
                     raise RuntimeError("OpenAI Responses 拒绝处理当前批次")
         return parse_json_content(self._extract_output_text(response))
-
-    def _should_enable_reasoning(
-        self, task: str, reasoning: bool | None
-    ) -> bool:
-        if task in {"connection_test", "format", "simple"}:
-            return False
-        if reasoning is not None:
-            return bool(reasoning)
-        model = self.model.lower()
-        return any(marker in model for marker in ("gpt-5", "o1", "o3", "reason"))

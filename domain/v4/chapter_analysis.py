@@ -104,13 +104,15 @@ class ChapterCharacterUpdate:
     aliases: list[str] = field(default_factory=list)
     is_new: bool = False
     confidence: float = 0.0
+    evidence: list[str] = field(default_factory=list)
+    uncertainty_reason: str | None = None
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> ChapterCharacterUpdate:
         _strict_keys(
             value,
             required={"character_id", "canonical_name", "aliases", "is_new"},
-            optional={"confidence"},
+            optional={"confidence", "evidence", "uncertainty_reason"},
         )
         if value["character_id"] is not None and not isinstance(value["character_id"], str):
             raise ValidationError("character_update character_id must be string or null")
@@ -123,12 +125,26 @@ class ChapterCharacterUpdate:
         if not isinstance(value["is_new"], bool):
             raise ValidationError("character_update is_new must be boolean")
         confidence = _confidence(value.get("confidence", 0.0))
+        evidence = value.get("evidence", [])
+        if not isinstance(evidence, list) or any(
+            not isinstance(item, str) or not item.strip() for item in evidence
+        ):
+            raise ValidationError("character_update evidence must be text strings")
+        uncertainty_reason = value.get("uncertainty_reason")
+        if uncertainty_reason is not None and (
+            not isinstance(uncertainty_reason, str) or not uncertainty_reason.strip()
+        ):
+            raise ValidationError("character_update uncertainty_reason is invalid")
         return cls(
             character_id=value["character_id"],
             canonical_name=value["canonical_name"].strip(),
             aliases=list(dict.fromkeys(item.strip() for item in value["aliases"])),
             is_new=value["is_new"],
             confidence=float(confidence),
+            evidence=list(dict.fromkeys(item.strip() for item in evidence)),
+            uncertainty_reason=uncertainty_reason.strip()
+            if uncertainty_reason
+            else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -138,6 +154,8 @@ class ChapterCharacterUpdate:
             "aliases": self.aliases,
             "is_new": self.is_new,
             "confidence": self.confidence,
+            "evidence": self.evidence,
+            "uncertainty_reason": self.uncertainty_reason,
         }
 
 
@@ -150,13 +168,21 @@ class ChapterAnalysisSegment:
     emotion: str = "neutral"
     confidence: float | None = None
     speaker_name: str | None = None
+    speaker_evidence: list[str] = field(default_factory=list)
+    uncertainty_reason: str | None = None
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> ChapterAnalysisSegment:
         _strict_keys(
             value,
             required={"segment_type", "speaker_id", "text", "emotion"},
-            optional={"index", "confidence", "speaker_name"},
+            optional={
+                "index",
+                "confidence",
+                "speaker_name",
+                "speaker_evidence",
+                "uncertainty_reason",
+            },
         )
         index = value.get("index", 0)
         if isinstance(index, bool) or not isinstance(index, int):
@@ -175,6 +201,16 @@ class ChapterAnalysisSegment:
             not isinstance(speaker_name, str) or not speaker_name.strip()
         ):
             raise ValidationError("chapter segment speaker_name must be non-empty")
+        speaker_evidence = value.get("speaker_evidence", [])
+        if not isinstance(speaker_evidence, list) or any(
+            not isinstance(item, str) or not item.strip() for item in speaker_evidence
+        ):
+            raise ValidationError("chapter segment speaker_evidence must be text strings")
+        uncertainty_reason = value.get("uncertainty_reason")
+        if uncertainty_reason is not None and (
+            not isinstance(uncertainty_reason, str) or not uncertainty_reason.strip()
+        ):
+            raise ValidationError("chapter segment uncertainty_reason is invalid")
         return cls(
             index=index,
             segment_type=value["segment_type"],
@@ -183,6 +219,10 @@ class ChapterAnalysisSegment:
             emotion=value["emotion"],
             confidence=_confidence(value.get("confidence"), required=False),
             speaker_name=speaker_name.strip() if speaker_name else None,
+            speaker_evidence=list(dict.fromkeys(item.strip() for item in speaker_evidence)),
+            uncertainty_reason=uncertainty_reason.strip()
+            if uncertainty_reason
+            else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -196,6 +236,10 @@ class ChapterAnalysisSegment:
         }
         if self.speaker_name:
             value["speaker_name"] = self.speaker_name
+        if self.speaker_evidence:
+            value["speaker_evidence"] = self.speaker_evidence
+        if self.uncertainty_reason:
+            value["uncertainty_reason"] = self.uncertainty_reason
         return value
 
 

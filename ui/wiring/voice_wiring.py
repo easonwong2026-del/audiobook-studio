@@ -30,6 +30,24 @@ def wire_voice_page(page: dict, context: dict) -> None:
             page["v_bind_msg"],
         ],
     )
+    page["v_confirm_candidate"].click(
+        cb["confirm_v4_speaker_candidate"],
+        [project, page["v_role"], session],
+        [page["v_candidate_msg"]],
+    ).then(
+        cb["refresh_role_list"],
+        [page["v_role_search"], page["v_role"], session],
+        [page["v_table"]],
+    )
+    page["v_reject_candidate"].click(
+        cb["reject_v4_speaker_candidate"],
+        [project, page["v_role"], session],
+        [page["v_candidate_msg"]],
+    ).then(
+        cb["refresh_role_list"],
+        [page["v_role_search"], page["v_role"], session],
+        [page["v_table"]],
+    )
     page["v_role_search"].change(
         cb["refresh_role_list"],
         [page["v_role_search"], page["v_role"], session],

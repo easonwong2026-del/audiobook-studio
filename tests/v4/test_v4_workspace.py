@@ -4,8 +4,8 @@ import inspect
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import ClassVar
 
-import gradio as gr
 import numpy as np
 from scipy.io import wavfile
 
@@ -102,11 +102,11 @@ def test_v4_analysis_summary_text_renders_reason_codes():
 
 
 def test_handlers_use_gradio_progress_injection():
-    """R-1：三个分析入口的 progress 参数用 gr.Progress() 标准注入（Gradio 5 才注入）。"""
+    """分析入口不在函数签名创建 Gradio 组件，避免 import 时产生副作用。"""
     for name in ("create_v4_from_source", "continue_v4_analysis", "reanalyze_v4_project"):
         signature = inspect.signature(getattr(handlers, name))
         default = signature.parameters["progress"].default
-        assert isinstance(default, gr.Progress), f"{name} 的 progress 未用 gr.Progress()"
+        assert default is None, f"{name} 应由运行时注入 progress，而不是函数默认值"
 
 
 def test_report_analysis_progress_calls_progress_with_stage_map():
@@ -232,7 +232,7 @@ def test_analysis_result_text_includes_message_and_errors():
 
     class FakeResult:
         message = "⚠ 分析未完成，需要人工确认"
-        errors = ["全书阅读有 1 个章节失败，可继续分析重试。"]
+        errors: ClassVar[list[str]] = ["全书阅读有 1 个章节失败，可继续分析重试。"]
 
     text = handlers._analysis_result_text(FakeResult())
     assert "分析未完成" in text
@@ -240,7 +240,7 @@ def test_analysis_result_text_includes_message_and_errors():
 
     class FakeResultDedup:
         message = "⚠ 分析未完成：全书阅读有 1 个章节失败"
-        errors = ["全书阅读有 1 个章节失败"]
+        errors: ClassVar[list[str]] = ["全书阅读有 1 个章节失败"]
 
     dedup = handlers._analysis_result_text(FakeResultDedup())
     assert dedup.count("章节失败") == 1

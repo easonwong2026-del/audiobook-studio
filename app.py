@@ -35,16 +35,14 @@ from services import (
 from services.session import SessionState
 from services.speaker_review_service import SpeakerReviewService
 from services.synthesis import SynthesisState
+from services.v4_export import V4ExportService
 from services.v4_project_service import V4ProjectService
 from services.v4_quality_service import V4QualityService
 from services.v4_synthesis_service import V4SynthesisService
 from services.v4_voice_service import V4VoiceService
-from services.v4_export import V4ExportService
 from ui import create_project_handlers as create_ui
 from ui import settings_handlers as settings_ui
 from ui import v4_workspace_handlers as v4_ui
-from ui.wiring.settings_wiring import wire_settings_page
-from ui.wiring.voice_wiring import wire_voice_page
 from ui.components import (
     build_role_management_choices,
     build_v4_role_management_choices,
@@ -65,12 +63,14 @@ from ui.pages import (
     create_settings_page,
     create_supplement_page,
     create_synthesis_page,
-    create_voice_page,
     create_v4_role_page,
     create_v4_workspace_page,
+    create_voice_page,
 )
 from ui.shared import create_status_bar
 from ui.theme import LIGHT_CSS, THEME
+from ui.wiring.settings_wiring import wire_settings_page
+from ui.wiring.voice_wiring import wire_voice_page
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 # 音色库外置于数据目录（默认 ~/AudiobookStudio/voice_library），与程序目录解耦。
@@ -669,8 +669,10 @@ def _v4_speaker_stats(ss):
     confidence = {}
     persisted_cards = {}
     try:
+        from repositories.character_candidates_repository import (
+            CharacterCandidatesRepository,
+        )
         from repositories.v4_analysis_repository import V4AnalysisRepository
-        from repositories.character_candidates_repository import CharacterCandidatesRepository
 
         state = V4AnalysisRepository(
             V4ProjectService.root() / ss.project
@@ -700,8 +702,18 @@ def _v4_speaker_stats(ss):
                 "dialogue_count", counts.get(speaker.speaker_id, 0)
             ),
             "confidence": persisted_cards.get(speaker.speaker_id, {}).get(
-                "confidence", confidence.get(speaker.speaker_id, 1.0)
+                "confidence",
+                speaker.confidence
+                if speaker.confidence is not None
+                else confidence.get(speaker.speaker_id, 1.0),
             ),
+            "status": (
+                "unknown"
+                if speaker.status != "confirmed"
+                and getattr(speaker, "review_status", "confirmed") == "confirmed"
+                else getattr(speaker, "review_status", "confirmed")
+            ),
+            "candidate_reason": getattr(speaker, "candidate_reason", None),
         }
         for speaker in ss.speakers_v4.speakers
     }
@@ -729,8 +741,26 @@ def _v4_role_config_title(ss, speaker_id):
         bound = speaker_id in voices.bindings
     except Exception:  # noqa: BLE001
         bound = False
-    status = "✅ 已绑定" if bound else "⚠ 待绑定"
-    return f"### 当前角色：{name}\n{status}"
+    speaker = next(
+        (item for item in ss.speakers_v4.speakers if item.speaker_id == speaker_id),
+        None,
+    )
+    review_status = getattr(speaker, "review_status", "confirmed") if speaker else "confirmed"
+    if speaker and speaker.status != "confirmed" and review_status == "confirmed":
+        review_status = "unknown"
+    review_label = {
+        "confirmed": "✅ 已确认",
+        "candidate": "🟡 AI 候选 · 需要确认",
+        "rejected": "⛔ 已拒绝",
+        "unknown": "⚪ 未知说话人 · 待确认",
+    }.get(review_status, "⚠ 待确认")
+    binding_label = "✅ 已绑定" if bound else "⚠ 待绑定"
+    reason = (
+        f"\n候选理由：{speaker.candidate_reason}"
+        if speaker and speaker.candidate_reason
+        else ""
+    )
+    return f"### 当前角色：{name}\n{review_label} · {binding_label}{reason}"
 
 
 def _wire_v4_role_controls(page: dict) -> None:
@@ -2425,6 +2455,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             v_reanalyze = vce_page["v_reanalyze"]
             v_analysis_msg = vce_page["v_analysis_msg"]
             v_analysis_progress = vce_page["v_analysis_progress"]
+            v_analysis_trace = vce_page["v_analysis_trace"]
             v_table = vce_page["v_table"]
             v_role_search = vce_page["v_role_search"]
             v_role_title = vce_page["v_role_title"]
@@ -2576,7 +2607,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         lambda: _goto("create_project"), None, _GROUPS,
         js=activate_js("create_project")).then(
         lambda: (
-            "##### v4 创建流程\n导入、章节切分和角色分析会自动执行；"
+            "##### v4 创建流程\n导入当前章节并完成结构分析；"
             "AI 未配置时项目仍会先保存，可在角色与声音页面继续分析。"
         ), [], [cp_config_summary])
     nav_v4.click(
@@ -2601,7 +2632,18 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     nav_settings.click(
         lambda: _goto("settings"), None, _GROUPS,
         js=activate_js("settings")).then(
-        settings_ui.load_ai_settings, [], [s_provider, s_model, s_base_url, s_timeout, s_provider_config, s_api_key, s_clear_key])
+        settings_ui.load_ai_settings, [], [s_provider, s_model, s_base_url, s_timeout, s_provider_config, s_api_key, s_clear_key]
+    ).then(
+        settings_ui.load_ai_analysis_settings,
+        [s_provider],
+        [
+            set_page["s_analysis_provider_info"], set_page["s_analysis_depth"],
+            set_page["s_analysis_reasoning"], set_page["s_analysis_auto_upgrade"],
+            set_page["s_analysis_capability"], set_page["s_analysis_prompt_core"],
+            set_page["s_analysis_prompt_supplement"],
+            set_page["s_analysis_prompt_preview"], set_page["s_analysis_prompt_version"],
+        ],
+    )
     nav_voices.click(
         lambda: _goto("voices"), None, _GROUPS,
         js=activate_js("voices")).then(
@@ -2615,7 +2657,8 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             [advanced_role_page["project"]],
         ).then(
         v4_ui.refresh_v4_reanalyze_visibility, [p_sel], [v_reanalyze]).then(
-        v4_ui.analysis_progress_text, [p_sel], [v_analysis_progress])
+        v4_ui.analysis_progress_text, [p_sel], [v_analysis_progress]).then(
+        v4_ui.analysis_trace_text, [p_sel], [v_analysis_trace])
     nav_synth.click(
         lambda: _goto("synth"), None, _GROUPS,
         js=activate_js("synth")).then(
@@ -2664,7 +2707,8 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             [p_sel],
             [advanced_role_page["project"]],
         ).then(
-        v4_ui.analysis_progress_text, [p_sel], [v_analysis_progress])
+        v4_ui.analysis_progress_text, [p_sel], [v_analysis_progress]).then(
+        v4_ui.analysis_trace_text, [p_sel], [v_analysis_trace])
     ov_synth.click(
         lambda: _goto("synth"), None, _GROUPS,
         js=activate_js("synth")).then(
@@ -3027,6 +3071,8 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
                 "refresh_voice_lib": refresh_voice_lib,
                 "select_voice_from_browser": select_voice_from_browser,
                 "preview_bound_voice": preview_bound_voice,
+                "confirm_v4_speaker_candidate": v4_ui.confirm_v4_speaker_candidate,
+                "reject_v4_speaker_candidate": v4_ui.reject_v4_speaker_candidate,
             },
         },
     )
@@ -3042,6 +3088,8 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         open_project,
         [p_sel, ss],
         [p_summary, v_table, v_role, v_role_title, v_lib, s_log, v_status],
+    ).then(
+        v4_ui.analysis_trace_text, [p_sel], [v_analysis_trace]
     )
     _open_chain_rest(analysis_chain)
     reanalysis_chain = v_reanalyze.click(
@@ -3056,6 +3104,8 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         open_project,
         [p_sel, ss],
         [p_summary, v_table, v_role, v_role_title, v_lib, s_log, v_status],
+    ).then(
+        v4_ui.analysis_trace_text, [p_sel], [v_analysis_trace]
     )
     _open_chain_rest(reanalysis_chain)
     _wire_v4_role_controls(advanced_role_page)

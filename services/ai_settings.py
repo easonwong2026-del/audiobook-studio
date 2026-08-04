@@ -120,6 +120,27 @@ class AiSettingsService:
     DEFAULT_MODELS = PROVIDER_DEFAULT_MODELS
 
     @staticmethod
+    def get_analysis_config() -> dict[str, Any]:
+        from services.ai_analysis_settings import AiAnalysisSettingsService
+
+        return AiAnalysisSettingsService.get_config()
+
+    @staticmethod
+    def save_analysis_config(values: dict[str, Any]) -> dict[str, Any]:
+        from services.ai_analysis_settings import AiAnalysisSettingsService
+
+        return AiAnalysisSettingsService.save_config(values)
+
+    @staticmethod
+    def get_effective_analysis_config(provider: Optional[str] = None) -> dict[str, Any]:
+        from services.ai_analysis_settings import AiAnalysisSettingsService
+
+        selected = provider or AiSettingsService.get_effective_provider_config().get(
+            "provider", "local"
+        )
+        return AiAnalysisSettingsService.for_provider(str(selected))
+
+    @staticmethod
     def get_provider_config() -> dict[str, Any]:
         cfg = _read_full_config()
         return cfg.get(_CONFIG_SECTION, {})

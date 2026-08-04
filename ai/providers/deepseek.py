@@ -1,11 +1,11 @@
 """DeepSeek 剧本导演 Provider。"""
 from __future__ import annotations
 
-import os
-from typing import Any, Dict
+from typing import Any
 
 from ._remote import RemoteJsonDirectorProvider, parse_json_content
 from .exceptions import ProviderOutputTruncatedError
+from .reasoning import is_deepseek_thinking_mode, resolve_reasoning_mode
 
 
 class DeepSeekProvider(RemoteJsonDirectorProvider):
@@ -18,6 +18,25 @@ class DeepSeekProvider(RemoteJsonDirectorProvider):
     default_model = "deepseek-v4-pro"
     default_base_url = "https://api.deepseek.com"
 
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        model: str | None = None,
+        base_url: str | None = None,
+        timeout: float = 180.0,
+        reasoning_mode: str | bool | None = None,
+        **kwargs: Any,
+    ):
+        super().__init__(
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            timeout=timeout,
+            **kwargs,
+        )
+        self.reasoning_mode = reasoning_mode
+
     def _request_json(
         self,
         system_prompt: str,
@@ -25,8 +44,16 @@ class DeepSeekProvider(RemoteJsonDirectorProvider):
         *,
         task: str = "script_director",
         reasoning: bool | None = None,
-    ) -> Dict[str, Any]:
-        payload = {
+        reasoning_mode: str | None = None,
+    ) -> dict[str, Any]:
+        mode = resolve_reasoning_mode(
+            self.name,
+            task,
+            reasoning_mode
+            if reasoning_mode is not None
+            else reasoning if reasoning is not None else self.reasoning_mode,
+        )
+        payload: dict[str, Any] = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -35,11 +62,10 @@ class DeepSeekProvider(RemoteJsonDirectorProvider):
             "response_format": {"type": "json_object"},
             "stream": False,
         }
-        if self._should_enable_reasoning(task, reasoning):
+        if is_deepseek_thinking_mode(mode):
             payload["thinking"] = {"type": "enabled"}
-        elif task == "legacy_script_director":
-            # Preserve the V3 protocol contract only.  V4 AI-first calls use
-            # explicit task names and never inherit this disabled setting.
+            payload["reasoning_effort"] = mode
+        else:
             payload["thinking"] = {"type": "disabled"}
         response = self._transport(
             f"{self.base_url}/chat/completions",
@@ -61,28 +87,3 @@ class DeepSeekProvider(RemoteJsonDirectorProvider):
         except (KeyError, TypeError) as exc:
             raise RuntimeError("DeepSeek 响应缺少 choices[0].message.content") from exc
         return parse_json_content(content)
-
-    def _should_enable_reasoning(
-        self, task: str, reasoning: bool | None
-    ) -> bool:
-        """Only send DeepSeek's thinking field when this model supports it.
-
-        The API rejects the field on non-reasoning models.  Model capability is
-        therefore inferred conservatively from the model id, with an explicit
-        environment override for compatible gateways.  Ordinary connection and
-        formatting calls never opt into reasoning.
-        """
-        if task in {"connection_test", "format", "simple"}:
-            return False
-        if reasoning is not None:
-            return bool(reasoning)
-        override = os.getenv("AUDIOBOOK_STUDIO_DEEPSEEK_REASONING", "auto").lower()
-        if override in {"0", "false", "disabled", "off"}:
-            return False
-        if override in {"1", "true", "enabled", "on"}:
-            return True
-        model = self.model.lower()
-        return any(
-            marker in model
-            for marker in ("reasoner", "reasoning", "think", "deepseek-r1", "-r1")
-        )
