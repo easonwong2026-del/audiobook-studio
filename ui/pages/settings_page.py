@@ -8,7 +8,7 @@ def create_settings_page() -> dict:
     with gr.Group(
         visible=False,
         elem_id="grp-settings",
-        elem_classes=["settings-page", "page-shell"],
+        elem_classes=["settings-page"] + ["page-shell"],
     ) as grp:
         gr.Markdown("### 设置")
 

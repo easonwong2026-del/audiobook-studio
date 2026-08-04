@@ -682,7 +682,7 @@ def _v4_speaker_stats(ss):
             V4ProjectService.root() / ss.project
         ).load(ss.script.source_sha256)
         for candidate in candidates.candidates:
-            if candidate.status != "confirmed":
+            if getattr(candidate, "status", "confirmed") != "confirmed":
                 continue
             for speaker in ss.speakers_v4.speakers:
                 if candidate.display_name in [speaker.display_name, *speaker.aliases]:

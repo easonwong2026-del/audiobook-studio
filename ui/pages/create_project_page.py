@@ -11,7 +11,7 @@ import gradio as gr
 
 def create_create_project_page() -> dict:
     with gr.Group(visible=False, elem_id="grp-create-project", elem_classes=["page-shell"]) as grp:
-        gr.Markdown("### 创建 v4 Source-first 项目")
+        gr.Markdown("### 创建 v4 项目 · Source-first")
 
         with gr.Row(equal_height=True, elem_classes=["stage-row"]):
             with gr.Column(scale=1, elem_classes=["stage-card"]):

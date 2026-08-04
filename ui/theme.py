@@ -344,7 +344,7 @@ button[aria-label*="Play"] {{ border-radius:999px!important; background:{ACCENT}
 .voice-flow-steps b {{ color:{ACCENT_DEEP}; }}
 .voice-workspace {{ gap:16px!important; align-items:start!important; flex-wrap:wrap!important; }}
 .voice-workspace > .role-list-panel {{ flex:0 0 300px!important; min-width:280px!important; }}
-.voice-workspace > .voice-config-panel {{ flex:1 1 600px!important; min-width:0!important; max-width:100%!important; }}
+.voice-workspace > .voice-config-panel {{ flex:1 1 600px!important; min-width:600px!important; max-width:100%!important; }}
 .advanced-role-accordion, #grp-v4-role-embedded {{ width:100%!important; max-width:100%!important; min-width:0!important; }}
 #grp-v4-role-embedded .gr-row {{ flex-wrap:wrap!important; }}
 .role-list-panel {{ padding:16px!important; border:1px solid {BORDER}!important; border-radius:14px!important; background:{PANEL}!important; }}
