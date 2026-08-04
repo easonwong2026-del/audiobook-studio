@@ -83,7 +83,8 @@ def build_v4_role_management_choices(
         if speaker.locked:
             label += " 🔒"
         review_status = getattr(speaker, "review_status", "confirmed")
-        if speaker.status != "confirmed" and review_status == "confirmed":
+        speaker_status = getattr(speaker, "status", "confirmed")
+        if speaker_status != "confirmed" and review_status == "confirmed":
             review_status = "unknown"
         status_label = {
             "confirmed": "✅ 已确认",
