@@ -21,6 +21,32 @@ class ImportedSource:
 class SourceImportService:
     """Import supported documents without AI or network access."""
 
+    def import_text(
+        self,
+        text: str,
+        *,
+        original_filename: str = "pasted-chapter.txt",
+        source_format: str = "txt",
+        encoding: str = "utf-8",
+        source_origin: str = "pasted-chapter",
+    ) -> ImportedSource:
+        """Create the same immutable source record for pasted chapter text."""
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("source text cannot be empty")
+        metadata = SourceMetadata(
+            original_filename=original_filename or "pasted-chapter.txt",
+            source_format=source_format or "txt",
+            encoding=encoding or "utf-8",
+            normalization=NORMALIZATION_VERSION,
+            char_count=len(text),
+            sha256=source_sha256(text),
+            imported_at=datetime.now(timezone.utc).isoformat(),
+            source_origin=source_origin,
+            source_fidelity="normalized-source",
+        )
+        metadata.validate(text)
+        return ImportedSource(text=text, metadata=metadata)
+
     def import_file(self, path: str | Path) -> ImportedSource:
         source = Path(path)
         text = load_text(str(source))

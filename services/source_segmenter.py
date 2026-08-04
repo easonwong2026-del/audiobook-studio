@@ -12,6 +12,7 @@ from domain.v4 import (
     SpeakersDocument,
 )
 from domain.v4.models import source_sha256, stable_speaker_id
+
 from services.speaker_normalization import (
     is_likely_character_name,
     normalize_speaker_name,
@@ -49,6 +50,61 @@ class SegmentationResult:
 
 class SourceSegmenter:
     """Produce a lossless baseline; uncertain dialogue remains unresolved."""
+
+    def source_only_chapter(
+        self,
+        source_text: str,
+        *,
+        chapter_id: str = "chapter_0001",
+        title: str = "当前章节",
+    ) -> SegmentationResult:
+        """Build one lossless chapter without detecting or splitting chapters.
+
+        The fast V4 path treats an upload or paste as the complete current
+        chapter.  Keeping this separate from ``source_only`` preserves the
+        legacy/full-book chapter detector for advanced and compatibility
+        workflows.
+        """
+        if not source_text.strip():
+            raise ValueError("source text cannot be empty")
+        script = ScriptDocument(
+            source_sha256=source_sha256(source_text),
+            chapters=[
+                ChapterScript(
+                    chapter_id=chapter_id,
+                    title=title.strip() or "当前章节",
+                    start=0,
+                    end=len(source_text),
+                    segments=[
+                        SemanticSegment(
+                            segment_id=f"segment_{chapter_id}_pending",
+                            chapter_id=chapter_id,
+                            start=0,
+                            end=len(source_text),
+                            kind="narration",
+                            speaker_id=None,
+                            speaker_source="unresolved",
+                            status="unresolved",
+                            dialogue_type="unanalysed",
+                        )
+                    ],
+                )
+            ],
+        )
+        speakers = SpeakersDocument(
+            speakers=[
+                Speaker(
+                    speaker_id="narrator",
+                    display_name="旁白",
+                    status="confirmed",
+                    speaker_type="narrator",
+                    locked=True,
+                )
+            ]
+        )
+        script.validate(source_text)
+        speakers.validate()
+        return SegmentationResult(script=script, speakers=speakers)
 
     def source_only(self, source_text: str) -> SegmentationResult:
         """Build the V4 pre-AI document without making semantic decisions.

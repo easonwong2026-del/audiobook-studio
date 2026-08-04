@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import gradio as gr
-
 from ai.character_extraction import create_character_extraction_adapter
 from ai.speaker_routing import create_speaker_routing_adapter
 from domain.v4 import ScriptDocument, SpeakersDocument
@@ -15,6 +14,7 @@ from domain.v4.character_extraction import CharacterCandidatesDocument
 from domain.v4.production import VoiceBindings
 from lib import config
 from repositories.audio_cache_repository import AudioCacheRepository
+from repositories.chapter_analysis_repository import ChapterAnalysisStateRepository
 from repositories.character_candidates_repository import CharacterCandidatesRepository
 from repositories.character_extraction_checkpoint_repository import (
     CharacterExtractionCheckpointRepository,
@@ -25,6 +25,7 @@ from repositories.routing_checkpoint_repository import RoutingCheckpointReposito
 from repositories.runtime_repository import RuntimeRepository
 from repositories.v4_analysis_repository import V4AnalysisRepository
 from services.ai_settings import AiSettingsService
+from services.chapter_analysis_service import ChapterAnalysisService
 from services.chapter_assembler import ChapterAssembler
 from services.character_candidate_service import (
     CharacterCandidateReviewService,
@@ -50,6 +51,7 @@ from services.v4_analysis_validity import (
 )
 from services.v4_project_analysis_pipeline import V4ProjectAnalysisPipeline
 from services.v4_project_creation import V4ProjectCreationService
+from services.v4_synthesis_service import V4SynthesisService
 from services.v4_voice_service import V4VoiceService
 from tts.indextts2_adapter import IndexTTS2Adapter
 from tts.text_measurement import CharacterMeasurer, ConservativeTokenMeasurer
@@ -65,7 +67,7 @@ def _analysis_summary_text(state: dict | None) -> str:
     summary = state.get("summary") or {}
     status = state.get("status")
     if status == "waiting_for_ai":
-        return "\n\n⚠ AI 尚未配置，可在此页配置后点击“继续分析”。"
+        return "\n\n⚠ AI 尚未配置，可在设置中配置后点击“快速分析当前章节”。"
     if not summary:
         return ""
     coverage = summary.get("dialogue_coverage")
@@ -297,6 +299,31 @@ def refresh_v4_reanalyze_visibility(project_name: str):
     return v4_analysis_buttons_visibility(state)["v_reanalyze"]
 
 
+def _chapter_analysis_summary(project: Path, script: ScriptDocument) -> str:
+    """Show the latest fast-path state without reading the full-book cache."""
+    repository = ChapterAnalysisStateRepository(project)
+    states = [repository.load(item.chapter_id) for item in script.chapters]
+    states = [item for item in states if item]
+    if not states:
+        return ""
+    state = states[-1]
+    status = state.get("status") or "unknown"
+    stats = state.get("stats") or {}
+    if status == "waiting_for_ai":
+        return "\n\n⚠ 当前章节等待 AI 配置；不会自动切换到规则角色识别。"
+    return (
+        "\n\n"
+        f"快速章节分析：{status} · 请求 {state.get('ai_requests', 0)} · "
+        f"重试 {state.get('retries', 0)} · 片段 {stats.get('segments', 0)} · "
+        f"待确认 {stats.get('unresolved_segments', 0)} · "
+        f"未绑定音色 {len(stats.get('unbound_speakers', []))} · "
+        f"Provider {state.get('provider') or '未配置'} · "
+        f"模型 {state.get('model') or '默认'} · "
+        f"更新时间 {state.get('updated_at', '')[:19]}"
+        + (f"\n\n⚠ {state.get('message')}" if status in {"needs_attention", "failed"} else "")
+    )
+
+
 def scan_v4_projects() -> list[str]:
     root = _root()
     if not root.is_dir():
@@ -315,19 +342,23 @@ def scan_v4_projects() -> list[str]:
     return sorted(names)
 
 
-def create_v4_from_source(name, source_file, title, author, progress=gr.Progress()):
+def create_v4_from_source(
+    name, source_file, title, author, source_text="", progress=gr.Progress()
+):
     progress = progress or (lambda *_args, **_kwargs: None)
     source = getattr(source_file, "name", None) or source_file
-    if not name or not source:
-        return "⚠ 请输入项目名称并上传书稿", "", gr.update(), gr.update()
+    pasted = str(source_text or "").strip()
+    if not name or (not source and not pasted):
+        return "⚠ 请输入项目名称，并上传书稿或粘贴当前章节原文", "", gr.update(), gr.update()
     try:
         result = V4ProjectCreationService(
             ProjectV4Repository(_root())
         ).create_from_source(
-            source,
+            source if source else None,
             str(name),
             title=str(title or ""),
             author=str(author or ""),
+            source_text=pasted or None,
             progress_callback=lambda message: _report_analysis_progress(progress, message),
         )
         manifest = ProjectV4Repository(_root()).load_manifest(result.project_path)
@@ -346,7 +377,7 @@ def create_v4_from_source(name, source_file, title, author, progress=gr.Progress
             f"- 待确认角色：{result.unresolved_segments}\n"
             f"- Source SHA：`{script.source_sha256}`\n\n"
             f"{analysis_message}\n\n"
-            "请到「③ 角色与声音」检查角色并绑定音色，然后在「④ 生产与质检」生成计划并合成。"
+            "请到「③ 角色与声音」检查当前章节角色、绑定音色，然后生成本章计划并合成。"
         )
         choices = scan_v4_projects()
         return (
@@ -363,6 +394,12 @@ def _report_analysis_progress(progress, message: str) -> None:
     labels = {
         "正在导入书稿": 1,
         "正在识别章节": 2,
+        "按当前章节导入原文": 1,
+        "已接收粘贴的当前章节": 1,
+        "正在分析当前章节（1/3）": 1,
+        "正在校验章节结果（2/3）": 2,
+        "正在修复章节结果（重试 1/1）": 2,
+        "正在保存章节结果（3/3）": 3,
         "正在阅读全书": 2,
         "正在建立人物关系": 3,
         "正在分析章节剧本": 4,
@@ -420,7 +457,9 @@ def open_v4_project(name: str):
     plan_rows = synthesis_plan_rows(plan) if plan else []
     queue_rows = _queue_rows(project)
     analysis = V4AnalysisRepository(project).load(script.source_sha256)
-    analysis_summary = _analysis_summary_text(analysis)
+    analysis_summary = _analysis_summary_text(analysis) or _chapter_analysis_summary(
+        project, script
+    )
     summary = (
         f"**{name}** · {len(script.chapters)} 章 · "
         f"{sum(len(item.segments) for item in script.chapters)} 片段 · "
@@ -543,16 +582,70 @@ def _analysis_result_text(result) -> str:
 
 
 def continue_v4_analysis(project_name: str, progress=gr.Progress()):
-    """Resume only the incomplete/invalidated analysis stages for a project."""
+    """Default entry point: analyze only the current/pending chapter."""
     if not project_name:
         return "⚠ 请先选择 v4 项目"
     try:
-        result = V4ProjectAnalysisPipeline.from_ai_settings(
+        result = ChapterAnalysisService.from_ai_settings(
             _root() / project_name
-        ).run(progress_callback=lambda message: _report_analysis_progress(progress, message))
+        ).analyze(
+            progress_callback=lambda message: _report_analysis_progress(progress, message)
+        )
         return _analysis_result_text(result)
     except Exception as exc:  # noqa: BLE001 - project remains openable
         return f"⚠ 项目已保留，但分析未完成：{str(exc)[:500]}"
+
+
+def analyze_v4_chapter(project_name: str, chapter_id: str = "", progress=None):
+    """Analyze one explicitly selected chapter through the fast contract."""
+    progress = progress or (lambda *_args, **_kwargs: None)
+    if not project_name:
+        return "⚠ 请先选择 v4 项目"
+    try:
+        result = ChapterAnalysisService.from_ai_settings(_root() / project_name).analyze(
+            chapter_id=chapter_id or None,
+            progress_callback=lambda message: _report_analysis_progress(progress, message),
+        )
+        return result.message
+    except Exception as exc:  # noqa: BLE001 - keep project openable
+        return f"⚠ 当前章节分析未完成：{str(exc)[:500]}"
+
+
+def reanalyze_v4_chapter(project_name: str, chapter_id: str = "", progress=None):
+    """Force one new chapter request; repair remains capped at one retry."""
+    progress = progress or (lambda *_args, **_kwargs: None)
+    if not project_name:
+        return "⚠ 请先选择 v4 项目"
+    try:
+        result = ChapterAnalysisService.from_ai_settings(_root() / project_name).analyze(
+            chapter_id=chapter_id or None,
+            force=True,
+            progress_callback=lambda message: _report_analysis_progress(progress, message),
+        )
+        return result.message
+    except Exception as exc:  # noqa: BLE001 - keep project openable
+        return f"⚠ 当前章节重分析未完成：{str(exc)[:500]}"
+
+
+def view_v4_chapter_script(project_name: str, chapter_id: str = ""):
+    if not project_name:
+        return "⚠ 请先选择 v4 项目"
+    project = _root() / project_name
+    source = (project / "source/source.txt").read_text(encoding="utf-8")
+    script = _load_script(project, source)
+    selected = next(
+        (item for item in script.chapters if not chapter_id or item.chapter_id == chapter_id),
+        None,
+    )
+    if selected is None:
+        return "⚠ 未找到当前章节"
+    lines = [f"### {selected.title or selected.chapter_id}"]
+    lines.extend(
+        f"{index + 1}. **{item.dialogue_type}** · "
+        f"`{item.speaker_id or '待确认'}` · {source[item.start:item.end]}"
+        for index, item in enumerate(selected.segments)
+    )
+    return "\n".join(lines)
 
 
 def reanalyze_v4_project(project_name: str, progress=gr.Progress()):
@@ -746,6 +839,22 @@ def open_v4_role_project(project_name: str):
     )
 
 
+def v4_chapter_choices(project_name: str):
+    if not project_name:
+        return gr.update(choices=[], value=None)
+    project = _root() / project_name
+    source_path = project / "source/source.txt"
+    script_path = project / "script/script.json"
+    if not source_path.is_file() or not script_path.is_file():
+        return gr.update(choices=[], value=None)
+    script = _load_script(project, source_path.read_text(encoding="utf-8"))
+    choices = [
+        (f"{item.chapter_id} · {item.title or '当前章节'}", item.chapter_id)
+        for item in script.chapters
+    ]
+    return gr.update(choices=choices, value=choices[0][1] if choices else None)
+
+
 def set_v4_speaker_lock(project_name: str, speaker_id: str):
     """切换角色锁定状态（V4 稳定角色 ID）。"""
     from dataclasses import replace
@@ -857,6 +966,37 @@ def generate_v4_plan(project_name: str):
         _queue_rows(project),
         _queue_summary(project),
     )
+
+
+def generate_v4_chapter_plan(project_name: str, chapter_id: str = ""):
+    """Generate a plan containing only the selected current chapter."""
+    if not project_name:
+        return [], "⚠ 请先选择 v4 项目", [], "尚未加载项目"
+    if not chapter_id:
+        return [], "⚠ 请先选择当前章节", [], "尚未选择章节"
+    try:
+        project = _root() / project_name
+        rows, message = V4SynthesisService.generate_plan(
+            project, chapter_id=chapter_id
+        )
+        return rows, f"本章：{message}", _queue_rows(project), _queue_summary(project)
+    except Exception as exc:  # noqa: BLE001 - visible UI error
+        return [], f"⚠ 本章计划生成失败：{str(exc)[:500]}", [], "计划生成失败"
+
+
+def generate_v4_chapter_plan_message(project_name: str, chapter_id: str = ""):
+    return generate_v4_chapter_plan(project_name, chapter_id)[1]
+
+
+def synthesize_v4_chapter(project_name: str, chapter_id: str = ""):
+    """Build the selected chapter plan and start its existing V4 queue."""
+    rows, message, _queue, _summary = generate_v4_chapter_plan(
+        project_name, chapter_id
+    )
+    if not rows:
+        return f"{message}\n\n⚠ 本章没有可合成任务，请先绑定音色并确认角色。"
+    ok, start_message = V4SynthesisService.start(project_name)
+    return f"{message}\n\n{start_message if ok else '⚠ ' + start_message}"
 
 
 def run_v4_synthesis(project_name: str):

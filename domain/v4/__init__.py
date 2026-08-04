@@ -10,6 +10,14 @@ from .ai_first import (
     ScriptDirectorSegment,
     ScriptReviewResponse,
 )
+from .chapter_analysis import (
+    CHAPTER_ANALYSIS_REQUEST_SCHEMA,
+    CHAPTER_ANALYSIS_RESPONSE_SCHEMA,
+    ChapterAnalysisRequest,
+    ChapterAnalysisResponse,
+    ChapterAnalysisSegment,
+    ChapterCharacterUpdate,
+)
 from .character_consolidation import (
     CharacterConsolidationRequest,
     CharacterConsolidationResponse,
@@ -36,9 +44,15 @@ from .models import (
 )
 
 __all__ = [
+    "CHAPTER_ANALYSIS_REQUEST_SCHEMA",
+    "CHAPTER_ANALYSIS_RESPONSE_SCHEMA",
     "BibleCharacter",
     "BibleEvidence",
     "BibleRelationship",
+    "ChapterAnalysisRequest",
+    "ChapterAnalysisResponse",
+    "ChapterAnalysisSegment",
+    "ChapterCharacterUpdate",
     "ChapterScript",
     "CharacterBibleDocument",
     "CharacterCandidate",

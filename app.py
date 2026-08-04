@@ -751,6 +751,57 @@ def _wire_v4_role_controls(page: dict) -> None:
         v4_ui.open_v4_role_project,
         [page["project"]],
         outputs,
+    ).then(
+        v4_ui.v4_chapter_choices,
+        [page["project"]],
+        [page["chapter"]],
+    )
+    page["analyze_chapter_btn"].click(
+        v4_ui.analyze_v4_chapter,
+        [page["project"], page["chapter"]],
+        [page["chapter_msg"]],
+        concurrency_limit=1,
+        concurrency_id="v4-analysis",
+    ).then(
+        v4_ui.open_v4_role_project,
+        [page["project"]],
+        outputs,
+    ).then(
+        v4_ui.v4_chapter_choices,
+        [page["project"]],
+        [page["chapter"]],
+    )
+    page["reanalyze_chapter_btn"].click(
+        v4_ui.reanalyze_v4_chapter,
+        [page["project"], page["chapter"]],
+        [page["chapter_msg"]],
+        concurrency_limit=1,
+        concurrency_id="v4-analysis",
+    ).then(
+        v4_ui.open_v4_role_project,
+        [page["project"]],
+        outputs,
+    ).then(
+        v4_ui.v4_chapter_choices,
+        [page["project"]],
+        [page["chapter"]],
+    )
+    page["view_chapter_btn"].click(
+        v4_ui.view_v4_chapter_script,
+        [page["project"], page["chapter"]],
+        [page["script_view"]],
+    )
+    page["chapter_plan_btn"].click(
+        v4_ui.generate_v4_chapter_plan_message,
+        [page["project"], page["chapter"]],
+        [page["chapter_plan_msg"]],
+    )
+    page["synthesize_chapter_btn"].click(
+        v4_ui.synthesize_v4_chapter,
+        [page["project"], page["chapter"]],
+        [page["chapter_plan_msg"]],
+        concurrency_limit=1,
+        concurrency_id="v4-synthesis",
     )
     page["reanalyze_btn"].click(
         v4_ui.reanalyze_v4_project,
@@ -2300,6 +2351,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             grp_create_project = cr_page["group"]
             cp_name = cr_page["cp_name"]
             cp_source = cr_page["cp_source"]
+            cp_source_text = cr_page["cp_source_text"]
             cp_title = cr_page["cp_title"]
             cp_author = cr_page["cp_author"]
             cp_slot_status = cr_page["cp_slot_status"]
@@ -2652,7 +2704,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     )
     creation_chain = cp_create.click(
         v4_ui.create_v4_from_source,
-        [cp_name, cp_source, cp_title, cp_author],
+        [cp_name, cp_source, cp_title, cp_author, cp_source_text],
         [cp_status, cp_result, v4_project, cp_json_result],
         concurrency_limit=1,
         concurrency_id="project-creation",

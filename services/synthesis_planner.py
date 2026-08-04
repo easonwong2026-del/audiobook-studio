@@ -50,6 +50,7 @@ class SynthesisPlanner:
         profile: TtsProfile,
         *,
         previous_plan: SynthesisPlan | None = None,
+        selected_chapter_ids: set[str] | None = None,
     ) -> PlanningResult:
         script.validate(source_text)
         speakers.validate()
@@ -63,6 +64,8 @@ class SynthesisPlanner:
         unresolved: list[str] = []
         unbound: set[str] = set()
         for chapter in script.chapters:
+            if selected_chapter_ids is not None and chapter.chapter_id not in selected_chapter_ids:
+                continue
             chapter_tasks: list[PlanTask] = []
             for segment in chapter.segments:
                 if segment.status == "unresolved" or not segment.speaker_id:
@@ -118,6 +121,7 @@ class SynthesisPlanner:
         if any(
             segment.status == "unresolved" and segment.dialogue_type == "unanalysed"
             for chapter in script.chapters
+            if selected_chapter_ids is None or chapter.chapter_id in selected_chapter_ids
             for segment in chapter.segments
         ):
             unbound.update(

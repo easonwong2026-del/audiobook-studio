@@ -21,19 +21,21 @@ import sqlite3
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, ClassVar
 
 from lib import config
 from repositories.audio_cache_repository import AudioCacheRepository
+from repositories.chapter_analysis_repository import ChapterAnalysisStateRepository
 from repositories.production_repository import ProductionRepository
 from repositories.runtime_repository import RuntimeRepository
+from tts.indextts2_adapter import IndexTTS2Adapter
+from tts.text_measurement import CharacterMeasurer, ConservativeTokenMeasurer
+
 from services.chapter_assembler import ChapterAssembler
 from services.invalidation_service import InvalidationService
 from services.plan_preview import synthesis_plan_rows, synthesis_plan_summary
 from services.synthesis_executor import ExecutionSummary, SynthesisExecutor
 from services.synthesis_planner import SynthesisPlanner
-from tts.indextts2_adapter import IndexTTS2Adapter
-from tts.text_measurement import CharacterMeasurer, ConservativeTokenMeasurer
 
 
 @dataclass
@@ -46,20 +48,22 @@ class V4SynthesisRun:
     pause_event: threading.Event = field(default_factory=threading.Event)
     status: str = "idle"  # idle|running|paused|cancelling|done|error
     error: str = ""
-    summary: Optional[ExecutionSummary] = None
-    thread: Optional[threading.Thread] = None
+    summary: ExecutionSummary | None = None
+    thread: threading.Thread | None = None
 
 
 class V4SynthesisService:
     """统一合成服务（进程级注册表 + runtime.db 持久化）。"""
 
-    _runs: dict[str, V4SynthesisRun] = {}
+    _runs: ClassVar[dict[str, V4SynthesisRun]] = {}
     _lock = threading.Lock()
 
     # ── 计划 ────────────────────────────────────────────────────────────────
 
     @classmethod
-    def ensure_plan(cls, project_path: str | Path) -> tuple[bool, str]:
+    def ensure_plan(
+        cls, project_path: str | Path, chapter_id: str | None = None
+    ) -> tuple[bool, str]:
         """确保项目已有合成计划；没有则自动生成（返回 (ok, 说明)）。
 
         若存在 unresolved 片段或未绑定角色，计划仍会生成（这些片段被跳过），
@@ -69,11 +73,13 @@ class V4SynthesisService:
         production = ProductionRepository(project)
         if production.load_plan() is not None:
             return True, ""
-        _rows, message = cls.generate_plan(project)
+        _rows, message = cls.generate_plan(project, chapter_id=chapter_id)
         return True, message
 
     @classmethod
-    def generate_plan(cls, project_path: str | Path) -> tuple[list[list], str]:
+    def generate_plan(
+        cls, project_path: str | Path, chapter_id: str | None = None
+    ) -> tuple[list[list], str]:
         """生成合成计划并同步 runtime（局部失效）。返回 (计划行, 消息)。"""
         project = Path(project_path)
         source = (project / "source/source.txt").read_text(encoding="utf-8")
@@ -96,6 +102,7 @@ class V4SynthesisService:
             pronunciation,
             profile,
             previous_plan=previous,
+            selected_chapter_ids={chapter_id} if chapter_id else None,
         )
         production.save_plan(result.plan)
         runtime = RuntimeRepository(project / "runtime/runtime.db")
@@ -134,6 +141,15 @@ class V4SynthesisService:
             run.error = "尚未生成合成计划，请先「生成计划」。"
             return False, run.error
         run.status = "running"
+        _set_chapter_analysis_states(
+            project_path,
+            {
+                item.chapter_id
+                for item in production.load_plan().tasks
+            },
+            "synthesizing",
+            "本章正在合成。",
+        )
         run.thread = threading.Thread(
             target=cls._worker, args=(run,), daemon=True, name=f"v4-synth-{project_name}"
         )
@@ -279,6 +295,7 @@ class V4SynthesisService:
         runtime = RuntimeRepository(run.project_path / "runtime/runtime.db")
         runtime.initialize()
         adapter: IndexTTS2Adapter | None = None
+        plan = None
         try:
             runtime.set_run_status("running")
             production = ProductionRepository(run.project_path)
@@ -318,10 +335,22 @@ class V4SynthesisService:
             run.summary = summary
             run.status = "cancelled" if summary.cancelled else "done"
             run.error = ""
+            _set_chapter_analysis_states(
+                run.project_path,
+                {item.chapter_id for item in plan.tasks},
+                "analyzed" if summary.cancelled else "completed",
+                "本章合成已取消。" if summary.cancelled else "本章合成已完成。",
+            )
             runtime.set_run_status(run.status)
         except Exception as exc:  # noqa: BLE001 - 用户可读错误
             run.status = "error"
             run.error = str(exc)[:500]
+            _set_chapter_analysis_states(
+                run.project_path,
+                {item.chapter_id for item in (plan.tasks if plan else [])},
+                "failed",
+                f"本章合成失败：{run.error}",
+            )
             try:
                 runtime.set_run_status("error")
             except Exception:  # noqa: BLE001
@@ -336,6 +365,21 @@ class V4SynthesisService:
 
 def _root() -> Path:
     return Path(config.get_projects_root())
+
+
+def _set_chapter_analysis_states(
+    project_path: Path,
+    chapter_ids: set[str],
+    status: str,
+    message: str,
+) -> None:
+    repository = ChapterAnalysisStateRepository(project_path)
+    for chapter_id in chapter_ids:
+        state = repository.load(chapter_id)
+        if not state or state.get("analysis_mode") != "chapter-fast":
+            continue
+        state.update({"status": status, "message": message})
+        repository.save(state)
 
 
 def _set_runtime_status(project_path: Path, status: str) -> None:

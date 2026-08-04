@@ -24,6 +24,13 @@ def create_create_project_page() -> dict:
                     type="filepath",
                 )
 
+        cp_source_text = gr.Textbox(
+            label="或粘贴当前章节原文（上传/粘贴内容按一章处理）",
+            placeholder="这里的内容就是要分析和合成的完整当前章节，不会自动拆分全书。",
+            lines=8,
+            max_lines=20,
+        )
+
         with gr.Row():
             cp_title = gr.Textbox(label="作品名（可选）", placeholder="默认使用文件名")
             cp_author = gr.Textbox(label="作者（可选）")
@@ -39,12 +46,12 @@ def create_create_project_page() -> dict:
         with gr.Row():
             cp_config_summary = gr.Markdown(
                 "##### v4 创建流程\n"
-                "导入后由 AI 顺序阅读全书、建立人物圣经、分析章节剧本并全书复查；"
-                "AI 未配置时项目仍会先保存，可稍后继续分析。"
+                "默认快速章节分析：一次只提交当前章节，完成校验后立即保存角色、剧本和合成入口；"
+                "AI 未配置时章节仍会先保存，可稍后继续分析。高级全书分析保留在角色工作台中。"
             )
 
         with gr.Row():
-            cp_create = gr.Button("创建并分析项目（创建 v4 项目）", variant="primary")
+            cp_create = gr.Button("创建并快速分析当前章节", variant="primary")
 
         cp_status = gr.Markdown("")
         cp_result = gr.Markdown("")
@@ -75,6 +82,7 @@ def create_create_project_page() -> dict:
         "group": grp,
         "cp_name": cp_name,
         "cp_source": cp_source,
+        "cp_source_text": cp_source_text,
         "cp_title": cp_title,
         "cp_author": cp_author,
         "cp_slot_status": cp_slot_status,

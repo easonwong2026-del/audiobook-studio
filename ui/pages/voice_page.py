@@ -14,7 +14,7 @@ def create_voice_page() -> dict:
                 v_status = gr.Markdown("打开项目后显示角色绑定状态。")
                 with gr.Row():
                     v_continue_analysis = gr.Button(
-                        "继续 AI 分析",
+                        "快速分析当前章节",
                         variant="secondary",
                         size="sm",
                     )

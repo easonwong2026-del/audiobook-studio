@@ -1,4 +1,4 @@
-"""V4 高级角色整理 UI builder — AI 识别 / 指派 / 合并 / 锁定 / 别名。
+"""V4 角色工作台 UI builder — 快速章节分析与高级角色整理。
 
 组件默认作为开发调试页隐藏，也可以嵌入「③ 角色与声音」的高级折叠区，
 让普通用户在同一角色工作流中使用 V4 的高级能力。
@@ -11,12 +11,12 @@ import gradio as gr
 def create_v4_role_page(
     *, visible: bool = False, elem_id: str = "grp-v4-role"
 ) -> dict:
-    """创建 V4 角色工作台；可嵌入角色页或作为开发调试入口。"""
+    """创建 V4 角色工作台；高级全书入口保持折叠。"""
     with gr.Group(visible=visible, elem_id=elem_id) as grp_v4_role:
         gr.Markdown("## V4 角色工作台")
         gr.Markdown(
-            "V4 项目使用稳定角色 ID。未确认片段可先由 AI 自动识别，"
-            "再人工指派、合并（旧角色保留为别名）、锁定或修改别名。"
+            "V4 项目使用稳定角色 ID。默认按当前章节快速分析，校验后可直接查看剧本、"
+            "绑定音色并合成本章；人工指派、合并（旧角色保留为别名）、锁定和全书分析仍在下方。"
         )
         with gr.Row():
             v4r_project = gr.Dropdown(label="v4 项目", choices=[], scale=3)
@@ -24,8 +24,23 @@ def create_v4_role_page(
             v4r_open = gr.Button("打开", variant="primary", scale=1)
         v4r_summary = gr.Markdown("请选择 v4 项目")
         with gr.Row():
+            v4r_chapter = gr.Dropdown(label="当前章节", choices=[], scale=2)
+            v4r_analyze_btn = gr.Button(
+                "快速分析当前章节", variant="primary", size="sm", scale=1
+            )
+            v4r_reanalyze_chapter_btn = gr.Button(
+                "重分析本章", variant="secondary", size="sm", scale=1
+            )
+            v4r_view_btn = gr.Button("查看本章剧本", size="sm", scale=1)
+        v4r_chapter_msg = gr.Markdown("")
+        v4r_script_view = gr.Markdown("")
+        with gr.Row():
+            v4r_chapter_plan_btn = gr.Button("生成本章合成计划", size="sm")
+            v4r_synthesize_btn = gr.Button("合成本章", variant="primary", size="sm")
+            v4r_chapter_plan_msg = gr.Markdown("")
+        with gr.Row():
             v4r_reanalyze_btn = gr.Button(
-                "重新进行 AI 剧本分析", variant="secondary", size="sm"
+                "高级：重新进行全书 AI-first 分析", variant="secondary", size="sm"
             )
             v4r_reanalyze_msg = gr.Markdown("")
 
@@ -107,6 +122,15 @@ def create_v4_role_page(
         "refresh": v4r_refresh,
         "open": v4r_open,
         "summary": v4r_summary,
+        "chapter": v4r_chapter,
+        "analyze_chapter_btn": v4r_analyze_btn,
+        "reanalyze_chapter_btn": v4r_reanalyze_chapter_btn,
+        "view_chapter_btn": v4r_view_btn,
+        "chapter_msg": v4r_chapter_msg,
+        "script_view": v4r_script_view,
+        "chapter_plan_btn": v4r_chapter_plan_btn,
+        "synthesize_chapter_btn": v4r_synthesize_btn,
+        "chapter_plan_msg": v4r_chapter_plan_msg,
         "reanalyze_btn": v4r_reanalyze_btn,
         "reanalyze_msg": v4r_reanalyze_msg,
         "unresolved_table": v4r_unresolved_table,

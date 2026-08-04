@@ -11,19 +11,21 @@ from pathlib import Path
 from domain.v4 import ProjectManifest
 from domain.v4.production import TtsProfile
 from repositories.project_v4_repository import ProjectV4Repository
+
+from services.chapter_analysis_service import (
+    ChapterAnalysisResult,
+    ChapterAnalysisService,
+)
 from services.source_import_service import SourceImportService
 from services.source_segmenter import SourceSegmenter
-from services.v4_project_analysis_pipeline import (
-    V4AnalysisResult,
-    V4ProjectAnalysisPipeline,
-)
+from services.v4_project_analysis_pipeline import V4AnalysisResult
 
 
 @dataclass(frozen=True)
 class V4CreationResult:
     project_path: Path
     unresolved_segments: int
-    analysis: V4AnalysisResult | None = None
+    analysis: V4AnalysisResult | ChapterAnalysisResult | None = None
     analysis_error: str = ""
 
 
@@ -40,7 +42,7 @@ class V4ProjectCreationService:
 
     def create_from_source(
         self,
-        source_path: str | Path,
+        source_path: str | Path | None,
         project_name: str,
         *,
         title: str = "",
@@ -48,22 +50,51 @@ class V4ProjectCreationService:
         progress_callback=None,
         auto_analyze: bool = True,
         analysis_pipeline_factory=None,
+        source_text: str | None = None,
+        chapter_title: str = "",
     ) -> V4CreationResult:
         name = project_name.strip()
         if not name:
             raise ValueError("project name cannot be empty")
         self._report(progress_callback, "正在导入书稿")
-        imported = self.importer.import_file(source_path)
-        self._report(progress_callback, "正在识别章节")
-        # V4 creation is source-only until an AI director has read the text.
-        # ``segment`` remains available for the legacy/offline compatibility
-        # path, but it must never seed formal V4 speakers or attributions.
-        source_only = getattr(self.segmenter, "source_only", None)
-        segmented = (
-            source_only(imported.text)
-            if callable(source_only)
-            else SourceSegmenter().source_only(imported.text)
-        )
+        if source_text is not None and source_text.strip():
+            imported = self.importer.import_text(
+                source_text,
+                original_filename=(title.strip() or "pasted-chapter") + ".txt",
+            )
+            self._report(progress_callback, "已接收粘贴的当前章节")
+            source_only_chapter = getattr(self.segmenter, "source_only_chapter", None)
+            segmented = (
+                source_only_chapter(
+                    imported.text,
+                    title=chapter_title.strip() or "当前章节",
+                )
+                if callable(source_only_chapter)
+                else SourceSegmenter().source_only_chapter(
+                    imported.text,
+                    title=chapter_title.strip() or "当前章节",
+                )
+            )
+        else:
+            if source_path is None:
+                raise ValueError("source file or chapter text is required")
+            imported = self.importer.import_file(source_path)
+            self._report(progress_callback, "按当前章节导入原文")
+            # The default fast flow treats the uploaded text as one complete
+            # chapter.  The old chapter detector remains available through
+            # SourceSegmenter.source_only for advanced/compatibility callers.
+            source_only_chapter = getattr(self.segmenter, "source_only_chapter", None)
+            segmented = (
+                source_only_chapter(
+                    imported.text,
+                    title=chapter_title.strip() or "当前章节",
+                )
+                if callable(source_only_chapter)
+                else SourceSegmenter().source_only_chapter(
+                    imported.text,
+                    title=chapter_title.strip() or "当前章节",
+                )
+            )
         project_id = f"project_{uuid.uuid4().hex}"
         directory_name = self._directory_name(name, project_id)
         timestamp = datetime.now(timezone.utc).isoformat()
@@ -100,12 +131,15 @@ class V4ProjectCreationService:
         final_script = segmented.script
         if auto_analyze:
             try:
-                pipeline = (
-                    analysis_pipeline_factory(path)
-                    if analysis_pipeline_factory is not None
-                    else V4ProjectAnalysisPipeline.from_ai_settings(path)
-                )
-                analysis = pipeline.run(progress_callback=progress_callback)
+                if analysis_pipeline_factory is not None:
+                    # Test/legacy injection remains supported and explicitly
+                    # opts into the old pipeline.
+                    pipeline = analysis_pipeline_factory(path)
+                    analysis = pipeline.run(progress_callback=progress_callback)
+                else:
+                    analysis = ChapterAnalysisService.from_ai_settings(path).analyze(
+                        progress_callback=progress_callback
+                    )
                 final_script = analysis.script
                 unresolved = sum(
                     segment.status == "unresolved"
