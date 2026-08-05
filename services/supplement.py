@@ -544,7 +544,8 @@ class SupplementService:
         Returns:
             最终产物绝对路径。
         """
-        out_dir = os.path.join(project_dir, "output")
+        from lib import project_paths
+        out_dir = project_paths.project_dir(project_dir, "exports", create=True)
         os.makedirs(out_dir, exist_ok=True)
         ts = time.strftime("%Y%m%d_%H%M%S")
         safe_role = re.sub(r'[\\/:*?"<>|]', '_', str(role))

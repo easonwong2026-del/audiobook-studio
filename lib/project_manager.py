@@ -14,7 +14,7 @@ from typing import Optional
 
 from .types import ProjectMeta
 from .snapshot import ProjectSnapshot
-from . import segment_cache
+from . import chapter_identity, project_paths, segment_cache
 from . import config as _cfg
 
 logger = logging.getLogger(__name__)
@@ -54,17 +54,18 @@ def create_project(name: str, script_path: str) -> str:
     if os.path.exists(project_dir):
         raise FileExistsError(f"项目 '{name}' 已存在")
 
-    os.makedirs(os.path.join(project_dir, "voices"))
-    os.makedirs(os.path.join(project_dir, "segments"))
-    os.makedirs(os.path.join(project_dir, "chapters"))
-    os.makedirs(os.path.join(project_dir, "output"))
+    paths = project_paths.ensure_layout(project_dir, prefer_canonical=True, compatibility=True)
 
     # 复制剧本 JSON
-    shutil.copy2(script_path, os.path.join(project_dir, "structured_script.json"))
-
-    # 统计段数
     with open(script_path, encoding="utf-8") as f:
-        script = json.load(f)
+        script = chapter_identity.normalize_script_for_project(json.load(f))
+    with open(os.path.join(project_dir, "structured_script.json"), "w", encoding="utf-8") as f:
+        json.dump(script, f, ensure_ascii=False, indent=2)
+    shutil.copy2(script_path, os.path.join(paths["source"], chapter_identity.safe_filename(os.path.basename(script_path))))
+    for index, chapter in enumerate(script.get("chapters", [])):
+        if isinstance(chapter, dict):
+            with open(os.path.join(paths["chapter_text"], f"{chapter_identity.chapter_file_stem(chapter, index, len(script.get('chapters', [])))}.json"), "w", encoding="utf-8") as f:
+                json.dump(chapter, f, ensure_ascii=False, indent=2)
     total_segments = 0
     for ch in script.get("chapters", []):
         total_segments += len(ch.get("segments", []))
@@ -77,6 +78,10 @@ def create_project(name: str, script_path: str) -> str:
     }
     with open(os.path.join(project_dir, "voice_bindings.json"), "w", encoding="utf-8") as f:
         json.dump(voice_bindings, f, ensure_ascii=False, indent=2)
+    shutil.copy2(
+        os.path.join(project_dir, "voice_bindings.json"),
+        os.path.join(paths["voices"], "voice_bindings.json"),
+    )
 
     # project.json
     meta = ProjectMeta(
@@ -91,8 +96,22 @@ def create_project(name: str, script_path: str) -> str:
             for ch in script.get("chapters", [])
             for seg in ch.get("segments", [])
         },
+        storage_version=project_paths.STORAGE_VERSION,
+        directories=project_paths.layout_manifest(project_dir),
+        source_file=os.path.relpath(
+            os.path.join(paths["source"], chapter_identity.safe_filename(os.path.basename(script_path))),
+            project_dir,
+        ),
     )
     _save_meta(project_dir, meta)
+    if meta.storage_version >= project_paths.STORAGE_VERSION:
+        try:
+            shutil.copy2(
+                os.path.join(project_dir, "project.json"),
+                os.path.join(paths["config"], "project.json"),
+            )
+        except OSError as exc:
+            logger.warning("同步项目配置副本失败: %s", exc)
 
     return name
 
@@ -149,7 +168,7 @@ def get_remaining(name: str) -> list[str]:
     """返回所有待合成的段 ID（pending + failed + done 但 wav 不存在）。"""
     project_dir = _resolve_dir(name)
     meta = _load_meta(project_dir)
-    seg_dir = os.path.join(project_dir, "segments")
+    seg_dir = project_paths.project_dir(project_dir, "segments")
     remaining = []
     for seg_id, status in meta.segments_status.items():
         if status in ("pending", "failed"):
@@ -205,7 +224,7 @@ def _repair_meta(project_dir: str, meta: ProjectMeta):
     for sid in json_ids:
         old_status = meta.segments_status.get(sid, "pending")
         # B7：用参数感知缓存键判定该段是否已真正合成（兼容历史裸文件）。
-        seg_dir = os.path.join(project_dir, "segments")
+        seg_dir = project_paths.project_dir(project_dir, "segments")
         if old_status == "done" and segment_cache.has_segment_wav(seg_dir, sid):
             new_status[sid] = "done"
         else:
@@ -233,6 +252,9 @@ def _save_meta(project_dir: str, meta: ProjectMeta):
         "pending_count": meta.pending_count,
         "segments_status": meta.segments_status,
         "voice_bindings_path": meta.voice_bindings_path,
+        "storage_version": meta.storage_version,
+        "directories": meta.directories,
+        "source_file": meta.source_file,
     }
     # 原子写：先写临时文件，fsync 后再 os.replace 替换，
     # 避免写入中途崩溃（断电 / 异常）留下半截 project.json（R4）。
@@ -357,13 +379,13 @@ def build_chapter_tree(project: str) -> str:
         return "<i>未打开项目</i>"
     status_map = meta.segments_status
     lines = []
-    for ch in script.get("chapters", []):
+    for chapter_index, ch in enumerate(script.get("chapters", [])):
         cid = ch.get("id", "")
         ch_title = ch.get("title", "") or str(cid)
         segs = ch.get("segments", [])
         done_n = sum(1 for s in segs if status_map.get(s["id"]) == "done")
         lines.append(
-            f"<details><summary>📖 第{cid}章 {ch_title}（{done_n}/{len(segs)} 完成）</summary>"
+            f"<details><summary>📖 {chapter_identity.chapter_label(ch, chapter_index, len(script.get('chapters', [])))}（{done_n}/{len(segs)} 完成）</summary>"
         )
         for seg in segs:
             sid = seg["id"]

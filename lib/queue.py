@@ -7,7 +7,7 @@ import time
 from typing import Generator, Optional
 
 from . import project_manager as pm
-from . import script_loader, segment_cache
+from . import project_paths, script_loader, segment_cache
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +70,7 @@ def synthesize_project(
     _, script_data, _ = pm.open_project(project_name)
     script = script_loader.from_dict(script_data)
 
-    segments_dir = os.path.join(project_dir, "segments")
+    segments_dir = project_paths.project_dir(project_dir, "segments", create=True)
     os.makedirs(segments_dir, exist_ok=True)
 
     remaining = pm.get_remaining(project_name)

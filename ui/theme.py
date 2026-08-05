@@ -235,8 +235,10 @@ button:hover, .gr-button:hover {{ transform:translateY(-1px)!important; }}
 }}
 
 /* ===== 主工作区（浅色 + 大圆角 + 统一分区间距） ===== */
-.main-area {{ border:none!important; width:100%!important; max-width:100%!important; min-width:0!important; padding:8px 20px 24px!important; background:transparent!important; box-sizing:border-box!important; }}
-.main-area > * {{ width:100%!important; max-width:100%!important; min-width:0!important; box-sizing:border-box!important; }}
+.main-area {{ border:none!important; flex:1 1 0!important; width:100%!important; max-width:none!important; min-width:0!important; padding:8px 20px 24px!important; background:transparent!important; box-sizing:border-box!important; }}
+.main-area > * {{ width:100%!important; max-width:none!important; min-width:0!important; box-sizing:border-box!important; }}
+.main-area > .gr-group {{ width:100%!important; min-width:0!important; box-sizing:border-box!important; }}
+.main-area .gr-row, .main-area .gr-column, .main-area .gr-box {{ min-width:0!important; max-width:100%!important; box-sizing:border-box!important; }}
 .settings-page, .settings-page > *, .settings-card {{ width:100%!important; max-width:100%!important; min-width:0!important; box-sizing:border-box!important; }}
 .settings-page .tabs, .settings-page .settings-tabs, .settings-page [role="tabpanel"] {{ width:100%!important; max-width:100%!important; min-width:0!important; box-sizing:border-box!important; }}
 .settings-provider-row, .settings-actions, .settings-data-actions {{ flex-wrap:wrap!important; gap:10px!important; }}
@@ -379,6 +381,8 @@ button[aria-label*="Play"] {{ border-radius:999px!important; background:{ACCENT}
 #grp-review {{ margin-top:16px!important; }} #grp-supplement {{ margin-top:8px!important; }}
 #grp-review > :first-child {{ font-size:20px!important; margin-bottom:2px!important; }}
 #grp-review > :nth-child(2) {{ margin-bottom:14px!important; }}
+.review-status {{ min-height:24px!important; margin:6px 0 10px!important; padding:7px 10px!important; border:1px solid #e4ebe1!important; border-radius:9px!important; background:#fbfdf9!important; color:{TEXT_MUTED}!important; }}
+#grp-review .gr-audio {{ min-width:0!important; width:100%!important; }}
 
 
 /* ===== 生产内部导航 (Pencil 三级 tab) ===== */

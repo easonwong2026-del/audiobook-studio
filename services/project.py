@@ -18,7 +18,7 @@ import os
 import shutil
 import time
 
-from lib import config, script_loader
+from lib import config, project_paths, script_loader
 from repositories.config_repo import ConfigRepository
 from repositories.project_repo import ProjectRepository
 
@@ -117,7 +117,7 @@ class ProjectService:
         if not project or not role or not audio_path:
             raise ValueError("bind_voice 需要 project / role / audio_path 均非空")
         d = ProjectRepository.get_project_dir(project)
-        vd = os.path.join(d, "voices")
+        vd = project_paths.project_dir(d, "voices", create=True)
         os.makedirs(vd, exist_ok=True)
         ext = os.path.splitext(audio_path)[1] or ".wav"
         dest = os.path.join(vd, f"{_safe_name(role)}{ext}")
@@ -131,6 +131,13 @@ class ProjectService:
         bd.setdefault("role_categories", {})[role] = category
         bd["bound_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
         ProjectRepository.save_bindings(d, bd)
+        try:
+            shutil.copy2(
+                os.path.join(d, "voice_bindings.json"),
+                os.path.join(vd, "voice_bindings.json"),
+            )
+        except OSError as exc:
+            logger.warning("同步角色声音配置副本失败: %s", exc)
         return dest
 
     @staticmethod
