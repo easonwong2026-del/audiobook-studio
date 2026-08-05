@@ -547,6 +547,16 @@ class SupplementService:
         from lib import project_paths
         out_dir = project_paths.project_dir(project_dir, "exports", create=True)
         os.makedirs(out_dir, exist_ok=True)
+        # Keep the pre-3.3 ``output/`` path discoverable for old integrations
+        # and test fixtures that do not have a project manifest yet.  New
+        # writes stay in the canonical ``09_导出文件`` directory; on Windows
+        # without link privileges a plain compatibility directory is enough.
+        legacy_output = os.path.join(project_dir, "output")
+        if os.path.abspath(legacy_output) != os.path.abspath(out_dir) and not os.path.lexists(legacy_output):
+            try:
+                os.symlink(os.path.basename(out_dir), legacy_output, target_is_directory=True)
+            except OSError:
+                os.makedirs(legacy_output, exist_ok=True)
         ts = time.strftime("%Y%m%d_%H%M%S")
         safe_role = re.sub(r'[\\/:*?"<>|]', '_', str(role))
         return os.path.join(out_dir, f"supplement_{safe_role}_{ts}.{ext}")
