@@ -5,6 +5,8 @@ from collections import Counter
 from difflib import SequenceMatcher
 from typing import Any
 
+from lib.script_loader import resolve_collections
+
 
 def _issue(kind: str, severity: str, message: str, **extra) -> dict[str, Any]:
     return {"type": kind, "severity": severity, "message": message, **extra}
@@ -18,8 +20,7 @@ def check_script_consistency(script: dict[str, Any]) -> dict[str, Any]:
             "issues": [_issue("top_level_not_object", "error", "JSON 顶层必须是对象")],
             "summary": {"errors": 1, "warnings": 0},
         }
-    voices = script.get("voices", {}) if isinstance(script.get("voices"), dict) else {}
-    chapters = script.get("chapters", []) if isinstance(script.get("chapters"), list) else []
+    voices, chapters = resolve_collections(script)
     chapter_ids = [str(ch.get("id", "")) for ch in chapters if isinstance(ch, dict)]
     for value, count in Counter(chapter_ids).items():
         if value and count > 1:

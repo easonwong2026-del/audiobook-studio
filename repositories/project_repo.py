@@ -19,6 +19,7 @@ import time as _time
 from dataclasses import dataclass, field
 from typing import ClassVar, Optional
 
+from lib import script_loader
 from lib.types import ProjectMeta
 from lib.snapshot import ProjectSnapshot
 
@@ -125,11 +126,12 @@ class ProjectRepository:
         if not os.path.isfile(script_path):
             return
         with open(script_path, encoding="utf-8") as f:
-            script = json.load(f)
+            script = script_loader.canonicalize_collections(json.load(f))
 
         # 收集 JSON 中所有段 ID
         json_ids = set()
-        for ch in script.get("chapters", []):
+        _, chapters = script_loader.resolve_collections(script)
+        for ch in chapters:
             for seg in ch.get("segments", []):
                 json_ids.add(seg["id"])
 
@@ -469,7 +471,7 @@ class ProjectRepository:
         meta = ProjectRepository._load_meta(project_dir)
         with open(os.path.join(project_dir, "structured_script.json"),
                   encoding="utf-8") as f:
-            script = json.load(f)
+            script = script_loader.canonicalize_collections(json.load(f))
         with open(os.path.join(project_dir, "voice_bindings.json"),
                   encoding="utf-8") as f:
             bindings = json.load(f)
@@ -517,16 +519,17 @@ class ProjectRepository:
                 os.makedirs(os.path.join(tmp_dir, sub), exist_ok=True)
             shutil.copy2(script_path, os.path.join(tmp_dir, "structured_script.json"))
             with open(script_path, encoding="utf-8") as f:
-                script = json.load(f)
-            total_segments = sum(len(ch.get("segments", [])) for ch in script.get("chapters", []))
-            bindings = {"bindings": {n: None for n in script.get("voices", {})},
+                raw_script = json.load(f)
+            parsed_script = script_loader.from_dict(raw_script)
+            total_segments = sum(len(ch.segments) for ch in parsed_script.chapters)
+            bindings = {"bindings": {n: None for n in parsed_script.voices},
                         "bound_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "verified": []}
             ProjectRepository.save_bindings(tmp_dir, bindings)
             meta = ProjectMeta(project_name=name, created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
                                updated_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
-                               total_chapters=len(script.get("chapters", [])), total_segments=total_segments,
+                               total_chapters=len(parsed_script.chapters), total_segments=total_segments,
                                pending_count=total_segments,
-                               segments_status={seg["id"]: "pending" for ch in script.get("chapters", []) for seg in ch.get("segments", [])})
+                               segments_status={seg.id: "pending" for ch in parsed_script.chapters for seg in ch.segments})
             ProjectRepository._save_meta(tmp_dir, meta)
             if os.path.exists(project_dir):
                 raise FileExistsError(f"项目 '{name}' 已存在")

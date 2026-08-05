@@ -34,6 +34,7 @@ SPEECH_RATE_RANGE = (0.7, 1.5)
 PITCH_RANGE = (-12.0, 12.0)
 INTENSITY_RANGE = (0.0, 1.0)
 PAUSE_RANGE_MS = (0, 3000)
+VALID_PAUSE_TYPES = frozenset({"pause_short", "pause_long", "pause_think"})
 
 # 期望的最小合法剧本示例（用于校验失败时的友好提示）。
 _MIN_EXAMPLE = (
@@ -51,6 +52,38 @@ _MIN_EXAMPLE = (
     '  ]\n'
     '}'
 )
+
+
+def resolve_collections(raw: dict) -> tuple[dict, list]:
+    """Return the canonical voices/chapters collections using explicit aliases."""
+    if not isinstance(raw, dict):
+        return {}, []
+    voices = raw.get("voices")
+    if not isinstance(voices, dict):
+        voices = next(
+            (raw.get(alias) for alias in _VOICE_ALIASES if isinstance(raw.get(alias), dict)),
+            {},
+        )
+    chapters = raw.get("chapters")
+    if not isinstance(chapters, list):
+        chapters = next(
+            (raw.get(alias) for alias in _CHAPTER_ALIASES if isinstance(raw.get(alias), list)),
+            [],
+        )
+    return voices, chapters
+
+
+def canonicalize_collections(raw: dict) -> dict:
+    """Return a shallow raw-payload copy with compatible aliases materialized."""
+    if not isinstance(raw, dict):
+        return raw
+    voices, chapters = resolve_collections(raw)
+    normalized = dict(raw)
+    if not isinstance(raw.get("voices"), dict):
+        normalized["voices"] = voices
+    if not isinstance(raw.get("chapters"), list):
+        normalized["chapters"] = chapters
+    return normalized
 
 
 def from_dict(raw: dict) -> Script:
@@ -73,13 +106,7 @@ def from_dict(raw: dict) -> Script:
         return empty
 
     # ── 解析 voices（角色表）──
-    voices_raw = raw.get("voices")
-    if voices_raw is None:
-        for alias in _VOICE_ALIASES:
-            cand = raw.get(alias)
-            if isinstance(cand, dict):
-                voices_raw = cand
-                break
+    voices_raw, chapters_raw = resolve_collections(raw)
     voices: dict[str, VoiceInfo] = {}
     if isinstance(voices_raw, dict):
         for name, info in voices_raw.items():
@@ -92,13 +119,6 @@ def from_dict(raw: dict) -> Script:
             )
 
     # ── 解析 chapters（章节列表）──
-    chapters_raw = raw.get("chapters")
-    if chapters_raw is None:
-        for alias in _CHAPTER_ALIASES:
-            cand = raw.get(alias)
-            if isinstance(cand, list):
-                chapters_raw = cand
-                break
     chapters: list[Chapter] = []
     if isinstance(chapters_raw, list):
         for ch in chapters_raw:
@@ -338,20 +358,28 @@ def _validate_segment_numbers(segment: dict, path: str, errors: list[str]) -> No
     """Validate the numeric delivery fields already used by the V3 TTS path."""
     delivery = segment.get("delivery") if isinstance(segment.get("delivery"), dict) else {}
 
-    def number(field: str, value, bounds: tuple[float, float], *, integer: bool = False):
+    def number(
+        field: str,
+        value,
+        bounds: tuple[float, float],
+        *,
+        integer: bool = False,
+        field_path: str | None = None,
+    ):
+        field_path = field_path or f"{path}.{field}"
         if value is None:
             return
         if integer and (not isinstance(value, int) or isinstance(value, bool)):
-            errors.append(f"{path}.{field}: 必须是整数")
+            errors.append(f"{field_path}: 必须是整数")
             return
         try:
             parsed = float(value)
         except (TypeError, ValueError):
-            errors.append(f"{path}.{field}: 必须是数字")
+            errors.append(f"{field_path}: 必须是数字")
             return
         if not math.isfinite(parsed) or not bounds[0] <= parsed <= bounds[1]:
             errors.append(
-                f"{path}.{field}: 数值 {value!r} 超出 {bounds[0]}–{bounds[1]} 范围"
+                f"{field_path}: 数值 {value!r} 超出 {bounds[0]}–{bounds[1]} 范围"
             )
 
     emotion = segment.get("emotion")
@@ -370,9 +398,9 @@ def _validate_segment_numbers(segment: dict, path: str, errors: list[str]) -> No
     )
     for field in ("pause_before", "pause_after"):
         number(field, segment.get(field), PAUSE_RANGE_MS, integer=True)
-    pauses = segment.get("pauses", [])
-    if pauses is None:
+    if "pauses" not in segment:
         return
+    pauses = segment.get("pauses")
     if not isinstance(pauses, list):
         errors.append(f"{path}.pauses: 必须是数组")
         return
@@ -383,8 +411,26 @@ def _validate_segment_numbers(segment: dict, path: str, errors: list[str]) -> No
             errors.append(f"{pause_path}: 必须是对象")
             continue
         position = pause.get("position")
-        number("position", position, (0, float(text_length)), integer=True)
-        number("duration", pause.get("duration"), PAUSE_RANGE_MS, integer=True)
+        number(
+            "position",
+            position,
+            (0, float(text_length)),
+            integer=True,
+            field_path=f"{pause_path}.position",
+        )
+        number(
+            "duration",
+            pause.get("duration"),
+            PAUSE_RANGE_MS,
+            integer=True,
+            field_path=f"{pause_path}.duration",
+        )
+        pause_type = pause.get("type")
+        if pause_type is not None and pause_type not in VALID_PAUSE_TYPES:
+            allowed = "、".join(sorted(VALID_PAUSE_TYPES))
+            errors.append(
+                f"{pause_path}.type: 不支持的停顿类型“{pause_type}”（可选：{allowed}）"
+            )
 
 
 def count_voiced(script: Script) -> int:

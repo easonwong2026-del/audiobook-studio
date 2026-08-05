@@ -68,7 +68,7 @@ Audiobook Studio 不分析小说原文。外部 Agent 或 Skill 负责理解原�
 | `pitch` | 可选 | 音高标注，`-12–12`；也兼容 `delivery.pitch` |
 | `delivery` | 可选 | 可含 `speed`、`pitch`、`intensity`、`breath` |
 | `pause_before` / `pause_after` | 可选 | 片段前后停顿，整数毫秒 `0–3000` |
-| `pauses` | 可选 | 片段内停顿对象数组；每项 `position` 为文本字符位置，`duration` 为 `0–3000` 毫秒，`type` 可选 |
+| `pauses` | 可选 | 片段内停顿对象数组；每项 `position` 为文本字符位置，`duration` 为整数 `0–3000` 毫秒；`type` 可选且只能是 `pause_short`、`pause_long` 或 `pause_think` |
 | `pinyin_hints` | 可选 | 传给 V3 TTS 的多音字提示对象 |
 
 合成、章节拼接、字幕和导出依赖 `id`、`role`/`speaker`、`text` 及上述 V3 演绎
@@ -81,7 +81,12 @@ Audiobook Studio 不分析小说原文。外部 Agent 或 Skill 负责理解原�
 
 以下情况拒绝导入：JSON 语法/编码错误、顶层不是对象、缺少或类型错误的 `meta`/
 `voices`/`chapters`、空章节/片段、缺少 ID、重复章节/片段 ID、空文本、未知角色、
-非法情绪、速度/音高/强度/停顿越界，以及 `meta` 中声明的统计数不一致。
+非法情绪、速度/音高/强度/停顿越界、非法 `pause.type`，以及 `meta` 中声明的统计数不一致。
+
+章节 ID 可以是数字或字符串，但必须非空且全书唯一；片段 ID 必须是非空字符串或可
+稳定转换为字符串的值，并且同样全书唯一。`characters`/`roles`/`cast`/`speakers`
+和 `sections`/`episodes`/`scenes` 只是规范字段缺失时的明确兼容别名，不会改变上述
+校验规则。
 
 以下情况只产生 warning 并允许创建：片段过短或过长、相邻语速跳变、未使用角色、
 角色名疑似别名，以及其他不改变结构合法性的质量提示。warning 会在创建前和成功消息中

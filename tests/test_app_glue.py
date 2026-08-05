@@ -117,6 +117,30 @@ def test_json_create_click_wiring():
     assert find_click("cp_json_check") is not None
 
 
+def test_json_create_reuses_open_project_and_full_voice_refresh_chain():
+    """创建成功后必须走既有 open_project + 全量刷新链，避免角色页半空。"""
+    assert "voice_create_chain = _open_chain_rest(voice_create_chain)" in SRC
+    open_calls = [
+        node for node in ast.walk(TREE)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "then"
+        and node.args
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "open_project"
+        and len(node.args) >= 3
+        and isinstance(node.args[2], ast.List)
+    ]
+    assert open_calls, "未找到带 outputs 的 open_project 接线"
+    assert any(len(node.args[2].elts) == 7 for node in open_calls), (
+        "创建后的 open_project 必须返回完整 7 项页面状态"
+    )
+    assert "refresh_voice_filters" in SRC
+    assert "refresh_voice_lib" in SRC
+    assert "refresh_role_list" in SRC
+    assert '"refresh_role_summary": refresh_role_summary' in SRC
+
+
 def test_do_export_signature():
     fn = find_func("do_export")
     assert fn is not None, "未找到 do_export 函数"

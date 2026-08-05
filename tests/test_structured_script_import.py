@@ -133,3 +133,56 @@ def test_invalid_json_syntax_is_reported(tmp_path, isolated_projects):
     path.write_text("{", encoding="utf-8")
     with pytest.raises(json.JSONDecodeError):
         StructuredScriptImportService.inspect(str(path))
+
+
+def test_json_top_level_must_be_an_object(isolated_projects, tmp_path):
+    path = write_payload(tmp_path, ["not-an-object"])
+    preview = StructuredScriptImportService.inspect(str(path))
+    assert not preview.valid
+    assert any("顶层结构必须是 JSON 对象" in error for error in preview.errors)
+
+
+@pytest.mark.parametrize(
+    ("pause_value", "needle"),
+    [
+        (None, ".pauses: 必须是数组"),
+        (["not-an-object"], ".pauses[0]: 必须是对象"),
+        ([{"position": "1", "duration": 100}], ".pauses[0].position: 必须是整数"),
+        ([{"position": 999, "duration": 100}], ".pauses[0].position: 数值"),
+        ([{"position": 1, "duration": "100"}], ".pauses[0].duration: 必须是整数"),
+        ([{"position": 1, "duration": 3001}], ".pauses[0].duration: 数值"),
+        ([{"position": 1, "duration": 100, "type": "not-a-pause"}], ".pauses[0].type: 不支持"),
+    ],
+)
+def test_pause_errors_keep_the_precise_json_path(
+    isolated_projects, tmp_path, pause_value, needle
+):
+    raw = payload(tmp_path)
+    raw["chapters"][0]["segments"][0]["pauses"] = pause_value
+    preview = StructuredScriptImportService.inspect(str(write_payload(tmp_path, raw)))
+    assert not preview.valid
+    assert any(needle in error for error in preview.errors), preview.errors
+
+
+def test_role_and_speaker_mismatch_is_rejected(isolated_projects, tmp_path):
+    raw = payload(tmp_path)
+    raw["chapters"][0]["segments"][0].update({"role": "旁白", "speaker": "小雨"})
+    preview = StructuredScriptImportService.inspect(str(write_payload(tmp_path, raw)))
+    assert not preview.valid
+    assert any("role 与 speaker 不一致" in error for error in preview.errors)
+
+
+def test_alias_collections_are_normalized_for_creation(isolated_projects, tmp_path):
+    raw = payload(tmp_path)
+    raw["characters"] = raw.pop("voices")
+    raw["sections"] = raw.pop("chapters")
+    path = write_payload(tmp_path, raw)
+    preview = StructuredScriptImportService.inspect(str(path), "alias-project")
+    assert preview.valid
+    assert (preview.chapter_count, preview.segment_count, preview.role_count) == (2, 4, 2)
+
+    result = StructuredScriptImportService.create("alias-project", str(path))
+    snapshot = ProjectRepository.load_snapshot(result.project_name)
+    assert snapshot.meta.total_chapters == 2
+    assert snapshot.meta.total_segments == 4
+    assert set(snapshot.bindings) == {"旁白", "小雨"}

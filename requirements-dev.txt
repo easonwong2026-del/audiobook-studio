@@ -4,3 +4,4 @@
 # 推理运行时（gradio / numpy / scipy / pyloudnorm / mutagen / pydub）见 requirements.txt。
 pytest>=8
 pytest-cov
+ruff>=0.8

@@ -212,6 +212,16 @@ def refresh_role_list(search, current_role, ss):
     return gr.update(choices=choices, value=selected)
 
 
+def refresh_role_summary(ss):
+    """Refresh the role binding count after a save without reloading the page."""
+    if not ss or not ss.project:
+        return "打开项目后显示角色绑定状态。"
+    snap = _snap(ss)
+    if not snap:
+        return "打开项目后显示角色绑定状态。"
+    return format_role_management_summary(snap.script, snap.bindings)
+
+
 def _role_config_title(role, voice, binding):
     """生成右侧当前角色标题，避免再次提供角色选择控件。"""
     if not role:
@@ -1515,15 +1525,21 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         [cp_json_file, cp_json_name],
         [cp_json_preview, cp_json_slot_status, cp_json_cleanup, cp_json_create],
     )
-    cp_json_create.click(
+    voice_create_chain = cp_json_create.click(
         create_ui.create_from_json,
         [cp_json_name, cp_json_file, ss],
         [cp_json_result, p_sel],
         concurrency_limit=1,
         concurrency_id="project-creation",
     ).then(
-        lambda: _goto("voices"), None, _GROUPS,
+        open_project,
+        [p_sel, ss],
+        [p_summary, v_table, v_role, v_role_title, v_lib, s_log, v_status],
     ).then(
+        lambda: _goto("voices"), None, _GROUPS,
+    )
+    voice_create_chain = _open_chain_rest(voice_create_chain)
+    voice_create_chain.then(
         refresh_role_list, [v_role_search, v_role, ss], [v_table],
     )
 
@@ -1541,6 +1557,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
                 "select_role_from_list": select_role_from_list,
                 "refresh_role_list": refresh_role_list,
                 "bind_voice": bind_voice,
+                "refresh_role_summary": refresh_role_summary,
                 "play_lib_voice": play_lib_voice,
                 "save_to_lib": save_to_lib,
                 "filter_vlib_by_category": filter_vlib_by_category,

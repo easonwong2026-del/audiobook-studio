@@ -113,12 +113,7 @@ class StructuredScriptImportService:
 
     @staticmethod
     def _raw_chapters(raw: dict[str, Any]) -> list:
-        chapters = raw.get("chapters")
-        if chapters is None:
-            for alias in ("sections", "episodes", "scenes"):
-                if isinstance(raw.get(alias), list):
-                    chapters = raw[alias]
-                    break
+        _, chapters = script_loader.resolve_collections(raw)
         return chapters if isinstance(chapters, list) else []
 
     @staticmethod
@@ -176,12 +171,7 @@ class StructuredScriptImportService:
             for chapter in chapters
             if isinstance(chapter, dict) and isinstance(chapter.get("segments"), list)
         )
-        roles = raw.get("voices") if isinstance(raw.get("voices"), dict) else {}
-        if not roles:
-            for alias in ("characters", "roles", "cast", "speakers"):
-                if isinstance(raw.get(alias), dict):
-                    roles = raw[alias]
-                    break
+        roles, _ = script_loader.resolve_collections(raw)
         suggested = StructuredScriptImportService._candidate_name(path, raw)
         title = str(raw_meta.get("title") or suggested)
         author = str(raw_meta.get("author") or "未填写")
