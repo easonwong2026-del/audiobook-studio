@@ -21,12 +21,16 @@ from lib import progress as synth_progress
 from lib import project_manager as _pm
 from services import (
     ExportService,
+    ProjectBackupService,
     ProjectService,
+    ProjectStorageService,
     SupplementService,
     SupplementTaskState,
     SynthesisService,
 )
 from services.session import SessionState
+from services.review_audio import ReviewAudioService
+from services.project_storage import format_size
 from services.synthesis import SynthesisState
 from ui import create_project_handlers as create_ui
 from ui.wiring.settings_wiring import wire_settings_page
@@ -174,9 +178,25 @@ def refresh_top_status(ss):
     except Exception as exc:
         return f"📖 {ss.project}（状态读取失败：{exc}）"
 
-def delete_project(name):
-    if name: ProjectService.delete_project(name)
-    return gr.update(choices=ProjectService.scan_projects())
+def delete_project(name, ss=None):
+    """Archive a project by default; permanent deletion has a separate callback."""
+    if not name:
+        update = gr.update(choices=ProjectService.scan_projects(), value=None)
+        return (update, "⚪ 请先选择项目。") if ss is not None else update
+    try:
+        target = ProjectStorageService.archive(name)
+        if ss is not None and ss.project == name:
+            ss.set_project(None, None, {})
+            ss.set_snapshot(None)
+            ss.synthesis = None
+            message = f"✅ 项目已移入回收站，可从 `{os.path.dirname(target)}` 恢复。"
+        else:
+            message = f"✅ 项目已移入回收站：`{target}`"
+    except Exception as exc:
+        logger.exception("归档项目失败")
+        message = f"❌ 归档项目失败：{exc}"
+    update = gr.update(choices=ProjectService.scan_projects(), value=None)
+    return (update, message) if ss is not None else update
 
 
 def apply_data_dir(new_dir):
@@ -541,118 +561,70 @@ def do_export_subtitles(ss, sub_choice):
         return None, str(e)
 
 def _selected_segment_id(choice, script=None):
-    """Normalize a Gradio choice to the original segment ID.
+    """Normalize a Gradio label/value choice without parsing display text."""
+    return ReviewAudioService.normalize_segment_id(choice, script or {})
 
-    New choices use ``(label, id)`` values.  The text fallback keeps old
-    browser state and bookmarked sessions usable during an upgrade.
-    """
-    if isinstance(choice, (tuple, list)) and len(choice) >= 2:
-        return str(choice[1])
-    if isinstance(choice, dict):
-        return str(choice.get("value") or choice.get("id") or choice.get("label") or "")
-    value = str(choice or "")
-    if script:
-        for chapter in script.get("chapters", []):
-            for segment in chapter.get("segments", []):
-                if str(segment.get("id")) == value:
-                    return value
-    return value.split(" ", 1)[0] if value else ""
+
+def _audio_update(path: str | None):
+    """Keep an Audio component visible while changing only its value."""
+    return gr.update(value=path, visible=True)
+
+
+def initialize_review_page(ss):
+    """Initialize all review controls and proactively load the first previews."""
+    if not ss or not ss.project:
+        state = ReviewAudioService.initialize(None, None, None)
+    else:
+        snapshot = _snap(ss)
+        state = ReviewAudioService.initialize(
+            ss.project,
+            ProjectService.get_project_dir(ss.project),
+            snapshot.script if snapshot else None,
+            snapshot.meta if snapshot else None,
+        )
+    return (
+        state.chapter_table,
+        gr.update(choices=state.chapter_choices, value=state.selected_chapter),
+        _audio_update(state.chapter_audio),
+        state.chapter_status,
+        gr.update(choices=state.segment_choices, value=state.selected_segment),
+        gr.update(choices=state.segment_choices, value=[]),
+        _audio_update(state.segment_audio),
+        state.segment_status,
+        gr.update(value=""),
+    )
+
+
+def _legacy_preview_chapters(ss):
+    """Compatibility alias kept for integrations that imported the old name."""
+    return initialize_review_page(ss)
 
 
 def preview_chapters(ss):
-    if not ss or not ss.project:
-        return (
-            "*请先在项目管理中打开项目*", None, None,
-            gr.update(choices=[], value=[]),
-            "⚪ 尚未打开项目。", "⚪ 尚未加载段落列表。",
-        )
-    # 阶段三：复用会话态快照的剧本 dict，不再直接读盘。
-    snap = _snap(ss); script = snap.script
-    proj_dir=ProjectService.get_project_dir(ss.project)
-    seg_dir=project_paths.project_dir(proj_dir, "segments")
-    def _f(sid,t,r,e,ea=1.0,sr=1.0,ph=None,dm=None):
-        # B7：参数感知缓存键优先，旧版裸文件回退
-        return segment_cache.find_segment_wav(
-            seg_dir, sid, t, r, e, ea, sr, ph, dm
-        )
-    lines=["| 章节 | 完成 | 详情 |","|------|------|------|"]
-    chapter_rows=[]; seg_choices=[]; td=0; ta=0
-    chapters = script.get("chapters", [])
-    for chapter_index, ch in enumerate(chapters):
-        segs=ch.get("segments",[]); ta+=len(segs)
-        done=[]; miss=[]
-        for seg in segs:
-            fp=_f(seg['id'],seg['text'],seg['role'],seg.get('emotion','neutral'),seg.get('emo_alpha',1.0),seg.get('speech_rate',1.0),seg.get('pinyin_hints'),segment_cache.director_metadata_for(seg))
-            if fp:
-                done.append(seg['id'])
-                seg_choices.append((
-                    f"{chapter_identity.chapter_code_for(ch, chapter_index, len(chapters))} · {seg['id']} · {seg.get('role', '')}",
-                    str(seg['id']),
-                ))
-            else: miss.append(seg['id'])
-        td+=len(done)
-        d=f"{len(done)}/{len(segs)}"
-        if done: d+=f" ✅ {', '.join(done[:4])}"+(f" +{len(done)-4}" if len(done)>4 else "")
-        if miss and len(miss)<=2: d+=f" ❌ {', '.join(miss)}"
-        chapter_rows.append(f"| {chapter_identity.chapter_label(ch, chapter_index, len(chapters))} | {len(done)}/{len(segs)} | {d} |")
-    # T5：仅截断「展示用 summary 文本」（按章上限，超出加说明）；
-    #     严禁截断 seg_choices（e_seg_sel 下拉需完整，供长书导出页选段试听/重合成）。
-    MAX_CHAPTER_ROWS=100
-    if len(chapter_rows)>MAX_CHAPTER_ROWS:
-        lines+=chapter_rows[:MAX_CHAPTER_ROWS]
-        lines.append(f"| … | … | 其余 {len(chapter_rows)-MAX_CHAPTER_ROWS} 章（详情见导出页） |")
-    else:
-        lines+=chapter_rows
-    summary=f"### 📊 {td}/{ta} 段已完成\n\n"+"\n".join(lines)
-    if td==0:
-        summary+="\n\n⚠ 未检测到合成段落"
-        chapter_status = "ℹ 当前项目暂无可试听音频。请先完成至少一个段落的合成。"
-        seg_status = "ℹ 当前没有已生成的段落音频可选择。"
-    else:
-        chapter_status = "✅ 已刷新章节音频状态；请选择章节生成合并试听。"
-        seg_status = f"✅ 已加载 {len(seg_choices)} 个可试听段落。"
-    return (
-        summary, None, None,
-        gr.update(choices=seg_choices, value=[seg_choices[0][1]] if seg_choices else []),
-        chapter_status, seg_status,
-    )
+    """Use the unified initializer for every review-page entry point."""
+    return initialize_review_page(ss)
 
 def play_segment(choices, ss):
     if not ss or not ss.project or not choices:
-        yield None, "⚪ 请先选择一个已生成音频的段落。"
+        yield _audio_update(None), "⚪ 未选择段落。"
         return
-    if isinstance(choices,list): choices=choices[0] if choices else None
-    if not choices:
-        yield None, "⚪ 请先选择一个已生成音频的段落。"
+    snapshot = _snap(ss)
+    if not snapshot:
+        yield _audio_update(None), "⚪ 请先打开项目。"
         return
-    # 阶段三：复用会话态快照的剧本 dict。
-    script = _snap(ss).script
-    sid=_selected_segment_id(choices, script); proj_dir=ProjectService.get_project_dir(ss.project)
-    seg_dir=project_paths.project_dir(proj_dir, "segments")
-    yield None, f"⏳ 正在加载段落 {sid} 的试听音频…"
-    # B7：参数感知缓存键优先，旧版裸文件回退
-    for ch in script.get("chapters",[]):
-        for seg in ch.get("segments",[]):
-            if seg["id"]==sid:
-                audio = segment_cache.find_segment_wav(
-                    seg_dir, sid, seg["text"], seg["role"],
-                    seg.get("emotion","neutral"),
-                    seg.get("emo_alpha",1.0),
-                    seg.get("speech_rate",1.0),
-                    seg.get("pinyin_hints"),
-                    segment_cache.director_metadata_for(seg),
-                )
-                if audio:
-                    _record_review_event(ss, "segment_preview", "done", segment_id=sid)
-                    yield audio, f"✅ 已加载段落 {sid} 的试听音频。"
-                    return
-                _record_review_event(ss, "segment_preview", "missing", segment_id=sid)
-                yield None, f"ℹ 段落 {sid} 暂无可试听音频。"
-                return
-    yield None, f"⚠ 未找到段落 {sid}，请刷新项目后重试。"
+    sid = _selected_segment_id(choices, snapshot.script)
+    yield _audio_update(None), f"⏳ 正在加载段落 {sid} 的试听音频…"
+    result = ReviewAudioService.play_segment(
+        ss.project,
+        ProjectService.get_project_dir(ss.project),
+        snapshot.script,
+        sid,
+    )
+    yield _audio_update(result.path), result.status
 
 def regenerate_segment(choices, emotion, emo_alpha, speech_rate, voice_choice, ss):
-    if not ss or not ss.project or not choices: return None,"请选择段落", "⚪ 尚未开始重合成。"
+    if not ss or not ss.project or not choices:
+        return _audio_update(None), "请选择段落", "⚪ 尚未开始重合成。"
     if isinstance(choices,str): choices=[choices]
     bindings=ss.bindings
     # 阶段三：复用会话态快照的剧本 dict。
@@ -667,7 +639,7 @@ def regenerate_segment(choices, emotion, emo_alpha, speech_rate, voice_choice, s
         sid=_selected_segment_id(choice, script)
         for ch in script.get("chapters",[]):
             for seg in ch.get("segments",[]):
-                if seg["id"]!=sid: continue
+                if str(seg.get("id")) != str(sid): continue
                 speaker = override_voice or bindings.get(seg["role"])
                 if not speaker: results.append(f"❌ {sid}: 角色未绑定"); break
                 try:
@@ -690,7 +662,7 @@ def regenerate_segment(choices, emotion, emo_alpha, speech_rate, voice_choice, s
     first_sid=_selected_segment_id(choices[0], script); first_fp=None
     for ch in script.get("chapters",[]):
         for seg in ch.get("segments",[]):
-            if seg["id"]==first_sid:
+            if str(seg.get("id")) == str(first_sid):
                 # B7：用同一缓存键推导真实 wav 名
                 first_fp=segment_cache.find_segment_wav(seg_dir, first_sid, seg["text"], seg["role"],
                     emotion, emo_alpha, speech_rate, seg.get("pinyin_hints"),
@@ -701,7 +673,7 @@ def regenerate_segment(choices, emotion, emo_alpha, speech_rate, voice_choice, s
     tts.empty_cache()
     # 段状态已写盘（ProjectService.update_segment_status），使快照失效以便下次读取重载
     ss.invalidate_snapshot()
-    return (first_fp, "\n".join(results), "✅ 已完成所选段落重合成。请重新选择段落以刷新播放器。")
+    return (_audio_update(first_fp), "\n".join(results), "✅ 已完成所选段落重合成。请重新选择段落以刷新播放器。")
 
 # ═══════════ 角色单独补录 / 补合成导出（T1-T4） ═══════════
 
@@ -970,70 +942,12 @@ def open_segments_folder(ss):
         return f"❌ 打开目录失败：{exc}"
 
 
-def _human_size(value: int) -> str:
-    size = float(max(0, value))
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if size < 1024 or unit == "TB":
-            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
-        size /= 1024
-    return f"{int(value)} B"
-
-
-def _directory_size(path: str) -> int:
-    total = 0
-    if not path or not os.path.isdir(path):
-        return 0
-    for root, _dirs, files in os.walk(path, followlinks=False):
-        for name in files:
-            try:
-                total += os.path.getsize(os.path.join(root, name))
-            except OSError:
-                continue
-    return total
-
-
-def _record_review_event(ss, action: str, status: str, **details) -> None:
-    """Append a small, recoverable quality-check event to the project."""
-    if not ss or not ss.project:
-        return
-    try:
-        project_dir = ProjectService.get_project_dir(ss.project)
-        quality_dir = project_paths.project_dir(project_dir, "quality", create=True)
-        event = {
-            "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "action": action,
-            "status": status,
-            **details,
-        }
-        with open(os.path.join(quality_dir, "review_events.jsonl"), "a", encoding="utf-8") as file:
-            file.write(json.dumps(event, ensure_ascii=False) + "\n")
-    except (OSError, TypeError, ValueError) as exc:
-        logger.debug("记录质检事件失败: %s", exc)
-
-
 def refresh_project_storage(ss):
-    """Show the active project root, logical folders, size and manifest state."""
+    """Show the active project root and the recursive storage summary."""
     if not ss or not ss.project:
         return "项目目录、存储占用和完整性状态会显示在这里。"
     try:
-        project_dir = os.path.normpath(ProjectService.get_project_dir(ss.project))
-        paths = project_paths.directory_map(project_dir)
-        total = _directory_size(project_dir)
-        snapshot = _snap(ss)
-        storage_version = getattr(getattr(snapshot, "meta", None), "storage_version", 1)
-        lines = [
-            "#### 项目存储",
-            f"- **项目目录**：`{project_dir}`",
-            f"- **项目占用**：`{_human_size(total)}`",
-            f"- **存储格式**：V{storage_version}，由 `project.json` 识别",
-            "",
-            "| 分类 | 目录 | 占用 |",
-            "|---|---|---:|",
-        ]
-        for key, path in paths.items():
-            display = project_paths.CANONICAL_DIRS.get(key, key)
-            lines.append(f"| {display} | `{os.path.basename(path)}` | {_human_size(_directory_size(path))} |")
-        return "\n".join(lines)
+        return ProjectStorageService.format_summary(ss.project)
     except Exception as exc:
         logger.warning("读取项目存储信息失败: %s", exc)
         return f"#### 项目存储\n❌ 无法读取项目目录：{exc}"
@@ -1042,38 +956,151 @@ def refresh_project_storage(ss):
 def open_project_folder(ss):
     if not ss or not ss.project:
         return "⚪ 请先打开项目。"
-    path = ProjectService.get_project_dir(ss.project)
-    try:
-        if sys.platform == "win32":
-            os.startfile(path)
-        elif sys.platform == "darwin":
-            import subprocess
-            subprocess.Popen(["open", path])
-        else:
-            import subprocess
-            subprocess.Popen(["xdg-open", path])
-        return f"✅ 已打开项目目录：`{path}`"
-    except OSError as exc:
-        return f"❌ 打开项目目录失败：{exc}"
+    _ok, message = ProjectStorageService.open_directory(ss.project)
+    return ("✅ " if _ok else "❌ ") + message
 
 
 def clear_project_cache(ss):
-    """Clear only the explicit project cache directory; never touch source/audio."""
+    """Clear only the external preview cache; never touch source or audio."""
     if not ss or not ss.project:
         return "⚪ 请先打开项目。"
-    cache_dir = project_paths.project_dir(ProjectService.get_project_dir(ss.project), "cache", create=True)
-    removed = 0
-    for name in os.listdir(cache_dir):
-        target = os.path.join(cache_dir, name)
-        try:
-            if os.path.isdir(target) and not os.path.islink(target):
-                shutil.rmtree(target)
-            else:
-                os.remove(target)
-            removed += 1
-        except OSError as exc:
-            logger.warning("清理项目缓存失败 %s: %s", target, exc)
-    return f"✅ 已清理项目缓存 {removed} 项；原始文件、章节文本和音频未受影响。"
+    try:
+        result = ProjectStorageService.clear_preview_cache(ss.project)
+        return f"✅ 已清理试听缓存 {result['files']} 个文件（{format_size(result['bytes'])}）；原始文件和音频未受影响。"
+    except Exception as exc:
+        return f"❌ 清理试听缓存失败：{exc}"
+
+
+def permanent_delete_project(name, confirmed, ss):
+    if not confirmed:
+        return gr.update(), "⚠ 永久删除前请勾选确认。"
+    if not name:
+        return gr.update(), "⚪ 请先选择项目。"
+    try:
+        ProjectStorageService.permanently_delete(name)
+        if ss and ss.project == name:
+            ss.set_project(None, None, {})
+            ss.set_snapshot(None)
+            ss.synthesis = None
+        return gr.update(choices=ProjectService.scan_projects(), value=None), f"✅ 项目「{name}」及其本地文件已永久删除。"
+    except Exception as exc:
+        logger.exception("永久删除项目失败")
+        return gr.update(), f"❌ 永久删除失败：{exc}"
+
+
+def hide_project_from_list(name, ss):
+    """Hide a project from the bookshelf without touching its local files."""
+    if not name:
+        return gr.update(), "⚪ 请先选择项目。"
+    try:
+        ProjectStorageService.remove_from_list(name)
+        if ss and ss.project == name:
+            ss.set_project(None, None, {})
+            ss.set_snapshot(None)
+            ss.synthesis = None
+        return gr.update(choices=ProjectService.scan_projects(), value=None), f"✅ 已仅从项目列表移除「{name}」，本地文件仍保留。"
+    except Exception as exc:
+        return gr.update(), f"❌ 从项目列表移除失败：{exc}"
+
+
+def restore_project_to_list(name):
+    if not name or not str(name).strip():
+        return gr.update(), "⚪ 请输入需要恢复的项目名称。"
+    try:
+        ProjectStorageService.restore_to_list(str(name).strip())
+        return gr.update(choices=ProjectService.scan_projects(), value=str(name).strip()), "✅ 项目已恢复到项目列表。"
+    except Exception as exc:
+        return gr.update(), f"❌ 恢复项目列表显示失败：{exc}"
+
+
+def scan_project_cleanup(ss):
+    if not ss or not ss.project:
+        return "⚪ 请先打开项目。", ""
+    try:
+        plan = ProjectStorageService.scan_cleanup(ss.project)
+        if not plan["candidates"]:
+            return "✅ 未发现可安全清理的临时文件或空分段音频。", plan["token"]
+        lines = [f"### 可安全清理 {len(plan['candidates'])} 项（共 {format_size(plan['total_bytes'])}）"]
+        lines.extend(f"- `{item['relative_path']}`：{item['reason']}" for item in plan["candidates"][:30])
+        if len(plan["candidates"]) > 30:
+            lines.append(f"- … 其余 {len(plan['candidates']) - 30} 项已纳入同一确认令牌")
+        return "\n".join(lines), plan["token"]
+    except Exception as exc:
+        return f"❌ 扫描失败：{exc}", ""
+
+
+def execute_project_cleanup(ss, token):
+    if not ss or not ss.project:
+        return "⚪ 请先打开项目。", ""
+    try:
+        result = ProjectStorageService.execute_cleanup(ss.project, token)
+        if result.get("stale"):
+            return "⚠ 清理令牌已过期，文件可能发生变化，请重新扫描。", ""
+        return f"✅ 已清理 {result['removed_files']} 个安全候选文件。", ""
+    except Exception as exc:
+        return f"❌ 执行清理失败：{exc}", ""
+
+
+def check_project_integrity(ss):
+    if not ss or not ss.project:
+        return "⚪ 请先打开项目。"
+    try:
+        report = ProjectStorageService.check_integrity(ss.project)
+        if report["ok"]:
+            return "✅ 项目完整性检查通过，未发现错误。"
+        lines = [f"### 发现 {report['issue_count']} 项完整性问题"]
+        lines.extend(
+            f"- **{issue['severity']} / {issue['code']}**：{issue['message']}"
+            for issue in report["issues"][:30]
+        )
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"❌ 完整性检查失败：{exc}"
+
+
+def repair_project_integrity(ss):
+    if not ss or not ss.project:
+        return "⚪ 请先打开项目。"
+    try:
+        report = ProjectStorageService.repair_integrity(ss.project)
+        repaired = report.get("repaired", [])
+        if report["ok"]:
+            return "✅ 已完成安全修复。" + ("\n" + "\n".join(f"- {item}" for item in repaired) if repaired else "")
+        return f"⚠ 已修复 {len(repaired)} 项；仍有 {report['issue_count']} 项问题，请查看完整性报告。"
+    except Exception as exc:
+        return f"❌ 修复失败：{exc}"
+
+
+def create_project_backup(ss, target_dir):
+    if not ss or not ss.project:
+        return "⚪ 请先打开项目。"
+    try:
+        path = ProjectBackupService.create_backup(ss.project, target_dir or None)
+        return f"✅ 项目备份已创建：`{path}`"
+    except Exception as exc:
+        return f"❌ 创建备份失败：{exc}"
+
+
+def restore_project_backup(archive_path):
+    if not archive_path:
+        return "⚪ 请选择项目备份 ZIP。"
+    try:
+        path = ProjectBackupService.restore_backup(archive_path)
+        return f"✅ 项目备份已恢复到：`{path}`；请刷新项目列表后打开。"
+    except Exception as exc:
+        return f"❌ 恢复备份失败：{exc}"
+
+
+def migrate_project_copy(ss, target_root):
+    if not ss or not ss.project:
+        return "⚪ 请先打开项目。"
+    if not target_root or not target_root.strip():
+        return "⚠ 请输入迁移目标项目根目录。"
+    try:
+        path = ProjectStorageService.migrate_to_projects_root(ss.project, target_root.strip())
+        return f"✅ 项目已复制并校验：`{path}`；源项目仍保留。"
+    except Exception as exc:
+        return f"❌ 迁移失败：{exc}"
 
 # ═══════════ O4/O5/O9/O13 新增 handler（仅追加，不触碰既有红线接线） ═══════════
 
@@ -1186,41 +1213,20 @@ def preview_chapter_options(ss):
 def preview_chapter(ss, chapter_id):
     """合并试听单章，并始终返回播放器状态说明。"""
     if not ss or not ss.project or not chapter_id:
-        yield None, "⚪ 请先打开项目并选择章节。"
+        yield _audio_update(None), "⚪ 请先打开项目并选择章节。"
         return
-    proj_dir = ProjectService.get_project_dir(ss.project)
-    yield None, "⏳ 正在生成章节合并试听，请稍候…"
-    try:
-        script = _snap(ss).script
-        chapters = script.get("chapters", [])
-        target = next(
-            ((index, chapter) for index, chapter in enumerate(chapters)
-             if str(chapter.get("id")) == str(chapter_id)),
-            None,
-        )
-        if target is None:
-            _record_review_event(ss, "chapter_preview", "unknown", chapter_id=str(chapter_id))
-            yield None, "⚠ 未找到所选章节，请刷新项目后重试。"
-            return
-        index, chapter = target
-        audio_dir = project_paths.project_dir(proj_dir, "chapter_audio", create=True)
-        stem = chapter_identity.chapter_file_stem(chapter, index, len(chapters))
-        out_path = os.path.join(audio_dir, f"{stem}_试听.wav")
-        result = _audio_pipeline().concat_for_preview(proj_dir, chapter_id, out_path)
-        label = chapter_identity.chapter_label(chapter, index, len(chapters))
-        if not result or not os.path.isfile(result):
-            _record_review_event(ss, "chapter_preview", "missing", chapter_id=str(chapter_id))
-            yield None, f"ℹ {label} 暂无可试听音频。请先合成该章节的段落。"
-            return
-        _record_review_event(
-            ss, "chapter_preview", "done", chapter_id=str(chapter_id),
-            audio=os.path.relpath(result, proj_dir),
-        )
-        yield result, f"✅ {label} 合并试听已准备好。"
-    except Exception as exc:
-        logger.exception("章节试听失败")
-        _record_review_event(ss, "chapter_preview", "error", chapter_id=str(chapter_id), error=str(exc)[:240])
-        yield None, f"❌ 章节试听加载失败：{str(exc)[:240]}。请点击章节重新加载。"
+    snapshot = _snap(ss)
+    if not snapshot:
+        yield _audio_update(None), "⚪ 请先打开项目。"
+        return
+    yield _audio_update(None), "⏳ 正在生成章节合并试听，请稍候…"
+    result = ReviewAudioService.render_chapter_preview(
+        ss.project,
+        ProjectService.get_project_dir(ss.project),
+        snapshot.script,
+        chapter_id,
+    )
+    yield _audio_update(result.path), result.status
 
 
 # ═══════════ UI ═══════════
@@ -1392,6 +1398,21 @@ def refresh_p_sel(name):
     return gr.update(choices=ProjectService.scan_projects(), value=name)
 
 
+def _review_outputs():
+    """Return the complete review-page callback contract in one stable order."""
+    return [
+        e_chapter_table,
+        e_chapter_sel,
+        e_chapter_audio,
+        e_chapter_audio_status,
+        e_seg_preview_sel,
+        e_seg_regen_sel,
+        e_seg_audio,
+        e_seg_audio_status,
+        e_regenerate_msg,
+    ]
+
+
 def _open_chain_rest(event):
     """把打开项目后的统一刷新接到 event 的 .then 链上（3 入口复用）。
 
@@ -1401,7 +1422,7 @@ def _open_chain_rest(event):
     """
     e = event
     e = e.then(refresh_top_status, [ss], [top_status])
-    e = e.then(preview_chapters, [ss], [e_chapter_table, e_chapter_audio, e_seg_audio, e_seg_sel, e_chapter_status, e_seg_status])
+    e = e.then(preview_chapters, [ss], _review_outputs())
     e = e.then(preview_chapter_options, [ss], [e_chapter_sel])
     e = e.then(refresh_queue_list, [ss], [s_queue_list])
     e = e.then(render_chapter_tree, [p_sel], [p_chapter_tree])
@@ -1477,13 +1498,30 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             p_refresh = prj_page["p_refresh"]
             p_open = prj_page["p_open"]
             p_open_dir = prj_page["p_open_dir"]
+            p_archive = prj_page["p_archive"]
             p_del = prj_page["p_del"]
+            p_hide = prj_page["p_hide"]
+            p_restore_name = prj_page["p_restore_name"]
+            p_restore_list = prj_page["p_restore_list"]
+            p_permanent_confirm = prj_page["p_permanent_confirm"]
+            p_permanent_delete = prj_page["p_permanent_delete"]
             p_open_msg = prj_page["p_open_msg"]
             p_summary = prj_page["p_summary"]
             p_chapter_tree = prj_page["p_chapter_tree"]
             p_storage = prj_page["p_storage"]
             p_storage_refresh = prj_page["p_storage_refresh"]
             p_cache_clear = prj_page["p_cache_clear"]
+            p_cleanup_scan = prj_page["p_cleanup_scan"]
+            p_cleanup_execute = prj_page["p_cleanup_execute"]
+            p_cleanup_token = prj_page["p_cleanup_token"]
+            p_integrity_check = prj_page["p_integrity_check"]
+            p_integrity_repair = prj_page["p_integrity_repair"]
+            p_backup_dir = prj_page["p_backup_dir"]
+            p_backup = prj_page["p_backup"]
+            p_restore_file = prj_page["p_restore_file"]
+            p_restore = prj_page["p_restore"]
+            p_migrate_root = prj_page["p_migrate_root"]
+            p_migrate = prj_page["p_migrate"]
             p_storage_msg = prj_page["p_storage_msg"]
 
             # ───────── 音色资产 ─────────
@@ -1545,7 +1583,10 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             e_chapter_sel = review_page["e_chapter_sel"]
             e_chapter_reload = review_page["e_chapter_reload"]
             e_chapter_audio = review_page["e_chapter_audio"]
+            e_chapter_audio_status = review_page["e_chapter_audio_status"]
             e_chapter_status = review_page["e_chapter_status"]
+            e_seg_preview_sel = review_page["e_seg_preview_sel"]
+            e_seg_regen_sel = review_page["e_seg_regen_sel"]
             e_seg_sel = review_page["e_seg_sel"]
             e_emo = review_page["e_emo"]
             e_alpha = review_page["e_alpha"]
@@ -1553,6 +1594,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             e_voice = review_page["e_voice"]
             e_regenerate = review_page["e_regenerate"]
             e_seg_audio = review_page["e_seg_audio"]
+            e_seg_audio_status = review_page["e_seg_audio_status"]
             e_seg_status = review_page["e_seg_status"]
             e_regenerate_msg = review_page["e_regenerate_msg"]
 
@@ -1648,8 +1690,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         lambda: gr.update(value="synth"), None, [production_stage]).then(
         refresh_production_voice_choices, [], [e_voice, sup_voice]).then(
         refresh_production_check, [ss], [production_check]).then(
-        preview_chapters, [ss],
-        [e_chapter_table, e_chapter_audio, e_seg_audio, e_seg_sel, e_chapter_status, e_seg_status]).then(
+        preview_chapters, [ss], _review_outputs()).then(
         preview_chapter_options, [ss], [e_chapter_sel]).then(
         refresh_queue_list, [ss], [s_queue_list]).then(
         refresh_supplement_roles, [ss], [sup_role])
@@ -1663,7 +1704,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         refresh_production_check, [ss], [production_check]
     ).then(
         preview_chapters, [ss],
-        [e_chapter_table, e_chapter_audio, e_seg_audio, e_seg_sel, e_chapter_status, e_seg_status],
+        _review_outputs(),
     ).then(
         preview_chapter_options, [ss], [e_chapter_sel]
     )
@@ -1696,8 +1737,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         lambda: gr.update(value="synth"), None, [production_stage]).then(
         refresh_production_voice_choices, [], [e_voice, sup_voice]).then(
         refresh_production_check, [ss], [production_check]).then(
-        preview_chapters, [ss],
-        [e_chapter_table, e_chapter_audio, e_seg_audio, e_seg_sel, e_chapter_status, e_seg_status]).then(
+        preview_chapters, [ss], _review_outputs()).then(
         preview_chapter_options, [ss], [e_chapter_sel]).then(
         refresh_queue_list, [ss], [s_queue_list]).then(
         refresh_supplement_roles, [ss], [sup_role])
@@ -1788,26 +1828,47 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     p_cache_clear.click(clear_project_cache, [ss], [p_storage_msg]).then(
         refresh_project_storage, [ss], [p_storage]
     )
-    p_del.click(delete_project, p_sel, p_sel)
+    p_archive.click(delete_project, [p_sel, ss], [p_sel, p_open_msg])
+    p_hide.click(hide_project_from_list, [p_sel, ss], [p_sel, p_open_msg])
+    p_restore_list.click(restore_project_to_list, [p_restore_name], [p_sel, p_open_msg])
+    p_permanent_delete.click(
+        permanent_delete_project,
+        [p_sel, p_permanent_confirm, ss],
+        [p_sel, p_open_msg],
+    )
+    p_cleanup_scan.click(scan_project_cleanup, [ss], [p_storage_msg, p_cleanup_token])
+    p_cleanup_execute.click(
+        execute_project_cleanup,
+        [ss, p_cleanup_token],
+        [p_storage_msg, p_cleanup_token],
+    ).then(refresh_project_storage, [ss], [p_storage])
+    p_integrity_check.click(check_project_integrity, [ss], [p_storage_msg])
+    p_integrity_repair.click(repair_project_integrity, [ss], [p_storage_msg]).then(
+        refresh_project_storage, [ss], [p_storage]
+    )
+    p_backup.click(create_project_backup, [ss, p_backup_dir], [p_storage_msg])
+    p_restore.click(restore_project_backup, [p_restore_file], [p_storage_msg]).then(
+        refresh_projects_full, [], [p_sel]
+    )
+    p_migrate.click(migrate_project_copy, [ss, p_migrate_root], [p_storage_msg])
     s_start.click(do_synthesis, [ss, s_beam, s_emo, s_override, s_alpha, s_rate, s_chapters_sel], outputs=[s_log, s_queue_list]).then(
         refresh_top_status, [ss], [top_status])
     s_cancel.click(cancel, [ss], outputs=s_log).then(refresh_top_status, [ss], [top_status])
     s_pause.click(pause_synthesis, [ss], [s_queue_list, s_pause, s_resume])
     s_resume.click(resume_synthesis, [ss], [s_queue_list, s_pause, s_resume])
     s_open_btn.click(open_segments_folder, [ss], s_open_msg)
-    e_chapter_sel.change(preview_chapter, [ss, e_chapter_sel], [e_chapter_audio, e_chapter_status])
-    e_chapter_reload.click(preview_chapter, [ss, e_chapter_sel], [e_chapter_audio, e_chapter_status])
-    e_seg_sel.change(
-        play_segment, [e_seg_sel, ss], [e_seg_audio, e_seg_status]
+    e_chapter_sel.change(preview_chapter, [ss, e_chapter_sel], [e_chapter_audio, e_chapter_audio_status])
+    e_chapter_reload.click(preview_chapter, [ss, e_chapter_sel], [e_chapter_audio, e_chapter_audio_status])
+    e_seg_preview_sel.change(
+        play_segment, [e_seg_preview_sel, ss], [e_seg_audio, e_seg_audio_status]
     )
     e_regenerate.click(
         regenerate_segment,
-        [e_seg_sel, e_emo, e_alpha, e_rate, e_voice, ss],
-        [e_seg_audio, e_seg_status, e_regenerate_msg],
+        [e_seg_regen_sel, e_emo, e_alpha, e_rate, e_voice, ss],
+        [e_seg_audio, e_seg_audio_status, e_regenerate_msg],
     )
     e_review_refresh.click(
-        preview_chapters, [ss],
-        [e_chapter_table, e_chapter_audio, e_seg_audio, e_seg_sel, e_chapter_status, e_seg_status],
+        preview_chapters, [ss], _review_outputs(),
     ).then(preview_chapter_options, [ss], [e_chapter_sel])
     e_go.click(do_export, [e_fmt, e_br, e_save_dir, ss], [e_out, e_path])
     e_subtitle_btn.click(do_export_subtitles, [ss, e_subtitle], [e_subtitle_out, e_subtitle_msg])

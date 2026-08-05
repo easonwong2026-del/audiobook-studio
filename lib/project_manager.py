@@ -9,8 +9,6 @@ import logging
 import os
 import shutil
 import time
-from pathlib import Path
-from typing import Optional
 
 from .types import ProjectMeta
 from .snapshot import ProjectSnapshot
@@ -380,8 +378,6 @@ def build_chapter_tree(project: str) -> str:
     status_map = meta.segments_status
     lines = []
     for chapter_index, ch in enumerate(script.get("chapters", [])):
-        cid = ch.get("id", "")
-        ch_title = ch.get("title", "") or str(cid)
         segs = ch.get("segments", [])
         done_n = sum(1 for s in segs if status_map.get(s["id"]) == "done")
         lines.append(

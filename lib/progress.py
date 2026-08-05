@@ -14,9 +14,10 @@ O3 结构化队列进度列表 + O12 段落级暂停/恢复共用的「内存段
 """
 from __future__ import annotations
 
+from typing import Optional
+
 from . import chapter_identity
 from . import project_manager as pm
-from . import script_loader
 
 # ── 段状态枚举（集中声明，O3/O12 共用） ──
 # pending 待合成 / running 合成中 / done 已完成 / error 失败

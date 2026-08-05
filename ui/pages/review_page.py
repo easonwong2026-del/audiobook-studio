@@ -19,17 +19,20 @@ def create_review_page() -> dict:
             e_chapter_audio = gr.Audio(
                 label="章节合并试听", type="filepath", interactive=False, scale=3,
             )
-        e_chapter_status = gr.Markdown(
+        e_chapter_audio_status = gr.Markdown(
             "请选择章节。没有生成音频时，这里会显示明确原因。",
             elem_classes=["review-status"],
         )
 
         gr.Markdown("##### 段落试听与修复")
-        e_seg_sel = gr.Dropdown(
-            label="选择段落", choices=[], interactive=True, multiselect=True, value=[],
+        e_seg_preview_sel = gr.Dropdown(
+            label="试听段落", choices=[], interactive=True, multiselect=False, value=None,
+        )
+        e_seg_regen_sel = gr.Dropdown(
+            label="选择需要重合成的段落", choices=[], interactive=True, multiselect=True, value=[],
         )
         e_seg_audio = gr.Audio(label="段落试听", type="filepath", interactive=False)
-        e_seg_status = gr.Markdown(
+        e_seg_audio_status = gr.Markdown(
             "请选择已生成音频的段落。",
             elem_classes=["review-status"],
         )
@@ -55,14 +58,20 @@ def create_review_page() -> dict:
         "e_chapter_sel": e_chapter_sel,
         "e_chapter_reload": e_chapter_reload,
         "e_chapter_audio": e_chapter_audio,
-        "e_chapter_status": e_chapter_status,
-        "e_seg_sel": e_seg_sel,
+        "e_chapter_audio_status": e_chapter_audio_status,
+        # ``e_chapter_status`` / ``e_seg_sel`` / ``e_seg_status`` remain aliases
+        # for integrations written against the pre-3.3.3 page dictionary.
+        "e_chapter_status": e_chapter_audio_status,
+        "e_seg_preview_sel": e_seg_preview_sel,
+        "e_seg_regen_sel": e_seg_regen_sel,
+        "e_seg_sel": e_seg_preview_sel,
         "e_emo": e_emo,
         "e_alpha": e_alpha,
         "e_rate": e_rate,
         "e_voice": e_voice,
         "e_regenerate": e_regenerate,
         "e_seg_audio": e_seg_audio,
-        "e_seg_status": e_seg_status,
+        "e_seg_audio_status": e_seg_audio_status,
+        "e_seg_status": e_seg_audio_status,
         "e_regenerate_msg": e_regenerate_msg,
     }

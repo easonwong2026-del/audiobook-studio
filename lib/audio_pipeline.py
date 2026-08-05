@@ -70,6 +70,7 @@ def export_book(project_dir: str, format: str = "mp3", bitrate: str = "192k",
     os.makedirs(out_dir, exist_ok=True)
 
     title = script.get("meta", {}).get("title", "audiobook")
+    safe_title = chapter_identity.safe_filename(title, "audiobook")
     # 收集 (章索引, 数据)，保持顺序，便于在章首插入更长静音
     loaded: list = []
     missing_ids: list = []
@@ -149,7 +150,7 @@ def export_book(project_dir: str, format: str = "mp3", bitrate: str = "192k",
         prev_ch = ch_idx
 
     combined = np.concatenate(parts)
-    wav_path = os.path.join(out_dir, f"{chapter_identity.safe_filename(title, 'audiobook')}.wav")
+    wav_path = os.path.normpath(os.path.join(out_dir, f"{safe_title}.wav"))
     wavfile.write(wav_path, rate, combined)
 
     # 2.4 M-2：拼接写盘后释放中间 numpy 数组，缓解长篇小说拼接峰值内存
@@ -167,7 +168,7 @@ def export_book(project_dir: str, format: str = "mp3", bitrate: str = "192k",
     # MP3/M4B 需要 ffmpeg 转码 + 写标签
     if format in ("mp3", "m4b"):
         ext = "mp3" if format == "mp3" else "m4b"
-        out_path = os.path.join(out_dir, f"{title}.{ext}")
+        out_path = os.path.normpath(os.path.join(out_dir, f"{safe_title}.{ext}"))
         codec = "libmp3lame" if format == "mp3" else "aac"
         try:
             subprocess.run(
@@ -418,6 +419,8 @@ def concat_for_preview(project_dir: str, chapter_id, output_path: str) -> str | 
     """
     import json
 
+    output_path = os.path.normpath(os.path.abspath(output_path))
+
     script_path = os.path.join(project_dir, "structured_script.json")
     if not os.path.isfile(script_path):
         return None
@@ -483,7 +486,7 @@ def concat_for_preview(project_dir: str, chapter_id, output_path: str) -> str | 
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
     wavfile.write(output_path, rate, combined)
-    return output_path if os.path.isfile(output_path) else None
+    return output_path if os.path.isfile(output_path) and os.path.getsize(output_path) > 0 else None
 
 
 def export_supplement(paths: list, out_path: str, format: str = "mp3", bitrate: str = "192k",

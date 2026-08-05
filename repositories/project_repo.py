@@ -210,6 +210,7 @@ class ProjectRepository:
         """
         ProjectRepository._ensure_roots()
         names = set()
+        hidden = ProjectRepository._hidden_project_names()
         ws = ProjectRepository.WORKSPACE_ROOT or ""
         lg = ProjectRepository.LEGACY_ROOT or ""
         for root in (ws, lg):
@@ -217,9 +218,24 @@ class ProjectRepository:
                 names.update(
                     d for d in os.listdir(root)
                     if d != ".trash"
+                    and d not in hidden
                     and ProjectRepository._is_valid_project_dir(os.path.join(root, d))
                 )
         return sorted(names)
+
+    @staticmethod
+    def _hidden_project_names() -> set[str]:
+        """Read the optional list-only catalog without making it authoritative."""
+        try:
+            from lib import config
+
+            path = os.path.join(config.get_data_dir(), ".project_catalog.json")
+            with open(path, encoding="utf-8") as file:
+                data = json.load(file)
+            hidden = data.get("hidden_projects", []) if isinstance(data, dict) else []
+            return {str(value) for value in hidden if isinstance(value, (str, int))}
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+            return set()
 
     @staticmethod
     def inspect_project_slot(name: str) -> ProjectSlotInspection:
@@ -585,6 +601,41 @@ class ProjectRepository:
         project_dir = ProjectRepository._resolve_dir(name)
         if os.path.isdir(project_dir):
             shutil.rmtree(project_dir)
+
+    @staticmethod
+    def archive_project(name: str) -> str:
+        """Move a project to the recoverable data-root trash area."""
+        from .project_storage_repo import ProjectStorageRepository
+
+        return ProjectStorageRepository.archive_project(name)
+
+    @staticmethod
+    def permanently_delete_project(name: str) -> None:
+        """Permanently delete a project after an explicit caller confirmation."""
+        from .project_storage_repo import ProjectStorageRepository
+
+        ProjectStorageRepository.permanently_delete_project(name)
+
+    @staticmethod
+    def remove_project_from_list(name: str) -> None:
+        """Hide a project from the bookshelf while retaining its local files."""
+        from .project_storage_repo import ProjectStorageRepository
+
+        ProjectStorageRepository.remove_from_list(name)
+
+    @staticmethod
+    def restore_project_to_list(name: str) -> None:
+        """Make a list-only hidden project visible again."""
+        from .project_storage_repo import ProjectStorageRepository
+
+        ProjectStorageRepository.restore_to_list(name)
+
+    @staticmethod
+    def check_project_integrity(name: str) -> dict:
+        """Run a non-destructive structured integrity check for one project."""
+        from .project_storage_repo import ProjectStorageRepository
+
+        return ProjectStorageRepository.check_project_integrity(name)
 
     @staticmethod
     def get_project_dir(name: str) -> str:

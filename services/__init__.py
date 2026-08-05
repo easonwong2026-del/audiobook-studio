@@ -16,6 +16,8 @@ from lib.snapshot import ProjectSnapshot
 
 from .export import ExportService
 from .project import ProjectService
+from .project_backup import ProjectBackupService
+from .project_storage import ProjectStorageService
 from .session import SessionState
 from .structured_script_import import (
     StructuredScriptCreationResult,
@@ -28,6 +30,8 @@ from .synthesis import SynthesisService, SynthesisState
 __all__ = [
     "ExportService",
     "ProjectService",
+    "ProjectBackupService",
+    "ProjectStorageService",
     "ProjectSnapshot",
     "SessionState",
     "StructuredScriptCreationResult",
