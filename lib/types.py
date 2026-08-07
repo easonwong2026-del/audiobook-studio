@@ -18,6 +18,9 @@ class Segment:
     pause_before: int = 0
     pause_after: int = 0
     pauses: list[dict] = field(default_factory=list)
+    # Phase-2 stable Character Roster key.  Appended with a default so older
+    # callers constructing Segment positionally remain compatible.
+    role_id: str | None = None
 
 
 @dataclass

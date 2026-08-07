@@ -144,6 +144,7 @@ def from_dict(raw: dict) -> Script:
                     pause_before=seg.get("pause_before", 0),
                     pause_after=seg.get("pause_after", 0),
                     pauses=seg.get("pauses", []) if isinstance(seg.get("pauses"), list) else [],
+                    role_id=seg.get("role_id"),
                 ))
             chapters.append(Chapter(
                 id=ch.get("id"),

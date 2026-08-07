@@ -103,6 +103,28 @@ def _allowed_audio_path(project_name: str, path: str, kind: str = "segments") ->
 
 def _segment_audio(project_dir: str, segment: dict[str, Any]) -> str | None:
     seg_dir = project_paths.project_dir(project_dir, "segments")
+    speaker_fingerprint = None
+    if os.path.isfile(os.path.join(project_dir, "voice_cast.json")):
+        try:
+            from repositories.project_repo import ProjectRepository
+
+            bindings = ProjectRepository.load_bindings(project_dir)
+            role_bindings = bindings.get("role_bindings", {}) if isinstance(bindings, dict) else {}
+            role_binding = role_bindings.get(str(segment.get("role_id") or ""))
+            if not isinstance(role_binding, dict):
+                role_name = str(segment.get("role") or segment.get("speaker") or "")
+                role_binding = next(
+                    (item for item in role_bindings.values()
+                     if isinstance(item, dict) and item.get("role_name") == role_name),
+                    None,
+                )
+            if isinstance(role_binding, dict):
+                path = str(role_binding.get("project_voice_path") or "")
+                if path and not os.path.isabs(path):
+                    path = os.path.join(project_dir, path)
+                speaker_fingerprint = segment_cache.speaker_fingerprint_for_path(path)
+        except Exception:
+            speaker_fingerprint = None
     return segment_cache.find_segment_wav(
         seg_dir,
         str(segment.get("id")),
@@ -113,6 +135,7 @@ def _segment_audio(project_dir: str, segment: dict[str, Any]) -> str | None:
         segment.get("speech_rate", 1.0),
         segment.get("pinyin_hints"),
         segment_cache.director_metadata_for(segment),
+        speaker_fingerprint,
     )
 
 

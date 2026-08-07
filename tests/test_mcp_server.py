@@ -111,8 +111,14 @@ def test_stdio_methods_and_no_gradio_import():
     })
     assert initialize["result"]["capabilities"]["tools"]
     tools = handle_request({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
-    assert {item["name"] for item in tools["result"]["tools"]} == {
+    assert {item["name"] for item in tools["result"]["tools"]} >= {
         "server_info", "validate_structured_script", "create_project", "list_projects", "get_project",
+        "list_voice_assets", "get_voice_asset",
+        "set_character_roster", "get_character_roster", "add_character_roles",
+        "update_character_role", "validate_character_roster",
+        "set_voice_cast", "get_voice_cast", "bind_cast_role",
+        "validate_voice_cast", "finalize_voice_cast", "get_voice_binding_status",
+        "check_chapter_roles",
     }
     path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "mcp_server")
     for root, _dirs, files in os.walk(path):

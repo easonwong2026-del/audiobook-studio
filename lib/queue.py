@@ -13,7 +13,8 @@ logger = logging.getLogger(__name__)
 
 
 def _seg_cache_key(seg, emotion: str = None, emo_alpha: float = None,
-                   speech_rate: float = None) -> str:
+                   speech_rate: float = None,
+                   speaker_fingerprint: str | None = None) -> str:
     """段缓存键（B7）：段标识 + 合成参数内容哈希，参数一变即生成新文件名。
 
     直接委派 ``lib.segment_cache.segment_cache_key``（单一公式来源），确保合成侧
@@ -46,6 +47,7 @@ def _seg_cache_key(seg, emotion: str = None, emo_alpha: float = None,
         speech_rate,
         getattr(seg, "pinyin_hints", None),
         segment_cache.director_metadata_for(seg),
+        speaker_fingerprint,
     )
 
 
@@ -67,11 +69,17 @@ def synthesize_project(
     project_dir = pm.get_project_dir(project_name)
     # P2 提速：open_project 已把剧本读入内存（dict），直接用 from_dict 构造 Script，
     # 避免对同一个 structured_script.json 做第二次磁盘读取。
-    _, script_data, _ = pm.open_project(project_name)
+    _, script_data, bindings_document = pm.open_project(project_name)
     script = script_loader.from_dict(script_data)
 
     segments_dir = project_paths.project_dir(project_dir, "segments", create=True)
     os.makedirs(segments_dir, exist_ok=True)
+    cast_active = os.path.isfile(os.path.join(project_dir, "voice_cast.json"))
+    speaker_fingerprints: dict[str, str | None] = {}
+    cast_role_bindings = (
+        bindings_document.get("role_bindings", {})
+        if isinstance(bindings_document, dict) else {}
+    )
 
     remaining = pm.get_remaining(project_name)
     if not remaining:
@@ -109,15 +117,28 @@ def synthesize_project(
                 continue
 
             speaker = voice_bindings.get(seg.role)
+            if not speaker and cast_active and getattr(seg, "role_id", None):
+                cast_binding = cast_role_bindings.get(str(seg.role_id))
+                if isinstance(cast_binding, dict):
+                    speaker = cast_binding.get("project_voice_path")
             if not speaker:
                 yield f"[X] {seg.id} 角色'{seg.role}'未绑定音频"
                 pm.update_segment_status(project_name, seg.id, "failed")
                 continue
 
+            if not os.path.isabs(str(speaker)):
+                speaker = os.path.join(project_dir, str(speaker))
             if not os.path.isfile(speaker):
                 yield f"[X] {seg.id} 音频文件不存在"
                 pm.update_segment_status(project_name, seg.id, "failed")
                 continue
+
+            speaker_fingerprint = None
+            if cast_active:
+                resolved_speaker = speaker
+                if resolved_speaker not in speaker_fingerprints:
+                    speaker_fingerprints[resolved_speaker] = segment_cache.speaker_fingerprint_for_path(resolved_speaker)
+                speaker_fingerprint = speaker_fingerprints[resolved_speaker]
 
             seg_start = time.time()
             try:
@@ -129,7 +150,7 @@ def synthesize_project(
                 #     文件名变化 → 旧文件不再被命中 → 触发重新合成。
                 seg_path = os.path.join(
                     segments_dir,
-                    f"{_seg_cache_key(seg, emotion_eff, emo_alpha_eff, speech_rate_eff)}.wav",
+                    f"{_seg_cache_key(seg, emotion_eff, emo_alpha_eff, speech_rate_eff, speaker_fingerprint)}.wav",
                 )
 
                 if not os.path.isfile(seg_path):

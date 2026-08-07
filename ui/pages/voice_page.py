@@ -10,6 +10,11 @@ def create_voice_page() -> dict:
             with gr.Column(scale=0, min_width=277, elem_classes=["role-list-panel"]):
                 gr.Markdown("### 角色与声音")
                 v_status = gr.Markdown("打开项目后显示角色绑定状态。")
+                v_cast_finalize = gr.Button(
+                    "确认并锁定全书声音方案",
+                    variant="secondary",
+                    size="sm",
+                )
                 v_role_search = gr.Textbox(
                     label="搜索角色",
                     placeholder="按名称或描述搜索",
@@ -93,6 +98,7 @@ def create_voice_page() -> dict:
     return {
         "group": grp_voices,
         "v_status": v_status,
+        "v_cast_finalize": v_cast_finalize,
         "v_table": v_table,
         "v_role_search": v_role_search,
         "v_role_title": v_role_title,

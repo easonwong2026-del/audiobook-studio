@@ -19,6 +19,7 @@ from .project_storage_repo import (
     ProjectStorageSummary,
 )
 from .binding_repo import BindingRepository
+from .voice_cast_repo import CharacterRosterRepository, VoiceCastRepository
 from .task_repo import TaskRepository, TaskRecord
 from .exceptions import RepoError, ProjectNotFoundError, ConfigCorruptedError, AtomicWriteError
 
@@ -28,6 +29,8 @@ __all__ = [
     "ProjectRepository",
     "ProjectStorageRepository", "ProjectStorageSummary", "ArchivedProjectSummary", "CleanupPlan", "CleanupCandidate",
     "BindingRepository",
+    "VoiceCastRepository",
+    "CharacterRosterRepository",
     "TaskRepository", "TaskRecord",
     "RepoError", "ProjectNotFoundError", "ConfigCorruptedError", "AtomicWriteError",
     "atomic_write",

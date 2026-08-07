@@ -280,6 +280,19 @@ def get_speaker_embedding(speaker_audio: str):
         return None
 
 
+def invalidate_speaker_cache(speaker_audio: str | None = None) -> None:
+    """Invalidate one speaker embedding or the whole embedding cache.
+
+    Voice Cast force-rebinds normally use a new project snapshot path, but the
+    old path can still be present in the LRU.  Removing it makes the lifecycle
+    explicit and keeps this operation testable without loading the TTS model.
+    """
+    if speaker_audio:
+        _SPEAKER_EMB_CACHE.pop(str(speaker_audio), None)
+    else:
+        _SPEAKER_EMB_CACHE.clear()
+
+
 def _concat_wavs(paths: list[str], out_path: str) -> None:
     """拼接多个 WAV 文件为一段，写入 out_path。
 

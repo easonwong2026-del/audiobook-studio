@@ -27,7 +27,10 @@ from services import (
     ProjectStorageService,
     SupplementService,
     SupplementTaskState,
+    VoiceAssetService,
     SynthesisService,
+    VoiceCastError,
+    VoiceCastResolver,
 )
 from services.session import SessionState
 from services.review_audio import ReviewAudioService
@@ -155,7 +158,7 @@ def open_project(name, ss):
                 "### 当前角色配置\n请从左侧角色列表选择角色。",
                 gr.update(choices=_lib_voices(),value=None),
                 log_init,
-                format_role_management_summary(snap.script, ss.bindings))
+                _voice_cast_summary(snap))
     except Exception as e:
         return (
             f"### 打开失败\n{e}", gr.update(), None,
@@ -248,7 +251,41 @@ def refresh_role_summary(ss):
     snap = _snap(ss)
     if not snap:
         return "打开项目后显示角色绑定状态。"
-    return format_role_management_summary(snap.script, snap.bindings)
+    return _voice_cast_summary(snap)
+
+
+def _voice_cast_summary(snap):
+    """Render shared Voice Cast state without exposing audio paths."""
+    # Legacy/manual projects already have the complete snapshot required for
+    # this display.  Avoid a second disk read during the normal open chain.
+    if not os.path.isfile(os.path.join(snap.project_dir, "character_roster.json")):
+        return format_role_management_summary(snap.script, snap.bindings)
+    try:
+        status = VoiceCastResolver.get_voice_binding_status(snap.name)
+    except Exception:
+        return format_role_management_summary(snap.script, snap.bindings)
+    if status.get("mode") == "legacy_manual":
+        return format_role_management_summary(snap.script, snap.bindings)
+    state = "已锁定" if status.get("cast_locked") else "草稿"
+    return (
+        f"全书角色：**{status.get('roles_total', 0)}** · "
+        f"已绑定：**{status.get('bound', 0)}** · "
+        f"新增待处理：**{status.get('new_roles', 0)}** · 状态：**{state}**"
+    )
+
+
+def finalize_voice_cast_ui(ss):
+    """Gradio callback for the one-click Voice Cast finalization."""
+    if not ss or not ss.project:
+        return "请先打开项目。"
+    try:
+        result = VoiceCastResolver.finalize_voice_cast(ss.project)
+        ss.invalidate_snapshot()
+        return f"✅ 全书声音方案已锁定（{len(result.get('cast', {}).get('roles', {}))} 个角色）。"
+    except VoiceCastError as exc:
+        return f"❌ {exc.code}：{exc}"
+    except Exception as exc:
+        return f"❌ 锁定失败：{exc}"
 
 
 def _role_config_title(role, voice, binding):
@@ -298,9 +335,25 @@ def bind_voice(role, audio_file, from_lib, ss):
     src = _lib_path(from_lib) if from_lib else audio_file
     if not src:
         return "请上传音频、录制或从音色库选择", gr.update(), gr.update(), role, gr.update(), gr.update()
-    # 业务委托 ProjectService.bind_voice（拷贝 + 写 voice_bindings.json），返回 dest
     cat = voice_lib._category_of(os.path.basename(src)) if from_lib else "未分类"
-    dest = ProjectService.bind_voice(ss.project, role, src, category=cat)
+    # A roster-backed project uses the same stable Voice Cast service as MCP
+    # when the UI choice comes from the global library.  Direct uploads retain
+    # the established manual-binding path for backwards compatibility.
+    project_dir = ProjectService.get_project_dir(ss.project)
+    if from_lib and os.path.isfile(os.path.join(project_dir, "character_roster.json")):
+        try:
+            resolved = VoiceCastResolver.resolve_role(ss.project, {"role": role})
+            asset_id = VoiceAssetService.asset_id_for_path(src)
+            VoiceCastResolver.bind_cast_role(ss.project, resolved["role_id"], asset_id)
+            refreshed = ProjectService.open_project_as_snapshot(ss.project)
+            dest = refreshed.bindings.get(role)
+            if not dest:
+                raise VoiceCastError("VOICE_BINDING_NOT_APPLIED", "演员表绑定未写入运行态绑定")
+        except VoiceCastError:
+            raise
+    else:
+        # 业务委托 ProjectService.bind_voice（拷贝 + 写 voice_bindings.json），返回 dest
+        dest = ProjectService.bind_voice(ss.project, role, src, category=cat)
     # 原地 mutate 会话态绑定表（R1：多标签隔离，不靠返回值回传）
     ss.bindings[role] = dest
     # 写盘后重建快照并刷新会话态绑定表 / 分类映射
@@ -654,9 +707,12 @@ def regenerate_segment(choices, emotion, emo_alpha, speech_rate, voice_choice, s
                 try:
                     # B7：重合成写入参数感知缓存键路径，与批量链路命名一致
                     director_meta = segment_cache.director_metadata_for(seg)
+                    speaker_fingerprint = None
+                    if os.path.isfile(os.path.join(proj_dir, "voice_cast.json")):
+                        speaker_fingerprint = segment_cache.speaker_fingerprint_for_path(speaker)
                     out=segment_cache.segment_wav_path(
                         seg_dir, sid, emotion, emo_alpha, speech_rate,
-                        seg.get("pinyin_hints"), director_meta,
+                        seg.get("pinyin_hints"), director_meta, speaker_fingerprint,
                     )
                     from lib import directed_synthesis
                     directed_synthesis.synthesize(
@@ -673,9 +729,13 @@ def regenerate_segment(choices, emotion, emo_alpha, speech_rate, voice_choice, s
         for seg in ch.get("segments",[]):
             if str(seg.get("id")) == str(first_sid):
                 # B7：用同一缓存键推导真实 wav 名
+                first_speaker_fingerprint = None
+                if os.path.isfile(os.path.join(proj_dir, "voice_cast.json")):
+                    first_speaker = override_voice or bindings.get(seg["role"])
+                    first_speaker_fingerprint = segment_cache.speaker_fingerprint_for_path(first_speaker)
                 first_fp=segment_cache.find_segment_wav(seg_dir, first_sid, seg["text"], seg["role"],
                     emotion, emo_alpha, speech_rate, seg.get("pinyin_hints"),
-                    segment_cache.director_metadata_for(seg))
+                    segment_cache.director_metadata_for(seg), first_speaker_fingerprint)
                 break
         if first_fp: break
     # 2.4 M-3：批量重合成结束后释放碎片化显存（不卸载模型）
@@ -1918,6 +1978,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
                 "refresh_role_list": refresh_role_list,
                 "bind_voice": bind_voice,
                 "refresh_role_summary": refresh_role_summary,
+                "finalize_voice_cast": finalize_voice_cast_ui,
                 "play_lib_voice": play_lib_voice,
                 "save_to_lib": save_to_lib,
                 "filter_vlib_by_category": filter_vlib_by_category,

@@ -26,6 +26,8 @@ from .structured_script_import import (
 )
 from .supplement import SupplementService, SupplementTaskState
 from .synthesis import SynthesisService, SynthesisState
+from .voice_assets import VoiceAssetError, VoiceAssetService
+from .voice_cast import VoiceCastError, VoiceCastResolver, VoiceCastService
 
 __all__ = [
     "ExportService",
@@ -41,4 +43,9 @@ __all__ = [
     "SupplementTaskState",
     "SynthesisService",
     "SynthesisState",
+    "VoiceAssetError",
+    "VoiceAssetService",
+    "VoiceCastError",
+    "VoiceCastResolver",
+    "VoiceCastService",
 ]

@@ -51,6 +51,28 @@ def test_cache_key_stable_for_same_params():
     assert a == b, "相同参数应产生稳定（幂等）缓存键"
 
 
+def test_cache_key_changes_with_speaker_fingerprint():
+    first = sc.segment_cache_key("1-001", "neutral", 1.0, 1.0, None, None, "voice-a")
+    second = sc.segment_cache_key("1-001", "neutral", 1.0, 1.0, None, None, "voice-b")
+    assert first != second
+
+
+def test_speaker_aware_lookup_does_not_fallback_to_legacy_speaker(tmp_path):
+    seg_dir = str(tmp_path)
+    legacy = os.path.join(seg_dir, "1-001.wav")
+    open(legacy, "w").close()
+    assert sc.find_segment_wav(
+        seg_dir, "1-001", "text", "role", "neutral", speaker_fingerprint="voice-new"
+    ) is None
+    path = sc.segment_wav_path(
+        seg_dir, "1-001", "neutral", speaker_fingerprint="voice-new"
+    )
+    open(path, "w").close()
+    assert sc.find_segment_wav(
+        seg_dir, "1-001", "text", "role", "neutral", speaker_fingerprint="voice-new"
+    ) == path
+
+
 def test_cache_key_empty_dict_equals_none():
     """B7 导出丢段回归：缺省 pinyin_hints 的 {} 与 None 必须等价。
 
