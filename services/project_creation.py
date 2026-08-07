@@ -70,5 +70,23 @@ class ProjectCreationService:
             warnings=list(result.warnings),
         )
 
+    @staticmethod
+    def create_from_structured_data(
+        project_name: str,
+        script: dict,
+    ) -> ProjectCreationResult:
+        """Create from an in-memory script through the same import service."""
+        from services.structured_script_import import StructuredScriptImportService
+
+        result = StructuredScriptImportService.create_from_data(project_name, script)
+        return ProjectCreationResult(
+            project_name=result.project_name,
+            title=result.title,
+            chapter_count=result.chapter_count,
+            segment_count=result.segment_count,
+            role_count=result.role_count,
+            warnings=list(result.warnings),
+        )
+
 
 __all__ = ["ProjectCreationResult", "ProjectCreationService"]

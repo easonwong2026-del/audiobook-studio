@@ -101,6 +101,53 @@ def test_archive_is_recoverable_and_path_is_bounded(storage_project):
         ProjectStorageRepository.archive_project("../storage_book")
 
 
+def test_recycle_bin_restore_rejects_name_conflict_and_permanent_delete_is_scoped(storage_project):
+    data_root, project_dir = storage_project
+    ProjectStorageRepository.archive_project("storage_book")
+    archived = ProjectStorageRepository.list_archived_projects()
+    assert len(archived) == 1
+    assert archived[0].original_name == "storage_book"
+
+    # A same-name active project is never overwritten by recovery.
+    ProjectRepository.create_project("storage_book", str(_script_file(data_root)))
+    with pytest.raises(FileExistsError):
+        ProjectStorageRepository.restore_archived_project(archived[0].archive_id)
+    assert (data_root / ".trash" / "projects" / archived[0].archive_id).is_dir()
+    ProjectRepository.delete_project("storage_book")
+
+    restored = ProjectStorageRepository.restore_archived_project(archived[0].archive_id)
+    assert restored["restored"] is True
+    assert restored["integrity"]["ok"] is True
+    assert (data_root / "projects" / "storage_book").is_dir()
+
+    ProjectStorageRepository.archive_project("storage_book")
+    second = ProjectStorageRepository.list_archived_projects()[0]
+    with pytest.raises(ValueError, match="只能针对"):
+        ProjectStorageRepository.permanently_delete_project("storage_book")
+    ProjectStorageRepository.permanently_delete_project(second.archive_id)
+    assert ProjectStorageRepository.list_archived_projects() == []
+
+
+def test_integrity_repair_does_not_delete_valid_audio(storage_project):
+    _data_root, project_dir = storage_project
+    segment = project_dir / "05_分段音频" / "1-001.wav"
+    segment.write_bytes(b"valid-audio")
+    valid_export = project_dir / "09_导出文件" / "book.mp3"
+    valid_export.parent.mkdir(parents=True, exist_ok=True)
+    valid_export.write_bytes(b"valid-export")
+    empty_export = project_dir / "09_导出文件" / "empty.mp3"
+    empty_export.touch()
+
+    from services.project_storage import ProjectStorageService
+
+    ProjectRepository.update_segment_status("storage_book", "1-001", "done")
+    report = ProjectStorageService.repair_integrity("storage_book")
+    assert "移除空输出文件：empty.mp3" in report["repaired"]
+    assert segment.exists()
+    assert valid_export.exists()
+    assert not empty_export.exists()
+
+
 def test_list_only_removal_keeps_project_files(storage_project):
     _data_root, project_dir = storage_project
     ProjectStorageRepository.remove_from_list("storage_book")

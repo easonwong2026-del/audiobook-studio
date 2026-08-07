@@ -12,6 +12,7 @@ from ._atomic import atomic_write
 from .config_repo import ConfigRepository, ConfigData
 from .project_repo import ProjectRepository
 from .project_storage_repo import (
+    ArchivedProjectSummary,
     CleanupCandidate,
     CleanupPlan,
     ProjectStorageRepository,
@@ -25,7 +26,7 @@ from .exceptions import RepoError, ProjectNotFoundError, ConfigCorruptedError, A
 __all__ = [
     "ConfigRepository", "ConfigData",
     "ProjectRepository",
-    "ProjectStorageRepository", "ProjectStorageSummary", "CleanupPlan", "CleanupCandidate",
+    "ProjectStorageRepository", "ProjectStorageSummary", "ArchivedProjectSummary", "CleanupPlan", "CleanupCandidate",
     "BindingRepository",
     "TaskRepository", "TaskRecord",
     "RepoError", "ProjectNotFoundError", "ConfigCorruptedError", "AtomicWriteError",

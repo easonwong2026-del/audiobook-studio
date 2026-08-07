@@ -9,6 +9,7 @@ import shutil
 import sys
 import tempfile
 import time
+from html import escape
 
 import gradio as gr
 
@@ -125,13 +126,21 @@ def open_project(name, ss):
         roles = list(snap.script.get("voices",{}).keys())
         vcount = len(roles)
         bound = sum(1 for v in ss.bindings.values() if v)
-
-        info = f"""### 🎧 {snap.script['meta'].get('title',name)}
-<div style="display:flex;gap:20px;margin-top:8px">
-<span>📄 **{snap.meta.total_chapters}** 章</span>
-<span>🎯 **{vcount}** 角色（{bound} 已绑定）</span>
-<span>✅ **{snap.meta.completed_count}** 段已合成</span>
-</div>"""
+        script_meta = snap.script.get("meta", {}) if isinstance(snap.script.get("meta"), dict) else {}
+        title = str(script_meta.get("title") or name)
+        author = str(script_meta.get("author") or "未填写")
+        total_segments = int(getattr(snap.meta, "total_segments", 0) or 0)
+        completed_segments = int(getattr(snap.meta, "completed_count", 0) or 0)
+        progress = round((completed_segments / total_segments) * 100, 1) if total_segments else 0.0
+        info = f"""### 🎧 {escape(title)}
+- **项目名称**：`{escape(name)}`
+- **书名**：{escape(title)}
+- **作者**：{escape(author)}
+- **章节数**：{snap.meta.total_chapters}
+- **片段数**：{total_segments}
+- **已完成片段**：{completed_segments}
+- **合成完成比例**：{progress}%
+- **角色与声音**：{vcount} 个角色（{bound} 已绑定）"""
         if snap.meta.failed_count: info += f"\n<span class='status-err'>⚠ {snap.meta.failed_count} 段失败</span>"
 
         seg_dir = project_paths.project_dir(ProjectService.get_project_dir(name), "segments")
@@ -953,6 +962,14 @@ def refresh_project_storage(ss):
         return f"#### 项目存储\n❌ 无法读取项目目录：{exc}"
 
 
+def clear_project_view():
+    return (
+        "选择一个项目并点击“打开项目”后显示书名、作者、章节、片段和合成进度。",
+        "打开项目后显示数据占用和最近修改时间。",
+        "<div class='inline-empty'>打开项目后在这里查看章节结构。</div>",
+    )
+
+
 def open_project_folder(ss):
     if not ss or not ss.project:
         return "⚪ 请先打开项目。"
@@ -969,23 +986,6 @@ def clear_project_cache(ss):
         return f"✅ 已清理试听缓存 {result['files']} 个文件（{format_size(result['bytes'])}）；原始文件和音频未受影响。"
     except Exception as exc:
         return f"❌ 清理试听缓存失败：{exc}"
-
-
-def permanent_delete_project(name, confirmed, ss):
-    if not confirmed:
-        return gr.update(), "⚠ 永久删除前请勾选确认。"
-    if not name:
-        return gr.update(), "⚪ 请先选择项目。"
-    try:
-        ProjectStorageService.permanently_delete(name)
-        if ss and ss.project == name:
-            ss.set_project(None, None, {})
-            ss.set_snapshot(None)
-            ss.synthesis = None
-        return gr.update(choices=ProjectService.scan_projects(), value=None), f"✅ 项目「{name}」及其本地文件已永久删除。"
-    except Exception as exc:
-        logger.exception("永久删除项目失败")
-        return gr.update(), f"❌ 永久删除失败：{exc}"
 
 
 def hide_project_from_list(name, ss):
@@ -1015,60 +1015,110 @@ def restore_project_to_list(name):
 
 def scan_project_cleanup(ss):
     if not ss or not ss.project:
-        return "⚪ 请先打开项目。", ""
+        return "⚪ 请先打开项目。", "", gr.update(visible=False)
     try:
         plan = ProjectStorageService.scan_cleanup(ss.project)
         if not plan["candidates"]:
-            return "✅ 未发现可安全清理的临时文件或空分段音频。", plan["token"]
-        lines = [f"### 可安全清理 {len(plan['candidates'])} 项（共 {format_size(plan['total_bytes'])}）"]
+            return (
+                "✅ 当前没有可安全清理的缓存或临时文件。\n\n"
+                "不会删除 structured_script.json、原始文件、有效音频或导出文件。",
+                plan["token"],
+                gr.update(visible=False),
+            )
+        from collections import Counter
+
+        categories = Counter(item["reason"] for item in plan["candidates"])
+        lines = [
+            f"### 预计可释放 {format_size(plan['total_bytes'])}",
+            f"共 {len(plan['candidates'])} 个文件，确认后才会删除。",
+            "",
+        ]
+        lines.extend(f"- **{reason}**：{count} 个" for reason, count in categories.items())
+        lines.extend([
+            "",
+            "**不会删除**：structured_script.json、原始文件、已生成有效音频、用户手工音频和导出文件。",
+        ])
+        lines.append("")
         lines.extend(f"- `{item['relative_path']}`：{item['reason']}" for item in plan["candidates"][:30])
         if len(plan["candidates"]) > 30:
             lines.append(f"- … 其余 {len(plan['candidates']) - 30} 项已纳入同一确认令牌")
-        return "\n".join(lines), plan["token"]
+        return "\n".join(lines), plan["token"], gr.update(visible=True)
     except Exception as exc:
-        return f"❌ 扫描失败：{exc}", ""
+        return f"❌ 扫描失败：{exc}", "", gr.update(visible=False)
 
 
 def execute_project_cleanup(ss, token):
     if not ss or not ss.project:
-        return "⚪ 请先打开项目。", ""
+        return "⚪ 请先打开项目。", "", gr.update(visible=False)
     try:
         result = ProjectStorageService.execute_cleanup(ss.project, token)
         if result.get("stale"):
-            return "⚠ 清理令牌已过期，文件可能发生变化，请重新扫描。", ""
-        return f"✅ 已清理 {result['removed_files']} 个安全候选文件。", ""
+            plan = result.get("plan", {})
+            if plan.get("candidates"):
+                return (
+                    "⚠ 文件在确认前发生了变化，已重新扫描。请重新确认这次清理。",
+                    plan.get("token", ""),
+                    gr.update(visible=True),
+                )
+            return "✅ 文件已发生变化，当前没有可安全清理的内容。", "", gr.update(visible=False)
+        return (
+            f"✅ 已清理 {result['removed_files']} 个安全文件，释放 {format_size(result['removed_bytes'])}。",
+            "",
+            gr.update(visible=False),
+        )
     except Exception as exc:
-        return f"❌ 执行清理失败：{exc}", ""
+        return f"❌ 执行清理失败：{exc}", "", gr.update(visible=False)
+
+
+def cancel_project_cleanup():
+    return "已取消清理。项目文件没有改变。", "", gr.update(visible=False)
 
 
 def check_project_integrity(ss):
     if not ss or not ss.project:
-        return "⚪ 请先打开项目。"
+        return "⚪ 请先打开项目。", gr.update(visible=False)
     try:
         report = ProjectStorageService.check_integrity(ss.project)
         if report["ok"]:
-            return "✅ 项目完整性检查通过，未发现错误。"
-        lines = [f"### 发现 {report['issue_count']} 项完整性问题"]
+            return "✅ 项目正常，未发现需要处理的问题。", gr.update(visible=False)
+        repairable = sum(1 for issue in report["issues"] if issue.get("repairable"))
+        manual = report["issue_count"] - repairable
+        lines = [
+            f"### 项目存在 {report['issue_count']} 项问题",
+            f"- 可自动安全修复：{repairable} 项",
+            f"- 需要人工处理：{manual} 项",
+        ]
         lines.extend(
             f"- **{issue['severity']} / {issue['code']}**：{issue['message']}"
             for issue in report["issues"][:30]
         )
-        return "\n".join(lines)
+        lines.extend([
+            "",
+            "安全修复不会修改 structured_script.json、正常音频、用户手工音频、角色绑定决定或有效导出成品。",
+        ])
+        return "\n".join(lines), gr.update(visible=bool(repairable))
     except Exception as exc:
-        return f"❌ 完整性检查失败：{exc}"
+        return f"❌ 完整性检查失败：{exc}", gr.update(visible=False)
 
 
 def repair_project_integrity(ss):
     if not ss or not ss.project:
-        return "⚪ 请先打开项目。"
+        return "⚪ 请先打开项目。", gr.update(visible=False)
     try:
         report = ProjectStorageService.repair_integrity(ss.project)
         repaired = report.get("repaired", [])
         if report["ok"]:
-            return "✅ 已完成安全修复。" + ("\n" + "\n".join(f"- {item}" for item in repaired) if repaired else "")
-        return f"⚠ 已修复 {len(repaired)} 项；仍有 {report['issue_count']} 项问题，请查看完整性报告。"
+            return (
+                "✅ 已完成安全修复。" + ("\n" + "\n".join(f"- {item}" for item in repaired) if repaired else ""),
+                gr.update(visible=False),
+            )
+        repairable = any(issue.get("repairable") for issue in report.get("issues", []))
+        return (
+            f"⚠ 已修复 {len(repaired)} 项；仍有 {report['issue_count']} 项问题，请人工处理剩余项目。",
+            gr.update(visible=repairable),
+        )
     except Exception as exc:
-        return f"❌ 修复失败：{exc}"
+        return f"❌ 修复失败：{exc}", gr.update(visible=False)
 
 
 def create_project_backup(ss, target_dir):
@@ -1089,6 +1139,65 @@ def restore_project_backup(archive_path):
         return f"✅ 项目备份已恢复到：`{path}`；请刷新项目列表后打开。"
     except Exception as exc:
         return f"❌ 恢复备份失败：{exc}"
+
+
+def refresh_archived_projects():
+    """Render the recoverable project list and its stable archive IDs."""
+    from datetime import datetime
+
+    archived = ProjectStorageService.list_archived()
+    rows = []
+    choices = []
+    for item in archived:
+        timestamp = item.get("archived_at")
+        archived_at = (
+            datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+            if timestamp
+            else "未知"
+        )
+        rows.append([
+            item.get("original_name", ""),
+            archived_at,
+            format_size(item.get("storage_bytes", 0)),
+            item.get("archive_id", ""),
+        ])
+        choices.append((
+            f"{item.get('original_name', '')} · {archived_at}",
+            item.get("archive_id", ""),
+        ))
+    return rows, gr.update(choices=choices, value=None), (
+        "回收站为空。" if not rows else f"回收站共有 {len(rows)} 个项目。"
+    )
+
+
+def restore_archived_project(archive_id, _ss):
+    if not archive_id:
+        return gr.update(), "⚪ 请先选择回收站项目。", gr.update(), gr.update()
+    try:
+        result = ProjectStorageService.restore_archived(archive_id)
+        name = result["project_name"]
+        rows, choices, _status = refresh_archived_projects()
+        return (
+            gr.update(choices=ProjectService.scan_projects(), value=name),
+            f"✅ 已恢复「{name}」，完整性检查通过；请点击“打开项目”。",
+            rows,
+            choices,
+        )
+    except Exception as exc:
+        return gr.update(), f"❌ 恢复失败：{exc}", gr.update(), gr.update()
+
+
+def permanently_delete_archived_project(archive_id, confirmed):
+    if not confirmed:
+        return gr.update(), gr.update(), "⚠ 永久删除前请勾选二次确认。"
+    if not archive_id:
+        return gr.update(), gr.update(), "⚪ 请先选择回收站项目。"
+    try:
+        ProjectStorageService.permanently_delete_archived(archive_id)
+        rows, choices, status = refresh_archived_projects()
+        return rows, choices, f"✅ 已永久删除回收站项目。{status}"
+    except Exception as exc:
+        return gr.update(), gr.update(), f"❌ 永久删除失败：{exc}"
 
 
 def migrate_project_copy(ss, target_root):
@@ -1499,30 +1608,29 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             p_open = prj_page["p_open"]
             p_open_dir = prj_page["p_open_dir"]
             p_archive = prj_page["p_archive"]
-            p_del = prj_page["p_del"]
-            p_hide = prj_page["p_hide"]
-            p_restore_name = prj_page["p_restore_name"]
-            p_restore_list = prj_page["p_restore_list"]
-            p_permanent_confirm = prj_page["p_permanent_confirm"]
-            p_permanent_delete = prj_page["p_permanent_delete"]
             p_open_msg = prj_page["p_open_msg"]
             p_summary = prj_page["p_summary"]
             p_chapter_tree = prj_page["p_chapter_tree"]
             p_storage = prj_page["p_storage"]
-            p_storage_refresh = prj_page["p_storage_refresh"]
-            p_cache_clear = prj_page["p_cache_clear"]
-            p_cleanup_scan = prj_page["p_cleanup_scan"]
-            p_cleanup_execute = prj_page["p_cleanup_execute"]
+            p_cleanup = prj_page["p_cleanup"]
+            p_cleanup_msg = prj_page["p_cleanup_msg"]
+            p_cleanup_cancel = prj_page["p_cleanup_cancel"]
+            p_cleanup_confirm = prj_page["p_cleanup_confirm"]
             p_cleanup_token = prj_page["p_cleanup_token"]
-            p_integrity_check = prj_page["p_integrity_check"]
+            p_integrity = prj_page["p_integrity"]
             p_integrity_repair = prj_page["p_integrity_repair"]
+            p_integrity_msg = prj_page["p_integrity_msg"]
             p_backup_dir = prj_page["p_backup_dir"]
             p_backup = prj_page["p_backup"]
             p_restore_file = prj_page["p_restore_file"]
             p_restore = prj_page["p_restore"]
-            p_migrate_root = prj_page["p_migrate_root"]
-            p_migrate = prj_page["p_migrate"]
-            p_storage_msg = prj_page["p_storage_msg"]
+            p_trash_table = prj_page["p_trash_table"]
+            p_trash_sel = prj_page["p_trash_sel"]
+            p_trash_refresh = prj_page["p_trash_refresh"]
+            p_trash_restore = prj_page["p_trash_restore"]
+            p_trash_confirm = prj_page["p_trash_confirm"]
+            p_trash_delete = prj_page["p_trash_delete"]
+            p_trash_msg = prj_page["p_trash_msg"]
 
             # ───────── 音色资产 ─────────
             vce_page = create_voice_page()
@@ -1823,34 +1931,50 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     p_refresh.click(refresh_projects_full, [], [p_sel])
     chain = p_open.click(open_project, [p_sel, ss], [p_summary, v_table, v_role, v_role_title, v_lib, s_log, v_status])
     _open_chain_rest(chain)
-    p_open_dir.click(open_project_folder, [ss], [p_storage_msg])
-    p_storage_refresh.click(refresh_project_storage, [ss], [p_storage])
-    p_cache_clear.click(clear_project_cache, [ss], [p_storage_msg]).then(
-        refresh_project_storage, [ss], [p_storage]
+    p_open_dir.click(open_project_folder, [ss], [p_open_msg])
+    p_archive.click(delete_project, [p_sel, ss], [p_sel, p_open_msg]).then(
+        clear_project_view, [], [p_summary, p_storage, p_chapter_tree]
+    ).then(
+        refresh_archived_projects, [], [p_trash_table, p_trash_sel, p_trash_msg]
     )
-    p_archive.click(delete_project, [p_sel, ss], [p_sel, p_open_msg])
-    p_hide.click(hide_project_from_list, [p_sel, ss], [p_sel, p_open_msg])
-    p_restore_list.click(restore_project_to_list, [p_restore_name], [p_sel, p_open_msg])
-    p_permanent_delete.click(
-        permanent_delete_project,
-        [p_sel, p_permanent_confirm, ss],
-        [p_sel, p_open_msg],
-    )
-    p_cleanup_scan.click(scan_project_cleanup, [ss], [p_storage_msg, p_cleanup_token])
-    p_cleanup_execute.click(
+    p_cleanup.click(scan_project_cleanup, [ss], [p_cleanup_msg, p_cleanup_token, p_cleanup_confirm])
+    p_cleanup_confirm.click(
         execute_project_cleanup,
         [ss, p_cleanup_token],
-        [p_storage_msg, p_cleanup_token],
+        [p_cleanup_msg, p_cleanup_token, p_cleanup_confirm],
     ).then(refresh_project_storage, [ss], [p_storage])
-    p_integrity_check.click(check_project_integrity, [ss], [p_storage_msg])
-    p_integrity_repair.click(repair_project_integrity, [ss], [p_storage_msg]).then(
+    p_cleanup_cancel.click(
+        cancel_project_cleanup,
+        [],
+        [p_cleanup_msg, p_cleanup_token, p_cleanup_confirm],
+    )
+    p_integrity.click(check_project_integrity, [ss], [p_integrity_msg, p_integrity_repair])
+    p_integrity_repair.click(repair_project_integrity, [ss], [p_integrity_msg, p_integrity_repair]).then(
         refresh_project_storage, [ss], [p_storage]
     )
-    p_backup.click(create_project_backup, [ss, p_backup_dir], [p_storage_msg])
-    p_restore.click(restore_project_backup, [p_restore_file], [p_storage_msg]).then(
+    p_backup.click(create_project_backup, [ss, p_backup_dir], [p_integrity_msg])
+    p_restore.click(restore_project_backup, [p_restore_file], [p_integrity_msg]).then(
         refresh_projects_full, [], [p_sel]
     )
-    p_migrate.click(migrate_project_copy, [ss, p_migrate_root], [p_storage_msg])
+    p_trash_refresh.click(
+        refresh_archived_projects,
+        [],
+        [p_trash_table, p_trash_sel, p_trash_msg],
+    )
+    p_trash_restore.click(
+        restore_archived_project,
+        [p_trash_sel, ss],
+        [p_sel, p_trash_msg, p_trash_table, p_trash_sel],
+    )
+    p_trash_delete.click(
+        permanently_delete_archived_project,
+        [p_trash_sel, p_trash_confirm],
+        [p_trash_table, p_trash_sel, p_trash_msg],
+    ).then(
+        lambda: gr.update(value=False),
+        [],
+        [p_trash_confirm],
+    )
     s_start.click(do_synthesis, [ss, s_beam, s_emo, s_override, s_alpha, s_rate, s_chapters_sel], outputs=[s_log, s_queue_list]).then(
         refresh_top_status, [ss], [top_status])
     s_cancel.click(cancel, [ss], outputs=s_log).then(refresh_top_status, [ss], [top_status])
