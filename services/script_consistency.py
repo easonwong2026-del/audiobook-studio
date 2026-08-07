@@ -8,8 +8,29 @@ from typing import Any
 from lib.script_loader import resolve_collections
 
 
+_FIX_HINTS = {
+    "missing_voice": "在 voices 中定义该角色，或修正该 segment 的 role/speaker。",
+    "duplicate_segment_id": "为每个 segment 分配全书唯一的 id。",
+    "duplicate_chapter_id": "为每个 chapter 分配全书唯一的 id。",
+    "empty_text": "补充该 segment 的 text。",
+    "segment_too_short": "确认短文本是否确实需要单独成段。",
+    "segment_too_long": "考虑让外部 Agent 将长段拆成更适合合成的片段。",
+    "unused_voice": "确认该角色是否应保留，或从 voices 中移除。",
+    "possible_character_alias": "由 Agent 或人工确认角色是否为同一人物；Studio 不会自动合并。",
+}
+
+
 def _issue(kind: str, severity: str, message: str, **extra) -> dict[str, Any]:
-    return {"type": kind, "severity": severity, "message": message, **extra}
+    issue = {
+        "type": kind,
+        "code": kind,
+        "severity": severity,
+        "message": message,
+        "fix_hint": _FIX_HINTS.get(kind, "按 path 定位并重新校验 structured_script。"),
+        **extra,
+    }
+    issue.setdefault("path", None)
+    return issue
 
 
 def check_script_consistency(script: dict[str, Any]) -> dict[str, Any]:

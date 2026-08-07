@@ -14,6 +14,7 @@ The service deliberately has only two operations:
 """
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -87,12 +88,118 @@ class StructuredScriptImportService:
     """Single source of truth for offline JSON inspection and creation."""
 
     @staticmethod
+    def _issue_key(issue: dict[str, Any]) -> tuple:
+        """Return a stable key for de-duplicating validation diagnostics."""
+        return (
+            issue.get("code") or issue.get("type"),
+            issue.get("path"),
+            issue.get("role"),
+            issue.get("id"),
+            issue.get("message"),
+        )
+
+    @staticmethod
+    def _script_summary(raw: dict[str, Any], project_name: str | None = None) -> dict[str, Any]:
+        meta = raw.get("meta") if isinstance(raw.get("meta"), dict) else {}
+        voices, chapters = script_loader.resolve_collections(raw)
+        segment_count = sum(
+            len(chapter.get("segments", []))
+            for chapter in chapters
+            if isinstance(chapter, dict) and isinstance(chapter.get("segments"), list)
+        )
+        return {
+            "title": str(meta.get("title") or project_name or raw.get("project_name") or ""),
+            "author": str(meta.get("author") or "未填写"),
+            "chapters": len(chapters),
+            "segments": segment_count,
+            "roles": len(voices),
+        }
+
+    @staticmethod
+    def inspect_data(
+        script: dict[str, Any],
+        project_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Validate an in-memory structured script using the file-import rules.
+
+        The returned object is intentionally JSON-serializable so it can be
+        returned directly by the MCP adapter.  It does not create a project or
+        write a temporary file.
+        """
+        raw = script
+        strict_issues = script_loader.validate_script_issues(raw)
+        consistency = check_script_consistency(raw)
+        issues: list[dict[str, Any]] = [dict(item) for item in strict_issues]
+        # Structural errors are already covered by validate_script_issues.  The
+        # consistency pass contributes quality warnings only, keeping one
+        # authoritative error for each blocking rule.
+        issues.extend(
+            dict(item)
+            for item in consistency.get("issues", [])
+            if item.get("severity") == "warning"
+        )
+        unique: list[dict[str, Any]] = []
+        seen: set[tuple] = set()
+        for issue in issues:
+            issue.setdefault("code", issue.get("type"))
+            issue.setdefault("type", issue.get("code"))
+            issue.setdefault("severity", "error")
+            issue.setdefault("path", None)
+            issue.setdefault("fix_hint", "按 path 定位并重新校验 structured_script。")
+            key = StructuredScriptImportService._issue_key(issue)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(issue)
+
+        selected_name = str(project_name or "").strip()
+        slot = None
+        if selected_name:
+            try:
+                selected_name = sanitize_project_name(selected_name)
+                slot = StructuredScriptImportService._slot(selected_name)
+            except ValueError as exc:
+                unique.append({
+                    "code": "invalid_project_name",
+                    "type": "invalid_project_name",
+                    "severity": "error",
+                    "path": "project_name",
+                    "message": str(exc),
+                    "fix_hint": "使用 Windows 和 macOS 都可用的项目目录名。",
+                })
+
+        errors = [item for item in unique if item.get("severity") == "error"]
+        warnings = [item for item in unique if item.get("severity") == "warning"]
+        report: dict[str, Any] = {
+            "valid": not errors,
+            "can_create": not errors and (slot is None or slot.status == "available"),
+            "project_name": selected_name or None,
+            "summary": {"errors": len(errors), "warnings": len(warnings)},
+            "errors": errors,
+            "warnings": warnings,
+            "script_summary": StructuredScriptImportService._script_summary(raw if isinstance(raw, dict) else {}, selected_name),
+        }
+        if slot is not None:
+            report["project_slot"] = {
+                "name": slot.name,
+                "status": slot.status,
+                "path": slot.path,
+                "location": slot.location,
+                "missing_files": list(slot.missing_files),
+                "invalid_files": list(slot.invalid_files),
+            }
+            if slot.status != "available" and not errors:
+                report["can_create"] = False
+        return report
+
+    @staticmethod
     def _raw_from_script(script) -> dict[str, Any]:
         raw = getattr(script, "raw", None)
         return raw if isinstance(raw, dict) else {}
 
     @staticmethod
     def _candidate_name(path: str, raw: dict[str, Any]) -> str:
+        raw = raw if isinstance(raw, dict) else {}
         meta = raw.get("meta") if isinstance(raw.get("meta"), dict) else {}
         candidates = (
             raw.get("project_name"),
@@ -146,33 +253,24 @@ class StructuredScriptImportService:
             raise ValueError(f"剧本文件不存在：{path or '（未选择）'}")
 
         try:
-            script = script_loader.load_script(path)
+            with open(path, encoding="utf-8") as file:
+                raw = json.load(file)
         except UnicodeDecodeError as exc:
             raise ValueError(f"无法按 UTF-8 读取 JSON：{exc}") from exc
         except OSError as exc:
             raise ValueError(f"无法读取 JSON 文件：{exc}") from exc
 
-        raw = StructuredScriptImportService._raw_from_script(script)
-        errors = list(script_loader.validate_script(script))
-        consistency = check_script_consistency(raw if raw else None)
-        consistency_errors = [
-            item["message"] for item in consistency["issues"]
-            if item.get("severity") == "error"
-        ]
-        warnings = [
-            item["message"] for item in consistency["issues"]
-            if item.get("severity") == "warning"
-        ]
-        errors = list(dict.fromkeys([*errors, *consistency_errors]))
-        raw_meta = raw.get("meta") if isinstance(raw.get("meta"), dict) else {}
+        report = StructuredScriptImportService.inspect_data(raw, project_name)
+        raw_dict = raw if isinstance(raw, dict) else {}
+        raw_meta = raw_dict.get("meta") if isinstance(raw_dict.get("meta"), dict) else {}
         chapters = StructuredScriptImportService._raw_chapters(raw)
         segment_count = sum(
             len(chapter.get("segments", []))
             for chapter in chapters
             if isinstance(chapter, dict) and isinstance(chapter.get("segments"), list)
         )
-        roles, _ = script_loader.resolve_collections(raw)
-        suggested = StructuredScriptImportService._candidate_name(path, raw)
+        roles, _ = script_loader.resolve_collections(raw_dict)
+        suggested = StructuredScriptImportService._candidate_name(path, raw_dict)
         title = str(raw_meta.get("title") or suggested)
         author = str(raw_meta.get("author") or "未填写")
         selected_name = str(project_name or suggested).strip() or suggested
@@ -180,8 +278,23 @@ class StructuredScriptImportService:
             selected_name = sanitize_project_name(selected_name)
             slot = StructuredScriptImportService._slot(selected_name)
         except ValueError as exc:
-            errors.append(f"project_name: {exc}")
             slot = None
+            # Keep the old preview contract string while the machine report
+            # remains the source of truth for MCP callers.
+            report["errors"].append({
+                "code": "invalid_project_name",
+                "type": "invalid_project_name",
+                "severity": "error",
+                "path": "project_name",
+                "message": f"project_name: {exc}",
+                "fix_hint": "使用 Windows 和 macOS 都可用的项目目录名。",
+            })
+        errors = [item.get("message", "") for item in report["errors"]]
+        warnings = [item.get("message", "") for item in report["warnings"]]
+        # ``inspect_data`` has already checked the selected slot.  The preview
+        # keeps the slot object for the existing Gradio import workbench.
+        if slot is None and report.get("project_slot"):
+            slot = StructuredScriptImportService._slot(selected_name)
 
         return StructuredScriptPreview(
             source_path=os.path.abspath(path),
@@ -196,7 +309,7 @@ class StructuredScriptImportService:
             errors=tuple(dict.fromkeys(errors)),
             warnings=tuple(dict.fromkeys(warnings)),
             slot=slot,
-            raw=raw,
+            raw=raw_dict,
         )
 
     @staticmethod
@@ -220,6 +333,29 @@ class StructuredScriptImportService:
             segment_count=preview.segment_count,
             role_count=preview.role_count,
             warnings=list(preview.warnings),
+        )
+
+    @staticmethod
+    def create_from_data(project_name: str, script: dict[str, Any]) -> StructuredScriptCreationResult:
+        """Create a project directly from an in-memory JSON object."""
+        safe_name = sanitize_project_name(str(project_name or "").strip())
+        report = StructuredScriptImportService.inspect_data(script, safe_name)
+        if report["errors"]:
+            messages = [item.get("message", "") for item in report["errors"]]
+            raise ValueError("JSON 校验失败：\n" + "\n".join(f"- {item}" for item in messages))
+
+        from services.project_creation import ProjectCreationService
+
+        ProjectCreationService._assert_slot_available(safe_name)
+        ProjectRepository.create_project_from_data(safe_name, script)
+        summary = report["script_summary"]
+        return StructuredScriptCreationResult(
+            project_name=safe_name,
+            title=summary["title"] or safe_name,
+            chapter_count=summary["chapters"],
+            segment_count=summary["segments"],
+            role_count=summary["roles"],
+            warnings=[item.get("message", "") for item in report["warnings"]],
         )
 
 

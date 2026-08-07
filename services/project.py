@@ -17,6 +17,7 @@ import logging
 import os
 import shutil
 import time
+from typing import Any
 
 from lib import config, project_paths, script_loader
 from repositories.config_repo import ConfigRepository
@@ -65,6 +66,129 @@ class ProjectService:
     def list_projects() -> list[dict]:
         """O4：扫描所有项目并产出多书摘要。"""
         return ProjectRepository.list_projects()
+
+    @staticmethod
+    def create_project_from_data(name: str, script: dict) -> Any:
+        """Create a project from an in-memory structured script."""
+        from services.project_creation import ProjectCreationService
+
+        return ProjectCreationService.create_from_structured_data(name, script)
+
+    @staticmethod
+    def list_project_summaries() -> list[dict[str, Any]]:
+        """Return resilient machine-facing project summaries."""
+        from services.project_storage import ProjectStorageService
+
+        summaries: list[dict[str, Any]] = []
+        for name in ProjectRepository.scan_projects():
+            item: dict[str, Any] = {
+                "project_name": name,
+                "title": name,
+                "chapter_count": 0,
+                "segment_count": 0,
+                "completed_segments": 0,
+                "progress": 0.0,
+                "storage_bytes": 0,
+                "modified_at": None,
+            }
+            try:
+                meta, script, _bindings = ProjectRepository.load_project(name)
+                voices, chapters = script_loader.resolve_collections(script)
+                script_meta = script.get("meta") if isinstance(script.get("meta"), dict) else {}
+                segment_count = sum(
+                    len(chapter.get("segments", []))
+                    for chapter in chapters
+                    if isinstance(chapter, dict) and isinstance(chapter.get("segments"), list)
+                )
+                total = int(getattr(meta, "total_segments", 0) or segment_count)
+                done = int(getattr(meta, "completed_count", 0) or 0)
+                item.update({
+                    "title": str(script_meta.get("title") or name),
+                    "chapter_count": len(chapters),
+                    "segment_count": total,
+                    "completed_segments": done,
+                    "progress": (done / total) if total else 0.0,
+                    "role_count": len(voices),
+                })
+                storage = ProjectStorageService.summary(name)
+                item["storage_bytes"] = storage.total_bytes
+                if storage.modified_at is not None:
+                    from datetime import datetime
+
+                    item["modified_at"] = datetime.fromtimestamp(storage.modified_at).isoformat(timespec="seconds")
+            except Exception as exc:
+                # A malformed project must not prevent an Agent from seeing
+                # the rest of the bookshelf.
+                logger.warning("读取 MCP 项目摘要失败 %s: %s", name, exc)
+                item["error"] = str(exc)
+            summaries.append(item)
+        return summaries
+
+    @staticmethod
+    def get_project_summary(name: str) -> dict[str, Any]:
+        """Return project metadata without embedding the full script payload."""
+        from services.project_storage import ProjectStorageService
+
+        meta, script, bindings = ProjectRepository.load_project(name)
+        voices, chapters = script_loader.resolve_collections(script)
+        script_meta = script.get("meta") if isinstance(script.get("meta"), dict) else {}
+        segments = [
+            segment
+            for chapter in chapters
+            if isinstance(chapter, dict) and isinstance(chapter.get("segments"), list)
+            for segment in chapter["segments"]
+            if isinstance(segment, dict)
+        ]
+        binding_values = bindings.get("bindings", {}) if isinstance(bindings, dict) else {}
+        role_bindings = []
+        for role in voices:
+            value = binding_values.get(role)
+            path = str(value) if value else None
+            if path and not os.path.isabs(path):
+                path = os.path.join(ProjectRepository.get_project_dir(name), path)
+            role_bindings.append({
+                "role": role,
+                "bound": bool(value),
+                "path": str(value) if value else None,
+                "exists": bool(path and os.path.isfile(path)),
+            })
+        total = int(getattr(meta, "total_segments", 0) or len(segments))
+        done = int(getattr(meta, "completed_count", 0) or 0)
+        failed = int(getattr(meta, "failed_count", 0) or 0)
+        integrity = ProjectStorageService.check_integrity(name)
+        integrity_summary = {
+            "ok": bool(integrity.get("ok")),
+            "issue_count": int(integrity.get("issue_count", 0) or 0),
+            "repairable_issues": sum(1 for issue in integrity.get("issues", []) if issue.get("repairable")),
+            "codes": [issue.get("code") for issue in integrity.get("issues", [])],
+        }
+        return {
+            "project_name": name,
+            "meta": script_meta,
+            "project_meta": {
+                "created_at": getattr(meta, "created_at", None),
+                "updated_at": getattr(meta, "updated_at", None),
+                "storage_version": getattr(meta, "storage_version", None),
+            },
+            "script_summary": {
+                "title": str(script_meta.get("title") or name),
+                "author": str(script_meta.get("author") or "未填写"),
+                "chapters": len(chapters),
+                "segments": total,
+                "roles": len(voices),
+            },
+            "roles": list(voices.keys()),
+            "voice_bindings": role_bindings,
+            "synthesis": {
+                "total_segments": total,
+                "completed_segments": done,
+                "failed_segments": failed,
+                "pending_segments": max(total - done - failed, 0),
+                "progress": (done / total) if total else 0.0,
+            },
+            "storage": ProjectStorageService.summary(name).as_dict(),
+            "integrity": integrity_summary,
+        }
 
     @staticmethod
     def delete_project(name: str) -> None:

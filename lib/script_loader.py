@@ -216,21 +216,61 @@ def validate_script(script: Script) -> list[str]:
 
     返回空列表表示校验通过。
     """
-    errors: list[str] = []
-    raw = getattr(script, "raw", None)
+    issues = validate_script_issues(getattr(script, "raw", None))
+    if not issues:
+        return []
+    return _build_diagnostic(script) + [issue["message"] for issue in issues]
+
+
+_VALIDATION_HINTS = {
+    "top_level_not_object": "将 JSON 顶层改为对象 {...}。",
+    "missing_meta": "补充 meta 对象。",
+    "invalid_meta": "将 meta 改为 JSON 对象。",
+    "missing_voices": "在 voices 中定义角色。",
+    "invalid_voices": "将 voices 改为角色名到对象的映射。",
+    "empty_voices": "至少定义一个角色。",
+    "missing_chapters": "在 chapters 中提供章节数组。",
+    "invalid_chapters": "将 chapters 改为数组。",
+    "empty_chapters": "至少提供一个章节。",
+    "missing_voice": "在 voices 中定义该角色，或修正片段的 role/speaker。",
+    "duplicate_segment_id": "为每个片段分配全书唯一的 id。",
+    "duplicate_chapter_id": "为每个章节分配全书唯一的 id。",
+    "empty_text": "补充片段原文 text。",
+    "count_mismatch": "更新 meta 中的统计数字，或修正实际章节/片段数量。",
+}
+
+
+def validate_script_issues(raw) -> list[dict]:
+    """Return machine-readable contract errors for an in-memory raw payload.
+
+    This is the structured counterpart of :func:`validate_script`.  Keeping the
+    rule implementation here means file imports, MCP calls, and project
+    integrity checks can share the exact same validation behavior without
+    parsing human-facing Chinese messages.
+    """
+    issues: list[dict] = []
+
+    def add(code: str, path: str, message: str, **metadata) -> None:
+        issue = {
+            "code": code,
+            "severity": "error",
+            "path": path,
+            "message": message,
+            "fix_hint": _VALIDATION_HINTS.get(code, "按该 JSON 路径修正字段后重新校验。"),
+        }
+        issue.update({key: value for key, value in metadata.items() if value is not None})
+        issues.append(issue)
 
     if not isinstance(raw, dict):
-        errors.extend([
-            "$: 顶层结构必须是 JSON 对象",
-            "voices: 未定义任何角色（voices 为空或缺失）",
-            "chapters: 未定义任何章节（chapters 为空或缺失）",
-        ])
-        return _build_diagnostic(script) + errors
+        add("top_level_not_object", "$", "$: 顶层结构必须是 JSON 对象")
+        add("missing_voices", "voices", "voices: 未定义任何角色（voices 为空或缺失）")
+        add("missing_chapters", "chapters", "chapters: 未定义任何章节（chapters 为空或缺失）")
+        return issues
 
     if "meta" not in raw:
-        errors.append("meta: 缺少必填对象")
+        add("missing_meta", "meta", "meta: 缺少必填对象")
     elif not isinstance(raw.get("meta"), dict):
-        errors.append("meta: 必须是对象")
+        add("invalid_meta", "meta", "meta: 必须是对象")
 
     voices_key = "voices" if "voices" in raw else next(
         (key for key in _VOICE_ALIASES if key in raw), None
@@ -239,82 +279,97 @@ def validate_script(script: Script) -> list[str]:
         (key for key in _CHAPTER_ALIASES if key in raw), None
     )
     if voices_key is None:
-        errors.append("voices: 缺少必填对象")
+        add("missing_voices", "voices", "voices: 缺少必填对象")
+        add("empty_voices", "voices", "voices: 未定义任何角色（voices 为空或缺失）")
     elif not isinstance(raw.get(voices_key), dict):
-        errors.append(f"{voices_key}: 必须是对象")
+        add("invalid_voices", voices_key, f"{voices_key}: 必须是对象")
     if chapters_key is None:
-        errors.append("chapters: 缺少必填数组")
+        add("missing_chapters", "chapters", "chapters: 缺少必填数组")
+        add("empty_chapters", "chapters", "chapters: 未定义任何章节（chapters 为空或缺失）")
     elif not isinstance(raw.get(chapters_key), list):
-        errors.append(f"{chapters_key}: 必须是数组")
+        add("invalid_chapters", chapters_key, f"{chapters_key}: 必须是数组")
 
-    if not script.voices:
-        errors.append("voices: 未定义任何角色（voices 为空或缺失）")
-    if not script.chapters:
-        errors.append("chapters: 未定义任何章节（chapters 为空或缺失）")
-
-    voice_names = set(script.voices.keys())
     raw_voices = raw.get(voices_key or "voices")
+    voice_names: set[str] = set(raw_voices) if isinstance(raw_voices, dict) else set()
     if isinstance(raw_voices, dict):
+        if not raw_voices:
+            add("empty_voices", voices_key or "voices", "voices: 未定义任何角色（voices 为空或缺失）")
         for role, info in raw_voices.items():
+            role_path = f"{voices_key or 'voices'}.{role}"
             if not isinstance(role, str) or not role.strip():
-                errors.append(f"{voices_key or 'voices'}: 角色名不能为空")
+                add("empty_voice_name", voices_key or "voices", "voices: 角色名不能为空")
             if not isinstance(info, dict):
-                errors.append(f"{voices_key or 'voices'}[{role!r}]: 必须是对象")
+                add("invalid_voice", role_path, f"{voices_key or 'voices'}[{role!r}]: 必须是对象")
 
     raw_chapters = raw.get(chapters_key or "chapters")
     if isinstance(raw_chapters, list):
+        if not raw_chapters:
+            add("empty_chapters", chapters_key or "chapters", "chapters: 未定义任何章节（chapters 为空或缺失）")
         seen_chapter_ids: set[str] = set()
         seen_segment_ids: set[str] = set()
         for chapter_index, chapter in enumerate(raw_chapters):
             chapter_path = f"{chapters_key or 'chapters'}[{chapter_index}]"
             if not isinstance(chapter, dict):
-                errors.append(f"{chapter_path}: 必须是对象")
+                add("invalid_chapter", chapter_path, f"{chapter_path}: 必须是对象")
                 continue
             chapter_id = chapter.get("id")
             if chapter_id is None or not str(chapter_id).strip():
-                errors.append(f"{chapter_path}.id: 缺少非空章节 ID")
+                add("empty_chapter_id", f"{chapter_path}.id", f"{chapter_path}.id: 缺少非空章节 ID")
             else:
                 normalized_chapter_id = str(chapter_id)
                 if normalized_chapter_id in seen_chapter_ids:
-                    errors.append(f"{chapter_path}.id: 章节 ID 重复（{normalized_chapter_id}）")
+                    add(
+                        "duplicate_chapter_id",
+                        f"{chapter_path}.id",
+                        f"{chapter_path}.id: 章节 ID 重复（{normalized_chapter_id}）",
+                        id=normalized_chapter_id,
+                    )
                 seen_chapter_ids.add(normalized_chapter_id)
             title = chapter.get("title")
             if not isinstance(title, str) or not title.strip():
-                errors.append(f"{chapter_path}.title: 必须是非空字符串")
+                add("empty_chapter_title", f"{chapter_path}.title", f"{chapter_path}.title: 必须是非空字符串")
             segments = chapter.get("segments")
             if not isinstance(segments, list):
-                errors.append(f"{chapter_path}.segments: 必须是数组")
+                add("invalid_segments", f"{chapter_path}.segments", f"{chapter_path}.segments: 必须是数组")
                 continue
             if not segments:
-                errors.append(f"{chapter_path}.segments: 不能为空")
+                add("empty_chapter", f"{chapter_path}.segments", f"{chapter_path}.segments: 不能为空")
             for segment_index, segment in enumerate(segments):
                 segment_path = f"{chapter_path}.segments[{segment_index}]"
                 if not isinstance(segment, dict):
-                    errors.append(f"{segment_path}: 必须是对象")
+                    add("invalid_segment", segment_path, f"{segment_path}: 必须是对象")
                     continue
                 segment_id = segment.get("id")
                 if segment_id is None or not str(segment_id).strip():
-                    errors.append(f"{segment_path}.id: 缺少非空片段 ID")
+                    add("empty_segment_id", f"{segment_path}.id", f"{segment_path}.id: 缺少非空片段 ID")
                 else:
                     normalized_segment_id = str(segment_id)
                     if normalized_segment_id in seen_segment_ids:
-                        errors.append(
-                            f"{segment_path}.id: 片段 ID 重复（{normalized_segment_id}）"
+                        add(
+                            "duplicate_segment_id",
+                            f"{segment_path}.id",
+                            f"{segment_path}.id: 片段 ID 重复（{normalized_segment_id}）",
+                            id=normalized_segment_id,
                         )
                     seen_segment_ids.add(normalized_segment_id)
+
                 role_value = segment.get("role")
                 speaker_value = segment.get("speaker")
                 speaker = role_value if role_value is not None else speaker_value
                 if not isinstance(speaker, str) or not speaker.strip():
-                    errors.append(f"{segment_path}.speaker: 必须是非空字符串")
+                    add("empty_role", f"{segment_path}.speaker", f"{segment_path}.speaker: 必须是非空字符串")
                 for field, value in (("role", role_value), ("speaker", speaker_value)):
+                    field_path = f"{segment_path}.{field}"
                     if value is None:
                         continue
                     if not isinstance(value, str) or not value.strip():
-                        errors.append(f"{segment_path}.{field}: 必须是非空字符串")
+                        add("empty_role", field_path, f"{field_path}: 必须是非空字符串")
                     elif value not in voice_names:
-                        errors.append(
-                            f"{segment_path}.{field}: 角色“{value}”未在 voices 中定义"
+                        add(
+                            "missing_voice",
+                            field_path,
+                            f"{field_path}: 角色“{value}”未在 voices 中定义",
+                            role=value,
                         )
                 if (
                     isinstance(role_value, str)
@@ -323,16 +378,12 @@ def validate_script(script: Script) -> list[str]:
                     and speaker_value.strip()
                     and role_value != speaker_value
                 ):
-                    errors.append(
-                        f"{segment_path}.speaker: role 与 speaker 不一致"
-                    )
+                    add("role_speaker_mismatch", f"{segment_path}.speaker", f"{segment_path}.speaker: role 与 speaker 不一致")
                 text = segment.get("text")
                 if not isinstance(text, str) or not text.strip():
-                    errors.append(f"{segment_path}.text: 必须是非空字符串")
-                _validate_segment_numbers(segment, segment_path, errors)
+                    add("empty_text", f"{segment_path}.text", f"{segment_path}.text: 必须是非空字符串")
+                _validate_segment_number_issues(segment, segment_path, add)
 
-    # A declared count is useful to external agents and must not silently
-    # disagree with the actual payload.  Missing counts remain compatible.
     meta = raw.get("meta") if isinstance(raw.get("meta"), dict) else {}
     actual_chapters = len(raw_chapters) if isinstance(raw_chapters, list) else 0
     actual_segments = sum(
@@ -341,17 +392,21 @@ def validate_script(script: Script) -> list[str]:
         if isinstance(ch, dict) and isinstance(ch.get("segments"), list)
     ) if isinstance(raw_chapters, list) else 0
     for field, actual in (("total_chapters", actual_chapters), ("total_segments", actual_segments)):
-        if field in meta:
-            declared = meta.get(field)
-            if not isinstance(declared, int) or isinstance(declared, bool):
-                errors.append(f"meta.{field}: 必须是整数")
-            elif declared != actual:
-                errors.append(f"meta.{field}: 声明为 {declared}，实际为 {actual}")
-
-    # 存在错误时，前置可读的诊断信息，帮助用户定位问题。
-    if errors:
-        errors = _build_diagnostic(script) + errors
-    return errors
+        if field not in meta:
+            continue
+        path = f"meta.{field}"
+        declared = meta.get(field)
+        if not isinstance(declared, int) or isinstance(declared, bool):
+            add("invalid_count", path, f"{path}: 必须是整数")
+        elif declared != actual:
+            add(
+                "count_mismatch",
+                path,
+                f"{path}: 声明为 {declared}，实际为 {actual}",
+                expected=actual,
+                actual=declared,
+            )
+    return issues
 
 
 def _validate_segment_numbers(segment: dict, path: str, errors: list[str]) -> None:
@@ -430,6 +485,69 @@ def _validate_segment_numbers(segment: dict, path: str, errors: list[str]) -> No
             allowed = "、".join(sorted(VALID_PAUSE_TYPES))
             errors.append(
                 f"{pause_path}.type: 不支持的停顿类型“{pause_type}”（可选：{allowed}）"
+            )
+
+
+def _validate_segment_number_issues(segment: dict, path: str, add) -> None:
+    """Add structured errors for the same delivery fields as the text validator."""
+
+    def number(field: str, value, bounds: tuple[float, float], *, integer: bool = False, field_path: str | None = None):
+        target = field_path or f"{path}.{field}"
+        if value is None:
+            return
+        if integer and (not isinstance(value, int) or isinstance(value, bool)):
+            add("invalid_number_type", target, f"{target}: 必须是整数")
+            return
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            add("invalid_number", target, f"{target}: 必须是数字")
+            return
+        if not math.isfinite(parsed) or not bounds[0] <= parsed <= bounds[1]:
+            add("number_out_of_range", target, f"{target}: 数值 {value!r} 超出 {bounds[0]}–{bounds[1]} 范围")
+
+    delivery = segment.get("delivery") if isinstance(segment.get("delivery"), dict) else {}
+    emotion = segment.get("emotion")
+    if emotion is not None and emotion not in VALID_EMOTIONS:
+        add("invalid_emotion", f"{path}.emotion", f"{path}.emotion: 不支持的情绪“{emotion}”")
+    number("speech_rate", segment.get("speech_rate", delivery.get("speed")), SPEECH_RATE_RANGE)
+    number("pitch", segment.get("pitch", delivery.get("pitch")), PITCH_RANGE)
+    number("emo_alpha", segment.get("emo_alpha", segment.get("emotion_strength", delivery.get("intensity"))), INTENSITY_RANGE)
+    for field in ("pause_before", "pause_after"):
+        number(field, segment.get(field), PAUSE_RANGE_MS, integer=True)
+    if "pauses" not in segment:
+        return
+    pauses = segment.get("pauses")
+    if not isinstance(pauses, list):
+        add("invalid_pauses", f"{path}.pauses", f"{path}.pauses: 必须是数组")
+        return
+    text_length = len(str(segment.get("text") or ""))
+    for index, pause in enumerate(pauses):
+        pause_path = f"{path}.pauses[{index}]"
+        if not isinstance(pause, dict):
+            add("invalid_pause", pause_path, f"{pause_path}: 必须是对象")
+            continue
+        number(
+            "position",
+            pause.get("position"),
+            (0, float(text_length)),
+            integer=True,
+            field_path=f"{pause_path}.position",
+        )
+        number(
+            "duration",
+            pause.get("duration"),
+            PAUSE_RANGE_MS,
+            integer=True,
+            field_path=f"{pause_path}.duration",
+        )
+        pause_type = pause.get("type")
+        if pause_type is not None and pause_type not in VALID_PAUSE_TYPES:
+            allowed = "、".join(sorted(VALID_PAUSE_TYPES))
+            add(
+                "invalid_pause_type",
+                f"{pause_path}.type",
+                f"{pause_path}.type: 不支持的停顿类型“{pause_type}”（可选：{allowed}）",
             )
 
 

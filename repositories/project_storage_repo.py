@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import time
 import uuid
@@ -62,6 +63,26 @@ class ProjectStorageSummary:
             "preview_bytes": self.preview_bytes,
             "file_count": self.file_count,
             "modified_at": self.modified_at,
+        }
+
+
+@dataclass(frozen=True)
+class ArchivedProjectSummary:
+    """A recoverable project entry under ``data/.trash/projects``."""
+
+    archive_id: str
+    original_name: str
+    path: str
+    archived_at: float | None
+    storage_bytes: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "archive_id": self.archive_id,
+            "original_name": self.original_name,
+            "path": self.path,
+            "archived_at": self.archived_at,
+            "storage_bytes": self.storage_bytes,
         }
 
 
@@ -183,6 +204,77 @@ class ProjectStorageRepository:
         return os.path.normpath(preview_root)
 
     @staticmethod
+    def _trash_root(*, create: bool = False) -> str:
+        data_root = os.path.realpath(config.get_data_dir())
+        trash_dir = os.path.join(data_root, ".trash")
+        if os.path.lexists(trash_dir) and os.path.islink(trash_dir):
+            raise ValueError("回收站路径不安全")
+        root = os.path.join(trash_dir, "projects")
+        if create:
+            os.makedirs(root, exist_ok=True)
+        if not _inside(root, data_root):
+            raise ValueError("回收站路径不安全")
+        return os.path.normpath(root)
+
+    @staticmethod
+    def _archive_name(path: str, archive_id: str) -> str:
+        """Read the original name, falling back to the archive suffix format."""
+        try:
+            with open(os.path.join(path, "project.json"), encoding="utf-8") as file:
+                meta = json.load(file)
+            candidate = meta.get("project_name") if isinstance(meta, dict) else None
+            if candidate:
+                safe = sanitize_project_name(str(candidate))
+                if safe == str(candidate):
+                    return safe
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+            pass
+        match = re.match(r"^(?P<name>.+)_\d{8}_\d{6}_[0-9a-fA-F]{8}$", archive_id)
+        candidate = match.group("name") if match else archive_id
+        return sanitize_project_name(candidate)
+
+    @staticmethod
+    def _resolve_archive(archive_id: str) -> tuple[str, str, str]:
+        raw = str(archive_id or "").strip()
+        if (
+            not raw
+            or os.path.basename(raw) != raw
+            or raw in {".", ".."}
+            or "/" in raw
+            or "\\" in raw
+        ):
+            raise ValueError("回收站项目标识无效")
+        root = ProjectStorageRepository._trash_root(create=False)
+        path = os.path.normpath(os.path.join(root, raw))
+        if not _inside(path, root) or path == root or os.path.islink(path) or not os.path.isdir(path):
+            raise FileNotFoundError("回收站中不存在该项目")
+        return raw, ProjectStorageRepository._archive_name(path, raw), path
+
+    @staticmethod
+    def list_archived_projects() -> list[ArchivedProjectSummary]:
+        """List recoverable project directories without touching active projects."""
+        root = ProjectStorageRepository._trash_root(create=False)
+        if not os.path.isdir(root) or os.path.islink(root):
+            return []
+        entries: list[ArchivedProjectSummary] = []
+        for entry in os.scandir(root):
+            if not entry.is_dir(follow_symlinks=False) or entry.is_symlink():
+                continue
+            try:
+                modified = entry.stat(follow_symlinks=False).st_mtime
+                size, _count, _mtime = _tree_measure(entry.path)
+                entries.append(ArchivedProjectSummary(
+                    archive_id=entry.name,
+                    original_name=ProjectStorageRepository._archive_name(entry.path, entry.name),
+                    path=os.path.normpath(entry.path),
+                    archived_at=modified,
+                    storage_bytes=size,
+                ))
+            except (OSError, ValueError) as exc:
+                logger.warning("读取回收站项目失败 %s: %s", entry.path, exc)
+        return sorted(entries, key=lambda item: (item.archived_at or 0, item.archive_id), reverse=True)
+
+    @staticmethod
     def _measure_category(project_dir: str, key: str) -> tuple[int, int, float | None]:
         return _tree_measure(project_paths.project_dir(project_dir, key))
 
@@ -195,14 +287,14 @@ class ProjectStorageRepository:
         )
 
         category_sizes: dict[str, int] = {}
-        for key in ("source", "voices", "segments", "chapter_audio", "merged_audio", "exports"):
+        for key in ("source", "chapter_text", "voices", "segments", "chapter_audio", "merged_audio", "exports"):
             category_sizes[key] = ProjectStorageRepository._measure_category(project_dir, key)[0]
 
         return ProjectStorageSummary(
             project_name=safe_name,
             project_dir=os.path.normpath(project_dir),
             total_bytes=root_bytes + preview_bytes,
-            source_bytes=category_sizes["source"],
+            source_bytes=category_sizes["source"] + category_sizes["chapter_text"],
             voices_bytes=category_sizes["voices"],
             segments_bytes=category_sizes["segments"],
             chapter_audio_bytes=category_sizes["chapter_audio"],
@@ -217,11 +309,7 @@ class ProjectStorageRepository:
     def archive_project(name: str) -> str:
         """Move a project into the data-root trash area, preserving recovery."""
         safe_name, project_dir = ProjectStorageRepository._resolve_project(name)
-        data_root = os.path.realpath(config.get_data_dir())
-        trash_root = os.path.join(data_root, ".trash", "projects")
-        os.makedirs(trash_root, exist_ok=True)
-        if not _inside(trash_root, data_root):
-            raise ValueError("回收站路径不安全")
+        trash_root = ProjectStorageRepository._trash_root(create=True)
         target = os.path.join(
             trash_root,
             f"{safe_name}_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}",
@@ -241,13 +329,92 @@ class ProjectStorageRepository:
                 if os.path.lexists(target):
                     shutil.rmtree(target, ignore_errors=True)
                 raise
+        try:
+            # Directory mtime is the only portable metadata available for old
+            # archives; refresh it so the recycle-bin UI shows archive time,
+            # not the last time the source project happened to change.
+            now = time.time()
+            os.utime(target, (now, now))
+        except OSError:
+            logger.debug("无法更新回收站归档时间：%s", target)
         return os.path.normpath(target)
 
     @staticmethod
-    def permanently_delete_project(name: str) -> None:
-        """Permanently remove a project after the caller has explicit consent."""
-        _safe_name, project_dir = ProjectStorageRepository._resolve_project(name)
-        shutil.rmtree(project_dir)
+    def permanently_delete_project(archive_id: str) -> None:
+        """Permanently delete only a project identified inside the trash."""
+        try:
+            ProjectStorageRepository._resolve_archive(archive_id)
+        except (FileNotFoundError, ValueError) as exc:
+            raise ValueError("永久删除只能针对已进入回收站的项目") from exc
+        ProjectStorageRepository.permanently_delete_archived_project(archive_id)
+
+    @staticmethod
+    def permanently_delete_archived_project(archive_id: str) -> None:
+        """Permanently delete exactly one already-archived project."""
+        _archive_id, _original_name, path = ProjectStorageRepository._resolve_archive(archive_id)
+        shutil.rmtree(path)
+
+    @staticmethod
+    def restore_archived_project(archive_id: str) -> dict[str, Any]:
+        """Restore one archive without overwriting an existing project slot."""
+        resolved_id, original_name, archive_path = ProjectStorageRepository._resolve_archive(archive_id)
+        inspection = ProjectRepository.inspect_project_slot(original_name)
+        if inspection.status != "available":
+            raise FileExistsError(
+                f"无法恢复「{original_name}」：目标项目名称已存在或不可用（{inspection.status}）"
+            )
+        ProjectRepository._ensure_roots()
+        workspace = os.path.abspath(ProjectRepository.WORKSPACE_ROOT or config.get_projects_root())
+        if os.path.islink(workspace):
+            raise ValueError("项目根目录不安全")
+        os.makedirs(workspace, exist_ok=True)
+        destination = os.path.normpath(os.path.join(workspace, original_name))
+        if not _inside(destination, workspace) or destination == workspace or os.path.lexists(destination):
+            raise FileExistsError(f"恢复目标已存在：{destination}")
+
+        moved = False
+        try:
+            try:
+                os.replace(archive_path, destination)
+            except OSError:
+                shutil.copytree(archive_path, destination, symlinks=True)
+                shutil.rmtree(archive_path)
+            moved = True
+            # A legacy list-only hide must not survive a real recycle-bin
+            # restore; the project should visibly return to the bookshelf.
+            catalog = ProjectStorageRepository._catalog()
+            hidden = {
+                str(value)
+                for value in catalog.get("hidden_projects", [])
+                if isinstance(value, (str, int))
+            }
+            if original_name in hidden:
+                hidden.discard(original_name)
+                catalog["hidden_projects"] = sorted(hidden)
+                _atomic_write(ProjectStorageRepository._catalog_path(), catalog)
+            report = ProjectStorageRepository.check_project_integrity(original_name)
+            if not report.get("ok"):
+                details = "; ".join(item.get("message", "") for item in report.get("issues", [])[:3])
+                raise ValueError(f"恢复后的项目完整性检查失败：{details}")
+            return {
+                "restored": True,
+                "archive_id": resolved_id,
+                "project_name": original_name,
+                "project_dir": destination,
+                "integrity": report,
+            }
+        except Exception:
+            if moved and os.path.lexists(destination) and not os.path.lexists(archive_path):
+                try:
+                    os.replace(destination, archive_path)
+                except OSError:
+                    logger.exception("恢复失败后无法将项目放回回收站：%s", archive_path)
+            elif not moved and os.path.lexists(destination) and os.path.lexists(archive_path):
+                # copytree may leave a partial target when a Windows file is
+                # locked; remove only that newly-created target and retain the
+                # original archive for a later retry.
+                shutil.rmtree(destination, ignore_errors=True)
+            raise
 
     @staticmethod
     def _catalog_path() -> str:
@@ -357,7 +524,9 @@ class ProjectStorageRepository:
                     except OSError:
                         continue
                     reason = ""
-                    if ProjectStorageRepository._is_temp_file(path):
+                    if _inside(path, preview_dir):
+                        reason = "试听缓存"
+                    elif ProjectStorageRepository._is_temp_file(path):
                         reason = "临时文件"
                     elif in_segments and stat.st_size == 0:
                         stem = os.path.splitext(os.path.basename(path))[0]
@@ -558,6 +727,7 @@ class ProjectStorageRepository:
 
 
 __all__ = [
+    "ArchivedProjectSummary",
     "CleanupCandidate",
     "CleanupPlan",
     "ProjectStorageRepository",

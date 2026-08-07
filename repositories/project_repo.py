@@ -536,25 +536,58 @@ class ProjectRepository:
         Raises:
             FileExistsError: 项目已存在时抛出。
         """
+        with open(script_path, encoding="utf-8") as file:
+            raw_script = json.load(file)
+        return ProjectRepository._create_project_from_raw(
+            name,
+            raw_script,
+            source_file_path=script_path,
+        )
+
+    @staticmethod
+    def create_project_from_data(name: str, raw_script: dict) -> str:
+        """Create a project from an already-loaded JSON object.
+
+        File and in-memory creation share the same canonical layout,
+        normalization, metadata and atomic publish path.  The in-memory path
+        only changes how the original source copy is materialized.
+        """
+        return ProjectRepository._create_project_from_raw(name, raw_script)
+
+    @staticmethod
+    def _create_project_from_raw(
+        name: str,
+        raw_script: dict,
+        *,
+        source_file_path: str | None = None,
+    ) -> str:
+        """Build one project in a temporary directory and publish it atomically."""
         ProjectRepository._ensure_roots()
         name = sanitize_project_name(name)
         ws = ProjectRepository.WORKSPACE_ROOT or ""
         project_dir = os.path.join(ws, name)
-        if os.path.exists(project_dir):
+        if os.path.lexists(project_dir):
             raise FileExistsError(f"项目 '{name}' 已存在")
         os.makedirs(ws, exist_ok=True)
         tmp_dir = os.path.join(ws, f".tmp_{name}_{uuid.uuid4().hex}")
         try:
             paths = project_paths.ensure_layout(tmp_dir, prefer_canonical=True, compatibility=True)
-            with open(script_path, encoding="utf-8") as f:
-                raw_script = json.load(f)
             normalized_script = chapter_identity.normalize_script_for_project(raw_script)
             with open(os.path.join(tmp_dir, "structured_script.json"), "w", encoding="utf-8") as f:
                 json.dump(normalized_script, f, ensure_ascii=False, indent=2)
 
-            source_name = chapter_identity.safe_filename(os.path.basename(script_path), "structured_script.json")
-            source_path = os.path.join(paths["source"], source_name)
-            shutil.copy2(script_path, source_path)
+            source_name = chapter_identity.safe_filename(
+                os.path.basename(source_file_path) if source_file_path else "structured_script.json",
+                "structured_script.json",
+            )
+            source_target = os.path.join(paths["source"], source_name)
+            if source_file_path:
+                # Keep the existing file-import copy behavior (and its
+                # Windows-safe metadata) while sharing the rest of creation.
+                shutil.copy2(source_file_path, source_target)
+            else:
+                with open(source_target, "w", encoding="utf-8") as f:
+                    json.dump(normalized_script, f, ensure_ascii=False, indent=2)
             for index, chapter in enumerate(normalized_script.get("chapters", [])):
                 if not isinstance(chapter, dict):
                     continue
@@ -581,9 +614,9 @@ class ProjectRepository:
                                segments_status={seg.id: "pending" for ch in parsed_script.chapters for seg in ch.segments},
                                storage_version=project_paths.STORAGE_VERSION,
                                directories=project_paths.layout_manifest(tmp_dir),
-                               source_file=os.path.relpath(source_path, tmp_dir))
+                               source_file=os.path.relpath(source_target, tmp_dir))
             ProjectRepository._save_meta(tmp_dir, meta)
-            if os.path.exists(project_dir):
+            if os.path.lexists(project_dir):
                 raise FileExistsError(f"项目 '{name}' 已存在")
             os.replace(tmp_dir, project_dir)
             return name
@@ -610,11 +643,32 @@ class ProjectRepository:
         return ProjectStorageRepository.archive_project(name)
 
     @staticmethod
-    def permanently_delete_project(name: str) -> None:
-        """Permanently delete a project after an explicit caller confirmation."""
+    def permanently_delete_project(archive_id: str) -> None:
+        """Permanently delete a project only by its trash archive id."""
         from .project_storage_repo import ProjectStorageRepository
 
-        ProjectStorageRepository.permanently_delete_project(name)
+        ProjectStorageRepository.permanently_delete_project(archive_id)
+
+    @staticmethod
+    def list_archived_projects() -> list[dict]:
+        """List projects that are already in the recoverable trash."""
+        from .project_storage_repo import ProjectStorageRepository
+
+        return [item.as_dict() for item in ProjectStorageRepository.list_archived_projects()]
+
+    @staticmethod
+    def restore_archived_project(archive_id: str) -> dict:
+        """Restore one trash entry without overwriting an active project."""
+        from .project_storage_repo import ProjectStorageRepository
+
+        return ProjectStorageRepository.restore_archived_project(archive_id)
+
+    @staticmethod
+    def permanently_delete_archived_project(archive_id: str) -> None:
+        """Permanently delete exactly one trash entry."""
+        from .project_storage_repo import ProjectStorageRepository
+
+        ProjectStorageRepository.permanently_delete_archived_project(archive_id)
 
     @staticmethod
     def remove_project_from_list(name: str) -> None:

@@ -43,9 +43,8 @@ class ProjectStorageService:
 
             modified = datetime.datetime.fromtimestamp(summary.modified_at).strftime("%Y-%m-%d %H:%M:%S")
         rows = [
-            "#### 项目存储与数据管理",
+            "#### 数据占用",
             f"- **项目名称**：`{summary.project_name}`",
-            f"- **项目目录**：`{summary.project_dir}`",
             f"- **总占用**：**{format_size(summary.total_bytes)}**（{summary.file_count} 个文件）",
             f"- **最近修改**：{modified}",
             "",
@@ -84,8 +83,21 @@ class ProjectStorageService:
         return ProjectStorageRepository.archive_project(name)
 
     @staticmethod
-    def permanently_delete(name: str) -> None:
-        ProjectStorageRepository.permanently_delete_project(name)
+    def list_archived() -> list[dict[str, Any]]:
+        return [item.as_dict() for item in ProjectStorageRepository.list_archived_projects()]
+
+    @staticmethod
+    def restore_archived(archive_id: str) -> dict[str, Any]:
+        return ProjectStorageRepository.restore_archived_project(archive_id)
+
+    @staticmethod
+    def permanently_delete_archived(archive_id: str) -> None:
+        ProjectStorageRepository.permanently_delete_archived_project(archive_id)
+
+    @staticmethod
+    def permanently_delete(archive_id: str) -> None:
+        """Compatibility entry point accepting only a trash archive id."""
+        ProjectStorageRepository.permanently_delete_project(archive_id)
 
     @staticmethod
     def remove_from_list(name: str) -> None:
