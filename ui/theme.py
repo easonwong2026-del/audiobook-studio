@@ -122,7 +122,35 @@ body, .gradio-container {{
   --block-radius:16px!important;
   background:{SURFACE}!important;
 }}
-.gradio-container {{ max-width:1440px!important; margin:0 auto!important; padding:20px 22px!important; }}
+html {{
+  overflow-y:scroll!important;
+  scrollbar-gutter:stable;
+}}
+body {{
+  min-width:0!important;
+  overflow-x:hidden!important;
+}}
+.gradio-container {{
+  width:100%!important;
+  max-width:1440px!important;
+  min-width:0!important;
+  margin:0 auto!important;
+  padding:20px 22px!important;
+  box-sizing:border-box!important;
+}}
+.gradio-container > main.fillable,
+.gradio-container > main.fillable > .wrap,
+.gradio-container > main.fillable > .wrap > .contain,
+.gradio-container > main.fillable > .wrap > .contain > .column,
+.gradio-container > main.fillable > .wrap > .contain > .column > .row {{
+  width:100%!important;
+  max-width:100%!important;
+  min-width:0!important;
+  box-sizing:border-box!important;
+}}
+.gradio-container > main.fillable > .wrap > .contain > .column > .row {{
+  align-items:stretch!important;
+}}
 
 /* ===== 文本输入 / 数字（白底深字 + 圆角 + focus 黄绿阴影） ===== */
 textarea {{ font-family:'JetBrains Mono',monospace!important; font-size:13px!important; color:{TEXT_PRIMARY}!important; background:{CARD}!important; border-radius:10px!important; border:1px solid {BORDER}!important; padding:10px 12px!important; transition:all 0.15s!important; }}
@@ -235,9 +263,24 @@ button:hover, .gr-button:hover {{ transform:translateY(-1px)!important; }}
 }}
 
 /* ===== 主工作区（浅色 + 大圆角 + 统一分区间距） ===== */
-.main-area {{ border:none!important; flex:1 1 0!important; width:100%!important; max-width:none!important; min-width:0!important; padding:8px 20px 24px!important; background:transparent!important; box-sizing:border-box!important; }}
-.main-area > * {{ width:100%!important; max-width:none!important; min-width:0!important; box-sizing:border-box!important; }}
-.main-area > .gr-group {{ width:100%!important; min-width:0!important; box-sizing:border-box!important; }}
+.main-area {{ border:none!important; flex:1 1 0!important; width:0!important; max-width:none!important; min-width:0!important; padding:8px 20px 24px!important; background:transparent!important; box-sizing:border-box!important; overflow-x:hidden!important; }}
+.main-area > * {{ width:100%!important; max-width:100%!important; min-width:0!important; box-sizing:border-box!important; }}
+.main-area > .gr-group,
+.main-area > #grp-overview,
+.main-area > #grp-create-project,
+.main-area > #grp-project,
+.main-area > #grp-voices,
+.main-area > #grp-synth,
+.main-area > #grp-review,
+.main-area > #grp-export,
+.main-area > #grp-settings,
+.main-area > #grp-production-nav,
+.main-area > #grp-supplement {{
+  width:100%!important;
+  max-width:100%!important;
+  min-width:0!important;
+  box-sizing:border-box!important;
+}}
 .main-area .gr-row, .main-area .gr-column, .main-area .gr-box {{ min-width:0!important; max-width:100%!important; box-sizing:border-box!important; }}
 .settings-page, .settings-page > *, .settings-card {{ width:100%!important; max-width:100%!important; min-width:0!important; box-sizing:border-box!important; }}
 .settings-page .tabs, .settings-page .settings-tabs, .settings-page [role="tabpanel"] {{ width:100%!important; max-width:100%!important; min-width:0!important; box-sizing:border-box!important; }}
@@ -350,8 +393,31 @@ button[aria-label*="Play"] {{ border-radius:999px!important; background:{ACCENT}
 .role-list-panel > .gr-markdown:nth-child(2) {{ color:{TEXT_MUTED}!important; font-size:12px!important; margin:0 0 10px!important; }}
 .role-list-search {{ margin-bottom:8px!important; }}
 .role-list-search input {{ background:{CARD}!important; }}
-.role-management-list {{ max-height:560px!important; overflow:auto!important; border:1px solid {BORDER}!important; border-radius:12px!important; background:{CARD}!important; padding:4px!important; }}
-.role-management-list .wrap {{ display:flex!important; flex-direction:column!important; width:100%!important; max-height:550px!important; overflow:auto!important; }}
+.role-management-list {{ width:100%!important; min-width:0!important; max-width:100%!important; max-height:560px!important; overflow:hidden!important; border:1px solid {BORDER}!important; border-radius:12px!important; background:{CARD}!important; padding:4px!important; box-sizing:border-box!important; }}
+/* Gradio 5.50 renders Radio choices in a direct div without role="radiogroup". */
+.role-management-list .wrap {{ display:flex!important; flex-direction:column!important; width:100%!important; min-width:0!important; max-width:100%!important; max-height:550px!important; overflow-y:auto!important; overflow-x:hidden!important; }}
+.role-management-list > div:has(> label),
+.role-management-list [role="radiogroup"] {{
+  display:flex!important;
+  flex-direction:column!important;
+  flex-wrap:nowrap!important;
+  align-items:stretch!important;
+  width:100%!important;
+  min-width:0!important;
+  max-width:100%!important;
+  max-height:550px!important;
+  overflow-y:auto!important;
+  overflow-x:hidden!important;
+}}
+.role-management-list > div:has(> label) > label,
+.role-management-list [role="radiogroup"] > label {{
+  display:flex!important;
+  flex:0 0 auto!important;
+  width:100%!important;
+  min-width:0!important;
+  max-width:100%!important;
+  box-sizing:border-box!important;
+}}
 .role-management-list label {{ display:flex!important; align-items:flex-start!important; width:100%!important; box-sizing:border-box!important; min-height:46px!important; padding:10px 12px!important; margin:0!important; border-bottom:1px solid #edf0ed!important; border-radius:9px!important; background:{CARD}!important; white-space:pre-line!important; line-height:1.35!important; color:{TEXT_PRIMARY}!important; cursor:pointer!important; transition:background .12s ease,border-color .12s ease!important; }}
 .role-management-list label:hover {{ background:#eef6e7!important; }}
 .role-management-list label:has(input:checked) {{ background:{ACCENT_SOFT}!important; border-left:3px solid {ACCENT_DEEP}!important; color:{TEXT_PRIMARY}!important; }}
@@ -398,7 +464,7 @@ button[aria-label*="Play"] {{ border-radius:999px!important; background:{ACCENT}
   }}
   .dashboard-metrics {{ grid-template-columns:1fr; }}
   .workbench-hero {{ padding:22px; }}.hero-progress {{ display:none; }}
-  .main-area {{ padding:8px 12px 20px!important; }}
+  .main-area {{ width:100%!important; padding:8px 12px 20px!important; }}
   .voice-workspace {{ flex-wrap:wrap!important; }}
   .voice-binding-layout {{ flex-wrap:wrap!important; }}
   .voice-config-footer {{ flex-wrap:wrap!important; }}
