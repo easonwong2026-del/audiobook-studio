@@ -196,7 +196,7 @@ def test_launcher_installs_requirements_with_resolved_python(monkeypatch, capsys
         "/tmp/target-python", "-m", "pip", "install", "-r", launcher.REQUIREMENTS_FILE,
     ]]
     with open(os.path.join(_PROJECT_ROOT, "requirements.txt"), encoding="utf-8") as requirements:
-        assert "gradio>=5.50,<6" in requirements.read()
+        assert "gradio==5.50.0" in requirements.read()
     assert "API Key" not in capsys.readouterr().out
 
 

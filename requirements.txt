@@ -1,7 +1,7 @@
 # 有声书合成工作台 — Python 依赖
 #
 # 运行依赖（由 audiobook-studio 的 Python 3.10+ venv 提供）：
-gradio>=5.50,<6
+gradio==5.50.0  # UI DOM and layout regression validated against this version.
 
 # 音频后处理 / 数值计算
 numpy
