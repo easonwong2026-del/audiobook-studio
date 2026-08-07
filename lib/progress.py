@@ -14,8 +14,10 @@ O3 结构化队列进度列表 + O12 段落级暂停/恢复共用的「内存段
 """
 from __future__ import annotations
 
+from typing import Optional
+
+from . import chapter_identity
 from . import project_manager as pm
-from . import script_loader
 
 # ── 段状态枚举（集中声明，O3/O12 共用） ──
 # pending 待合成 / running 合成中 / done 已完成 / error 失败
@@ -84,10 +86,12 @@ def build_segment_states(project: str, selected_chapters: Optional[list] = None)
     if selected_chapters:
         selected_set = {str(c) for c in selected_chapters}
     states: list[dict] = []
-    for ch in script_data.get("chapters", []):
-        ch_label = str(ch.get("id", ""))
-        ch_title = ch.get("title", "") or ch_label
-        ch_selected = (selected_set is None) or (ch_label in selected_set)
+    chapters = script_data.get("chapters", [])
+    for chapter_index, ch in enumerate(chapters):
+        ch_id = str(ch.get("id", ""))
+        ch_title = ch.get("title", "") or ch_id
+        ch_label = f"第{chapter_identity.chapter_number(ch, chapter_index)}章 {ch_title}"
+        ch_selected = (selected_set is None) or (ch_id in selected_set)
         for seg in ch.get("segments", []):
             seg_id = seg.get("id")
             # O5：未选中章的段 -> 内存态标 skipped（⏭），不写 meta
@@ -95,6 +99,7 @@ def build_segment_states(project: str, selected_chapters: Optional[list] = None)
                 states.append({
                     "seg_id": seg_id,
                     "chapter": ch_title or ch_label,
+                    "chapter_label": ch_label,
                     "role": seg.get("role", ""),
                     "text": seg.get("text", ""),
                     "status": SEGMENT_STATUS_SKIPPED,
@@ -114,6 +119,7 @@ def build_segment_states(project: str, selected_chapters: Optional[list] = None)
             states.append({
                 "seg_id": seg_id,
                 "chapter": ch_title or ch_label,
+                "chapter_label": ch_label,
                 "role": seg.get("role", ""),
                 "text": seg.get("text", ""),
                 "status": status,
@@ -178,7 +184,7 @@ def to_queue_rows(states: list[dict]) -> list[list]:
         progress = st.get("progress", 0.0) or 0.0
         rows.append([
             icon,
-            str(st.get("chapter", "")),
+            str(st.get("chapter_label") or st.get("chapter", "")),
             str(st.get("seg_id", "")),
             str(st.get("role", "")),
             preview,
@@ -199,9 +205,11 @@ def build_preview_rows_from_script(script: dict) -> list[list]:
         二维行列表；空剧本返回空列表。
     """
     rows: list[list] = []
-    for ch in script.get("chapters", []):
-        ch_label = str(ch.get("id", ""))
-        ch_title = ch.get("title", "") or ch_label
+    chapters = script.get("chapters", [])
+    for chapter_index, ch in enumerate(chapters):
+        ch_id = str(ch.get("id", ""))
+        ch_title = ch.get("title", "") or ch_id
+        ch_label = f"第{chapter_identity.chapter_number(ch, chapter_index)}章 {ch_title}"
         for seg in ch.get("segments", []):
             text = seg.get("text", "") or ""
             if len(text) > _PREVIEW_LEN:
@@ -209,7 +217,7 @@ def build_preview_rows_from_script(script: dict) -> list[list]:
             else:
                 preview = text
             rows.append([
-                f"第{ch_label}章 {ch_title}",
+                ch_label,
                 str(seg.get("id", "")),
                 str(seg.get("role", "")),
                 preview,

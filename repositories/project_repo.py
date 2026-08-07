@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import ClassVar, Optional
 
 from lib import script_loader
+from lib import chapter_identity, project_paths
 from lib.types import ProjectMeta
 from lib.snapshot import ProjectSnapshot
 
@@ -164,7 +165,7 @@ class ProjectRepository:
         复用 lib/segment_cache 的逻辑，延迟导入避免循环依赖。
         """
         from lib import segment_cache
-        seg_dir = os.path.join(project_dir, "segments")
+        seg_dir = project_paths.project_dir(project_dir, "segments")
         return segment_cache.has_segment_wav(seg_dir, seg_id)
 
     @staticmethod
@@ -182,8 +183,21 @@ class ProjectRepository:
             "pending_count": meta.pending_count,
             "segments_status": meta.segments_status,
             "voice_bindings_path": meta.voice_bindings_path,
+            "storage_version": meta.storage_version,
+            "directories": meta.directories,
+            "source_file": meta.source_file,
         }
         _atomic_write(path, payload)
+        # Keep a human-visible copy beside the other project configuration.
+        # The root project.json remains the authoritative marker used by the
+        # project scanner and atomic replacement logic.
+        if meta.storage_version >= project_paths.STORAGE_VERSION:
+            config_dir = project_paths.project_dir(project_dir, "config", create=True)
+            config_path = os.path.join(config_dir, "project.json")
+            try:
+                shutil.copy2(path, config_path)
+            except OSError as exc:
+                logger.warning("同步项目配置副本失败: %s", exc)
 
     # --- 公开 API ---
 
@@ -196,6 +210,7 @@ class ProjectRepository:
         """
         ProjectRepository._ensure_roots()
         names = set()
+        hidden = ProjectRepository._hidden_project_names()
         ws = ProjectRepository.WORKSPACE_ROOT or ""
         lg = ProjectRepository.LEGACY_ROOT or ""
         for root in (ws, lg):
@@ -203,9 +218,24 @@ class ProjectRepository:
                 names.update(
                     d for d in os.listdir(root)
                     if d != ".trash"
+                    and d not in hidden
                     and ProjectRepository._is_valid_project_dir(os.path.join(root, d))
                 )
         return sorted(names)
+
+    @staticmethod
+    def _hidden_project_names() -> set[str]:
+        """Read the optional list-only catalog without making it authoritative."""
+        try:
+            from lib import config
+
+            path = os.path.join(config.get_data_dir(), ".project_catalog.json")
+            with open(path, encoding="utf-8") as file:
+                data = json.load(file)
+            hidden = data.get("hidden_projects", []) if isinstance(data, dict) else []
+            return {str(value) for value in hidden if isinstance(value, (str, int))}
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+            return set()
 
     @staticmethod
     def inspect_project_slot(name: str) -> ProjectSlotInspection:
@@ -515,21 +545,43 @@ class ProjectRepository:
         os.makedirs(ws, exist_ok=True)
         tmp_dir = os.path.join(ws, f".tmp_{name}_{uuid.uuid4().hex}")
         try:
-            for sub in ("voices", "segments", "chapters", "output"):
-                os.makedirs(os.path.join(tmp_dir, sub), exist_ok=True)
-            shutil.copy2(script_path, os.path.join(tmp_dir, "structured_script.json"))
+            paths = project_paths.ensure_layout(tmp_dir, prefer_canonical=True, compatibility=True)
             with open(script_path, encoding="utf-8") as f:
                 raw_script = json.load(f)
-            parsed_script = script_loader.from_dict(raw_script)
+            normalized_script = chapter_identity.normalize_script_for_project(raw_script)
+            with open(os.path.join(tmp_dir, "structured_script.json"), "w", encoding="utf-8") as f:
+                json.dump(normalized_script, f, ensure_ascii=False, indent=2)
+
+            source_name = chapter_identity.safe_filename(os.path.basename(script_path), "structured_script.json")
+            source_path = os.path.join(paths["source"], source_name)
+            shutil.copy2(script_path, source_path)
+            for index, chapter in enumerate(normalized_script.get("chapters", [])):
+                if not isinstance(chapter, dict):
+                    continue
+                chapter_path = os.path.join(
+                    paths["chapter_text"],
+                    f"{chapter_identity.chapter_file_stem(chapter, index, len(normalized_script.get('chapters', [])))}.json",
+                )
+                with open(chapter_path, "w", encoding="utf-8") as f:
+                    json.dump(chapter, f, ensure_ascii=False, indent=2)
+
+            parsed_script = script_loader.from_dict(normalized_script)
             total_segments = sum(len(ch.segments) for ch in parsed_script.chapters)
             bindings = {"bindings": {n: None for n in parsed_script.voices},
                         "bound_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "verified": []}
             ProjectRepository.save_bindings(tmp_dir, bindings)
+            shutil.copy2(
+                os.path.join(tmp_dir, "voice_bindings.json"),
+                os.path.join(paths["voices"], "voice_bindings.json"),
+            )
             meta = ProjectMeta(project_name=name, created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
                                updated_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
                                total_chapters=len(parsed_script.chapters), total_segments=total_segments,
                                pending_count=total_segments,
-                               segments_status={seg.id: "pending" for ch in parsed_script.chapters for seg in ch.segments})
+                               segments_status={seg.id: "pending" for ch in parsed_script.chapters for seg in ch.segments},
+                               storage_version=project_paths.STORAGE_VERSION,
+                               directories=project_paths.layout_manifest(tmp_dir),
+                               source_file=os.path.relpath(source_path, tmp_dir))
             ProjectRepository._save_meta(tmp_dir, meta)
             if os.path.exists(project_dir):
                 raise FileExistsError(f"项目 '{name}' 已存在")
@@ -549,6 +601,41 @@ class ProjectRepository:
         project_dir = ProjectRepository._resolve_dir(name)
         if os.path.isdir(project_dir):
             shutil.rmtree(project_dir)
+
+    @staticmethod
+    def archive_project(name: str) -> str:
+        """Move a project to the recoverable data-root trash area."""
+        from .project_storage_repo import ProjectStorageRepository
+
+        return ProjectStorageRepository.archive_project(name)
+
+    @staticmethod
+    def permanently_delete_project(name: str) -> None:
+        """Permanently delete a project after an explicit caller confirmation."""
+        from .project_storage_repo import ProjectStorageRepository
+
+        ProjectStorageRepository.permanently_delete_project(name)
+
+    @staticmethod
+    def remove_project_from_list(name: str) -> None:
+        """Hide a project from the bookshelf while retaining its local files."""
+        from .project_storage_repo import ProjectStorageRepository
+
+        ProjectStorageRepository.remove_from_list(name)
+
+    @staticmethod
+    def restore_project_to_list(name: str) -> None:
+        """Make a list-only hidden project visible again."""
+        from .project_storage_repo import ProjectStorageRepository
+
+        ProjectStorageRepository.restore_to_list(name)
+
+    @staticmethod
+    def check_project_integrity(name: str) -> dict:
+        """Run a non-destructive structured integrity check for one project."""
+        from .project_storage_repo import ProjectStorageRepository
+
+        return ProjectStorageRepository.check_project_integrity(name)
 
     @staticmethod
     def get_project_dir(name: str) -> str:
@@ -660,7 +747,7 @@ class ProjectRepository:
         """
         project_dir = ProjectRepository._resolve_dir(name)
         meta = ProjectRepository._load_meta(project_dir)
-        seg_dir = os.path.join(project_dir, "segments")
+        seg_dir = project_paths.project_dir(project_dir, "segments")
         remaining: list[str] = []
         for seg_id, status in meta.segments_status.items():
             if status in ("pending", "failed"):

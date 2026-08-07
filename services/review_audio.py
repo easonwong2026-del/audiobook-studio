@@ -1,0 +1,326 @@
+"""Production review audio orchestration.
+
+This module keeps the review page's file lookup, cache naming and status
+messages out of ``app.py``.  It intentionally has no Gradio dependency so the
+same behavior can be exercised by Windows/path tests.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import shutil
+import time
+import wave
+from dataclasses import dataclass, field
+from typing import Any
+
+from lib import chapter_identity, config, project_paths, segment_cache
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ReviewPageState:
+    """All values needed to initialize the review page in one callback."""
+
+    chapter_table: str
+    chapter_choices: list[tuple[str, str]] = field(default_factory=list)
+    selected_chapter: str | None = None
+    chapter_audio: str | None = None
+    chapter_status: str = ""
+    segment_choices: list[tuple[str, str]] = field(default_factory=list)
+    selected_segment: str | None = None
+    segment_audio: str | None = None
+    segment_status: str = ""
+
+
+@dataclass(frozen=True)
+class ReviewAudioResult:
+    path: str | None
+    status: str
+
+
+def _safe_project_name(project_name: str) -> str:
+    return chapter_identity.safe_filename(project_name, "project")
+
+
+def preview_cache_dir(project_name: str, kind: str = "chapters") -> str:
+    """Return a project-isolated preview cache directory under data_dir."""
+    if kind not in {"chapters", "segments", "supplement"}:
+        raise ValueError(f"未知试听缓存类型: {kind}")
+    data_root = os.path.realpath(config.get_data_dir())
+    path = os.path.realpath(
+        os.path.join(config.get_preview_dir(), _safe_project_name(project_name), kind)
+    )
+    if os.path.commonpath([data_root, path]) != data_root:
+        raise ValueError("试听缓存路径超出数据目录")
+    os.makedirs(path, exist_ok=True)
+    return os.path.normpath(path)
+
+
+def _nonempty_file(path: str | None) -> bool:
+    try:
+        return bool(path and os.path.isfile(path) and os.path.getsize(path) > 0)
+    except OSError:
+        return False
+
+
+def _valid_wav_file(path: str | None) -> bool:
+    """Check that a segment points to a readable, non-empty WAV file."""
+    if not _nonempty_file(path):
+        return False
+    try:
+        with wave.open(str(path), "rb") as audio:
+            return audio.getnframes() > 0 and audio.getframerate() > 0
+    except (OSError, wave.Error):
+        return False
+
+
+def _allowed_audio_path(project_name: str, path: str, kind: str = "segments") -> str | None:
+    """Return a Gradio-safe copy when a legacy path is outside data_dir."""
+    if not _nonempty_file(path):
+        return None
+    absolute = os.path.normpath(os.path.abspath(path))
+    data_root = os.path.realpath(config.get_data_dir())
+    try:
+        inside_data = os.path.commonpath([data_root, os.path.realpath(absolute)]) == data_root
+    except ValueError:
+        inside_data = False
+    if inside_data:
+        return absolute
+
+    cache_dir = preview_cache_dir(project_name, kind)
+    destination = os.path.join(cache_dir, chapter_identity.safe_filename(os.path.basename(absolute), "preview.wav"))
+    try:
+        shutil.copy2(absolute, destination)
+    except OSError as exc:
+        logger.exception("复制试听音频到允许目录失败: %s", exc)
+        return None
+    return destination if _nonempty_file(destination) else None
+
+
+def _segment_audio(project_dir: str, segment: dict[str, Any]) -> str | None:
+    seg_dir = project_paths.project_dir(project_dir, "segments")
+    return segment_cache.find_segment_wav(
+        seg_dir,
+        str(segment.get("id")),
+        str(segment.get("text") or ""),
+        str(segment.get("role") or segment.get("speaker") or ""),
+        str(segment.get("emotion") or "neutral"),
+        segment.get("emo_alpha", 1.0),
+        segment.get("speech_rate", 1.0),
+        segment.get("pinyin_hints"),
+        segment_cache.director_metadata_for(segment),
+    )
+
+
+def _segment_label(segment: dict[str, Any]) -> str:
+    text = " ".join(str(segment.get("text") or "").split())
+    if len(text) > 36:
+        text = text[:36] + "…"
+    return f"{segment.get('id')} · {segment.get('role') or segment.get('speaker') or ''} · {text}"
+
+
+def build_segment_choices(project_dir: str, script: dict[str, Any]) -> list[tuple[str, str]]:
+    """Build label/value choices only for segments with valid audio."""
+    choices: list[tuple[str, str]] = []
+    for chapter in script.get("chapters", []):
+        for segment in chapter.get("segments", []):
+            audio = _segment_audio(project_dir, segment)
+            if _valid_wav_file(audio):
+                choices.append((_segment_label(segment), str(segment.get("id"))))
+    return choices
+
+
+def normalize_segment_id(choice: Any, script: dict[str, Any]) -> str:
+    """Normalize a Gradio label/value choice without parsing display text."""
+    if isinstance(choice, (tuple, list)) and len(choice) >= 2:
+        return str(choice[1])
+    if isinstance(choice, dict):
+        for key in ("value", "id", "label"):
+            if key in choice and choice[key] is not None:
+                return str(choice[key])
+        return ""
+    value = "" if choice is None else str(choice)
+    for chapter in script.get("chapters", []):
+        for segment in chapter.get("segments", []):
+            segment_id = str(segment.get("id"))
+            if segment_id == value or _segment_label(segment) == value:
+                return segment_id
+    return value
+
+
+def play_segment(project_name: str, project_dir: str, script: dict[str, Any], choice: Any) -> ReviewAudioResult:
+    selected_id = normalize_segment_id(choice, script)
+    if not selected_id:
+        return ReviewAudioResult(None, "⚪ 未选择段落。")
+    for chapter in script.get("chapters", []):
+        for segment in chapter.get("segments", []):
+            if str(segment.get("id")) != str(selected_id):
+                continue
+            audio = _segment_audio(project_dir, segment)
+            if not _valid_wav_file(audio):
+                _record_event(project_dir, "segment_preview", "missing", segment_id=str(selected_id))
+                return ReviewAudioResult(None, f"ℹ 当前段落 {selected_id} 没有已合成音频。")
+            safe_audio = _allowed_audio_path(project_name, audio, "segments")
+            if not safe_audio:
+                _record_event(project_dir, "segment_preview", "unavailable", segment_id=str(selected_id))
+                return ReviewAudioResult(None, f"⚠ 段落 {selected_id} 的音频路径无法访问。")
+            _record_event(project_dir, "segment_preview", "done", segment_id=str(selected_id))
+            return ReviewAudioResult(safe_audio, f"✅ 段落 {selected_id} 试听音频已准备。")
+    return ReviewAudioResult(None, f"⚠ 未找到段落 {selected_id}，请刷新项目后重试。")
+
+
+def _chapter_fingerprint(project_dir: str, chapter: dict[str, Any]) -> str:
+    files: list[dict[str, Any]] = []
+    for segment in chapter.get("segments", []):
+        audio = _segment_audio(project_dir, segment)
+        stat: dict[str, Any] = {"id": str(segment.get("id")), "path": ""}
+        if audio:
+            try:
+                info = os.stat(audio)
+                stat.update({"path": os.path.basename(audio), "size": info.st_size, "mtime_ns": info.st_mtime_ns})
+            except OSError:
+                stat["path"] = os.path.basename(audio)
+        files.append(stat)
+    payload = {"chapter": chapter, "files": files}
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:12]
+
+
+def render_chapter_preview(project_name: str, project_dir: str, script: dict[str, Any], chapter_id: Any) -> ReviewAudioResult:
+    """Merge one chapter into a project-isolated, content-addressed preview."""
+    chapters = script.get("chapters", [])
+    target: tuple[int, dict[str, Any]] | None = next(
+        ((index, chapter) for index, chapter in enumerate(chapters)
+         if str(chapter.get("id")) == str(chapter_id)),
+        None,
+    )
+    if target is None:
+        return ReviewAudioResult(None, "⚠ 未找到所选章节，请刷新项目后重试。")
+    index, chapter = target
+    valid_audio = [
+        audio for segment in chapter.get("segments", [])
+        for audio in [_segment_audio(project_dir, segment)]
+        if _valid_wav_file(audio)
+    ]
+    label = chapter_identity.chapter_label(chapter, index, len(chapters))
+    if not valid_audio:
+        _record_event(project_dir, "chapter_preview", "missing", chapter_id=str(chapter_id))
+        return ReviewAudioResult(None, f"ℹ {label} 没有可试听的已合成音频。")
+
+    fingerprint = _chapter_fingerprint(project_dir, chapter)
+    safe_project = _safe_project_name(project_name)
+    safe_chapter = chapter_identity.chapter_file_stem(chapter, index, len(chapters))
+    output_dir = preview_cache_dir(project_name, "chapters")
+    output_path = os.path.normpath(os.path.join(output_dir, f"chapter_{safe_project}_{safe_chapter}_{fingerprint}.wav"))
+    try:
+        from lib import audio_pipeline
+
+        result = audio_pipeline.concat_for_preview(project_dir, chapter_id, output_path)
+        if not result or not _valid_wav_file(result):
+            _record_event(project_dir, "chapter_preview", "merge_failed", chapter_id=str(chapter_id))
+            return ReviewAudioResult(None, f"⚠ {label} 合并试听失败，未生成有效音频。")
+        safe_result = _allowed_audio_path(project_name, result, "chapters")
+        if not safe_result:
+            _record_event(project_dir, "chapter_preview", "unavailable", chapter_id=str(chapter_id))
+            return ReviewAudioResult(None, f"⚠ {label} 的试听音频路径无法访问。")
+        _record_event(project_dir, "chapter_preview", "done", chapter_id=str(chapter_id), path=os.path.relpath(safe_result, config.get_data_dir()))
+        return ReviewAudioResult(safe_result, f"✅ {label} 章节试听已准备。")
+    except Exception as exc:
+        logger.exception("章节试听生成失败")
+        _record_event(project_dir, "chapter_preview", "error", chapter_id=str(chapter_id), error=str(exc)[:240])
+        return ReviewAudioResult(None, f"❌ {label} 合并试听失败，请点击重新加载。")
+
+
+def build_chapter_table(project_dir: str, script: dict[str, Any], meta: Any) -> tuple[str, list[tuple[str, str]]]:
+    chapters = script.get("chapters", [])
+    total_done = 0
+    total_segments = 0
+    rows = ["| 章节 | 完成 | 详情 |", "|---|---:|---|"]
+    choices: list[tuple[str, str]] = []
+    for index, chapter in enumerate(chapters):
+        segments = chapter.get("segments", [])
+        done_ids = [str(segment.get("id")) for segment in segments if _valid_wav_file(_segment_audio(project_dir, segment))]
+        missing_ids = [str(segment.get("id")) for segment in segments if str(segment.get("id")) not in done_ids]
+        total_done += len(done_ids)
+        total_segments += len(segments)
+        detail = f"{len(done_ids)}/{len(segments)}"
+        if done_ids:
+            detail += " ✅ " + ", ".join(done_ids[:4])
+        if missing_ids and len(missing_ids) <= 2:
+            detail += " ❌ " + ", ".join(missing_ids)
+        label = chapter_identity.chapter_label(chapter, index, len(chapters))
+        rows.append(f"| {label} | {len(done_ids)}/{len(segments)} | {detail} |")
+        choices.append((label, str(chapter.get("id"))))
+    summary = f"### 📊 {total_done}/{total_segments} 段已完成\n\n" + "\n".join(rows)
+    if not total_done:
+        summary += "\n\n⚠ 未检测到合成段落"
+    return summary, choices
+
+
+def initialize(project_name: str | None, project_dir: str | None, script: dict[str, Any] | None, meta: Any = None) -> ReviewPageState:
+    if not project_name or not project_dir or not script:
+        return ReviewPageState(
+            chapter_table="*请先在项目管理中打开项目。*",
+            chapter_status="⚪ 尚未打开项目。",
+            segment_status="⚪ 尚未加载段落列表。",
+        )
+    table, chapter_choices = build_chapter_table(project_dir, script, meta)
+    selected_chapter = chapter_choices[0][1] if chapter_choices else None
+    chapter_result = (
+        render_chapter_preview(project_name, project_dir, script, selected_chapter)
+        if selected_chapter is not None
+        else ReviewAudioResult(None, "⚪ 当前项目没有可用章节。")
+    )
+    segment_choices = build_segment_choices(project_dir, script)
+    selected_segment = segment_choices[0][1] if segment_choices else None
+    segment_result = (
+        play_segment(project_name, project_dir, script, selected_segment)
+        if selected_segment is not None
+        else ReviewAudioResult(None, "ℹ 当前没有已生成的段落音频可选择。")
+    )
+    return ReviewPageState(
+        chapter_table=table,
+        chapter_choices=chapter_choices,
+        selected_chapter=selected_chapter,
+        chapter_audio=chapter_result.path,
+        chapter_status=chapter_result.status,
+        segment_choices=segment_choices,
+        selected_segment=selected_segment,
+        segment_audio=segment_result.path,
+        segment_status=segment_result.status,
+    )
+
+
+def _record_event(project_dir: str, action: str, status: str, **details) -> None:
+    try:
+        quality_dir = project_paths.project_dir(project_dir, "quality", create=True)
+        event = {"time": time.strftime("%Y-%m-%dT%H:%M:%S"), "action": action, "status": status, **details}
+        with open(os.path.join(quality_dir, "review_events.jsonl"), "a", encoding="utf-8") as file:
+            file.write(json.dumps(event, ensure_ascii=False) + "\n")
+    except (OSError, TypeError, ValueError) as exc:
+        logger.debug("记录质检事件失败: %s", exc)
+
+
+class ReviewAudioService:
+    """Stable service façade used by Gradio and platform-independent tests."""
+
+    normalize_segment_id = staticmethod(normalize_segment_id)
+    play_segment = staticmethod(play_segment)
+    render_chapter_preview = staticmethod(render_chapter_preview)
+    initialize = staticmethod(initialize)
+
+
+__all__ = [
+    "ReviewAudioResult",
+    "ReviewPageState",
+    "ReviewAudioService",
+    "build_segment_choices",
+    "initialize",
+    "normalize_segment_id",
+    "play_segment",
+    "preview_cache_dir",
+    "render_chapter_preview",
+]

@@ -17,6 +17,7 @@ import numpy as np
 from scipy.io import wavfile
 
 from . import audio_format as af
+from . import chapter_identity, project_paths
 from . import segment_cache
 from .exceptions import ExportError
 
@@ -64,11 +65,12 @@ def export_book(project_dir: str, format: str = "mp3", bitrate: str = "192k",
     with open(script_path, encoding="utf-8") as f:
         script = json.load(f)
 
-    segments_dir = os.path.join(project_dir, "segments")
-    out_dir = output_dir if output_dir else os.path.join(project_dir, "output")
+    segments_dir = project_paths.project_dir(project_dir, "segments")
+    out_dir = output_dir if output_dir else project_paths.project_dir(project_dir, "exports", create=True)
     os.makedirs(out_dir, exist_ok=True)
 
     title = script.get("meta", {}).get("title", "audiobook")
+    safe_title = chapter_identity.safe_filename(title, "audiobook")
     # 收集 (章索引, 数据)，保持顺序，便于在章首插入更长静音
     loaded: list = []
     missing_ids: list = []
@@ -148,7 +150,7 @@ def export_book(project_dir: str, format: str = "mp3", bitrate: str = "192k",
         prev_ch = ch_idx
 
     combined = np.concatenate(parts)
-    wav_path = os.path.join(out_dir, f"{title}.wav")
+    wav_path = os.path.normpath(os.path.join(out_dir, f"{safe_title}.wav"))
     wavfile.write(wav_path, rate, combined)
 
     # 2.4 M-2：拼接写盘后释放中间 numpy 数组，缓解长篇小说拼接峰值内存
@@ -166,7 +168,7 @@ def export_book(project_dir: str, format: str = "mp3", bitrate: str = "192k",
     # MP3/M4B 需要 ffmpeg 转码 + 写标签
     if format in ("mp3", "m4b"):
         ext = "mp3" if format == "mp3" else "m4b"
-        out_path = os.path.join(out_dir, f"{title}.{ext}")
+        out_path = os.path.normpath(os.path.join(out_dir, f"{safe_title}.{ext}"))
         codec = "libmp3lame" if format == "mp3" else "aac"
         try:
             subprocess.run(
@@ -296,8 +298,8 @@ def generate_subtitles(project_dir: str, formats=("srt", "lrc"), output_dir: str
     with open(script_path, encoding="utf-8") as f:
         script = json.load(f)
 
-    segments_dir = os.path.join(project_dir, "segments")
-    out_dir = output_dir if output_dir else os.path.join(project_dir, "output")
+    segments_dir = project_paths.project_dir(project_dir, "segments")
+    out_dir = output_dir if output_dir else project_paths.project_dir(project_dir, "exports", create=True)
     os.makedirs(out_dir, exist_ok=True)
 
     title = script.get("meta", {}).get("title", "audiobook")
@@ -354,11 +356,11 @@ def generate_subtitles(project_dir: str, formats=("srt", "lrc"), output_dir: str
 
     written: list = []
     if "srt" in formats:
-        p = os.path.join(out_dir, f"{title}.srt")
+        p = os.path.join(out_dir, f"{chapter_identity.safe_filename(title, 'audiobook')}.srt")
         _write_srt(p, rows)
         written.append(p)
     if "lrc" in formats:
-        p = os.path.join(out_dir, f"{title}.lrc")
+        p = os.path.join(out_dir, f"{chapter_identity.safe_filename(title, 'audiobook')}.lrc")
         _write_lrc(p, rows)
         written.append(p)
     return written
@@ -417,6 +419,8 @@ def concat_for_preview(project_dir: str, chapter_id, output_path: str) -> str | 
     """
     import json
 
+    output_path = os.path.normpath(os.path.abspath(output_path))
+
     script_path = os.path.join(project_dir, "structured_script.json")
     if not os.path.isfile(script_path):
         return None
@@ -432,7 +436,7 @@ def concat_for_preview(project_dir: str, chapter_id, output_path: str) -> str | 
     if target is None:
         return None
 
-    segments_dir = os.path.join(project_dir, "segments")
+    segments_dir = project_paths.project_dir(project_dir, "segments")
     loaded: list = []  # int16 单声道数组（已统一规格）
     canonical_rate = None
     for seg in target.get("segments", []):
@@ -482,7 +486,7 @@ def concat_for_preview(project_dir: str, chapter_id, output_path: str) -> str | 
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
     wavfile.write(output_path, rate, combined)
-    return output_path if os.path.isfile(output_path) else None
+    return output_path if os.path.isfile(output_path) and os.path.getsize(output_path) > 0 else None
 
 
 def export_supplement(paths: list, out_path: str, format: str = "mp3", bitrate: str = "192k",

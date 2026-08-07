@@ -56,3 +56,8 @@ class ProjectMeta:
     pending_count: int = 0
     segments_status: dict[str, str] = field(default_factory=dict)
     voice_bindings_path: str = "voice_bindings.json"
+    # Storage metadata was added in V3.3.3.  Defaults keep old project.json
+    # files loadable without a migration step.
+    storage_version: int = 1
+    directories: dict[str, str] = field(default_factory=dict)
+    source_file: str = ""
