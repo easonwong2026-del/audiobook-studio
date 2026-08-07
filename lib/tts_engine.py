@@ -5,8 +5,6 @@ import inspect
 import os
 import logging
 import threading
-from pathlib import Path
-
 from . import config as _cfg
 from . import audio_format as af
 from .segment_cache import SpeakerEmbeddingLRU
@@ -42,7 +40,7 @@ def init_engine(model_dir: str = None, use_fp16: bool = True, use_cuda_kernel: b
     with _ENGINE_LOCK:
         if _tts is not None:
             return
-        import torch
+        __import__("torch")
         from indextts.infer_v2 import IndexTTS2
 
         if model_dir is None:
