@@ -62,6 +62,7 @@ def synthesize_project(
     speech_rate: float = None,
     cb_seg_state=None,
     selected_chapters: Optional[list] = None,
+    selected_segment_ids: Optional[list] = None,
 ) -> Generator[str, None, None]:
     # NumPy / SciPy 随 TTS 适配层按需加载，不进入应用启动热路径。
     from . import tts_engine
@@ -81,12 +82,31 @@ def synthesize_project(
         if isinstance(bindings_document, dict) else {}
     )
 
+    selected_segment_set = (
+        {str(segment_id) for segment_id in selected_segment_ids}
+        if selected_segment_ids else None
+    )
     remaining = pm.get_remaining(project_name)
+    if selected_segment_set is not None:
+        remaining = [segment_id for segment_id in remaining if segment_id in selected_segment_set]
     if not remaining:
         yield "[0] all_done 所有段落已完成"
         return
 
     total = script_loader.count_segments(script)
+    if selected_segment_set is not None:
+        total = sum(
+            1 for chapter in script.chapters
+            for segment in chapter.segments
+            if str(segment.id) in selected_segment_set
+        )
+    elif selected_chapters:
+        selected_chapter_set = {str(chapter_id) for chapter_id in selected_chapters}
+        total = sum(
+            len(chapter.segments)
+            for chapter in script.chapters
+            if str(chapter.id) in selected_chapter_set
+        )
     done = total - len(remaining)
     start_time = time.time()
 
@@ -108,6 +128,8 @@ def synthesize_project(
         ch_label = str(ch.id)
         ch_unselected = selected_set is not None and ch_label not in selected_set
         for seg in ch.segments:
+            if selected_segment_set is not None and str(seg.id) not in selected_segment_set:
+                continue
             # O5：未选中章节 -> 标 skipped 并跳过（不合成、不写 wav）
             if ch_unselected:
                 if seg.id in remaining:

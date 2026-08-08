@@ -30,6 +30,16 @@ from .tools.voice_cast import (
     validate_character_roster,
     validate_voice_cast,
 )
+from .tools.production import (
+    cancel_production,
+    get_production_task,
+    list_production_tasks,
+    pause_production,
+    plan_production,
+    resume_production,
+    retry_failed_segments,
+    start_production,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +240,131 @@ _TOOLS: dict[str, dict[str, Any]] = {
             "additionalProperties": False,
         },
     },
+    "plan_production": {
+        "name": "plan_production",
+        "description": "检查项目、章节、角色绑定和段落状态，返回可机器读取的生产计划。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name"],
+            "properties": {
+                "project_name": {"type": "string"},
+                "scope": {
+                    "type": "object",
+                    "properties": {
+                        "all": {"type": "boolean", "default": True},
+                        "chapter_ids": {"type": "array", "items": {"type": "string"}},
+                        "segment_ids": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+    "start_production": {
+        "name": "start_production",
+        "description": "异步启动统一生产任务，立即返回稳定 task_id。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name"],
+            "properties": {
+                "project_name": {"type": "string"},
+                "scope": {
+                    "type": "object",
+                    "properties": {
+                        "all": {"type": "boolean", "default": True},
+                        "chapter_ids": {"type": "array", "items": {"type": "string"}},
+                        "segment_ids": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "additionalProperties": False,
+                },
+                "options": {
+                    "type": "object",
+                    "properties": {
+                        "num_beams": {"type": "integer", "minimum": 1},
+                        "emotion": {"type": ["string", "null"]},
+                        "emo_alpha": {"type": ["number", "null"]},
+                        "speech_rate": {"type": ["number", "null"]},
+                    },
+                    "additionalProperties": False,
+                },
+                "idempotency_key": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    "get_production_task": {
+        "name": "get_production_task",
+        "description": "读取生产任务的持久化状态和实时进度。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["task_id"],
+            "properties": {"task_id": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
+    "list_production_tasks": {
+        "name": "list_production_tasks",
+        "description": "按项目、状态或来源倒序列出生产任务。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_name": {"type": "string"},
+                "status": {
+                    "type": "string",
+                    "enum": [
+                        "pending", "running", "pausing", "paused", "cancelling",
+                        "cancelled", "done", "error", "interrupted",
+                    ],
+                },
+                "source": {"type": "string", "enum": ["mcp", "web", "system", "recovery"]},
+            },
+            "additionalProperties": False,
+        },
+    },
+    "pause_production": {
+        "name": "pause_production",
+        "description": "请求在当前段边界暂停生产。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["task_id"],
+            "properties": {"task_id": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
+    "resume_production": {
+        "name": "resume_production",
+        "description": "恢复 paused 或 interrupted 生产任务。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["task_id"],
+            "properties": {"task_id": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
+    "cancel_production": {
+        "name": "cancel_production",
+        "description": "请求取消生产；运行中先返回 cancelling，段边界后进入 cancelled。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["task_id"],
+            "properties": {"task_id": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
+    "retry_failed_segments": {
+        "name": "retry_failed_segments",
+        "description": "只重新生产指定任务中实际失败或缺失的段落。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["task_id"],
+            "properties": {
+                "task_id": {"type": "string"},
+                "idempotency_key": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+    },
 }
 
 _HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
@@ -252,6 +387,14 @@ _HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "finalize_voice_cast": finalize_voice_cast,
     "get_voice_binding_status": get_voice_binding_status,
     "check_chapter_roles": check_chapter_roles,
+    "plan_production": plan_production,
+    "start_production": start_production,
+    "get_production_task": get_production_task,
+    "list_production_tasks": list_production_tasks,
+    "pause_production": pause_production,
+    "resume_production": resume_production,
+    "cancel_production": cancel_production,
+    "retry_failed_segments": retry_failed_segments,
 }
 
 
