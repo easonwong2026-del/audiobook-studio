@@ -35,6 +35,9 @@ def wire_voice_page(page: dict, context: dict) -> None:
             page["v_role"], page["v_role_title"], page["v_current"],
         ],
     ).then(cb["refresh_role_summary"], session, page["v_status"])
+    page["v_cast_finalize"].click(
+        cb["finalize_voice_cast"], session, page["v_status"]
+    )
     page["v_lib"].change(cb["play_lib_voice"], page["v_lib"], page["v_audio"])
     page["v_lib"].change(
         lambda choice: f"*当前参考音频: 音色库/{choice}*" if choice else "*当前参考音频: 未选择*",

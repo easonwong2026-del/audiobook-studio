@@ -1,7 +1,7 @@
 """段缓存键推导（B7：缓存键改内容哈希）。
 
 把「段标识 + 合成参数（emotion / emo_alpha / speech_rate / pinyin_hints /
-director_metadata）」
+director_metadata）+ speaker fingerprint」
 组合哈希，得到 ``segments/`` 目录下唯一的 wav 文件名。
 
 设计要点：
@@ -9,8 +9,8 @@ director_metadata）」
   （解决 REVIEW B7：批量模式下改情感 / 语速 / 多音字后重跑不重合成的问题）。
 - 无需维护额外元数据文件，文件名即缓存键。
 - 读取侧（``find_segment_wav`` / ``has_segment_wav``）在找不到参数感知文件时，
-  回退到旧版裸 ``{seg_id}.wav``，兼容升级前的历史项目，保证导出 / 试听 /
-  状态链路不丢段。
+  对未启用 speaker fingerprint 的旧项目回退到旧版裸 ``{seg_id}.wav``；
+  Voice Cast 项目使用严格 speaker-aware lookup，避免换声后误用旧音频。
 """
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ def segment_cache_key(
     speech_rate: float = 1.0,
     pinyin_hints: Any = None,
     director_metadata: Any = None,
+    speaker_fingerprint: str | None = None,
 ) -> str:
     """由段标识 + 合成参数派生稳定缓存键（不含扩展名）。
 
@@ -40,6 +41,8 @@ def segment_cache_key(
         pinyin_hints: 多音字提示 dict，默认 None。
         director_metadata: v3 停顿、呼吸和音高 metadata；v2 缺省为 None，
             保持旧缓存键完全不变。
+        speaker_fingerprint: Voice Cast 音色内容哈希；缺省时保持 legacy
+            speaker-agnostic cache contract。
 
     Returns:
         ``{seg_id}_{md5前8位}`` 形式的缓存键。
@@ -65,6 +68,11 @@ def segment_cache_key(
     params = f"{emotion}|{emo_alpha}|{speech_rate}|{pinyin_hints}"
     if director_metadata is not None:
         params += f"|director={director_metadata}"
+    # Voice Cast projects must never reuse a segment rendered with another
+    # speaker.  Keep this optional so pre-Phase-2 projects retain their exact
+    # historical cache names and fallback behavior.
+    if speaker_fingerprint:
+        params += f"|speaker={str(speaker_fingerprint).strip()}"
     digest = hashlib.md5(params.encode("utf-8")).hexdigest()[:8]
     return f"{seg_id}_{digest}"
 
@@ -77,10 +85,12 @@ def segment_wav_path(
     speech_rate: float = 1.0,
     pinyin_hints: Any = None,
     director_metadata: Any = None,
+    speaker_fingerprint: str | None = None,
 ) -> str:
     """返回参数感知的 wav 绝对路径（缓存键命名）。"""
     key = segment_cache_key(
-        seg_id, emotion, emo_alpha, speech_rate, pinyin_hints, director_metadata
+        seg_id, emotion, emo_alpha, speech_rate, pinyin_hints, director_metadata,
+        speaker_fingerprint,
     )
     return os.path.join(segments_dir, f"{key}.wav")
 
@@ -95,6 +105,8 @@ def find_segment_wav(
     speech_rate: float = 1.0,
     pinyin_hints: Any = None,
     director_metadata: Any = None,
+    speaker_fingerprint: str | None = None,
+    allow_legacy_fallback: bool | None = None,
 ) -> Optional[str]:
     """查找某段已合成的 wav。
 
@@ -107,11 +119,21 @@ def find_segment_wav(
     """
     # 1) 参数感知的缓存键文件
     ck = segment_cache_key(
-        seg_id, emotion, emo_alpha, speech_rate, pinyin_hints, director_metadata
+        seg_id, emotion, emo_alpha, speech_rate, pinyin_hints, director_metadata,
+        speaker_fingerprint,
     )
     fp = os.path.join(segments_dir, f"{ck}.wav")
     if os.path.isfile(fp):
         return fp
+    # A speaker fingerprint opts into strict lookup.  Falling through to a
+    # speaker-agnostic file here would silently play the previous actor after a
+    # cast change.  Callers that explicitly want a compatibility lookup can
+    # pass allow_legacy_fallback=True.
+    if allow_legacy_fallback is None:
+        allow_legacy_fallback = speaker_fingerprint is None
+    if not allow_legacy_fallback:
+        return None
+
     # 2) 旧版裸文件（未升级前的命名），用于兼容历史项目
     legacy = os.path.join(segments_dir, f"{seg_id}.wav")
     if os.path.isfile(legacy):
@@ -127,6 +149,7 @@ def has_segment_wav(
     speech_rate: float = 1.0,
     pinyin_hints: Any = None,
     director_metadata: Any = None,
+    speaker_fingerprint: str | None = None,
 ) -> bool:
     """某段是否已存在对应 wav（参数感知文件 / 旧版裸文件 / 任意参数变体均可）。
 
@@ -137,15 +160,38 @@ def has_segment_wav(
     3) 任意 ``{seg_id}_*.wav`` 变体（参数未知时也能识别）。
     """
     ck = segment_cache_key(
-        seg_id, emotion, emo_alpha, speech_rate, pinyin_hints, director_metadata
+        seg_id, emotion, emo_alpha, speech_rate, pinyin_hints, director_metadata,
+        speaker_fingerprint,
     )
     if os.path.isfile(os.path.join(segments_dir, f"{ck}.wav")):
         return True
+    if speaker_fingerprint:
+        return False
     if os.path.isfile(os.path.join(segments_dir, f"{seg_id}.wav")):
         return True
     if glob.glob(os.path.join(segments_dir, f"{seg_id}_*.wav")):
         return True
     return False
+
+
+def speaker_fingerprint_for_path(path: str | None) -> str | None:
+    """Return the content fingerprint used by Voice Cast-aware caches.
+
+    The full SHA-256 is intentionally used instead of mtime or an absolute
+    path.  Project snapshots therefore keep the same cache identity after a
+    restart or a global voice-library move, while replacing the audio creates
+    a new identity.
+    """
+    if not path or not os.path.isfile(path):
+        return None
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as file:
+            for chunk in iter(lambda: file.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
 
 
 class SpeakerEmbeddingLRU:
@@ -190,6 +236,14 @@ class SpeakerEmbeddingLRU:
 
     def __contains__(self, key: str) -> bool:
         return key in self._store
+
+    def pop(self, key: str, default=None):
+        """Remove one cached value without changing the bounded-cache API."""
+        return self._store.pop(key, default)
+
+    def clear(self) -> None:
+        """Drop all cached values (used when a cast is forcibly replaced)."""
+        self._store.clear()
 
 
 def effective_params(seg, overrides: dict) -> tuple:

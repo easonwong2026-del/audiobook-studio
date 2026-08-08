@@ -5,8 +5,6 @@ import inspect
 import os
 import logging
 import threading
-from pathlib import Path
-
 from . import config as _cfg
 from . import audio_format as af
 from .segment_cache import SpeakerEmbeddingLRU
@@ -42,7 +40,7 @@ def init_engine(model_dir: str = None, use_fp16: bool = True, use_cuda_kernel: b
     with _ENGINE_LOCK:
         if _tts is not None:
             return
-        import torch
+        __import__("torch")
         from indextts.infer_v2 import IndexTTS2
 
         if model_dir is None:
@@ -278,6 +276,19 @@ def get_speaker_embedding(speaker_audio: str):
     except Exception as exc:  # pylint: disable=broad-except
         logger.debug("speaker embedding 提取失败，降级为 spk_audio_prompt: %s", exc)
         return None
+
+
+def invalidate_speaker_cache(speaker_audio: str | None = None) -> None:
+    """Invalidate one speaker embedding or the whole embedding cache.
+
+    Voice Cast force-rebinds normally use a new project snapshot path, but the
+    old path can still be present in the LRU.  Removing it makes the lifecycle
+    explicit and keeps this operation testable without loading the TTS model.
+    """
+    if speaker_audio:
+        _SPEAKER_EMB_CACHE.pop(str(speaker_audio), None)
+    else:
+        _SPEAKER_EMB_CACHE.clear()
 
 
 def _concat_wavs(paths: list[str], out_path: str) -> None:

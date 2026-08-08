@@ -11,6 +11,10 @@ CAPABILITIES = [
     "project_creation",
     "project_listing",
     "project_inspection",
+    "voice_asset_catalog",
+    "character_roster",
+    "voice_cast",
+    "chapter_role_resolution",
 ]
 
 

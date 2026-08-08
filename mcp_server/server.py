@@ -15,6 +15,21 @@ from typing import Any, Callable
 from .models import API_VERSION, server_info
 from .tools.projects import get_project, list_projects
 from .tools.scripts import create_project, validate_structured_script
+from .tools.voice_assets import get_voice_asset, list_voice_assets
+from .tools.voice_cast import (
+    add_character_roles,
+    bind_cast_role,
+    check_chapter_roles,
+    finalize_voice_cast,
+    get_character_roster,
+    get_voice_binding_status,
+    get_voice_cast,
+    set_character_roster,
+    set_voice_cast,
+    update_character_role,
+    validate_character_roster,
+    validate_voice_cast,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +79,157 @@ _TOOLS: dict[str, dict[str, Any]] = {
             "additionalProperties": False,
         },
     },
+    "list_voice_assets": {
+        "name": "list_voice_assets",
+        "description": "列出全局音色资产的稳定 ID 与元数据，不返回绝对路径。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "search": {"type": "string"},
+                "category": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    "get_voice_asset": {
+        "name": "get_voice_asset",
+        "description": "读取一个稳定 voice_asset_id 的音色资产元数据。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["voice_asset_id"],
+            "properties": {"voice_asset_id": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
+    "set_character_roster": {
+        "name": "set_character_roster",
+        "description": "首次写入项目 Character Roster；不会静默覆盖已有角色表。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name", "roles"],
+            "properties": {"project_name": {"type": "string"}, "roles": {}},
+            "additionalProperties": False,
+        },
+    },
+    "get_character_roster": {
+        "name": "get_character_roster",
+        "description": "读取项目完整 Character Roster。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name"],
+            "properties": {"project_name": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
+    "add_character_roles": {
+        "name": "add_character_roles",
+        "description": "以 additive 方式向项目 Character Roster 增加角色。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name", "roles"],
+            "properties": {"project_name": {"type": "string"}, "roles": {}},
+            "additionalProperties": False,
+        },
+    },
+    "update_character_role": {
+        "name": "update_character_role",
+        "description": "显式更新一个角色定义；role_id 不可修改。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name", "role_id", "updates"],
+            "properties": {
+                "project_name": {"type": "string"},
+                "role_id": {"type": "string"},
+                "updates": {"type": "object"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    "validate_character_roster": {
+        "name": "validate_character_roster",
+        "description": "校验角色 ID、canonical name、alias 及冲突。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name"],
+            "properties": {"project_name": {"type": "string"}, "roles": {}},
+            "additionalProperties": False,
+        },
+    },
+    "set_voice_cast": {
+        "name": "set_voice_cast",
+        "description": "首次创建项目 Voice Cast，可先保存 draft。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name", "roles"],
+            "properties": {"project_name": {"type": "string"}, "roles": {}},
+            "additionalProperties": False,
+        },
+    },
+    "get_voice_cast": {
+        "name": "get_voice_cast",
+        "description": "读取项目 Voice Cast 及校验摘要。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name"],
+            "properties": {"project_name": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
+    "bind_cast_role": {
+        "name": "bind_cast_role",
+        "description": "为一个 role_id 绑定或补绑声音；锁定角色必须显式 force_rebind。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name", "role_id", "voice_asset_id"],
+            "properties": {
+                "project_name": {"type": "string"},
+                "role_id": {"type": "string"},
+                "voice_asset_id": {"type": "string"},
+                "force_rebind": {"type": "boolean", "default": False},
+            },
+            "additionalProperties": False,
+        },
+    },
+    "validate_voice_cast": {
+        "name": "validate_voice_cast",
+        "description": "校验演员表完整性、音频资产与锁定规则。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name"],
+            "properties": {"project_name": {"type": "string"}, "roles": {}},
+            "additionalProperties": False,
+        },
+    },
+    "finalize_voice_cast": {
+        "name": "finalize_voice_cast",
+        "description": "在所有角色就绪后锁定项目 Voice Cast。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name"],
+            "properties": {"project_name": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
+    "get_voice_binding_status": {
+        "name": "get_voice_binding_status",
+        "description": "返回项目角色绑定、锁定与合成就绪状态。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name"],
+            "properties": {"project_name": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
+    "check_chapter_roles": {
+        "name": "check_chapter_roles",
+        "description": "检查增量章节中的已知、新增和未绑定角色。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name", "chapters"],
+            "properties": {"project_name": {"type": "string"}, "chapters": {"type": "array"}},
+            "additionalProperties": False,
+        },
+    },
 }
 
 _HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
@@ -72,6 +238,20 @@ _HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "create_project": create_project,
     "list_projects": list_projects,
     "get_project": get_project,
+    "list_voice_assets": list_voice_assets,
+    "get_voice_asset": get_voice_asset,
+    "set_character_roster": set_character_roster,
+    "get_character_roster": get_character_roster,
+    "add_character_roles": add_character_roles,
+    "update_character_role": update_character_role,
+    "validate_character_roster": validate_character_roster,
+    "set_voice_cast": set_voice_cast,
+    "get_voice_cast": get_voice_cast,
+    "bind_cast_role": bind_cast_role,
+    "validate_voice_cast": validate_voice_cast,
+    "finalize_voice_cast": finalize_voice_cast,
+    "get_voice_binding_status": get_voice_binding_status,
+    "check_chapter_roles": check_chapter_roles,
 }
 
 

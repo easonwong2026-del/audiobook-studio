@@ -728,6 +728,29 @@ class ProjectRepository:
         ProjectRepository._save_meta(project_dir, meta)
 
     @staticmethod
+    def invalidate_done_segments(name: str, segment_ids: list[str]) -> int:
+        """Reset only completed segments in ``segment_ids`` to ``pending``.
+
+        Voice Cast force-rebinds use one atomic metadata write so unrelated
+        roles keep their completed state and progress counters remain exact.
+        """
+        project_dir = ProjectRepository._resolve_dir(name)
+        meta = ProjectRepository._load_meta(project_dir)
+        targets = {str(value) for value in (segment_ids or [])}
+        invalidated = 0
+        for segment_id in targets:
+            if meta.segments_status.get(segment_id) == "done":
+                meta.segments_status[segment_id] = "pending"
+                invalidated += 1
+        if invalidated:
+            meta.completed_count = sum(value == "done" for value in meta.segments_status.values())
+            meta.failed_count = sum(value == "failed" for value in meta.segments_status.values())
+            meta.pending_count = sum(value == "pending" for value in meta.segments_status.values())
+            meta.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+            ProjectRepository._save_meta(project_dir, meta)
+        return invalidated
+
+    @staticmethod
     def update_project_meta(name: str, **updates) -> None:
         """更新 project.json 的顶层字段。
 

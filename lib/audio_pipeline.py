@@ -85,6 +85,7 @@ def export_book(project_dir: str, format: str = "mp3", bitrate: str = "192k",
                 seg.get("speech_rate", 1.0),
                 seg.get("pinyin_hints"),
                 segment_cache.director_metadata_for(seg),
+                _cast_speaker_fingerprint(project_dir, seg),
             )
             if fp:
                 if canonical_rate is None:
@@ -259,7 +260,8 @@ def _build_chapters(script: dict, chapter_markers: list, rate: int) -> list:
 def _find_segment(segments_dir: str, seg_id: str, text: str, role: str, emotion: str,
                   emo_alpha: float = 1.0, speech_rate: float = 1.0,
                   pinyin_hints: Any = None,
-                  director_metadata: Any = None) -> str | None:
+                  director_metadata: Any = None,
+                  speaker_fingerprint: str | None = None) -> str | None:
     """查找某段已合成 wav：参数感知缓存键优先，旧版裸文件回退（B7 兼容）。
 
     委托给 ``segment_cache.find_segment_wav``，保持导出链路在 B7 文件名
@@ -267,8 +269,36 @@ def _find_segment(segments_dir: str, seg_id: str, text: str, role: str, emotion:
     """
     return segment_cache.find_segment_wav(
         segments_dir, seg_id, text, role, emotion, emo_alpha, speech_rate,
-        pinyin_hints, director_metadata,
+        pinyin_hints, director_metadata, speaker_fingerprint,
     )
+
+
+def _cast_speaker_fingerprint(project_dir: str, segment: dict[str, Any]) -> str | None:
+    """Resolve the active project's speaker identity for strict cache lookup."""
+    if not os.path.isfile(os.path.join(project_dir, "voice_cast.json")):
+        return None
+    try:
+        import json
+
+        with open(os.path.join(project_dir, "voice_bindings.json"), encoding="utf-8") as file:
+            bindings = json.load(file)
+        role_bindings = bindings.get("role_bindings", {}) if isinstance(bindings, dict) else {}
+        role_binding = role_bindings.get(str(segment.get("role_id") or ""))
+        if not isinstance(role_binding, dict):
+            role_name = str(segment.get("role") or segment.get("speaker") or "")
+            role_binding = next(
+                (item for item in role_bindings.values()
+                 if isinstance(item, dict) and item.get("role_name") == role_name),
+                None,
+            )
+        if not isinstance(role_binding, dict):
+            return None
+        path = str(role_binding.get("project_voice_path") or "")
+        if not os.path.isabs(path):
+            path = os.path.join(project_dir, path)
+        return segment_cache.speaker_fingerprint_for_path(path)
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def generate_subtitles(project_dir: str, formats=("srt", "lrc"), output_dir: str = "") -> list:
@@ -318,6 +348,7 @@ def generate_subtitles(project_dir: str, formats=("srt", "lrc"), output_dir: str
                 seg.get("speech_rate", 1.0),
                 seg.get("pinyin_hints"),
                 segment_cache.director_metadata_for(seg),
+                _cast_speaker_fingerprint(project_dir, seg),
             )
             if not fp:
                 # 缺段则跳过（导出会单独报错），字幕不阻断
@@ -447,6 +478,7 @@ def concat_for_preview(project_dir: str, chapter_id, output_path: str) -> str | 
             seg.get("speech_rate", 1.0),
             seg.get("pinyin_hints"),
             segment_cache.director_metadata_for(seg),
+            _cast_speaker_fingerprint(project_dir, seg),
         )
         if not fp:
             # 失败段跳过

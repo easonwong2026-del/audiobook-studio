@@ -14,8 +14,6 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Optional
-
 from lib.types import ProjectMeta
 
 
@@ -59,7 +57,10 @@ class ProjectSnapshot:
         """检测磁盘关键文件是否在加载后发生变更（任一文件 mtime 晚于 loaded_at 即视为脏）。"""
         if not self.project_dir or not os.path.isdir(self.project_dir):
             return True
-        for fn in ("project.json", "structured_script.json", "voice_bindings.json"):
+        for fn in (
+            "project.json", "structured_script.json", "voice_bindings.json",
+            "character_roster.json", "voice_cast.json",
+        ):
             p = os.path.join(self.project_dir, fn)
             if os.path.isfile(p) and os.path.getmtime(p) > self.loaded_at:
                 return True
