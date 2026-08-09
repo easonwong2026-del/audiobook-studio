@@ -11,10 +11,9 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Optional
+from typing import Any, Optional
 
 from ._atomic import atomic_write as _atomic_write
-from .exceptions import AtomicWriteError
 
 logger = logging.getLogger(__name__)
 

@@ -3,7 +3,7 @@
 通过 AST 解析 + 字符串断言验证 R1 重构已落地：
   - 全局可变 ``S = {...}`` 已移除（改用 ``gr.State(SessionState())``）。
   - 各事件 handler 改接 ``ss``（do_export 用 ``*args`` 吸收 ss 以零改动过 glue 测试）。
-  - app.py 引入了三个 service（ProjectService / ExportService / SynthesisService）并调用。
+  - app.py 引入了核心 service（ProjectService / ExportService / ProductionJobService）并调用。
 """
 import sys
 import os
@@ -51,7 +51,7 @@ def test_gr_state_present():
 def test_services_imported_and_used():
     assert "from services" in SRC or "import services" in SRC, \
         "app.py 应引入 services 层"
-    for svc in ("ProjectService", "ExportService", "SynthesisService"):
+    for svc in ("ProjectService", "ExportService", "ProductionJobService"):
         assert svc in SRC, f"app.py 未使用 {svc}"
 
 
