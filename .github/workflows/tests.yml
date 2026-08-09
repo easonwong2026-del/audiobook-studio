@@ -95,7 +95,7 @@ jobs:
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
 
-      - name: Run Windows path and project workflow tests
+      - name: Run Windows path, project, runtime, QA and delivery tests
         env:
           PYTHONUTF8: "1"
         run: >-
@@ -108,5 +108,22 @@ jobs:
           tests/test_binding_repo.py
           tests/test_session_snapshot.py
           tests/test_app_glue.py
+          tests/test_app_wiring.py
+          tests/test_ui_layout_regression.py
           tests/test_workspace_paths.py
+          tests/test_voice_cast_phase2.py
+          tests/test_task_repo.py
+          tests/test_production_jobs.py
+          tests/test_production_runtime.py
+          tests/test_runtime_tts.py
+          tests/test_production_mutation_guard.py
+          tests/test_o12_state_machine.py
+          tests/test_cancellation_state.py
+          tests/test_quality_phase4.py
+          tests/test_repair_phase4.py
+          tests/test_workflow_export_phase4.py
+          tests/test_audio_pipeline_streaming.py
+          tests/test_export_r2.py
+          tests/test_project_backup.py
+          tests/test_mcp_server.py
           tests/workflows/test_project_lifecycle.py

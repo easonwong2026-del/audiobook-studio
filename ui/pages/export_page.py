@@ -10,8 +10,23 @@ def create_export_page() -> dict:
         with gr.Group(elem_classes=["delivery-workspace"]):
             gr.Markdown("##### 导出有声书")
             with gr.Row():
+                e_readiness = gr.Markdown(
+                    "打开项目后检查合成、QA、章节、FFmpeg 与 metadata。",
+                    elem_classes=["review-status"],
+                )
+                e_readiness_refresh = gr.Button("刷新交付准备度", size="sm")
+            with gr.Row():
                 e_fmt = gr.Dropdown(label="格式", choices=["mp3", "m4b", "wav"], value="wav")
                 e_br = gr.Dropdown(label="比特率", choices=["128k", "192k", "320k"], value="192k")
+                e_qa_policy = gr.Dropdown(
+                    label="QA 策略",
+                    choices=[
+                        ("全部人工通过", "require_passed"),
+                        ("技术 QA 通过", "technical"),
+                        ("允许未检查（有警告）", "allow_unreviewed"),
+                    ],
+                    value="require_passed",
+                )
             e_save_dir = gr.Textbox(
                 label="保存位置",
                 placeholder="留空使用项目默认目录",
@@ -40,8 +55,11 @@ def create_export_page() -> dict:
 
     return {
         "group": grp_export,
+        "e_readiness": e_readiness,
+        "e_readiness_refresh": e_readiness_refresh,
         "e_fmt": e_fmt,
         "e_br": e_br,
+        "e_qa_policy": e_qa_policy,
         "e_save_dir": e_save_dir,
         "e_save_dir_hint": e_save_dir_hint,
         "e_go": e_go,

@@ -10,6 +10,10 @@ def create_review_page() -> dict:
         with gr.Row(equal_height=True):
             gr.Markdown("##### 章节试听")
             e_review_refresh = gr.Button("刷新质检状态", size="sm")
+        e_quality_summary = gr.Markdown(
+            "质量状态将在打开项目后显示。",
+            elem_classes=["review-status"],
+        )
         e_chapter_table = gr.Markdown("打开项目并完成部分合成后，章节状态会显示在这里。")
         with gr.Row():
             e_chapter_sel = gr.Dropdown(
@@ -25,9 +29,25 @@ def create_review_page() -> dict:
         )
 
         gr.Markdown("##### 段落试听与修复")
-        e_seg_preview_sel = gr.Dropdown(
-            label="试听段落", choices=[], interactive=True, multiselect=False, value=None,
-        )
+        with gr.Row():
+            e_quality_filter = gr.Dropdown(
+                label="状态筛选",
+                choices=[
+                    ("全部", "all"),
+                    ("待检查", "needs_review"),
+                    ("需修复", "needs_fix"),
+                    ("技术警告", "technical_warning"),
+                    ("已通过", "passed"),
+                ],
+                value="all",
+                scale=1,
+            )
+            e_seg_preview_sel = gr.Dropdown(
+                label="试听段落", choices=[], interactive=True,
+                multiselect=False, value=None, scale=3,
+            )
+            e_prev = gr.Button("上一段", size="sm", scale=1)
+            e_next = gr.Button("下一段", size="sm", scale=1)
         e_seg_regen_sel = gr.Dropdown(
             label="选择需要重合成的段落", choices=[], interactive=True, multiselect=True, value=[],
         )
@@ -36,6 +56,35 @@ def create_review_page() -> dict:
             "请选择已生成音频的段落。",
             elem_classes=["review-status"],
         )
+        e_segment_quality = gr.Markdown(
+            "选择段落后显示技术 QA 与人工 Review。",
+            elem_classes=["review-status"],
+        )
+        with gr.Row():
+            e_run_qa = gr.Button("运行技术 QA", size="sm")
+            e_review_status = gr.Dropdown(
+                label="人工 QA 状态",
+                choices=["needs_review", "needs_fix", "passed"],
+                value="needs_review",
+            )
+            e_issue_type = gr.Dropdown(
+                label="问题标签",
+                choices=[
+                    "emotion", "voice", "speed", "pronunciation",
+                    "pause", "noise", "clipping", "other",
+                ],
+                value="other",
+            )
+        e_review_note = gr.Textbox(
+            label="质检备注",
+            placeholder="记录情绪、语速、断句、发音等问题",
+            lines=2,
+        )
+        with gr.Row():
+            e_mark_review = gr.Button("保存质检标记")
+            e_mark_passed = gr.Button("通过并跳到下一未检", variant="primary")
+            e_bulk_pass = gr.Button("批量通过本章技术 QA=pass 段")
+        e_bulk_pass_msg = gr.Markdown("")
 
         with gr.Accordion("修复参数", open=False):
             with gr.Row():
@@ -54,6 +103,7 @@ def create_review_page() -> dict:
     return {
         "group": grp_review,
         "e_review_refresh": e_review_refresh,
+        "e_quality_summary": e_quality_summary,
         "e_chapter_table": e_chapter_table,
         "e_chapter_sel": e_chapter_sel,
         "e_chapter_reload": e_chapter_reload,
@@ -63,6 +113,9 @@ def create_review_page() -> dict:
         # for integrations written against the pre-3.3.3 page dictionary.
         "e_chapter_status": e_chapter_audio_status,
         "e_seg_preview_sel": e_seg_preview_sel,
+        "e_quality_filter": e_quality_filter,
+        "e_prev": e_prev,
+        "e_next": e_next,
         "e_seg_regen_sel": e_seg_regen_sel,
         "e_seg_sel": e_seg_preview_sel,
         "e_emo": e_emo,
@@ -72,6 +125,15 @@ def create_review_page() -> dict:
         "e_regenerate": e_regenerate,
         "e_seg_audio": e_seg_audio,
         "e_seg_audio_status": e_seg_audio_status,
+        "e_segment_quality": e_segment_quality,
+        "e_run_qa": e_run_qa,
+        "e_review_status": e_review_status,
+        "e_issue_type": e_issue_type,
+        "e_review_note": e_review_note,
+        "e_mark_review": e_mark_review,
+        "e_mark_passed": e_mark_passed,
+        "e_bulk_pass": e_bulk_pass,
+        "e_bulk_pass_msg": e_bulk_pass_msg,
         "e_seg_status": e_seg_audio_status,
         "e_regenerate_msg": e_regenerate_msg,
     }

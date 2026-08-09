@@ -14,11 +14,14 @@ from __future__ import annotations
 
 from lib.snapshot import ProjectSnapshot
 
-from .export import ExportService
+from .export import ExportPlanError, ExportService
 from .project import ProjectService
 from .project_backup import ProjectBackupService
 from .project_storage import ProjectStorageService
 from .production_jobs import ProductionJobError, ProductionJobService
+from .quality import QualityService
+from .repair import RepairError, RepairService
+from .runtime_tts import RuntimeTTSBusyError, RuntimeTTSError, RuntimeTTSService
 from .session import SessionState
 from .structured_script_import import (
     StructuredScriptCreationResult,
@@ -29,15 +32,23 @@ from .supplement import SupplementService, SupplementTaskState
 from .synthesis import SynthesisService, SynthesisState
 from .voice_assets import VoiceAssetError, VoiceAssetService
 from .voice_cast import VoiceCastError, VoiceCastResolver, VoiceCastService
+from .workflow import WorkflowService
 
 __all__ = [
     "ExportService",
+    "ExportPlanError",
     "ProjectService",
     "ProjectBackupService",
     "ProjectStorageService",
     "ProductionJobError",
     "ProductionJobService",
+    "QualityService",
     "ProjectSnapshot",
+    "RepairError",
+    "RepairService",
+    "RuntimeTTSBusyError",
+    "RuntimeTTSError",
+    "RuntimeTTSService",
     "SessionState",
     "StructuredScriptCreationResult",
     "StructuredScriptImportService",
@@ -51,4 +62,5 @@ __all__ = [
     "VoiceCastError",
     "VoiceCastResolver",
     "VoiceCastService",
+    "WorkflowService",
 ]

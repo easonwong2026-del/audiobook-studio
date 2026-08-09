@@ -70,15 +70,16 @@ Phase 2 增加全局音色资产目录和项目角色/演员表生命周期：
 
 ## Phase 3 production jobs
 
-Phase 3 使用一个同时服务于网页和 Agent 的 `ProductionJobService`。Web 不通过
-MCP 调用自己，MCP 也不调用 Gradio callback：
+Phase 3 使用一个同时服务于网页和 Agent 的 `ProductionJobService`，并由独立
+`production_runtime` 进程独占 TTS 模型和 GPU。Web 不通过 MCP 调用自己，MCP
+也不调用 Gradio callback；两者都只是 SQLite 命令/查询客户端：
 
 ~~~text
 MCP ─────┐
          ↓
- ProductionJobService → SynthesisService → repositories / lib / TTS
-         ↑
-Web ─────┘
+ ProductionJobService → project-local SQLite ← production_runtime
+         ↑                                      ↓
+Web ─────┘                         SynthesisService / lib / TTS
 ~~~
 
 新增 tools：
@@ -94,20 +95,42 @@ Web ─────┘
 | retry_failed_segments | 只重试实际失败或缺失的段落 |
 
 任务状态为：`pending`、`running`、`pausing`、`paused`、`cancelling`、
-`cancelled`、`done`、`error`、`interrupted`。持久记录只保存 JSON-safe 数据；
-进程重启后，找不到 runtime registry 的旧 active 任务会转换为 `interrupted`，
-`resume_production` 使用项目现有 segment status 和缓存继续未完成部分。
+`cancelled`、`done`、`error`、`interrupted`。`pause`/`cancel` 先持久化意图，
+worker 到段边界后确认最终状态。客户端读取永远不会把任务判成
+`interrupted`；只有新的 runtime 成功取得 OS 单实例锁后，才会修复上一 owner
+遗留的 active attempt。`resume_production` 会创建 child attempt，保留恢复历史。
 
-同一项目同时只允许一个 active production task。重复的
-`project + task_type + idempotency_key` 返回原任务，不会创建第二个 GPU job。
+任务存放在项目 `01_项目配置/production_tasks.sqlite3`。同一项目同时只允许一个
+active production task。重复的 `project + task_type + idempotency_key` 且 payload
+完全一致时返回原任务；同 key 不同 payload 返回 `IDEMPOTENCY_CONFLICT`，不会
+创建第二个 GPU job。
 `source` 只用于审计和 Web 展示，支持 `mcp`、`web`、`system`、`recovery`，不会
 改变业务路径。
 
 生产状态不返回本机绝对路径；任务 API 只返回 task、scope、状态、进度、错误摘要和
 稳定的段/项目标识。
 
+## Phase 4 quality、repair、workflow 与 delivery
+
+Phase 4 的 UI 与 MCP 共用项目内 Revision/QA/Review、修复任务、工作流与正式交付
+模型。技术 QA 和人工 Review 分开记录，修复只在新 revision 通过技术检查后切换
+active pointer；正式导出固定一份 revision snapshot，并生成 Delivery Manifest。
+
+| Tool | 作用 |
+| --- | --- |
+| get_workflow_state | 派生当前阶段、blockers 和 next_actions |
+| get_quality_report / list_review_segments / get_segment_review | 查询技术 QA、人工 Review 与 active revision |
+| mark_segment_review / run_technical_qa | 写入人工 Review、运行技术检查 |
+| regenerate_segments / get_repair_task / list_repairs | 创建和查询 revision-safe 修复 |
+| plan_export / start_export / get_export_task / list_exports | 正式导出的 readiness、执行和历史 |
+| get_delivery_manifest | 获取交付物相对路径、校验和与 revision snapshot 摘要 |
+
+`plan_export` 会检查缺段、生产失败、QA policy、metadata 和 FFmpeg。字幕使用同一
+active revision snapshot，并在任何段落缺失时整体失败，不会静默生成部分字幕。
+所有公开返回只包含项目相对路径，不暴露本机绝对路径。
+
 ## 后续边界
 
-Phase 3 仍不实现 AI 听感 QA、导出/M4B、云端 worker、分布式任务、多 GPU、权限系统
-或 Streamable HTTP。API_VERSION 继续保持 `1`，Phase 1–3 共用同一 MCP V1 stdio
+当前不实现 AI 听感 QA、云端 worker、分布式任务、多 GPU、权限系统或
+Streamable HTTP。API_VERSION 继续保持 `1`，Phase 1–4 共用同一 MCP V1 stdio
 协议。

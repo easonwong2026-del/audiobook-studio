@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 from typing import Any, Callable
 
@@ -40,6 +41,24 @@ from .tools.production import (
     retry_failed_segments,
     start_production,
 )
+from .tools.export import (
+    get_delivery_manifest,
+    get_export_task,
+    list_exports,
+    plan_export,
+    start_export,
+)
+from .tools.quality import (
+    get_quality_report,
+    get_repair_task,
+    get_segment_review,
+    list_repairs,
+    list_review_segments,
+    mark_segment_review,
+    regenerate_segments,
+    run_technical_qa,
+)
+from .tools.workflow import get_workflow_state
 
 logger = logging.getLogger(__name__)
 
@@ -367,6 +386,219 @@ _TOOLS: dict[str, dict[str, Any]] = {
     },
 }
 
+_TOOLS.update({
+    "get_workflow_state": {
+        "name": "get_workflow_state",
+        "description": "派生整书工作流阶段、阻断项与 Agent 可执行的下一步。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name"],
+            "properties": {"project_name": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
+    "get_quality_report": {
+        "name": "get_quality_report",
+        "description": "返回项目技术 QA 与人工 Review 分离的质量汇总。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name"],
+            "properties": {"project_name": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
+    "list_review_segments": {
+        "name": "list_review_segments",
+        "description": "按质量状态列出待检查或待修复段落。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name"],
+            "properties": {
+                "project_name": {"type": "string"},
+                "status": {
+                    "type": "string",
+                    "enum": [
+                        "unreviewed", "needs_review", "needs_fix", "passed",
+                        "technical_warning", "regenerating", "pass", "warning", "fail",
+                    ],
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+    "get_segment_review": {
+        "name": "get_segment_review",
+        "description": "读取单段 active audio revision、技术 QA 与人工 Review。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name", "segment_id"],
+            "properties": {
+                "project_name": {"type": "string"},
+                "segment_id": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    "mark_segment_review": {
+        "name": "mark_segment_review",
+        "description": "标记单段人工 Review 状态、问题类型和备注。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name", "segment_id", "review_status"],
+            "properties": {
+                "project_name": {"type": "string"},
+                "segment_id": {"type": "string"},
+                "review_status": {
+                    "type": "string",
+                    "enum": ["unreviewed", "needs_review", "needs_fix", "passed"],
+                },
+                "issue_type": {"type": "string"},
+                "review_note": {"type": "string"},
+                "reviewed_by": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    "run_technical_qa": {
+        "name": "run_technical_qa",
+        "description": "对指定段落或整项目 active revisions 运行非 AI 技术 QA。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name"],
+            "properties": {
+                "project_name": {"type": "string"},
+                "segment_ids": {"type": "array", "items": {"type": "string"}},
+            },
+            "additionalProperties": False,
+        },
+    },
+    "regenerate_segments": {
+        "name": "regenerate_segments",
+        "description": "创建 revision-safe Repair Job 并通过唯一 Production Runtime 重合成。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name", "segment_ids"],
+            "properties": {
+                "project_name": {"type": "string"},
+                "segment_ids": {
+                    "type": "array", "minItems": 1, "items": {"type": "string"},
+                },
+                "emotion": {"type": ["string", "null"]},
+                "emo_alpha": {"type": ["number", "null"]},
+                "speech_rate": {"type": ["number", "null"]},
+                "voice_override": {"type": ["string", "null"]},
+                "note": {"type": "string"},
+                "idempotency_key": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    "get_repair_task": {
+        "name": "get_repair_task",
+        "description": "刷新并读取 Repair Job 状态与 revision 结果。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name", "repair_id"],
+            "properties": {
+                "project_name": {"type": "string"},
+                "repair_id": {"type": "string"},
+                "refresh": {"type": "boolean", "default": True},
+            },
+            "additionalProperties": False,
+        },
+    },
+    "list_repairs": {
+        "name": "list_repairs",
+        "description": "列出项目 Repair 历史。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name"],
+            "properties": {"project_name": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
+    "plan_export": {
+        "name": "plan_export",
+        "description": "检查 active revisions、QA、metadata 与 FFmpeg 交付准备度。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name"],
+            "properties": {
+                "project_name": {"type": "string"},
+                "format": {"type": "string", "enum": ["wav", "mp3", "m4b"]},
+                "qa_policy": {
+                    "type": "string",
+                    "enum": ["require_passed", "technical", "allow_unreviewed"],
+                },
+                "subtitle_formats": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["srt", "lrc"]},
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+    "start_export": {
+        "name": "start_export",
+        "description": "通过 readiness gate 导出并保存 Export Job 与 Delivery Manifest。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name"],
+            "properties": {
+                "project_name": {"type": "string"},
+                "format": {"type": "string", "enum": ["wav", "mp3", "m4b"]},
+                "bitrate": {"type": "string"},
+                "qa_policy": {
+                    "type": "string",
+                    "enum": ["require_passed", "technical", "allow_unreviewed"],
+                },
+                "subtitle_formats": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["srt", "lrc"]},
+                },
+                "idempotency_key": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    "get_export_task": {
+        "name": "get_export_task",
+        "description": "读取一个 Export Job 的公共状态与相对输出路径。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name", "export_id"],
+            "properties": {
+                "project_name": {"type": "string"},
+                "export_id": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    "list_exports": {
+        "name": "list_exports",
+        "description": "列出项目 Export Job 历史。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name"],
+            "properties": {"project_name": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
+    "get_delivery_manifest": {
+        "name": "get_delivery_manifest",
+        "description": "读取指定导出或最近成功导出的公共交付清单。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name"],
+            "properties": {
+                "project_name": {"type": "string"},
+                "export_id": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+    },
+})
+
 _HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "server_info": lambda _arguments: server_info(),
     "validate_structured_script": validate_structured_script,
@@ -395,6 +627,20 @@ _HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "resume_production": resume_production,
     "cancel_production": cancel_production,
     "retry_failed_segments": retry_failed_segments,
+    "get_workflow_state": get_workflow_state,
+    "get_quality_report": get_quality_report,
+    "list_review_segments": list_review_segments,
+    "get_segment_review": get_segment_review,
+    "mark_segment_review": mark_segment_review,
+    "run_technical_qa": run_technical_qa,
+    "regenerate_segments": regenerate_segments,
+    "get_repair_task": get_repair_task,
+    "list_repairs": list_repairs,
+    "plan_export": plan_export,
+    "start_export": start_export,
+    "get_export_task": get_export_task,
+    "list_exports": list_exports,
+    "get_delivery_manifest": get_delivery_manifest,
 }
 
 
@@ -418,6 +664,132 @@ def _tool_call_result(payload: Any, *, is_error: bool = False) -> dict[str, Any]
         "structuredContent": payload,
         "isError": is_error,
     }
+
+
+def _public_error_message(value: Any) -> str:
+    return re.sub(
+        r"(?:[A-Za-z]:[\\/]|/(?:Users|home|private|tmp|var|opt)/)[^\s,;)]*",
+        "<local-path>",
+        str(value or ""),
+    )
+
+
+def _public_error_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _public_error_message(value)
+    if isinstance(value, dict):
+        return {
+            str(key): _public_error_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_public_error_value(item) for item in value]
+    return value
+
+
+def _exception_payload(exc: Exception) -> dict[str, Any]:
+    converter = getattr(exc, "as_payload", None)
+    if callable(converter):
+        payload = converter()
+        if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
+            return payload
+    plan = getattr(exc, "plan", None)
+    if isinstance(plan, dict):
+        return {
+            "error": {
+                "code": "EXPORT_NOT_READY",
+                "message": "交付准备度检查未通过",
+                "fix_hint": "处理 blockers 后重新调用 plan_export。",
+                "details": {"blockers": plan.get("blockers", [])},
+            }
+        }
+    return {
+        "error": {
+            "code": type(exc).__name__.upper(),
+            "message": _public_error_message(exc),
+            "fix_hint": "",
+            "details": {},
+        }
+    }
+
+
+def _normalize_tool_payload(payload: Any) -> tuple[Any, bool]:
+    """Normalize adapter/domain failures to one Agent-facing error contract."""
+    if not isinstance(payload, dict):
+        return payload, False
+    raw_error = payload.get("error")
+    if isinstance(raw_error, dict):
+        details = raw_error.get("details")
+        if not isinstance(details, dict):
+            details = {
+                key: value
+                for key, value in raw_error.items()
+                if key not in {"code", "message", "fix_hint", "details"}
+            }
+        return {
+            "error": {
+                "code": str(raw_error.get("code") or "TOOL_ERROR"),
+                "message": _public_error_message(raw_error.get("message") or "工具调用失败"),
+                "fix_hint": str(raw_error.get("fix_hint") or ""),
+                "details": _public_error_value(details),
+            }
+        }, True
+    if payload.get("success") is False:
+        errors = payload.get("errors")
+        issues = errors if isinstance(errors, list) else []
+        first = issues[0] if issues and isinstance(issues[0], dict) else {}
+        return {
+            "error": {
+                "code": str(first.get("code") or "TOOL_REJECTED"),
+                "message": _public_error_message(
+                    first.get("message") or "工具调用被业务规则拒绝"
+                ),
+                "fix_hint": str(first.get("fix_hint") or ""),
+                "details": {"errors": _public_error_value(issues)},
+            }
+        }, True
+    return payload, False
+
+
+def _validate_arguments(schema: dict[str, Any], value: Any, path: str = "arguments") -> None:
+    """Enforce the small JSON Schema subset advertised by MCP tools."""
+    expected = schema.get("type")
+    allowed_types = expected if isinstance(expected, list) else [expected]
+    if value is None and "null" in allowed_types:
+        return
+    type_matches = {
+        "object": isinstance(value, dict),
+        "array": isinstance(value, list),
+        "string": isinstance(value, str),
+        "boolean": isinstance(value, bool),
+        "integer": isinstance(value, int) and not isinstance(value, bool),
+        "number": isinstance(value, (int, float)) and not isinstance(value, bool),
+        None: True,
+    }
+    if not any(type_matches.get(item, False) for item in allowed_types):
+        raise ValueError(f"{path} 类型不符合 schema")
+    if isinstance(value, dict):
+        required = schema.get("required", [])
+        missing = [key for key in required if key not in value]
+        if missing:
+            raise ValueError(f"{path} 缺少必填字段: {', '.join(missing)}")
+        properties = schema.get("properties", {})
+        if schema.get("additionalProperties") is False:
+            extra = sorted(set(value) - set(properties))
+            if extra:
+                raise ValueError(f"{path} 包含未知字段: {', '.join(extra)}")
+        for key, child in value.items():
+            if key in properties:
+                _validate_arguments(properties[key], child, f"{path}.{key}")
+    if isinstance(value, list):
+        if len(value) < int(schema.get("minItems", 0) or 0):
+            raise ValueError(f"{path} 项目数量不足")
+        child_schema = schema.get("items")
+        if isinstance(child_schema, dict):
+            for index, child in enumerate(value):
+                _validate_arguments(child_schema, child, f"{path}[{index}]")
+    if "enum" in schema and value not in schema["enum"]:
+        raise ValueError(f"{path} 不在允许值中")
 
 
 def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
@@ -454,13 +826,19 @@ def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
         if not isinstance(arguments, dict):
             return _jsonrpc_error(request_id, -32602, "tool arguments 必须是对象")
         try:
+            _validate_arguments(_TOOLS[name]["inputSchema"], arguments)
             payload = handler(arguments)
-            result = _tool_call_result(payload)
+            payload, payload_is_error = _normalize_tool_payload(payload)
+            result = _tool_call_result(
+                payload,
+                is_error=payload_is_error,
+            )
         except Exception as exc:  # MCP clients receive a structured tool error.
             logger.exception("MCP tool failed: %s", name)
-            result = _tool_call_result({
-                "error": {"code": type(exc).__name__, "message": str(exc)},
-            }, is_error=True)
+            payload, _payload_is_error = _normalize_tool_payload(
+                _exception_payload(exc)
+            )
+            result = _tool_call_result(payload, is_error=True)
         return None if is_notification else _jsonrpc_result(request_id, result)
     if is_notification:
         return None
