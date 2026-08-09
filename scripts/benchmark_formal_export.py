@@ -15,7 +15,6 @@ import sys
 import tempfile
 import time
 import tracemalloc
-import wave
 
 try:
     import resource
