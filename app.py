@@ -25,10 +25,11 @@ from services import (
     ProjectBackupService,
     ProjectService,
     ProjectStorageService,
+    ProductionJobError,
+    ProductionJobService,
     SupplementService,
     SupplementTaskState,
     VoiceAssetService,
-    SynthesisService,
     VoiceCastError,
     VoiceCastResolver,
 )
@@ -149,6 +150,16 @@ def open_project(name, ss):
         seg_dir = project_paths.project_dir(ProjectService.get_project_dir(name), "segments")
         existing = scan_existing_raw(snap, seg_dir)
         log_init = "\n".join(existing[-15:]) if existing else "等待音色配置完成后开始合成..."
+        # Production state is process-wide and durable; a fresh browser
+        # session must discover an Agent/Web task instead of relying on its
+        # own SessionState object.
+        task_snapshot = _latest_production_task(name)
+        if task_snapshot:
+            runtime = ProductionJobService.get_runtime_state(task_snapshot.get("task_id"))
+            ss.synthesis = runtime
+            task_logs = task_snapshot.get("log_lines") or []
+            if task_logs:
+                log_init = "\n".join(task_logs[-15:])
 
         role_choices = build_role_management_choices(snap.script, ss.bindings)
 
@@ -189,6 +200,98 @@ def refresh_top_status(ss):
                 f"引擎: {engine_state}")
     except Exception as exc:
         return f"📖 {ss.project}（状态读取失败：{exc}）"
+
+
+def _production_status_label(status: str) -> str:
+    return {
+        "pending": "等待中",
+        "running": "运行中",
+        "pausing": "正在暂停",
+        "paused": "已暂停",
+        "cancelling": "正在停止",
+        "cancelled": "已停止",
+        "done": "已完成",
+        "error": "完成但有失败段",
+        "interrupted": "上次运行已中断",
+    }.get(status, status or "未知")
+
+
+def _production_source_label(source: str) -> str:
+    return {
+        "mcp": "Agent / MCP",
+        "web": "网页",
+        "recovery": "恢复任务",
+        "system": "系统",
+    }.get(source, source or "系统")
+
+
+def _production_task_markdown(task: dict | None) -> str:
+    """Render a task snapshot without exposing private filesystem paths."""
+    if not task:
+        return "当前没有运行中的生产任务。"
+    progress = task.get("progress", {}) or {}
+    total = int(progress.get("total", 0) or 0)
+    completed = int(progress.get("completed", 0) or 0)
+    failed = int(progress.get("failed", 0) or 0)
+    percent = float(progress.get("percent", 0.0) or 0.0)
+    scope = task.get("scope", {}) or {}
+    if scope.get("all"):
+        scope_text = "整书"
+    elif scope.get("chapter_ids"):
+        scope_text = "第 " + ", ".join(str(item) for item in scope["chapter_ids"]) + " 章"
+    elif scope.get("segment_ids"):
+        scope_text = "指定段落（" + str(len(scope["segment_ids"])) + " 段）"
+    else:
+        scope_text = "未指定"
+    lines = [
+        "### 当前生产任务",
+        f"- **任务 ID**：`{task.get('task_id', '')}`",
+        f"- **任务来源**：{_production_source_label(str(task.get('source') or ''))}",
+        f"- **生产范围**：{scope_text}",
+        f"- **状态**：{_production_status_label(str(task.get('status') or ''))}",
+        f"- **进度**：{completed} / {total}（{percent:.1f}%）",
+    ]
+    current_chapter = progress.get("current_chapter")
+    current_segment = progress.get("current_segment")
+    if current_chapter or current_segment:
+        lines.append(
+            f"- **当前**：{current_chapter or '—'}"
+            + (f" · `{current_segment}`" if current_segment else "")
+        )
+    if failed:
+        lines.append(f"- **失败**：{failed}")
+    if task.get("status") == "interrupted":
+        lines.append("- **提示**：检测到上次中断任务，可点击“继续”恢复剩余段落。")
+    return "\n".join(lines)
+
+
+def _latest_production_task(project: str) -> dict | None:
+    if not project:
+        return None
+    active = ProductionJobService.get_active_task(project)
+    if active:
+        return active
+    tasks = ProductionJobService.list_tasks(project_name=project)
+    return next(
+        (task for task in tasks if task.get("status") == "interrupted"),
+        None,
+    )
+
+
+def refresh_production_task(ss):
+    """Refresh the shared task panel from ProductionJobService."""
+    if not ss or not ss.project:
+        return "当前没有运行中的生产任务。"
+    try:
+        task = _latest_production_task(ss.project)
+        if task:
+            runtime = ProductionJobService.get_runtime_state(task.get("task_id"))
+            if runtime is not None:
+                ss.synthesis = runtime
+        return _production_task_markdown(task)
+    except Exception as exc:
+        logger.warning("刷新生产任务状态失败: %s", exc)
+        return f"当前生产任务状态读取失败：{exc}"
 
 def delete_project(name, ss=None):
     """Archive a project by default; permanent deletion has a separate callback."""
@@ -402,25 +505,10 @@ def preview_bound_voice(role, audio_file, from_lib, ss):
 def do_synthesis(ss, num_beams=2, progress=gr.Progress(),
                 emotion="(按剧本默认)", s_override=False, emo_alpha=1.0, speech_rate=1.0,
                 selected_chapters=None):
-    """开始合成：提交后台队列并轮询进度（R1 后台化，不再阻塞 UI）。
-
-    2.3 O2：接收合成期情感 / 语速全局覆盖，持久化到项目 ``synthesis_overrides.json``
-    并透传至 ``SynthesisService.start``，保证预览 / 导出缓存键一致。
-    """
+    """Start production through the shared Web/MCP task kernel."""
     proj = ss.project
-    bindings = ss.bindings
-    script = ss.script or {}
     if not proj:
         yield ("请先在项目管理中打开项目", [])
-        return
-    missing = [n for n in (script.get("voices", {}) or {}) if n not in bindings or not bindings[n]]
-    if missing:
-        yield (f"以下角色未绑定: {', '.join(missing)}", [])
-        return
-    try:
-        _tts_engine().init_engine()
-    except Exception as e:
-        yield (f"模型加载失败: {e}", [])
         return
     # 2.3 O2：解析覆盖并持久化，保证预览 / 导出一致
     emotion_override = None if emotion == "(按剧本默认)" else emotion
@@ -434,52 +522,110 @@ def do_synthesis(ss, num_beams=2, progress=gr.Progress(),
         _pm.set_synthesis_overrides(proj, overrides)
     except Exception as exc:
         logger.warning("保存合成覆盖参数失败: %s", exc)
-    # 5.4：已有合成任务进行中（pending/running/pausing/paused/cancelling）时禁止开启新任务，
-    # 避免第二个整本任务覆盖 state 引用导致第一个任务失控。
-    if ss.synthesis is not None and ss.synthesis.status in (
-        "pending", "running", "pausing", "paused", "cancelling"
-    ):
-        yield ("⚠ 已有合成任务进行中（状态：" + ss.synthesis.status
-               + "），请先停止当前任务再开始新的合成。", [])
-        return
-    # 准备本次合成任务态（每会话独立），提交后台
-    ss.synthesis = SynthesisState(task_id=f"task_{int(time.time()*1000)}", project=proj)
-    # O3：初始化内存段态列表（与 O11 共享真相，绝不反向写 meta.segments_status）
-    # O5：传入 selected_chapters，使未选中段在内存态标 skipped（⏭）
-    ss.synthesis.segment_states = synth_progress.build_segment_states(proj, selected_chapters)
-    # O5：持久化本次勾选（非破坏性，与 synthesis_overrides.json 同构）
+    chapter_ids = [str(item) for item in (selected_chapters or []) if str(item).strip()]
+    scope = {"chapter_ids": chapter_ids} if chapter_ids else {"all": True}
     try:
         _pm.set_synthesis_selections(proj, {"chapters": selected_chapters or []})
     except Exception as exc:
         logger.warning("保存合成勾选失败: %s", exc)
-    SynthesisService.start(
-        ss.synthesis, proj, bindings, num_beams=num_beams,
-        emotion=emotion_override,
-        emo_alpha=emo_alpha if s_override else None,
-        speech_rate=speech_rate if s_override else None,
-        selected_chapters=selected_chapters,
-    )
-    state = ss.synthesis
+    try:
+        started = ProductionJobService.start(
+            proj,
+            scope,
+            {
+                "num_beams": num_beams,
+                "emotion": emotion_override,
+                "emo_alpha": emo_alpha if s_override else None,
+                "speech_rate": speech_rate if s_override else None,
+            },
+            source="web",
+        )
+        ss.synthesis = ProductionJobService.get_runtime_state(started["task_id"])
+        if ss.synthesis is None:
+            # A task may finish before the UI gets its first callback; the
+            # durable snapshot remains the source of truth.
+            ss.synthesis = SynthesisState(
+                task_id=started["task_id"], project=proj, status=started.get("status", "pending")
+            )
+    except ProductionJobError as exc:
+        yield (f"❌ {exc}", [])
+        return
+    except Exception as exc:
+        logger.exception("网页启动生产失败")
+        yield (f"❌ 启动生产失败: {exc}", [])
+        return
     # 轮询直到终态，~0.5s 刷新一次日志 + 进度条 + 队列列表
-    while state.status not in ("done", "cancelled", "error"):
+    while True:
+        snapshot = ProductionJobService.get_task_snapshot(started["task_id"])
+        state = ss.synthesis
+        status = str(snapshot.get("status") or getattr(state, "status", "pending"))
+        if state is not None:
+            state.status = status
+        log_lines = snapshot.get("log_lines") or (
+            state.log_lines[-50:] if state is not None else []
+        )
+        log_text = "\n".join(log_lines)
+        rows = (
+            synth_progress.to_queue_rows(state.segment_states)
+            if state is not None and state.segment_states
+            else synth_progress.to_queue_rows(
+                synth_progress.build_segment_states(
+                    proj,
+                    snapshot.get("scope", {}).get("chapter_ids") or None,
+                )
+            )
+        )
         time.sleep(0.5)
         try:
-            progress(state.progress, f"{state.completed}/{state.total}")
+            progress(
+                float(snapshot.get("progress", {}).get("percent", 0.0) or 0.0) / 100,
+                f"{snapshot.get('progress', {}).get('completed', 0)}/{snapshot.get('progress', {}).get('total', 0)}",
+            )
         except Exception as exc:
             logger.debug("进度回调异常（进行中）: %s", exc)
-        yield (state.snapshot_text(), df_style.style_dataframe(synth_progress.to_queue_rows(state.segment_states), synth_progress.QUEUE_HEADERS, status_col=0, status_color_map=df_style.ICON_COLORS))
+        yield (
+            log_text or _production_task_markdown(snapshot),
+            df_style.style_dataframe(
+                rows,
+                synth_progress.QUEUE_HEADERS,
+                status_col=0,
+                status_color_map=df_style.ICON_COLORS,
+            ),
+        )
+        if status in ("done", "cancelled", "error", "interrupted"):
+            break
     # 终态再刷一次
     try:
-        progress(state.progress, f"{state.completed}/{state.total}")
+        final_progress = snapshot.get("progress", {})
+        progress(
+            float(final_progress.get("percent", 0.0) or 0.0) / 100,
+            f"{final_progress.get('completed', 0)}/{final_progress.get('total', 0)}",
+        )
     except Exception as exc:
         logger.debug("进度回调异常（终态）: %s", exc)
-    yield (state.snapshot_text(), df_style.style_dataframe(synth_progress.to_queue_rows(state.segment_states), synth_progress.QUEUE_HEADERS, status_col=0, status_color_map=df_style.ICON_COLORS))
+    yield (
+        "\n".join(snapshot.get("log_lines") or []) or _production_task_markdown(snapshot),
+        df_style.style_dataframe(
+            rows,
+            synth_progress.QUEUE_HEADERS,
+            status_col=0,
+            status_color_map=df_style.ICON_COLORS,
+        ),
+    )
 
 def cancel(ss):
-    """停止合成：置协作取消标志（worker 在下一段前检查 -> 段边界生效）。"""
-    if ss.synthesis is not None:
-        SynthesisService.cancel(ss.synthesis)
-    return "停止中..."
+    """Request cooperative cancellation through the shared task service."""
+    if not ss or not ss.project:
+        return "当前没有生产任务。"
+    task = _latest_production_task(ss.project)
+    task_id = task.get("task_id") if task else getattr(ss.synthesis, "task_id", None)
+    if not task_id:
+        return "当前没有生产任务。"
+    try:
+        result = ProductionJobService.cancel(task_id)
+        return f"任务 {task_id}：{_production_status_label(result.get('status', ''))}"
+    except Exception as exc:
+        return f"停止任务失败：{exc}"
 
 def pause_synthesis(ss):
     """O12：暂停合成（协作暂停，段边界挂起，不杀进行中进程）。
@@ -487,18 +633,25 @@ def pause_synthesis(ss):
     仅在 ``ss.synthesis`` 存在且 ``status in (running, paused)`` 时生效；否则返回提示不报错。
     返回 (队列列表, 暂停按钮, 恢复按钮) 的更新三元组。
     """
-    if ss.synthesis is None or ss.synthesis.status not in ("running", "paused"):
+    task = _latest_production_task(ss.project) if ss and ss.project else None
+    if not task:
         return (gr.update(), gr.update(), gr.update())
-    SynthesisService.pause(ss.synthesis)
+    try:
+        result = ProductionJobService.pause(task["task_id"])
+    except Exception:
+        return (gr.update(), gr.update(), gr.update())
+    runtime = ProductionJobService.get_runtime_state(task["task_id"])
+    if runtime is not None:
+        ss.synthesis = runtime
     rows = df_style.style_dataframe(
-        synth_progress.to_queue_rows(ss.synthesis.segment_states),
+        synth_progress.to_queue_rows(runtime.segment_states if runtime else []),
         synth_progress.QUEUE_HEADERS,
         status_col=0,
         status_color_map=df_style.ICON_COLORS,
     )
     return (
         rows,
-        gr.update(value="⏸ 已暂停", interactive=False),
+        gr.update(value=f"⏸ {_production_status_label(result.get('status', 'paused'))}", interactive=False),
         gr.update(interactive=True),
     )
 
@@ -508,11 +661,18 @@ def resume_synthesis(ss):
     仅在 ``ss.synthesis`` 存在且 ``status == 'paused'`` 时生效；否则返回提示不报错。
     返回 (队列列表, 暂停按钮, 恢复按钮) 的更新三元组。
     """
-    if ss.synthesis is None or ss.synthesis.status != "paused":
+    task = _latest_production_task(ss.project) if ss and ss.project else None
+    if not task or task.get("status") not in ("paused", "interrupted"):
         return (gr.update(), gr.update(), gr.update())
-    SynthesisService.resume(ss.synthesis)
+    try:
+        ProductionJobService.resume(task["task_id"])
+    except Exception:
+        return (gr.update(), gr.update(), gr.update())
+    runtime = ProductionJobService.get_runtime_state(task["task_id"])
+    if runtime is not None:
+        ss.synthesis = runtime
     rows = df_style.style_dataframe(
-        synth_progress.to_queue_rows(ss.synthesis.segment_states),
+        synth_progress.to_queue_rows(runtime.segment_states if runtime else []),
         synth_progress.QUEUE_HEADERS,
         status_col=0,
         status_color_map=df_style.ICON_COLORS,
@@ -529,6 +689,31 @@ def refresh_queue_list(ss):
     与 O11 ``refresh_top_status`` 共享状态源约定：O11 读 meta（粗粒度），本函数读
     ``state.segment_states``（细粒度）；不互相写、不反向写 meta。
     """
+    task = _latest_production_task(ss.project) if ss and ss.project else None
+    if task:
+        runtime = ProductionJobService.get_runtime_state(task.get("task_id"))
+        if runtime is not None:
+            ss.synthesis = runtime
+        if runtime is not None and runtime.segment_states:
+            return df_style.style_dataframe(
+                synth_progress.to_queue_rows(runtime.segment_states),
+                synth_progress.QUEUE_HEADERS,
+                status_col=0,
+                status_color_map=df_style.ICON_COLORS,
+            )
+        scope = task.get("scope", {}) or {}
+        selected = scope.get("chapter_ids") or None
+        try:
+            return df_style.style_dataframe(
+                synth_progress.to_queue_rows(
+                    synth_progress.build_segment_states(ss.project, selected)
+                ),
+                synth_progress.QUEUE_HEADERS,
+                status_col=0,
+                status_color_map=df_style.ICON_COLORS,
+            )
+        except Exception:
+            pass
     if ss and ss.synthesis is not None and ss.synthesis.segment_states:
         return df_style.style_dataframe(
             synth_progress.to_queue_rows(ss.synthesis.segment_states),
@@ -1594,6 +1779,7 @@ def _open_chain_rest(event):
     e = e.then(preview_chapters, [ss], _review_outputs())
     e = e.then(preview_chapter_options, [ss], [e_chapter_sel])
     e = e.then(refresh_queue_list, [ss], [s_queue_list])
+    e = e.then(refresh_production_task, [ss], [s_task_status])
     e = e.then(render_chapter_tree, [p_sel], [p_chapter_tree])
     e = e.then(refresh_project_storage, [ss], [p_storage])
     e = e.then(render_preview, [ss], [s_preview_df, s_chapters_sel])
@@ -1727,6 +1913,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             # ───────── 合成 ─────────
             syn_page = create_synthesis_page()
             grp_synth = syn_page["group"]
+            s_task_status = syn_page["s_task_status"]
             s_preview_df = syn_page["s_preview_df"]
             s_chapters_sel = syn_page["s_chapters_sel"]
             s_log = syn_page["s_log"]
@@ -1827,7 +2014,18 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         grp_settings,
     ]
 
+    # The browser is an observer/controller.  A lightweight timer keeps the
+    # shared durable task state visible after MCP actions without owning the
+    # worker lifecycle.
+    s_task_timer = gr.Timer(1.5)
+
     # ═══════════ 侧边栏导航切换 ═══════════
+
+    s_task_timer.tick(
+        refresh_production_task, [ss], [s_task_status]
+    ).then(
+        refresh_queue_list, [ss], [s_queue_list]
+    )
 
     # 旧的全量刷新契约（22 元组）已移除（阶段三：open_project 首步 + _open_chain_rest 打开链）
 
@@ -1861,6 +2059,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         preview_chapters, [ss], _review_outputs()).then(
         preview_chapter_options, [ss], [e_chapter_sel]).then(
         refresh_queue_list, [ss], [s_queue_list]).then(
+        refresh_production_task, [ss], [s_task_status]).then(
         refresh_supplement_roles, [ss], [sup_role])
     nav_export.click(
         lambda: _goto("export"), None, _GROUPS,
@@ -1870,6 +2069,8 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     # ── 生产阶段内部导航：合成中心 / 试听质检 / 角色补录 ──
     production_stage.change(_goto, [production_stage], _GROUPS).then(
         refresh_production_check, [ss], [production_check]
+    ).then(
+        refresh_production_task, [ss], [s_task_status]
     ).then(
         preview_chapters, [ss],
         _review_outputs(),
@@ -1908,6 +2109,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         preview_chapters, [ss], _review_outputs()).then(
         preview_chapter_options, [ss], [e_chapter_sel]).then(
         refresh_queue_list, [ss], [s_queue_list]).then(
+        refresh_production_task, [ss], [s_task_status]).then(
         refresh_supplement_roles, [ss], [sup_role])
     ov_export.click(
         lambda: _goto("export"), None, _GROUPS,
@@ -2037,10 +2239,15 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         [p_trash_confirm],
     )
     s_start.click(do_synthesis, [ss, s_beam, s_emo, s_override, s_alpha, s_rate, s_chapters_sel], outputs=[s_log, s_queue_list]).then(
+        refresh_production_task, [ss], [s_task_status]).then(
         refresh_top_status, [ss], [top_status])
-    s_cancel.click(cancel, [ss], outputs=s_log).then(refresh_top_status, [ss], [top_status])
-    s_pause.click(pause_synthesis, [ss], [s_queue_list, s_pause, s_resume])
-    s_resume.click(resume_synthesis, [ss], [s_queue_list, s_pause, s_resume])
+    s_cancel.click(cancel, [ss], outputs=s_log).then(
+        refresh_production_task, [ss], [s_task_status]).then(
+        refresh_top_status, [ss], [top_status])
+    s_pause.click(pause_synthesis, [ss], [s_queue_list, s_pause, s_resume]).then(
+        refresh_production_task, [ss], [s_task_status])
+    s_resume.click(resume_synthesis, [ss], [s_queue_list, s_pause, s_resume]).then(
+        refresh_production_task, [ss], [s_task_status])
     s_open_btn.click(open_segments_folder, [ss], s_open_msg)
     e_chapter_sel.change(preview_chapter, [ss, e_chapter_sel], [e_chapter_audio, e_chapter_audio_status])
     e_chapter_reload.click(preview_chapter, [ss, e_chapter_sel], [e_chapter_audio, e_chapter_audio_status])

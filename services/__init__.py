@@ -18,6 +18,7 @@ from .export import ExportService
 from .project import ProjectService
 from .project_backup import ProjectBackupService
 from .project_storage import ProjectStorageService
+from .production_jobs import ProductionJobError, ProductionJobService
 from .session import SessionState
 from .structured_script_import import (
     StructuredScriptCreationResult,
@@ -34,6 +35,8 @@ __all__ = [
     "ProjectService",
     "ProjectBackupService",
     "ProjectStorageService",
+    "ProductionJobError",
+    "ProductionJobService",
     "ProjectSnapshot",
     "SessionState",
     "StructuredScriptCreationResult",

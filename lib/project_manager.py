@@ -169,7 +169,10 @@ def get_remaining(name: str) -> list[str]:
     seg_dir = project_paths.project_dir(project_dir, "segments")
     remaining = []
     for seg_id, status in meta.segments_status.items():
-        if status in ("pending", "failed"):
+        # ``skipped`` is a selection marker, not a completed production
+        # result.  It must become eligible again when a later all-book job (or
+        # a matching chapter job) is started.
+        if status in ("pending", "failed", "skipped"):
             remaining.append(seg_id)
         elif status == "done":
             # B7：用参数感知的缓存键判定（兼容历史裸文件 + glob 任意参数变体），

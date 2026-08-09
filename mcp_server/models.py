@@ -15,6 +15,7 @@ CAPABILITIES = [
     "character_roster",
     "voice_cast",
     "chapter_role_resolution",
+    "production_jobs",
 ]
 
 
