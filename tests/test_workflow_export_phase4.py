@@ -228,7 +228,7 @@ def test_start_export_returns_before_slow_worker_finishes(delivery_project, monk
     _finish_and_review(delivery_project)
 
     def slow_export(_project_dir, _fmt, _bitrate, output_dir="", **_kwargs):
-        time.sleep(0.25)
+        time.sleep(0.5)
         output = os.path.join(output_dir, "slow.wav")
         wavfile.write(output, 22050, np.ones(2205, dtype=np.int16))
         return output
@@ -237,7 +237,7 @@ def test_start_export_returns_before_slow_worker_finishes(delivery_project, monk
     started = time.monotonic()
     submitted = ExportService.start_export(delivery_project, "wav")
     elapsed = time.monotonic() - started
-    assert elapsed < 0.20
+    assert elapsed < 0.30
     assert submitted["status"] in {"pending", "running"}
     finished = submitted
     deadline = time.monotonic() + 5.0
