@@ -48,20 +48,33 @@ def run_technical_qa(arguments: dict[str, Any]) -> dict[str, Any]:
     project = str(arguments.get("project_name") or "")
     segment_ids = arguments.get("segment_ids")
     if isinstance(segment_ids, list) and segment_ids:
+        normalized_ids = [str(segment_id) for segment_id in segment_ids]
+        if len(normalized_ids) == 1:
+            return {
+                "project": project,
+                "results": [
+                    QualityService.run_technical_qa(project, normalized_ids[0])
+                ],
+            }
         return {
             "project": project,
-            "results": [
-                QualityService.run_technical_qa(project, str(segment_id))
-                for segment_id in segment_ids
-            ],
+            "results": QualityService.run_technical_qa_batch(
+                project,
+                normalized_ids,
+            ),
         }
     report = QualityService.get_quality_report(project)
+    report_segment_ids = [
+        str(item["segment_id"])
+        for item in report.get("segments", [])
+        if isinstance(item, dict) and str(item.get("segment_id") or "").strip()
+    ]
     return {
         "project": project,
-        "results": [
-            QualityService.run_technical_qa(project, str(item["segment_id"]))
-            for item in report.get("segments", [])
-        ],
+        "results": QualityService.run_technical_qa_batch(
+            project,
+            report_segment_ids,
+        ),
     }
 
 

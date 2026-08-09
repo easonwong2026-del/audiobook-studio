@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -22,7 +23,9 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from lib import audio_pipeline
+from lib import project_paths
 from repositories.project_repo import ProjectRepository
+from repositories.quality_repo import QualityRepository
 from repositories.task_repo import TaskRepository
 from services.quality import QualityService
 
@@ -75,6 +78,26 @@ def _tiny_wav(path: str) -> None:
         audio.writeframes(b"\0\0" * 160)
 
 
+def _prepare_qa_audio(project: str, segment_ids: list[str]) -> None:
+    """Create one tiny, project-local WAV for each synthetic segment.
+
+    ``get_quality_report`` discovers legacy ``{segment_id}.wav`` files and
+    bootstraps active revisions in one repository mutation.  Hard links keep
+    setup storage small on POSIX while the copy fallback keeps the benchmark
+    usable on filesystems (including Windows) that do not support them.
+    """
+    project_dir = ProjectRepository.get_project_dir(project)
+    segments_dir = project_paths.project_dir(project_dir, "segments", create=True)
+    sample = os.path.join(segments_dir, "__benchmark_qa_sample.wav")
+    _tiny_wav(sample)
+    for segment_id in segment_ids:
+        target = os.path.join(segments_dir, f"{segment_id}.wav")
+        try:
+            os.link(sample, target)
+        except OSError:
+            shutil.copyfile(sample, target)
+
+
 def _benchmark_size(root: str, segment_count: int, status_updates: int) -> dict[str, Any]:
     project = f"bench_{segment_count}"
     ProjectRepository.create_project_from_data(project, _script(segment_count))
@@ -82,17 +105,31 @@ def _benchmark_size(root: str, segment_count: int, status_updates: int) -> dict[
     (_meta, script, _bindings), open_seconds, open_peak = _measure(
         lambda: ProjectRepository.load_project(project)
     )
-    report, qa_seconds, qa_peak = _measure(
-        lambda: QualityService.get_quality_report(project)
-    )
-    tasks, task_seconds, task_peak = _measure(
-        lambda: TaskRepository.list_tasks(project=project)
-    )
     segment_ids = [
         str(segment["id"])
         for chapter in script.get("chapters", [])
         for segment in chapter.get("segments", [])
     ]
+    _prepare_qa_audio(project, segment_ids)
+
+    # The first refresh discovers real WAV files and bootstraps active
+    # revisions; subsequent measurements isolate analysis, batch persistence,
+    # and the normal post-QA report refresh.
+    _report, qa_seconds, qa_peak = _measure(
+        lambda: QualityService.get_quality_report(project)
+    )
+    analyzed, qa_analyze_seconds, qa_analyze_peak = _measure(
+        lambda: QualityService.analyze_technical_qa_batch(project, segment_ids)
+    )
+    persisted, qa_persist_seconds, qa_persist_peak = _measure(
+        lambda: QualityRepository.save_technical_qa_batch(project, analyzed)
+    )
+    refreshed, quality_refresh_seconds, quality_refresh_peak = _measure(
+        lambda: QualityService.get_quality_report(project)
+    )
+    tasks, task_seconds, task_peak = _measure(
+        lambda: TaskRepository.list_tasks(project=project)
+    )
     update_count = min(len(segment_ids), max(int(status_updates), 0))
 
     def update_statuses() -> None:
@@ -130,7 +167,15 @@ def _benchmark_size(root: str, segment_count: int, status_updates: int) -> dict[
         "project_open_peak_python_mb": open_peak,
         "qa_refresh_seconds": qa_seconds,
         "qa_refresh_peak_python_mb": qa_peak,
-        "quality_segments": report["summary"]["segments"],
+        "qa_analyze_seconds": qa_analyze_seconds,
+        "qa_analyze_peak_python_mb": qa_analyze_peak,
+        "qa_analyzed_results": len(analyzed),
+        "qa_batch_persistence_seconds": qa_persist_seconds,
+        "qa_batch_persistence_peak_python_mb": qa_persist_peak,
+        "qa_persisted_results": len(persisted),
+        "quality_refresh_seconds": quality_refresh_seconds,
+        "quality_refresh_peak_python_mb": quality_refresh_peak,
+        "quality_segments": refreshed["summary"]["segments"],
         "task_query_seconds": task_seconds,
         "task_query_peak_python_mb": task_peak,
         "task_count": len(tasks),

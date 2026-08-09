@@ -124,8 +124,12 @@ class QualityService:
         *,
         params: dict[str, Any] | None = None,
         speaker_override: str | None = None,
+        bindings_document: dict[str, Any] | None = None,
     ) -> tuple[str, str, dict[str, Any]]:
-        _meta, _script, bindings = ProjectRepository.load_project(project_name)
+        if bindings_document is None:
+            _meta, _script, bindings = ProjectRepository.load_project(project_name)
+        else:
+            bindings = bindings_document
         effective = {
             "emotion": segment.get("emotion", "neutral"),
             "emo_alpha": segment.get("emo_alpha", 1.0),
@@ -388,17 +392,25 @@ class QualityService:
         }
 
     @classmethod
-    def run_technical_qa(
+    def _analyze_technical_qa(
         cls,
         project_name: str,
         segment_id: str,
         revision_id: str | None = None,
+        *,
+        meta: Any | None = None,
+        segment: dict[str, Any] | None = None,
+        bindings: dict[str, Any] | None = None,
+        revision: dict[str, Any] | None = None,
+        resolve_missing_revision: bool = True,
     ) -> dict[str, Any]:
-        meta, _script, segment = cls._segment(project_name, segment_id)
-        revision = (
-            QualityRepository.get_revision(project_name, revision_id)
-            if revision_id else cls.ensure_active_revision(project_name, segment_id)
-        )
+        if meta is None or segment is None:
+            meta, _script, segment = cls._segment(project_name, segment_id)
+        if revision is None and resolve_missing_revision:
+            revision = (
+                QualityRepository.get_revision(project_name, revision_id)
+                if revision_id else cls.ensure_active_revision(project_name, segment_id)
+            )
         issues: list[dict[str, Any]] = []
         metrics: dict[str, Any] = {}
         if not revision:
@@ -496,6 +508,7 @@ class QualityService:
             project_name,
             segment,
             params=dict(revision.get("params") or {}),
+            bindings_document=bindings,
         )
         if revision.get("cache_identity") and revision.get("cache_identity") != expected_identity:
             issues.append({
@@ -524,9 +537,165 @@ class QualityService:
             "checker_version": 1,
             "checked_at": _now(),
         }
-        return QualityRepository.save_technical_qa(
-            project_name, revision["revision_id"], result
+        return result
+
+    @classmethod
+    def analyze_technical_qa(
+        cls,
+        project_name: str,
+        segment_id: str,
+        revision_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Analyze one segment without mutating the quality repository."""
+        revision = (
+            QualityRepository.get_revision(project_name, revision_id)
+            if revision_id
+            else QualityRepository.get_active_revision(project_name, segment_id)
         )
+        return cls._analyze_technical_qa(
+            project_name,
+            segment_id,
+            revision_id,
+            revision=revision,
+            resolve_missing_revision=False,
+        )
+
+    @classmethod
+    def run_technical_qa(
+        cls,
+        project_name: str,
+        segment_id: str,
+        revision_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Analyze and persist one segment (backward-compatible API)."""
+        result = cls._analyze_technical_qa(project_name, segment_id, revision_id)
+        revision_key = str(result.get("revision_id") or "").strip()
+        if not revision_key:
+            return result
+        return QualityRepository.save_technical_qa(project_name, revision_key, result)
+
+    @classmethod
+    def analyze_technical_qa_batch(
+        cls,
+        project_name: str,
+        segment_ids: list[str],
+        *,
+        revision_ids: dict[str, str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Analyze many segments without writing ``quality_state.json``."""
+        prepared_ids = [
+            str(segment_id).strip()
+            for segment_id in segment_ids
+            if str(segment_id).strip()
+        ]
+        revision_map = {
+            str(segment_id): str(revision_id)
+            for segment_id, revision_id in (revision_ids or {}).items()
+            if str(segment_id).strip() and str(revision_id).strip()
+        }
+        if not prepared_ids:
+            return []
+
+        meta, script, bindings = ProjectRepository.load_project(project_name)
+        segments = _script_index(script)
+        state = QualityRepository.load(project_name)
+
+        # Read the project and quality snapshots once for the read-only
+        # analysis loop.  Revision bootstrap, when needed, belongs to
+        # ``run_technical_qa_batch``'s preparation step below.
+        results: list[dict[str, Any]] = []
+        for segment_id in prepared_ids:
+            segment = segments.get(segment_id)
+            if segment is None:
+                # Preserve the single-segment API's KeyError contract for an
+                # invalid identifier rather than silently dropping a result.
+                results.append(
+                    cls._analyze_technical_qa(
+                        project_name,
+                        segment_id,
+                        revision_map.get(segment_id),
+                    )
+                )
+                continue
+            selected_revision_id = revision_map.get(segment_id)
+            if selected_revision_id:
+                selected_revision = state["revisions"].get(selected_revision_id)
+            else:
+                selected_revision_id = state["active_revisions"].get(segment_id)
+                selected_revision = state["revisions"].get(selected_revision_id)
+            results.append(
+                cls._analyze_technical_qa(
+                    project_name,
+                    segment_id,
+                    selected_revision_id,
+                    meta=meta,
+                    segment=segment,
+                    bindings=bindings,
+                    revision=(
+                        selected_revision
+                        if isinstance(selected_revision, dict) else None
+                    ),
+                    resolve_missing_revision=False,
+                )
+            )
+        return results
+
+    @classmethod
+    def _prepare_technical_qa_batch(
+        cls,
+        project_name: str,
+        segment_ids: list[str],
+    ) -> None:
+        """Ensure legacy audio has active revisions before a batch run.
+
+        This preparation belongs to the mutating ``run`` operation.  The
+        public ``analyze`` methods remain read-only and therefore never
+        bootstrap or rewrite ``quality_state.json``.
+        """
+        state = QualityRepository.load(project_name)
+        if any(
+            segment_id not in state["active_revisions"]
+            or state["active_revisions"].get(segment_id)
+            not in state["revisions"]
+            for segment_id in segment_ids
+        ):
+            cls.get_quality_report(project_name)
+
+    @classmethod
+    def run_technical_qa_batch(
+        cls,
+        project_name: str,
+        segment_ids: list[str],
+        *,
+        revision_ids: dict[str, str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Analyze many segments and persist all revisions in one mutation."""
+        prepared_ids = [
+            str(segment_id).strip()
+            for segment_id in segment_ids
+            if str(segment_id).strip()
+        ]
+        if not prepared_ids:
+            return []
+        cls._prepare_technical_qa_batch(project_name, prepared_ids)
+        results = cls.analyze_technical_qa_batch(
+            project_name,
+            prepared_ids,
+            revision_ids=revision_ids,
+        )
+        persisted = QualityRepository.save_technical_qa_batch(
+            project_name,
+            results,
+        )
+        by_revision = {
+            str(item.get("revision_id")): item
+            for item in persisted
+            if str(item.get("revision_id") or "").strip()
+        }
+        return [
+            by_revision.get(str(item.get("revision_id")), item)
+            for item in results
+        ]
 
     @classmethod
     def mark_review(

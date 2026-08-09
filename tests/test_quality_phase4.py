@@ -222,3 +222,38 @@ def test_failed_mutation_releases_process_lock(quality_project):
         {"after_failure": True},
     )
     assert record["after_failure"] is True
+
+
+def test_technical_qa_batch_rewrites_quality_state_once(quality_project, monkeypatch):
+    """Batch QA performs one quality-state snapshot write for many segments."""
+    for segment_id in ("001-001", "001-002"):
+        assert QualityService.ensure_active_revision(quality_project, segment_id)
+
+    writes: list[str] = []
+    original_atomic_write = __import__(
+        "repositories.quality_repo", fromlist=["atomic_write"]
+    ).atomic_write
+
+    def counted_atomic_write(path, payload):
+        writes.append(path)
+        return original_atomic_write(path, payload)
+
+    monkeypatch.setattr(
+        "repositories.quality_repo.atomic_write",
+        counted_atomic_write,
+    )
+    analyzed = QualityService.analyze_technical_qa_batch(
+        quality_project,
+        ["001-001", "001-002"],
+    )
+    assert len(analyzed) == 2
+    assert writes == []
+
+    results = QualityService.run_technical_qa_batch(
+        quality_project,
+        ["001-001", "001-002"],
+    )
+
+    assert len(results) == 2
+    assert {item["revision_id"] for item in results}
+    assert writes == [QualityRepository.state_path(quality_project)]
