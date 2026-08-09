@@ -794,6 +794,14 @@ def do_export(fmt, bitrate, output_dir, *args):
             bitrate=bitrate,
             qa_policy=str(qa_policy or "require_passed"),
         )
+        status = str(result.get("status") or "pending")
+        export_id = str(result.get("export_id") or "")
+        if status != "done":
+            return (
+                None,
+                f"⏳ 导出任务已提交 · {status} · Export ID {export_id}。"
+                "请刷新交付状态查看进度。",
+            )
         outputs = result.get("outputs") or []
         if not outputs:
             return None, "导出任务已结束，但没有生成交付文件。"
@@ -837,6 +845,21 @@ def refresh_export_readiness(fmt, qa_policy, ss):
             f"- FFmpeg：{'正常' if summary.get('ffmpeg_ready') else '不可用'}",
             f"- Metadata：{'正常' if metadata.get('title') else '缺少书名'}",
         ]
+        exports = ExportService.list_exports(ss.project)
+        if exports:
+            latest_export = exports[0]
+            lines.append(
+                f"- Export：{latest_export.get('status', 'unknown')} · "
+                f"{latest_export.get('export_id', '')}"
+            )
+        try:
+            workflow = WorkflowService.get_state(ss.project)
+            lines.append(
+                "- Delivery："
+                + ("current" if workflow["summary"].get("delivered") else "stale/missing")
+            )
+        except Exception:
+            lines.append("- Delivery：状态暂不可用")
         if plan.get("ready"):
             lines.append("\n✅ 已满足当前 QA 策略，可以导出成品。")
         else:
