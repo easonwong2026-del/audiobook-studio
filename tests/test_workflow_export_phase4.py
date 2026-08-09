@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 
 import numpy as np
@@ -314,18 +315,31 @@ def test_export_worker_cannot_publish_after_runtime_ownership_loss(
 
 def test_start_export_returns_before_slow_worker_finishes(delivery_project, monkeypatch):
     _finish_and_review(delivery_project)
+    export_started = threading.Event()
 
     def slow_export(_project_dir, _fmt, _bitrate, output_dir="", **_kwargs):
+        export_started.set()
         time.sleep(0.5)
         output = os.path.join(output_dir, "slow.wav")
         wavfile.write(output, 22050, np.ones(2205, dtype=np.int16))
         return output
 
     monkeypatch.setattr(ExportService, "export", staticmethod(slow_export))
-    started = time.monotonic()
-    submitted = ExportService.start_export(delivery_project, "wav")
-    elapsed = time.monotonic() - started
+    # Runtime startup and Windows SQLite/file-lock scheduling are independent
+    # of the API's async contract.  Suppress startup just for the submission
+    # measurement, then launch the real inline runtime and await the job.
+    with monkeypatch.context() as context:
+        context.setattr(
+            ProductionRuntimeClient,
+            "ensure_running",
+            staticmethod(lambda: None),
+        )
+        started = time.monotonic()
+        submitted = ExportService.start_export(delivery_project, "wav")
+        elapsed = time.monotonic() - started
     assert elapsed < 0.30
+    assert not export_started.is_set()
+    ProductionRuntimeClient.ensure_running()
     assert submitted["status"] in {"pending", "running"}
     finished = submitted
     deadline = time.monotonic() + 5.0

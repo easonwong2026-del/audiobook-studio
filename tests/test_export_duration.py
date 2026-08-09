@@ -9,7 +9,7 @@ from services.export import ExportService
 
 
 def _write_wav(path: str, duration: float, rate: int = 10_000) -> None:
-    frames = int(round(duration * rate))
+    frames = round(duration * rate)
     with wave.open(path, "wb") as audio:
         audio.setnchannels(1)
         audio.setsampwidth(2)
