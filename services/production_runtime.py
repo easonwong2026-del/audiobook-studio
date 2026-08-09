@@ -346,14 +346,17 @@ class ProductionRuntime:
                 error_summary="",
                 log_lines=["运行时完成正式导出"],
             )
-        except ExportCancelled as exc:
+        except ExportCancelled:
             TaskRepository.persist_runtime_state(
                 record.task_id,
                 self.owner_id,
                 status="cancelled",
                 progress=dict(current.progress or {}),
                 failed_segment_ids=[],
-                error_summary=str(exc),
+                # Cancellation is a terminal control outcome, not a task
+                # error. Keep the durable task error field empty so clients
+                # cannot misclassify a successful cancel as a failure.
+                error_summary="",
                 log_lines=["正式导出已取消"],
             )
         except Exception as exc:

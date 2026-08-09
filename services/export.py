@@ -879,15 +879,16 @@ class ExportService:
                             "message": "正式导出未完成",
                         },
                     )
+                history_error = None if isinstance(exc, ExportCancelled) else {
+                    "code": getattr(exc, "code", type(exc).__name__),
+                    "message": "正式导出未完成",
+                }
                 QualityRepository.update_history_record(
                     project,
                     "export_jobs",
                     history["export_id"],
                     status=("cancelled" if isinstance(exc, ExportCancelled) else "error"),
-                    error={
-                        "code": getattr(exc, "code", type(exc).__name__),
-                        "message": "正式导出未完成",
-                    },
+                    error=history_error,
                 )
             except Exception:
                 logger.exception("更新导出历史失败: %s", record.task_id)
