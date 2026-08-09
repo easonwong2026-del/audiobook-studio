@@ -1,8 +1,7 @@
-"""合成服务：进程内后台队列 + 单段协作取消（禁止 import gradio）。
+"""Runtime-private synthesis worker + segment-boundary control.
 
 设计要点：
-- 重活在 worker 线程跑，UI 通过 ``do_synthesis`` 以 ~0.5s 轮询 ``SynthesisState``
-  并 ``yield`` 日志 / 进度，合成不再阻塞 Gradio UI 线程。
+- 重活只在独立 ``production_runtime`` 的 worker 线程跑；Web/MCP 轮询 SQLite。
 - 后台队列选 ``concurrent.futures.ThreadPoolExecutor``（单 worker，单 GPU 串行安全），
   不引入 asyncio：TTS 引擎是同步阻塞 API，asyncio 仍需 ``run_in_executor``，
   本质等同本方案但更复杂。
@@ -10,7 +9,8 @@
   检查 ``state.cancel`` 标志；单段内 GPU 调用不可中断（杀线程会泄漏显存），
   故取消粒度细化到「段边界」，这是务实解耦档的明确边界（D2）。
 
-阶段四重构：新增 TaskRepository.save_task() 记录可恢复任务状态。
+``persist_task=True`` 仅保留给兼容测试；正式生产由 runtime 持久化 owner、
+heartbeat、control intent 和进度。
 """
 from __future__ import annotations
 
@@ -130,7 +130,8 @@ class SynthesisService:
               speech_rate: float = None, cb_seg_state=None,
               selected_chapters: Optional[list] = None,
               selected_segment_ids: Optional[list] = None,
-              persist_task: bool = True) -> str:
+              persist_task: bool = True,
+              voice_overrides: Optional[dict[str, str]] = None) -> str:
         """提交后台合成，立即返回 task_id；重活在 worker 线程执行。
 
         阶段四：在提交 worker 前写入 TaskRecord（running 态）。
@@ -170,6 +171,7 @@ class SynthesisService:
             SynthesisService._run, state, project, bindings,
             num_beams, emotion, emo_alpha, speech_rate, cb_seg_state,
             selected_chapters, selected_segment_ids, persist_task,
+            voice_overrides,
         )
         # 写入任务状态记录（running）
         if persist_task:
@@ -215,21 +217,21 @@ class SynthesisService:
 
     @staticmethod
     def pause(state: SynthesisState) -> None:
-        """协作暂停：置 ``state.paused=True`` 并标记 ``status='paused'``。
+        """请求协作暂停，并在 worker 段边界确认 ``paused``。
 
-        仅当任务处于 ``running`` / ``paused`` 时生效；worker 在下一段边界挂起
-        （不杀进行中进程，仅停止提交新段）。暂停中亦可取消（cancel 优先）。
+        ``pausing`` 表示当前 GPU 段仍可能执行；只有 worker 到达安全边界后
+        才会写 ``paused``。暂停中亦可取消（cancel 优先）。
         """
         state.paused = True
-        if state.status == "running":
-            state.status = "paused"
+        if state.status in {"pending", "running"}:
+            state.status = "pausing"
         state.notify()
 
     @staticmethod
     def resume(state: SynthesisState) -> None:
-        """恢复：``paused=False``，状态回到 ``running``（仅 ``paused`` 态生效）。"""
+        """撤销暂停意图，worker 继续拉取下一段。"""
         state.paused = False
-        if state.status == "paused":
+        if state.status in {"paused", "pausing"}:
             state.status = "running"
         state.notify()
 
@@ -280,7 +282,8 @@ class SynthesisService:
              speech_rate: float = None, cb_seg_state=None,
              selected_chapters: Optional[list] = None,
              selected_segment_ids: Optional[list] = None,
-             persist_task: bool = True) -> None:
+             persist_task: bool = True,
+             voice_overrides: Optional[dict[str, str]] = None) -> None:
         """worker 主体：驱动 ``lib.queue.synthesize_project``，逐 yield 写回 ``state``。
 
         段边界检查 ``state.cancel`` -> 协作取消（置 ``cancelled`` 终态）；检查
@@ -302,7 +305,12 @@ class SynthesisService:
             selected_segment_ids: 可选的精确段范围。
             persist_task: 是否写入兼容版 TaskRecord。
         """
-        state.status = "running"
+        if state.cancel:
+            state.status = "cancelling"
+        elif state.paused:
+            state.status = "pausing"
+        else:
+            state.status = "running"
         state.append_log("🚀 开始合成…")
         state.notify()
         # 默认回调：直接驱动本任务的 state.segment_states（O3 列表数据源）
@@ -369,6 +377,7 @@ class SynthesisService:
                 emotion=emotion, emo_alpha=emo_alpha, speech_rate=speech_rate,
                 cb_seg_state=cb_seg_state, selected_chapters=selected_chapters,
                 selected_segment_ids=selected_segment_ids,
+                voice_overrides=voice_overrides,
             )
             # 手动驱动生成器：在「段边界」检查暂停/取消，并控制是否向下拉取（暂停时
             # 不调 next，从而不提交新段）。等价于原 ``for raw in gen``，但支持协作暂停。
@@ -376,6 +385,9 @@ class SynthesisService:
             while True:
                 # 段边界协作暂停：暂停且未取消时不向下拉取（不提交新段），worker 存活挂起
                 while state.paused and not state.cancel:
+                    if state.status != "paused":
+                        state.status = "paused"
+                        state.notify()
                     if not _paused_logged:
                         state.append_log("⏸ 已暂停，等待恢复…")
                         _paused_logged = True

@@ -1,25 +1,23 @@
 """Unified production-job orchestration for Web and MCP.
 
-The service is deliberately framework-free.  It owns the durable task
-record, the in-process runtime registry, the production state machine and the
-machine-readable planning contract.  ``SynthesisService`` remains the only
-worker/TTS entry point; this module never reimplements synthesis.
+The service is deliberately framework-free.  It is a command/query client over
+the project-local task database and owns the machine-readable planning
+contract.  ``production_runtime`` alone owns ``SynthesisService`` and TTS.
 """
 from __future__ import annotations
 
 import logging
 import re
-import threading
 import uuid
 from datetime import datetime, timezone
-from typing import Any, ClassVar, Optional
+from typing import Any, Optional
 
-from lib import progress as synthesis_progress
 from lib import project_paths, script_loader, segment_cache
 from repositories.project_repo import ProjectRepository
 from repositories.task_repo import TaskRecord, TaskRepository
 
-from .synthesis import SynthesisService, SynthesisState
+from .synthesis import SynthesisState
+from .production_runtime import ProductionRuntimeClient
 from .voice_cast import VoiceCastResolver
 
 logger = logging.getLogger(__name__)
@@ -81,18 +79,16 @@ class ProductionJobError(ValueError):
 
 
 class ProductionJobService:
-    """The single production-job kernel shared by Web and MCP."""
+    """Transactional command/query façade shared by Web and MCP.
 
-    _lock: ClassVar[threading.RLock] = threading.RLock()
-    _running_tasks: ClassVar[dict[str, SynthesisState]] = {}
-    _task_metadata: ClassVar[dict[str, dict[str, Any]]] = {}
+    Runtime objects live exclusively in ``ProductionRuntime``.  This class
+    never infers worker death from the absence of process-local memory.
+    """
 
     @classmethod
     def reset_runtime(cls) -> None:
-        """Clear the registry for isolated tests; workers are owned by SynthesisService."""
-        with cls._lock:
-            cls._running_tasks.clear()
-            cls._task_metadata.clear()
+        """Stop the optional inline runtime used by unit tests."""
+        ProductionRuntimeClient.reset_inline()
 
     @staticmethod
     def _project_data(project_name: str) -> tuple[Any, dict[str, Any], dict[str, Any]]:
@@ -467,175 +463,21 @@ class ProductionJobService:
     plan_production = plan
 
     @classmethod
-    def _record_progress(
-        cls,
-        state: SynthesisState,
-        record: TaskRecord,
-    ) -> dict[str, Any]:
-        metadata = cls._task_metadata.get(state.task_id, {})
-        chapter = metadata.get("segment_to_chapter", {}).get(state.current_segment)
-        total = max(int(state.total or record.progress.get("total", 0) or 0), 0)
-        completed = max(int(state.completed or 0), 0)
-        failed_ids = sorted({str(item) for item in state.failed_segment_ids if str(item)})
-        failed = len(failed_ids)
-        percent = round((completed / total) * 100, 1) if total else 0.0
-        return {
-            "total": total,
-            "completed": completed,
-            "failed": failed,
-            "percent": percent,
-            "current_chapter": chapter,
-            "current_segment": state.current_segment,
-        }
-
-    @classmethod
-    def _on_state_update(cls, state: SynthesisState) -> None:
-        """Persist a state callback from the SynthesisService worker."""
-        with cls._lock:
-            record = TaskRepository.load_task(state.task_id)
-            if record is None:
-                return
-            if state.status == "done" and state.failed_segment_ids:
-                # A queue can finish its generator while individual segments
-                # failed.  Production exposes that outcome as error so retry
-                # is discoverable through both interfaces.
-                state.status = "error"
-                state.error = "存在失败段落"
-            record.status = state.status
-            record.progress = cls._record_progress(state, record)
-            record.failed_segment_ids = sorted({str(item) for item in state.failed_segment_ids})
-            record.error_summary = _public_error(
-                state.error or ("存在失败段落" if record.failed_segment_ids else "")
-            )[:500]
-            record.updated_at = _now()
-            if state.status == "running" and not record.started_at:
-                record.started_at = record.updated_at
-            if state.status in TERMINAL_PRODUCTION_STATES:
-                record.finished_at = record.updated_at
-            TaskRepository.save_task(record)
-            if state.status in TERMINAL_PRODUCTION_STATES:
-                cls._running_tasks.pop(state.task_id, None)
-                cls._task_metadata.pop(state.task_id, None)
-
-    @classmethod
-    def _runtime_state(
-        cls,
-        record: TaskRecord,
-        plan: dict[str, Any],
-    ) -> SynthesisState:
-        _meta, _script, _bindings_document = cls._project_data(record.project)
-        selected_chapters = record.scope.get("chapter_ids", []) if isinstance(record.scope, dict) else []
-        selected_segments = record.scope.get("segment_ids", []) if isinstance(record.scope, dict) else []
-        state = SynthesisState(
-            task_id=record.task_id,
-            project=record.project,
-            status="pending",
-            total=int(plan.get("segments", 0) or 0),
-            completed=int(plan.get("already_completed", 0) or 0),
-            failed_segment_ids=list(plan.get("failed_segment_ids", []) or []),
-        )
-        state.on_update = cls._on_state_update
-        state.selected_chapters = list(selected_chapters) or None
-        state.selected_segment_ids = list(selected_segments) or None
-        try:
-            state.segment_states = synthesis_progress.build_segment_states(
-                record.project,
-                list(selected_chapters) if selected_chapters else None,
-            )
-        except Exception:
-            state.segment_states = []
-        cls._task_metadata[record.task_id] = {
-            "segment_to_chapter": cls._script_index(_script)[2],
-        }
-        cls._running_tasks[record.task_id] = state
-        record.status = "pending"
-        record.progress = {
-            "total": state.total,
-            "completed": state.completed,
-            "failed": len(state.failed_segment_ids),
-            "percent": round((state.completed / state.total) * 100, 1) if state.total else 0.0,
-            "current_chapter": None,
-            "current_segment": None,
-        }
-        record.updated_at = _now()
-        TaskRepository.save_task(record)
-        return state
-
-    @classmethod
-    def _launch(cls, record: TaskRecord, plan: dict[str, Any]) -> None:
-        """Register and submit a task to the existing synthesis worker."""
-        state = cls._runtime_state(record, plan)
-        try:
-            _meta, _script, bindings_document = cls._project_data(record.project)
-            bindings = (
-                bindings_document.get("bindings", {})
-                if isinstance(bindings_document, dict) else {}
-            )
-            options = record.options if isinstance(record.options, dict) else {}
-            selected_chapters = record.scope.get("chapter_ids", []) if isinstance(record.scope, dict) else []
-            selected_segments = record.scope.get("segment_ids", []) if isinstance(record.scope, dict) else []
-            synthesis_kwargs = {
-                "num_beams": int(options.get("num_beams", 2) or 2),
-                "emotion": options.get("emotion"),
-                "emo_alpha": options.get("emo_alpha"),
-                "speech_rate": options.get("speech_rate"),
-                "selected_chapters": selected_chapters or None,
-                "selected_segment_ids": selected_segments or None,
-                "persist_task": False,
-            }
-            try:
-                SynthesisService.start(
-                    state, record.project, bindings, **synthesis_kwargs
-                )
-            except TypeError as exc:
-                # Keep adapters friendly to small test/integration doubles
-                # implementing the pre-Phase-3 SynthesisService signature.
-                if "unexpected keyword" not in str(exc) and "keyword argument" not in str(exc):
-                    raise
-                fallback = dict(synthesis_kwargs)
-                fallback.pop("selected_segment_ids", None)
-                fallback.pop("persist_task", None)
-                SynthesisService.start(state, record.project, bindings, **fallback)
-        except Exception as exc:
-            cls._running_tasks.pop(record.task_id, None)
-            cls._task_metadata.pop(record.task_id, None)
-            record.status = "error"
-            record.error_summary = _public_error(exc)[:500]
-            record.updated_at = _now()
-            record.finished_at = record.updated_at
-            TaskRepository.save_task(record)
-            raise
-
-    @classmethod
     def _active_or_interrupted(cls, project_name: str) -> Optional[TaskRecord]:
-        """Return the current active task and repair stale runtime claims."""
+        """Return the current durable active task without stale inference."""
         records = TaskRepository.list_tasks(project=project_name, task_type=PRODUCTION_TASK_TYPE)
         for record in records:
-            if record.status not in ACTIVE_PRODUCTION_STATES:
-                continue
-            if record.task_id not in cls._running_tasks:
-                record.status = "interrupted"
-                record.error_summary = record.error_summary or "应用重启后未找到运行中的任务实例"
-                record.updated_at = _now()
-                TaskRepository.save_task(record)
-                continue
-            return record
+            if record.status in ACTIVE_PRODUCTION_STATES:
+                return record
         return None
 
     @classmethod
     def _existing_idempotent(
         cls, project_name: str, idempotency_key: str
     ) -> Optional[TaskRecord]:
-        record = TaskRepository.find_by_idempotency(
+        return TaskRepository.find_by_idempotency(
             project_name, PRODUCTION_TASK_TYPE, idempotency_key
         )
-        if record is None:
-            return None
-        # A cancelled task is explicitly terminal and may be intentionally
-        # started again with the same human key; all other rows are replayable.
-        if record.status == "cancelled":
-            return None
-        return record
 
     @classmethod
     def _normalize_options(cls, options: Any) -> dict[str, Any]:
@@ -649,8 +491,27 @@ class ProductionJobService:
             "emotion": raw.get("emotion"),
             "emo_alpha": raw.get("emo_alpha"),
             "speech_rate": raw.get("speech_rate"),
+            "voice_overrides": {
+                str(segment_id): str(path)
+                for segment_id, path in raw.get("voice_overrides", {}).items()
+                if str(segment_id).strip() and str(path).strip()
+            } if isinstance(raw.get("voice_overrides"), dict) else {},
         }
-        return result
+        return TaskRepository.canonical_options(result)
+
+    @staticmethod
+    def _idempotency_conflict(
+        existing: TaskRecord,
+        idempotency_key: str,
+    ) -> ProductionJobError:
+        return ProductionJobError(
+            "IDEMPOTENCY_CONFLICT",
+            "同一幂等键已用于不同的生产请求",
+            project_name=existing.project,
+            task_id=existing.task_id,
+            status=existing.status,
+            idempotency_key=idempotency_key,
+        )
 
     @classmethod
     def start(
@@ -665,6 +526,7 @@ class ProductionJobService:
         selected_segment_ids: Optional[list[str]] = None,
         parent_task_id: str = "",
         recovery_of: str = "",
+        attempt: int = 1,
     ) -> dict[str, Any]:
         """Plan, create and asynchronously launch one production task."""
         name = str(project_name or "").strip()
@@ -679,61 +541,79 @@ class ProductionJobService:
                 "chapter_ids": list(selected_chapters or []),
                 "segment_ids": list(selected_segment_ids or []),
             }
+        key = str(idempotency_key or "").strip()
+        normalized_options = cls._normalize_options(options)
+        requested_scope = TaskRepository.canonical_scope(scope)
+        # Fast-path existing durable rows before re-running mutable project
+        # planning.  The later SQLite transaction remains authoritative.
+        replay = cls._existing_idempotent(name, key)
+        if replay is not None:
+            if (
+                (scope is None or isinstance(scope, dict))
+                and TaskRepository.same_production_payload(
+                    replay, requested_scope, normalized_options
+                )
+            ):
+                return {"created": False, **cls._task_snapshot(replay)}
+            raise cls._idempotency_conflict(replay, key)
+        active = cls._active_or_interrupted(name)
+        if active is not None:
+            raise ProductionJobError(
+                "PROJECT_HAS_ACTIVE_TASK",
+                "同一项目已有生产任务运行中",
+                project_name=name,
+                task_id=active.task_id,
+                status=active.status,
+            )
         plan = cls.plan(name, scope)
         if not plan["ready"]:
             raise ProductionJobError(
                 "PRODUCTION_BLOCKED", "生产前检查未通过",
                 project_name=name, blockers=plan["blockers"], plan=plan,
             )
-        key = str(idempotency_key or "").strip()
-        with cls._lock:
-            replay = cls._existing_idempotent(name, key)
-            if replay is not None:
-                return {
-                    "created": False,
-                    **cls.get_task_snapshot(replay.task_id),
-                }
-            active = cls._active_or_interrupted(name)
-            if active is not None:
-                raise ProductionJobError(
-                    "PROJECT_HAS_ACTIVE_TASK",
-                    "同一项目已有生产任务运行中",
-                    project_name=name,
-                    task_id=active.task_id,
-                    status=active.status,
-                )
-            now = _now()
-            task_id = f"task_{uuid.uuid4().hex[:16]}"
-            record = TaskRecord(
-                task_id=task_id,
-                task_type=PRODUCTION_TASK_TYPE,
-                project=name,
-                status="pending",
-                source=origin,
-                scope=plan["scope"],
-                options=cls._normalize_options(options),
-                progress={
-                    "total": plan["segments"],
-                    "completed": plan["already_completed"],
-                    "failed": plan["failed"],
-                    "percent": round(
-                        (plan["already_completed"] / plan["segments"]) * 100, 1
-                    ) if plan["segments"] else 0.0,
-                    "current_chapter": None,
-                    "current_segment": None,
-                },
-                failed_segment_ids=list(plan.get("failed_segment_ids", [])),
-                attempt=1,
-                idempotency_key=key,
-                created_at=now,
-                updated_at=now,
-                parent_task_id=str(parent_task_id or ""),
-                recovery_of=str(recovery_of or ""),
+        now = _now()
+        task_id = f"task_{uuid.uuid4().hex[:16]}"
+        record = TaskRecord(
+            task_id=task_id,
+            task_type=PRODUCTION_TASK_TYPE,
+            project=name,
+            status="pending",
+            source=origin,
+            scope=plan["scope"],
+            options=normalized_options,
+            progress={
+                "total": plan["segments"],
+                "completed": plan["already_completed"],
+                "failed": plan["failed"],
+                "percent": round(
+                    (plan["already_completed"] / plan["segments"]) * 100, 1
+                ) if plan["segments"] else 0.0,
+                "current_chapter": None,
+                "current_segment": None,
+            },
+            failed_segment_ids=list(plan.get("failed_segment_ids", [])),
+            attempt=max(int(attempt or 1), 1),
+            idempotency_key=key,
+            created_at=now,
+            updated_at=now,
+            parent_task_id=str(parent_task_id or ""),
+            recovery_of=str(recovery_of or ""),
+        )
+        outcome, durable = TaskRepository.create_production_task(record)
+        if outcome == "idempotent":
+            return {"created": False, **cls._task_snapshot(durable)}
+        if outcome == "idempotency_conflict":
+            raise cls._idempotency_conflict(durable, key)
+        if outcome == "active":
+            raise ProductionJobError(
+                "PROJECT_HAS_ACTIVE_TASK",
+                "同一项目已有生产任务运行中",
+                project_name=name,
+                task_id=durable.task_id,
+                status=durable.status,
             )
-            TaskRepository.save_task(record)
-            cls._launch(record, plan)
-            snapshot = cls.get_task_snapshot(task_id)
-            return {"created": True, **snapshot}
+        ProductionRuntimeClient.ensure_running()
+        return {"created": True, **cls._task_snapshot(durable)}
 
     start_production = start
 
@@ -747,26 +627,15 @@ class ProductionJobService:
 
     @classmethod
     def _mark_stale(cls, record: TaskRecord) -> TaskRecord:
-        if record.status in ACTIVE_PRODUCTION_STATES and record.task_id not in cls._running_tasks:
-            record.status = "interrupted"
-            record.error_summary = record.error_summary or "应用重启后未找到运行中的任务实例"
-            record.updated_at = _now()
-            TaskRepository.save_task(record)
+        """Compatibility no-op: only a lock-owning runtime may repair orphans."""
         return record
 
     @classmethod
     def _task_snapshot(cls, record: TaskRecord) -> dict[str, Any]:
-        state = cls._running_tasks.get(record.task_id)
-        if state is not None:
-            progress = cls._record_progress(state, record)
-            status = state.status
-            failed_ids = sorted({str(item) for item in state.failed_segment_ids})
-            log_lines = [_public_error(line) for line in state.log_lines[-50:]]
-        else:
-            progress = dict(record.progress or {})
-            status = record.status
-            failed_ids = list(record.failed_segment_ids or [])
-            log_lines = []
+        progress = dict(record.progress or {})
+        status = record.status
+        failed_ids = list(record.failed_segment_ids or [])
+        log_lines = [_public_error(line) for line in record.log_lines[-50:]]
         base_progress = {
             "total": 0,
             "completed": 0,
@@ -801,6 +670,7 @@ class ProductionJobService:
             "started_at": record.started_at,
             "updated_at": record.updated_at,
             "finished_at": record.finished_at,
+            "heartbeat_at": record.heartbeat_at,
             "error_summary": _public_error(record.error_summary),
         }
         if log_lines:
@@ -809,9 +679,7 @@ class ProductionJobService:
 
     @classmethod
     def get_task_snapshot(cls, task_id: str) -> dict[str, Any]:
-        with cls._lock:
-            record = cls._mark_stale(cls._get_record(task_id))
-            return cls._task_snapshot(record)
+        return cls._task_snapshot(cls._get_record(task_id))
 
     get_production_task = get_task_snapshot
 
@@ -823,8 +691,7 @@ class ProductionJobService:
         to render the existing queue rows without making the session the task
         owner.
         """
-        with cls._lock:
-            return cls._running_tasks.get(str(task_id or "").strip())
+        return ProductionRuntimeClient.get_runtime_state(str(task_id or "").strip())
 
     @classmethod
     def list_tasks(
@@ -833,27 +700,20 @@ class ProductionJobService:
         status: Optional[str] = None,
         source: Optional[str] = None,
     ) -> list[dict[str, Any]]:
-        with cls._lock:
-            records = TaskRepository.list_tasks(
-                project=project_name or None,
-                task_type=PRODUCTION_TASK_TYPE,
-                source=source or None,
-            )
-            snapshots = [cls._task_snapshot(cls._mark_stale(record)) for record in records]
-            if status:
-                snapshots = [
-                    snapshot for snapshot in snapshots
-                    if snapshot.get("status") == status
-                ]
-            return snapshots
+        records = TaskRepository.list_tasks(
+            project=project_name or None,
+            task_type=PRODUCTION_TASK_TYPE,
+            status=status or None,
+            source=source or None,
+        )
+        return [cls._task_snapshot(record) for record in records]
 
     list_production_tasks = list_tasks
 
     @classmethod
     def get_active_task(cls, project_name: str) -> Optional[dict[str, Any]]:
-        with cls._lock:
-            record = cls._active_or_interrupted(str(project_name or "").strip())
-            return cls._task_snapshot(record) if record is not None else None
+        record = cls._active_or_interrupted(str(project_name or "").strip())
+        return cls._task_snapshot(record) if record is not None else None
 
     @classmethod
     def _scope_for_record(cls, record: TaskRecord) -> dict[str, Any]:
@@ -866,85 +726,63 @@ class ProductionJobService:
 
     @classmethod
     def pause(cls, task_id: str) -> dict[str, Any]:
-        with cls._lock:
-            record = cls._mark_stale(cls._get_record(task_id))
-            if record.status == "paused":
-                return cls._task_snapshot(record)
-            if record.status not in {"pending", "running", "pausing"}:
-                raise ProductionJobError(
-                    "INVALID_TASK_STATE", "当前任务不能暂停",
-                    task_id=record.task_id, status=record.status,
-                )
-            state = cls._running_tasks.get(record.task_id)
-            if state is None:
-                record = cls._mark_stale(record)
-                return cls._task_snapshot(record)
-            SynthesisService.pause(state)
-            return cls._task_snapshot(TaskRepository.load_task(record.task_id) or record)
+        record = cls._get_record(task_id)
+        try:
+            updated = TaskRepository.request_control(record.task_id, "pause")
+        except ValueError:
+            raise ProductionJobError(
+                "INVALID_TASK_STATE", "当前任务不能暂停",
+                task_id=record.task_id, status=record.status,
+            ) from None
+        ProductionRuntimeClient.poke()
+        return cls._task_snapshot(TaskRepository.load_task(record.task_id) or updated)
 
     pause_production = pause
 
     @classmethod
     def cancel(cls, task_id: str) -> dict[str, Any]:
-        with cls._lock:
-            record = cls._mark_stale(cls._get_record(task_id))
-            if record.status in TERMINAL_PRODUCTION_STATES:
-                return cls._task_snapshot(record)
-            if record.status == "interrupted":
-                # There is no worker left to observe a cooperative cancel.
-                record.status = "cancelled"
-                record.updated_at = _now()
-                record.finished_at = record.updated_at
-                TaskRepository.save_task(record)
-                return cls._task_snapshot(record)
-            state = cls._running_tasks.get(record.task_id)
-            if state is None:
-                raise ProductionJobError(
-                    "RUNTIME_TASK_NOT_FOUND", "当前进程找不到任务运行实例",
-                    task_id=record.task_id, status=record.status,
-                )
-            SynthesisService.cancel(state)
-            return cls._task_snapshot(TaskRepository.load_task(record.task_id) or record)
+        record = cls._get_record(task_id)
+        try:
+            updated = TaskRepository.request_control(record.task_id, "cancel")
+        except ValueError:
+            raise ProductionJobError(
+                "INVALID_TASK_STATE", "当前任务不能取消",
+                task_id=record.task_id, status=record.status,
+            ) from None
+        ProductionRuntimeClient.poke()
+        return cls._task_snapshot(TaskRepository.load_task(record.task_id) or updated)
 
     cancel_production = cancel
 
     @classmethod
     def _resume_interrupted(cls, record: TaskRecord) -> dict[str, Any]:
-        plan = cls.plan(record.project, cls._scope_for_record(record))
-        if not plan["ready"]:
-            raise ProductionJobError(
-                "PRODUCTION_BLOCKED", "恢复前检查未通过",
-                project_name=record.project, blockers=plan["blockers"], plan=plan,
-            )
-        record.attempt = max(int(record.attempt or 1), 1) + 1
-        record.source = "recovery"
-        record.recovery_of = record.task_id
-        record.status = "pending"
-        record.finished_at = ""
-        record.updated_at = _now()
-        TaskRepository.save_task(record)
-        cls._launch(record, plan)
-        return cls._task_snapshot(TaskRepository.load_task(record.task_id) or record)
+        result = cls.start(
+            record.project,
+            cls._scope_for_record(record),
+            record.options,
+            source="recovery",
+            parent_task_id=record.task_id,
+            recovery_of=record.task_id,
+            attempt=max(int(record.attempt or 1), 1) + 1,
+        )
+        result["recovery_of"] = record.task_id
+        return result
 
     @classmethod
     def resume(cls, task_id: str) -> dict[str, Any]:
-        with cls._lock:
-            record = cls._mark_stale(cls._get_record(task_id))
-            if record.status == "interrupted":
-                return cls._resume_interrupted(record)
-            if record.status != "paused":
-                raise ProductionJobError(
-                    "INVALID_TASK_STATE", "当前任务不能恢复",
-                    task_id=record.task_id, status=record.status,
-                )
-            state = cls._running_tasks.get(record.task_id)
-            if state is None:
-                record.status = "interrupted"
-                record.updated_at = _now()
-                TaskRepository.save_task(record)
-                return cls._resume_interrupted(record)
-            SynthesisService.resume(state)
-            return cls._task_snapshot(TaskRepository.load_task(record.task_id) or record)
+        record = cls._get_record(task_id)
+        if record.status == "interrupted":
+            return cls._resume_interrupted(record)
+        try:
+            updated = TaskRepository.request_control(record.task_id, "resume")
+        except ValueError:
+            raise ProductionJobError(
+                "INVALID_TASK_STATE", "当前任务不能恢复",
+                task_id=record.task_id, status=record.status,
+            ) from None
+        ProductionRuntimeClient.ensure_running()
+        ProductionRuntimeClient.poke()
+        return cls._task_snapshot(TaskRepository.load_task(record.task_id) or updated)
 
     resume_production = resume
 
@@ -978,31 +816,30 @@ class ProductionJobService:
         task_id: str,
         idempotency_key: str = "",
     ) -> dict[str, Any]:
-        with cls._lock:
-            record = cls._mark_stale(cls._get_record(task_id))
-            if record.status in ACTIVE_PRODUCTION_STATES:
-                raise ProductionJobError(
-                    "INVALID_TASK_STATE", "任务仍在运行，不能重试失败段",
-                    task_id=record.task_id, status=record.status,
-                )
-            segment_ids = cls._retryable_segments(record)
-            if not segment_ids:
-                raise ProductionJobError(
-                    "NO_FAILED_SEGMENTS", "任务没有可重试的失败或缺失段落",
-                    task_id=record.task_id,
-                )
-            result = cls.start(
-                record.project,
-                {"segment_ids": segment_ids},
-                record.options,
-                source=record.source if record.source in VALID_SOURCES else "recovery",
-                idempotency_key=idempotency_key,
-                parent_task_id=record.task_id,
-                recovery_of=record.task_id,
+        record = cls._get_record(task_id)
+        if record.status in ACTIVE_PRODUCTION_STATES:
+            raise ProductionJobError(
+                "INVALID_TASK_STATE", "任务仍在运行，不能重试失败段",
+                task_id=record.task_id, status=record.status,
             )
-            result["retry_of"] = record.task_id
-            result["retry_segment_ids"] = segment_ids
-            return result
+        segment_ids = cls._retryable_segments(record)
+        if not segment_ids:
+            raise ProductionJobError(
+                "NO_FAILED_SEGMENTS", "任务没有可重试的失败或缺失段落",
+                task_id=record.task_id,
+            )
+        result = cls.start(
+            record.project,
+            {"segment_ids": segment_ids},
+            record.options,
+            source=record.source if record.source in VALID_SOURCES else "recovery",
+            idempotency_key=idempotency_key,
+            parent_task_id=record.task_id,
+            recovery_of=record.task_id,
+        )
+        result["retry_of"] = record.task_id
+        result["retry_segment_ids"] = segment_ids
+        return result
 
     retry_failed = retry_failed_segments
 

@@ -2,7 +2,7 @@
 
 直接构造 SynthesisState，调 SynthesisService.pause / resume / cancel，断言 status 转换
 与 paused 标志。设计 §2.2 状态机：
-  - pause()  -> paused（且 paused 标志置位）
+  - pause()  -> pausing（worker 段边界确认后才 paused）
   - resume() -> running（且 paused 标志清除）
   - cancel() -> cancelled（terminal，cancel 优先）
 
@@ -12,8 +12,6 @@ cancel() 也应直接把 status 置为 cancelled（cancel 标志与终态一致�
 """
 import sys
 import os
-
-import pytest
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
@@ -32,15 +30,14 @@ def test_pause_sets_paused_and_status():
     st = _state("running")
     SynthesisService.pause(st)
     assert st.paused is True
-    assert st.status == "paused"
+    assert st.status == "pausing"
 
 
-def test_pause_when_not_running_only_sets_flag():
-    # pause 仅在 running 时改 status；非 running（如 pending）仅置 paused 标志
+def test_pause_pending_enters_pausing():
     st = _state("pending")
     SynthesisService.pause(st)
     assert st.paused is True
-    assert st.status == "pending"
+    assert st.status == "pausing"
 
 
 def test_resume_clears_paused_and_restores_running():

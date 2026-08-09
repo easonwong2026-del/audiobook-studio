@@ -11,13 +11,14 @@ import gc
 import logging
 import os
 import subprocess
+import wave
 from typing import Any
 
 import numpy as np
 from scipy.io import wavfile
 
 from . import audio_format as af
-from . import chapter_identity, project_paths
+from . import chapter_identity, config, project_paths
 from . import segment_cache
 from .exceptions import ExportError
 
@@ -29,6 +30,10 @@ SEG_SILENCE_SEC = 0.3
 CH_SILENCE_SEC = 0.8
 
 
+def _ffmpeg_executable() -> str:
+    return str(config.get_ffmpeg_path() or "ffmpeg")
+
+
 def _uses_director_timing(script: dict) -> bool:
     """v3 段音频已内嵌导演停顿，导出时不得重复插入固定静音。"""
     return str(script.get("version") or "").startswith("3")
@@ -36,7 +41,8 @@ def _uses_director_timing(script: dict) -> bool:
 
 def export_book(project_dir: str, format: str = "mp3", bitrate: str = "192k",
                 output_dir: str = "", enable_eq: bool = False,
-                target_lufs: float = -16.0) -> str:
+                target_lufs: float = -16.0,
+                segment_paths: dict[str, str] | None = None) -> str:
     """拼接段落并导出成品（wav / mp3 / m4b）。
 
     后处理顺序：拼接 → 均衡(D3, 默认关闭) → 响度(D1, LUFS-16)
@@ -71,31 +77,33 @@ def export_book(project_dir: str, format: str = "mp3", bitrate: str = "192k",
 
     title = script.get("meta", {}).get("title", "audiobook")
     safe_title = chapter_identity.safe_filename(title, "audiobook")
-    # 收集 (章索引, 数据)，保持顺序，便于在章首插入更长静音
-    loaded: list = []
+    # 收集 (章索引, 文件路径)，不把音频数组留在内存。真正的读取和格式统一
+    # 在下方逐段写入目标 WAV，峰值内存与单个 segment 大小相关，而非整书时长。
+    entries: list[tuple[int, str]] = []
     missing_ids: list = []
     canonical_rate = None
 
     for ch_idx, ch in enumerate(script.get("chapters", [])):
         for seg in ch.get("segments", []):
-            fp = _find_segment(
-                segments_dir, seg["id"], seg["text"], seg["role"],
-                seg.get("emotion", "neutral"),
-                seg.get("emo_alpha", 1.0),
-                seg.get("speech_rate", 1.0),
-                seg.get("pinyin_hints"),
-                segment_cache.director_metadata_for(seg),
-                _cast_speaker_fingerprint(project_dir, seg),
-            )
+            fp = None
+            if segment_paths:
+                candidate = segment_paths.get(str(seg["id"]))
+                if candidate and os.path.isfile(candidate):
+                    fp = candidate
+            if not fp:
+                fp = _find_segment(
+                    segments_dir, seg["id"], seg["text"], seg["role"],
+                    seg.get("emotion", "neutral"),
+                    seg.get("emo_alpha", 1.0),
+                    seg.get("speech_rate", 1.0),
+                    seg.get("pinyin_hints"),
+                    segment_cache.director_metadata_for(seg),
+                    _cast_speaker_fingerprint(project_dir, seg),
+                )
             if fp:
                 if canonical_rate is None:
-                    r0, _ = wavfile.read(fp)
-                    canonical_rate = int(r0)
-                na = af.load_and_normalize_wav(
-                    fp, target_rate=canonical_rate, target_channels=1,
-                    target_dtype=np.int16,
-                )
-                loaded.append((ch_idx, na.data))
+                    canonical_rate = _wav_rate(fp)
+                entries.append((ch_idx, fp))
             else:
                 missing_ids.append(seg["id"])
 
@@ -103,60 +111,22 @@ def export_book(project_dir: str, format: str = "mp3", bitrate: str = "192k",
     if missing_ids:
         raise RuntimeError(f"以下段落未找到音频文件，无法导出: {missing_ids}")
 
-    if loaded:
-        logger.info(f"Export: {len(loaded)} found")
+    if entries:
+        logger.info("Export: %d found", len(entries))
     else:
         # list files for debug
         existing = os.listdir(segments_dir)[:10] if os.path.isdir(segments_dir) else []
         raise RuntimeError(f"未找到任何已合成段落。segments/ 目录下文件: {existing}")
 
-    # 统一 dtype 到 int16，避免拼接时 dtype 不一致报错（已在 load_and_normalize_wav 完成）
+    # 统一 dtype 到 int16，避免拼接时 dtype 不一致报错。
     rate = canonical_rate
-
-    # 静音间隔：段间 SEG_SILENCE_SEC、章首（首章除外）CH_SILENCE_SEC（统一常量）
-    director_timing = _uses_director_timing(script)
-    seg_silence = np.zeros(
-        0 if director_timing else int(rate * SEG_SILENCE_SEC),
-        dtype=np.int16,
-    )
-    ch_silence = np.zeros(
-        0 if director_timing else int(rate * CH_SILENCE_SEC),
-        dtype=np.int16,
-    )
-
-    # 拼接并记录章节起点（采样点），供 m4b 章节标签推算（B8 静音仍生效）
-    chapter_markers: list = []   # (chapter_index, start_sample)
-    parts: list = []
-    prev_ch = None
-    cursor = 0
-    for ch_idx, data in loaded:
-        if prev_ch is None:
-            # 首章起点为 0
-            chapter_markers.append((ch_idx, cursor))
-            parts.append(data)
-            cursor += len(data)
-        elif ch_idx != prev_ch:
-            # 新章开头（非首章）：先插入较长静音，再记录章节起点（静音之后）
-            chapter_markers.append((ch_idx, cursor + len(ch_silence)))
-            parts.append(ch_silence)
-            cursor += len(ch_silence)
-            parts.append(data)
-            cursor += len(data)
-        else:
-            # 段间插入短静音
-            parts.append(seg_silence)
-            cursor += len(seg_silence)
-            parts.append(data)
-            cursor += len(data)
-        prev_ch = ch_idx
-
-    combined = np.concatenate(parts)
     wav_path = os.path.normpath(os.path.join(out_dir, f"{safe_title}.wav"))
-    wavfile.write(wav_path, rate, combined)
-
-    # 2.4 M-2：拼接写盘后释放中间 numpy 数组，缓解长篇小说拼接峰值内存
-    del loaded, parts, combined
-    gc.collect()
+    chapter_markers = _write_streaming_book_wav(
+        entries,
+        wav_path,
+        rate,
+        director_timing=_uses_director_timing(script),
+    )
 
     # ── 后处理（在拼接 WAV 上做，ffmpeg 转码之前）──
     from . import postprocess
@@ -173,7 +143,7 @@ def export_book(project_dir: str, format: str = "mp3", bitrate: str = "192k",
         codec = "libmp3lame" if format == "mp3" else "aac"
         try:
             subprocess.run(
-                ["ffmpeg", "-y", "-i", wav_path, "-b:a", bitrate, "-codec:a", codec, out_path],
+                [_ffmpeg_executable(), "-y", "-i", wav_path, "-b:a", bitrate, "-codec:a", codec, out_path],
                 check=True, capture_output=True, text=True
             )
             # D2 写标签（best-effort：标签失败不破坏音频导出）
@@ -198,6 +168,73 @@ def export_book(project_dir: str, format: str = "mp3", bitrate: str = "192k",
         return out_path
 
     return wav_path
+
+
+def _wav_rate(path: str) -> int:
+    """Read only enough WAV metadata to determine the sample rate."""
+    try:
+        with wave.open(path, "rb") as audio:
+            rate = int(audio.getframerate())
+            if rate > 0:
+                return rate
+    except (OSError, wave.Error):
+        pass
+    rate, data = wavfile.read(path, mmap=True)
+    del data
+    return int(rate)
+
+
+def _write_streaming_book_wav(
+    entries: list[tuple[int, str]],
+    output_path: str,
+    rate: int,
+    *,
+    director_timing: bool,
+) -> list[tuple[int, int]]:
+    """Normalize and append one segment at a time to a PCM16 mono WAV."""
+    if not entries:
+        raise ValueError("流式整书拼接至少需要一个音频段落")
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    segment_silence_samples = (
+        0 if director_timing else int(rate * SEG_SILENCE_SEC)
+    )
+    chapter_silence_samples = (
+        0 if director_timing else int(rate * CH_SILENCE_SEC)
+    )
+    segment_silence = b"\x00\x00" * segment_silence_samples
+    chapter_silence = b"\x00\x00" * chapter_silence_samples
+    chapter_markers: list[tuple[int, int]] = []
+    previous_chapter: int | None = None
+    cursor = 0
+    with wave.open(output_path, "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(rate)
+        for chapter_index, path in entries:
+            if previous_chapter is None:
+                chapter_markers.append((chapter_index, cursor))
+            elif chapter_index != previous_chapter:
+                if chapter_silence:
+                    output.writeframesraw(chapter_silence)
+                cursor += chapter_silence_samples
+                chapter_markers.append((chapter_index, cursor))
+            else:
+                if segment_silence:
+                    output.writeframesraw(segment_silence)
+                cursor += segment_silence_samples
+            normalized = af.load_and_normalize_wav(
+                path,
+                target_rate=rate,
+                target_channels=1,
+                target_dtype=np.int16,
+            )
+            data = np.ascontiguousarray(normalized.data, dtype="<i2")
+            output.writeframesraw(data.tobytes())
+            cursor += int(data.shape[0])
+            del normalized, data
+            previous_chapter = chapter_index
+        output.writeframes(b"")
+    return chapter_markers
 
 
 def _write_tags(format: str, out_path: str, script: dict, project_dir: str,
@@ -301,7 +338,13 @@ def _cast_speaker_fingerprint(project_dir: str, segment: dict[str, Any]) -> str 
         return None
 
 
-def generate_subtitles(project_dir: str, formats=("srt", "lrc"), output_dir: str = "") -> list:
+def generate_subtitles(
+    project_dir: str,
+    formats=("srt", "lrc"),
+    output_dir: str = "",
+    segment_paths: dict[str, str] | None = None,
+    require_complete: bool = False,
+) -> list:
     """生成字幕文件（srt / lrc），时间戳复用导出拼接的静音规则（SEG/CH_SILENCE_SEC）。
 
     逐段用 ``_find_segment`` 找到已合成 wav，读取时长，按统一静音间隔累计
@@ -338,25 +381,39 @@ def generate_subtitles(project_dir: str, formats=("srt", "lrc"), output_dir: str
     cursor_ms = 0
     prev_ch = None
     seg_index = 0
+    missing_ids: list[str] = []
 
     for ch_idx, ch in enumerate(script.get("chapters", [])):
         for seg in ch.get("segments", []):
-            fp = _find_segment(
-                segments_dir, seg["id"], seg["text"], seg["role"],
-                seg.get("emotion", "neutral"),
-                seg.get("emo_alpha", 1.0),
-                seg.get("speech_rate", 1.0),
-                seg.get("pinyin_hints"),
-                segment_cache.director_metadata_for(seg),
-                _cast_speaker_fingerprint(project_dir, seg),
-            )
+            fp = None
+            if segment_paths:
+                candidate = segment_paths.get(str(seg["id"]))
+                if candidate and os.path.isfile(candidate):
+                    fp = candidate
             if not fp:
-                # 缺段则跳过（导出会单独报错），字幕不阻断
+                fp = _find_segment(
+                    segments_dir, seg["id"], seg["text"], seg["role"],
+                    seg.get("emotion", "neutral"),
+                    seg.get("emo_alpha", 1.0),
+                    seg.get("speech_rate", 1.0),
+                    seg.get("pinyin_hints"),
+                    segment_cache.director_metadata_for(seg),
+                    _cast_speaker_fingerprint(project_dir, seg),
+                )
+            if not fp:
+                missing_ids.append(str(seg["id"]))
                 continue
-            r, data = wavfile.read(fp)
+            try:
+                with wave.open(fp, "rb") as audio:
+                    r = int(audio.getframerate())
+                    frames = int(audio.getnframes())
+            except (OSError, wave.Error):
+                r, data = wavfile.read(fp, mmap=True)
+                frames = len(data)
+                del data
             if rate is None:
                 rate = r
-            dur_ms = int(len(data) / r * 1000) if r else 0
+            dur_ms = int(frames / r * 1000) if r else 0
             # 段前静音间隔：首段 0；新章首（非首章）CH_SILENCE_SEC；其余 SEG_SILENCE_SEC
             if _uses_director_timing(script):
                 gap_ms = 0
@@ -381,6 +438,9 @@ def generate_subtitles(project_dir: str, formats=("srt", "lrc"), output_dir: str
                 else end_ms
             )
             prev_ch = ch_idx
+
+    if require_complete and missing_ids:
+        raise RuntimeError(f"以下段落未找到音频文件，无法生成完整字幕: {missing_ids}")
 
     if not rows:
         return []
@@ -611,7 +671,7 @@ def export_supplement(paths: list, out_path: str, format: str = "mp3", bitrate: 
         codec = "libmp3lame" if format == "mp3" else "aac"
         try:
             subprocess.run(
-                ["ffmpeg", "-y", "-i", wav_path, "-b:a", bitrate, "-codec:a", codec, out_path_real],
+                [_ffmpeg_executable(), "-y", "-i", wav_path, "-b:a", bitrate, "-codec:a", codec, out_path_real],
                 check=True, capture_output=True, text=True
             )
             # best-effort 写标签：失败不破坏音频导出

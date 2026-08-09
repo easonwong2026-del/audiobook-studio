@@ -109,7 +109,107 @@ def test_start_idempotency_and_active_project_constraint(production_project, mon
     assert getattr(error.value, "code", None) == "PROJECT_HAS_ACTIVE_TASK"
 
 
-def test_running_persisted_without_runtime_becomes_interrupted(production_project):
+def test_idempotency_replays_only_same_normalized_payload(production_project, monkeypatch):
+    monkeypatch.setattr(SynthesisService, "start", staticmethod(_fake_start))
+    first = ProductionJobService.start(
+        production_project,
+        {"all": False, "segment_ids": ["001-002", "001-001", "001-002"]},
+        {"num_beams": 2, "emo_alpha": 1},
+        source="mcp",
+        idempotency_key="normalized-payload",
+    )
+    replay = ProductionJobService.start(
+        production_project,
+        {"segment_ids": ["001-001", "001-002"]},
+        {"emo_alpha": 1.0, "num_beams": 2},
+        source="mcp",
+        idempotency_key="normalized-payload",
+    )
+    assert replay["created"] is False
+    assert replay["task_id"] == first["task_id"]
+
+
+def test_voice_overrides_are_preserved_and_order_independent(
+    production_project,
+    monkeypatch,
+):
+    monkeypatch.setattr(SynthesisService, "start", staticmethod(_fake_start))
+    first = ProductionJobService.start(
+        production_project,
+        {"segment_ids": ["001-001", "001-002"]},
+        {
+            "voice_overrides": {
+                "001-002": "08_质检记录/repair_voices/two.wav",
+                "001-001": "08_质检记录/repair_voices/one.wav",
+            },
+        },
+        source="mcp",
+        idempotency_key="voice-overrides",
+    )
+    replay = ProductionJobService.start(
+        production_project,
+        {"segment_ids": ["001-002", "001-001"]},
+        {
+            "voice_overrides": {
+                "001-001": "08_质检记录/repair_voices/one.wav",
+                "001-002": "08_质检记录/repair_voices/two.wav",
+            },
+        },
+        source="mcp",
+        idempotency_key="voice-overrides",
+    )
+    assert replay["created"] is False
+    assert replay["task_id"] == first["task_id"]
+    assert first["options"]["voice_overrides"] == {
+        "001-001": "08_质检记录/repair_voices/one.wav",
+        "001-002": "08_质检记录/repair_voices/two.wav",
+    }
+
+
+@pytest.mark.parametrize(
+    ("scope", "options"),
+    [
+        ({"segment_ids": ["002-001"]}, {"num_beams": 2}),
+        ({"segment_ids": ["001-001"]}, {"num_beams": 3}),
+        (
+            {"segment_ids": ["001-001"]},
+            {
+                "num_beams": 2,
+                "voice_overrides": {"001-001": "08_质检记录/repair_voices/b.wav"},
+            },
+        ),
+    ],
+)
+def test_idempotency_payload_conflict_is_stable(
+    production_project,
+    monkeypatch,
+    scope,
+    options,
+):
+    monkeypatch.setattr(SynthesisService, "start", staticmethod(_fake_start))
+    first = ProductionJobService.start(
+        production_project,
+        {"segment_ids": ["001-001"]},
+        {
+            "num_beams": 2,
+            "voice_overrides": {"001-001": "08_质检记录/repair_voices/a.wav"},
+        } if "voice_overrides" in options else {"num_beams": 2},
+        source="mcp",
+        idempotency_key="conflicting-payload",
+    )
+    with pytest.raises(Exception) as error:
+        ProductionJobService.start(
+            production_project,
+            scope,
+            options,
+            source="mcp",
+            idempotency_key="conflicting-payload",
+        )
+    assert getattr(error.value, "code", None) == "IDEMPOTENCY_CONFLICT"
+    assert error.value.details["task_id"] == first["task_id"]
+
+
+def test_reading_running_task_does_not_infer_interrupted(production_project):
     TaskRepository.save_task(TaskRecord(
         task_id="task_restarted",
         task_type="synthesis",
@@ -125,8 +225,8 @@ def test_running_persisted_without_runtime_becomes_interrupted(production_projec
 
     snapshot = ProductionJobService.get_task_snapshot("task_restarted")
 
-    assert snapshot["status"] == "interrupted"
-    assert ProductionJobService.get_active_task(production_project) is None
+    assert snapshot["status"] == "running"
+    assert ProductionJobService.get_active_task(production_project)["task_id"] == "task_restarted"
 
 
 def test_web_source_is_visible_to_task_listing(production_project, monkeypatch):

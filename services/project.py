@@ -22,6 +22,7 @@ from typing import Any
 from lib import config, project_paths, script_loader
 from repositories.config_repo import ConfigRepository
 from repositories.project_repo import ProjectRepository
+from repositories.task_repo import TaskRepository
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,63 @@ logger = logging.getLogger(__name__)
 def _safe_name(s: str) -> str:
     """把任意字符串转成安全的文件名（替换文件系统非法字符为下划线）。"""
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in s)
+
+
+class ProjectMutationBlockedError(RuntimeError):
+    """Stable domain error for writes rejected during active production."""
+
+    code = "PROJECT_HAS_ACTIVE_PRODUCTION"
+
+    def __init__(self, operation: str, task_id: str, status: str, project: str) -> None:
+        super().__init__("项目存在活动生产任务，当前变更已拒绝")
+        self.operation = str(operation)
+        self.task_id = str(task_id)
+        self.status = str(status)
+        self.project = str(project)
+
+    def as_error(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "message": str(self),
+            "operation": self.operation,
+            "task_id": self.task_id,
+            "status": self.status,
+            "project_name": self.project,
+        }
+
+
+def ensure_project_mutation_allowed(
+    project: str | None,
+    operation: str,
+) -> None:
+    """Reject project-destructive writes while production is active."""
+    from .production_jobs import ACTIVE_PRODUCTION_STATES
+
+    records = TaskRepository.list_tasks(
+        project=str(project or "").strip() or None,
+    )
+    active = next(
+        (
+            record
+            for record in records
+            if record.status in ACTIVE_PRODUCTION_STATES
+            and (
+                record.task_type == "synthesis"
+                or (
+                    record.task_type in {"supplement", "voice_preview", "export"}
+                    and bool(record.idempotency_key)
+                )
+            )
+        ),
+        None,
+    )
+    if active is not None:
+        raise ProjectMutationBlockedError(
+            operation,
+            active.task_id,
+            active.status,
+            active.project,
+        )
 
 
 class ProjectService:
@@ -120,7 +178,10 @@ class ProjectService:
                 # A malformed project must not prevent an Agent from seeing
                 # the rest of the bookshelf.
                 logger.warning("读取 MCP 项目摘要失败 %s: %s", name, exc)
-                item["error"] = str(exc)
+                item["error"] = {
+                    "code": type(exc).__name__.upper(),
+                    "message": "项目摘要读取失败，请运行完整性检查。",
+                }
             summaries.append(item)
         return summaries
 
@@ -141,15 +202,26 @@ class ProjectService:
         ]
         binding_values = bindings.get("bindings", {}) if isinstance(bindings, dict) else {}
         role_bindings = []
+        project_dir = os.path.realpath(ProjectRepository.get_project_dir(name))
         for role in voices:
             value = binding_values.get(role)
             path = str(value) if value else None
             if path and not os.path.isabs(path):
-                path = os.path.join(ProjectRepository.get_project_dir(name), path)
+                path = os.path.join(project_dir, path)
+            relative_path = None
+            if path:
+                try:
+                    resolved = os.path.realpath(path)
+                    if os.path.commonpath([project_dir, resolved]) == project_dir:
+                        relative_path = os.path.relpath(
+                            resolved, project_dir
+                        ).replace(os.sep, "/")
+                except ValueError:
+                    relative_path = None
             role_bindings.append({
                 "role": role,
                 "bound": bool(value),
-                "path": str(value) if value else None,
+                "project_relative_path": relative_path,
                 "exists": bool(path and os.path.isfile(path)),
             })
         total = int(getattr(meta, "total_segments", 0) or len(segments))
@@ -193,6 +265,7 @@ class ProjectService:
     @staticmethod
     def delete_project(name: str) -> None:
         """删除项目。"""
+        ensure_project_mutation_allowed(name, "delete_project")
         ProjectRepository.delete_project(name)
 
     @staticmethod
@@ -203,6 +276,7 @@ class ProjectService:
     @staticmethod
     def update_segment_status(name: str, seg_id: str, status: str) -> None:
         """更新单段状态（包 ``ProjectRepository.update_segment_status``）。"""
+        ensure_project_mutation_allowed(name, "update_segment_status")
         ProjectRepository.update_segment_status(name, seg_id, status)
 
     @staticmethod
@@ -215,9 +289,19 @@ class ProjectService:
         Returns:
             规范化后的绝对路径。
         """
+        ensure_project_mutation_allowed(None, "set_data_dir")
         d = ConfigRepository.set_data_dir(new_dir)
-        # 立即让本次运行切到新目录（WORKSPACE_ROOT 为模块级可变变量，可被覆盖）。
+        # Immediately move both the canonical repository and the short-lived
+        # compatibility wrapper.  The wrapper delegates every disk operation
+        # back to ProjectRepository, but its mutable roots remain for legacy
+        # tests/integrations until that API is retired.
         ProjectRepository.WORKSPACE_ROOT = config.get_projects_root()
+        ProjectRepository.LEGACY_ROOT = config.get_legacy_dir()
+        ProjectRepository._INITIALIZED = True
+        from lib import project_manager as compatibility_manager
+
+        compatibility_manager.WORKSPACE_ROOT = ProjectRepository.WORKSPACE_ROOT
+        compatibility_manager.LEGACY_ROOT = ProjectRepository.LEGACY_ROOT
         return d
 
     @staticmethod
@@ -240,6 +324,7 @@ class ProjectService:
         """
         if not project or not role or not audio_path:
             raise ValueError("bind_voice 需要 project / role / audio_path 均非空")
+        ensure_project_mutation_allowed(project, "bind_voice")
         d = ProjectRepository.get_project_dir(project)
         vd = project_paths.project_dir(d, "voices", create=True)
         os.makedirs(vd, exist_ok=True)

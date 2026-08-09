@@ -1,60 +1,139 @@
-"""TaskRepository：轻量任务状态持久化。
+"""Durable task repository.
 
-只保存可序列化的轻量任务状态记录（synthesis / supplement），
-不保存 Future / 线程 / SynthesisState（内存态不落盘）。
-每个任务一个 JSON 文件：<task_dir>/<task_id>.json
+Production tasks use a project-local SQLite database as their source of truth.
+SQLite transactions provide the cross-process active-task and idempotency
+guarantees that the former collection of JSON files could not provide.
+
+Legacy global JSON records remain readable and are imported, once per project,
+without being deleted.  Supplement tasks and synthetic test fixtures whose
+project directory does not exist continue to use the legacy JSON backend.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import sqlite3
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Optional
 
+from lib import project_paths
+
 from ._atomic import atomic_write as _atomic_write
+from .project_repo import ProjectRepository
 
 logger = logging.getLogger(__name__)
 
-# 预览目录的获取推迟到 get_task_dir() 中动态解析
-_PROGRAM_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DB_FILENAME = "production_tasks.sqlite3"
+_PRODUCTION_TYPE = "synthesis"
+_RUNTIME_TASK_TYPES = frozenset({"synthesis", "supplement", "voice_preview"})
+_ACTIVE_STATES = ("pending", "running", "pausing", "paused", "cancelling")
+_TERMINAL_STATES = ("cancelled", "done", "error", "interrupted")
 
 
 def _default_progress() -> dict[str, Any]:
-    """Return a fresh, JSON-safe progress payload for Task V2 records."""
     return {
         "total": 0,
         "completed": 0,
         "failed": 0,
+        "percent": 0.0,
         "current_chapter": None,
         "current_segment": None,
     }
 
 
+def _json_dict(value: str | None, default: dict[str, Any]) -> dict[str, Any]:
+    try:
+        parsed = json.loads(value or "")
+    except (TypeError, json.JSONDecodeError):
+        return dict(default)
+    return parsed if isinstance(parsed, dict) else dict(default)
+
+
+def _json_list(value: str | None) -> list[Any]:
+    try:
+        parsed = json.loads(value or "")
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _canonical_scope(value: Any) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    chapter_ids = sorted({
+        str(item).strip()
+        for item in raw.get("chapter_ids", [])
+        if str(item).strip()
+    }) if isinstance(raw.get("chapter_ids", []), list) else []
+    segment_ids = sorted({
+        str(item).strip()
+        for item in raw.get("segment_ids", [])
+        if str(item).strip()
+    }) if isinstance(raw.get("segment_ids", []), list) else []
+    all_scope = bool(raw.get("all", not (chapter_ids or segment_ids)))
+    return {
+        "all": all_scope,
+        "chapter_ids": [] if all_scope else chapter_ids,
+        "segment_ids": [] if all_scope else segment_ids,
+    }
+
+
+def _canonical_optional_number(value: Any) -> Any:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return float(value)
+    return value
+
+
+def _canonical_options(value: Any) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    try:
+        beams = max(int(raw.get("num_beams", 2) or 2), 1)
+    except (TypeError, ValueError):
+        beams = 2
+    emotion = raw.get("emotion")
+    raw_voice_overrides = raw.get("voice_overrides")
+    voice_overrides = {
+        str(segment_id).strip(): str(path).strip()
+        for segment_id, path in sorted(
+            raw_voice_overrides.items(),
+            key=lambda item: str(item[0]),
+        )
+        if str(segment_id).strip() and str(path).strip()
+    } if isinstance(raw_voice_overrides, dict) else {}
+    return {
+        "num_beams": beams,
+        "emotion": str(emotion) if emotion not in (None, "") else None,
+        "emo_alpha": _canonical_optional_number(raw.get("emo_alpha")),
+        "speech_rate": _canonical_optional_number(raw.get("speech_rate")),
+        "voice_overrides": voice_overrides,
+    }
+
+
 @dataclass
 class TaskRecord:
-    """可序列化的轻量任务状态记录。
+    """JSON-safe durable task record.
 
-    Attributes:
-        task_id: 任务标识（uuid4().hex）。
-        task_type: 任务类型（"synthesis" | "supplement"）。
-        project: 所属项目名。
-        status: 状态（"pending" | "running" | "pausing" | "paused" |
-            "cancelling" | "cancelled" | "done" | "error" | "interrupted"）。
-        artifact_dir: 产物目录（可选）。
-        error_summary: 错误摘要（可选）。
-        created_at: ISO 8601 时间戳（可选）。
+    The first fields intentionally retain the legacy positional constructor.
+    Runtime ownership fields are persisted only for production tasks.
     """
+
     task_id: str
-    task_type: str  # "synthesis" | "supplement"
+    task_type: str
     project: str
-    status: str  # production state machine; supplement keeps legacy values
+    status: str
     artifact_dir: str = ""
     error_summary: str = ""
-    created_at: str = ""  # ISO 8601
-    # Task V2 fields.  Defaults intentionally keep old task JSON and old
-    # positional constructors valid.
+    created_at: str = ""
     source: str = "system"
     scope: dict[str, Any] = field(default_factory=lambda: {
         "all": True,
@@ -71,9 +150,13 @@ class TaskRecord:
     finished_at: str = ""
     parent_task_id: str = ""
     recovery_of: str = ""
+    owner_id: str = ""
+    heartbeat_at: str = ""
+    control_intent: str = ""
+    log_lines: list[str] = field(default_factory=list)
+    version: int = 0
 
-    def to_dict(self) -> dict:
-        """序列化为 dict。"""
+    def to_dict(self) -> dict[str, Any]:
         scope = {"all": False, "chapter_ids": [], "segment_ids": []}
         if isinstance(self.scope, dict):
             scope.update(self.scope)
@@ -100,11 +183,15 @@ class TaskRecord:
             "created_at": self.created_at,
             "parent_task_id": self.parent_task_id,
             "recovery_of": self.recovery_of,
+            "owner_id": self.owner_id,
+            "heartbeat_at": self.heartbeat_at,
+            "control_intent": self.control_intent,
+            "log_lines": [str(item) for item in self.log_lines[-50:]],
+            "version": max(int(self.version or 0), 0),
         }
 
     @staticmethod
-    def from_dict(data: dict) -> "TaskRecord":
-        """从 dict 反序列化，缺省字段使用空值。"""
+    def from_dict(data: dict[str, Any]) -> "TaskRecord":
         raw_scope = data.get("scope")
         scope = {"all": True, "chapter_ids": [], "segment_ids": []}
         if isinstance(raw_scope, dict):
@@ -115,18 +202,24 @@ class TaskRecord:
             progress.update(raw_progress)
         raw_failed = data.get("failed_segment_ids", [])
         failed = [str(item) for item in raw_failed] if isinstance(raw_failed, list) else []
+        raw_logs = data.get("log_lines", [])
+        logs = [str(item) for item in raw_logs[-50:]] if isinstance(raw_logs, list) else []
         try:
             attempt = max(int(data.get("attempt", 1) or 1), 1)
         except (TypeError, ValueError):
             attempt = 1
+        try:
+            version = max(int(data.get("version", 0) or 0), 0)
+        except (TypeError, ValueError):
+            version = 0
         return TaskRecord(
-            task_id=data.get("task_id", ""),
-            task_type=data.get("task_type", ""),
-            project=data.get("project", ""),
-            status=data.get("status", "pending"),
-            artifact_dir=data.get("artifact_dir", ""),
-            error_summary=data.get("error_summary", ""),
-            created_at=data.get("created_at", ""),
+            task_id=str(data.get("task_id") or ""),
+            task_type=str(data.get("task_type") or ""),
+            project=str(data.get("project") or ""),
+            status=str(data.get("status") or "pending"),
+            artifact_dir=str(data.get("artifact_dir") or ""),
+            error_summary=str(data.get("error_summary") or ""),
+            created_at=str(data.get("created_at") or ""),
             source=str(data.get("source") or "system"),
             scope=scope,
             options=data.get("options", {}) if isinstance(data.get("options", {}), dict) else {},
@@ -139,115 +232,494 @@ class TaskRecord:
             finished_at=str(data.get("finished_at") or ""),
             parent_task_id=str(data.get("parent_task_id") or ""),
             recovery_of=str(data.get("recovery_of") or ""),
+            owner_id=str(data.get("owner_id") or ""),
+            heartbeat_at=str(data.get("heartbeat_at") or ""),
+            control_intent=str(data.get("control_intent") or ""),
+            log_lines=logs,
+            version=version,
         )
 
 
 class TaskRepository:
-    """任务状态仓库：轻量任务状态持久化（JSON 文件）。
-
-    所有方法均为 @staticmethod，无实例状态。
-    """
+    """Task persistence with transactional production operations."""
 
     @staticmethod
     def _resolve_preview_dir() -> str:
-        """动态解析 preview 目录（延迟导入 lib.config 避免循环依赖）。"""
-        # 使用与 lib/config.py 相同的解析逻辑
         from lib import config as _cfg
+
         return _cfg.get_preview_dir()
 
     @staticmethod
     def get_task_dir() -> str:
-        """任务状态 JSON 根目录：<preview_dir>/task_records/
-
-        目录不存在时自动创建。
-        """
-        preview_dir = TaskRepository._resolve_preview_dir()
-        task_dir = os.path.join(preview_dir, "task_records")
+        """Legacy global JSON directory."""
+        task_dir = os.path.join(TaskRepository._resolve_preview_dir(), "task_records")
         os.makedirs(task_dir, exist_ok=True)
         return task_dir
 
+    canonical_scope = staticmethod(_canonical_scope)
+    canonical_options = staticmethod(_canonical_options)
+
     @staticmethod
-    def save_task(record: TaskRecord) -> None:
-        """原子写 <task_dir>/<task_id>.json。
+    def same_production_payload(
+        record: TaskRecord,
+        scope: Any,
+        options: Any,
+    ) -> bool:
+        return (
+            _canonical_scope(record.scope) == _canonical_scope(scope)
+            and _canonical_options(record.options) == _canonical_options(options)
+        )
 
-        Args:
-            record: TaskRecord 实例。
+    @staticmethod
+    def get_database_path(project: str, *, create: bool = False) -> str | None:
+        """Return the project-local production database path."""
+        name = str(project or "").strip()
+        if not name:
+            return None
+        try:
+            project_dir = ProjectRepository.get_project_dir(name)
+        except Exception:
+            return None
+        if not os.path.isdir(project_dir) or not os.path.isfile(
+            os.path.join(project_dir, "project.json")
+        ):
+            return None
+        config_dir = project_paths.project_dir(project_dir, "config", create=create)
+        return os.path.join(config_dir, _DB_FILENAME)
 
-        Raises:
-            AtomicWriteError: 写入失败时抛出。
-        """
+    @staticmethod
+    def _connect(project: str, *, create: bool = True) -> sqlite3.Connection | None:
+        path = TaskRepository.get_database_path(project, create=create)
+        if path is None or (not create and not os.path.isfile(path)):
+            return None
+        connection = sqlite3.connect(path, timeout=10.0)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout=10000")
+        connection.execute("PRAGMA foreign_keys=ON")
+        if create:
+            TaskRepository._ensure_schema(connection)
+            TaskRepository._migrate_legacy_json(project, connection)
+        return connection
+
+    @staticmethod
+    def _ensure_schema(connection: sqlite3.Connection) -> None:
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS repository_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS production_tasks (
+                task_id TEXT PRIMARY KEY,
+                task_type TEXT NOT NULL,
+                project TEXT NOT NULL,
+                status TEXT NOT NULL,
+                source TEXT NOT NULL,
+                scope_json TEXT NOT NULL,
+                options_json TEXT NOT NULL,
+                progress_json TEXT NOT NULL,
+                failed_segment_ids_json TEXT NOT NULL,
+                attempt INTEGER NOT NULL,
+                idempotency_key TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT '',
+                started_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT '',
+                finished_at TEXT NOT NULL DEFAULT '',
+                parent_task_id TEXT NOT NULL DEFAULT '',
+                recovery_of TEXT NOT NULL DEFAULT '',
+                artifact_dir TEXT NOT NULL DEFAULT '',
+                error_summary TEXT NOT NULL DEFAULT '',
+                owner_id TEXT NOT NULL DEFAULT '',
+                heartbeat_at TEXT NOT NULL DEFAULT '',
+                control_intent TEXT NOT NULL DEFAULT '',
+                log_lines_json TEXT NOT NULL DEFAULT '[]',
+                version INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_production_active_project
+            ON production_tasks(project)
+            WHERE status IN ('pending','running','pausing','paused','cancelling');
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_production_idempotency
+            ON production_tasks(project, task_type, idempotency_key)
+            WHERE idempotency_key <> '';
+            CREATE INDEX IF NOT EXISTS ix_production_updated
+            ON production_tasks(updated_at DESC, task_id DESC);
+            """
+        )
+        connection.commit()
+
+    @staticmethod
+    def _migrate_legacy_json(project: str, connection: sqlite3.Connection) -> None:
+        marker = connection.execute(
+            "SELECT value FROM repository_meta WHERE key='legacy_json_imported'"
+        ).fetchone()
+        if marker is not None:
+            return
         task_dir = TaskRepository.get_task_dir()
-        os.makedirs(task_dir, exist_ok=True)
+        try:
+            names = list(os.listdir(task_dir))
+        except OSError:
+            names = []
+        with connection:
+            for name in names:
+                if not name.endswith(".json"):
+                    continue
+                try:
+                    with open(os.path.join(task_dir, name), encoding="utf-8") as file:
+                        data = json.load(file)
+                    record = TaskRecord.from_dict(data) if isinstance(data, dict) else None
+                except (OSError, UnicodeError, json.JSONDecodeError):
+                    continue
+                if (
+                    record is None
+                    or record.task_type != _PRODUCTION_TYPE
+                    or record.project != project
+                ):
+                    continue
+                TaskRepository._insert_record(connection, record, ignore=True)
+            connection.execute(
+                "INSERT OR REPLACE INTO repository_meta(key,value) VALUES('legacy_json_imported',?)",
+                (_utc_now(),),
+            )
+
+    @staticmethod
+    def _insert_record(
+        connection: sqlite3.Connection,
+        record: TaskRecord,
+        *,
+        ignore: bool = False,
+    ) -> None:
+        values = record.to_dict()
+        command = "INSERT OR IGNORE" if ignore else "INSERT"
+        connection.execute(
+            f"""
+            {command} INTO production_tasks (
+                task_id,task_type,project,status,source,scope_json,options_json,
+                progress_json,failed_segment_ids_json,attempt,idempotency_key,
+                created_at,started_at,updated_at,finished_at,parent_task_id,
+                recovery_of,artifact_dir,error_summary,owner_id,heartbeat_at,
+                control_intent,log_lines_json,version
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                values["task_id"], values["task_type"], values["project"],
+                values["status"], values["source"],
+                json.dumps(values["scope"], ensure_ascii=False),
+                json.dumps(values["options"], ensure_ascii=False),
+                json.dumps(values["progress"], ensure_ascii=False),
+                json.dumps(values["failed_segment_ids"], ensure_ascii=False),
+                values["attempt"], values["idempotency_key"],
+                values["created_at"], values["started_at"], values["updated_at"],
+                values["finished_at"], values["parent_task_id"],
+                values["recovery_of"], values["artifact_dir"],
+                values["error_summary"], values["owner_id"],
+                values["heartbeat_at"], values["control_intent"],
+                json.dumps(values["log_lines"], ensure_ascii=False),
+                values["version"],
+            ),
+        )
+
+    @staticmethod
+    def _row_to_record(row: sqlite3.Row) -> TaskRecord:
+        return TaskRecord(
+            task_id=row["task_id"],
+            task_type=row["task_type"],
+            project=row["project"],
+            status=row["status"],
+            source=row["source"],
+            scope=_json_dict(
+                row["scope_json"],
+                {"all": True, "chapter_ids": [], "segment_ids": []},
+            ),
+            options=_json_dict(row["options_json"], {}),
+            progress=_json_dict(row["progress_json"], _default_progress()),
+            failed_segment_ids=[
+                str(item) for item in _json_list(row["failed_segment_ids_json"])
+            ],
+            attempt=max(int(row["attempt"] or 1), 1),
+            idempotency_key=row["idempotency_key"],
+            created_at=row["created_at"],
+            started_at=row["started_at"],
+            updated_at=row["updated_at"],
+            finished_at=row["finished_at"],
+            parent_task_id=row["parent_task_id"],
+            recovery_of=row["recovery_of"],
+            artifact_dir=row["artifact_dir"],
+            error_summary=row["error_summary"],
+            owner_id=row["owner_id"],
+            heartbeat_at=row["heartbeat_at"],
+            control_intent=row["control_intent"],
+            log_lines=[str(item) for item in _json_list(row["log_lines_json"])][-50:],
+            version=max(int(row["version"] or 0), 0),
+        )
+
+    @staticmethod
+    def _legacy_save(record: TaskRecord) -> None:
+        task_dir = TaskRepository.get_task_dir()
         path = os.path.join(task_dir, f"{record.task_id}.json")
         _atomic_write(path, record.to_dict())
 
     @staticmethod
-    def load_task(task_id: str) -> Optional[TaskRecord]:
-        """读取任务记录。
-
-        Args:
-            task_id: 任务 ID。
-
-        Returns:
-            TaskRecord 实例，文件不存在时返回 None。
-        """
-        task_dir = TaskRepository.get_task_dir()
-        path = os.path.join(task_dir, f"{task_id}.json")
+    def _legacy_load(task_id: str) -> Optional[TaskRecord]:
+        path = os.path.join(TaskRepository.get_task_dir(), f"{task_id}.json")
         if not os.path.isfile(path):
             return None
         try:
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
+            with open(path, encoding="utf-8") as file:
+                data = json.load(file)
             return TaskRecord.from_dict(data) if isinstance(data, dict) else None
-        except (json.JSONDecodeError, OSError) as exc:
+        except (json.JSONDecodeError, OSError, UnicodeError) as exc:
             logger.warning("读取任务记录 %s 失败: %s", task_id, exc)
             return None
 
     @staticmethod
-    def list_tasks(project: Optional[str] = None,
-                   task_type: Optional[str] = None,
-                   status: Optional[str] = None,
-                   source: Optional[str] = None) -> list[TaskRecord]:
-        """扫描任务记录并按条件过滤。
+    def _project_names(project: str | None = None) -> list[str]:
+        if project:
+            return [str(project)]
+        names: set[str] = set()
+        try:
+            names.update(ProjectRepository.scan_projects())
+        except Exception:
+            pass
+        # Production ownership must also see projects hidden from the bookshelf;
+        # otherwise a hidden active project could be bypassed by a data-dir
+        # switch or a second task lookup.
+        try:
+            ProjectRepository._ensure_roots()
+            for root in (
+                ProjectRepository.WORKSPACE_ROOT,
+                ProjectRepository.LEGACY_ROOT,
+            ):
+                if not root or not os.path.isdir(root):
+                    continue
+                for entry in os.scandir(root):
+                    if (
+                        entry.name == ".trash"
+                        or entry.name.startswith(".tmp_")
+                        or not entry.is_dir(follow_symlinks=False)
+                    ):
+                        continue
+                    if os.path.isfile(os.path.join(entry.path, "project.json")):
+                        names.add(entry.name)
+        except OSError:
+            pass
+        return sorted(names)
 
-        Args:
-            project: 可选项目名过滤。
-            task_type: 可选任务类型过滤（"synthesis" | "supplement"）。
-            status: 可选状态过滤。
-            source: 可选来源过滤（mcp / web / system / recovery）。
+    @staticmethod
+    def save_task(record: TaskRecord) -> None:
+        """Persist a task, using SQLite for real project production tasks."""
+        if record.task_type != _PRODUCTION_TYPE:
+            TaskRepository._legacy_save(record)
+            return
+        connection = TaskRepository._connect(record.project, create=True)
+        if connection is None:
+            TaskRepository._legacy_save(record)
+            return
+        values = record.to_dict()
+        try:
+            with connection:
+                existing = connection.execute(
+                    "SELECT task_id FROM production_tasks WHERE task_id=?", (record.task_id,)
+                ).fetchone()
+                if existing is None:
+                    TaskRepository._insert_record(connection, record)
+                else:
+                    connection.execute(
+                        """
+                        UPDATE production_tasks SET
+                          status=?,source=?,scope_json=?,options_json=?,progress_json=?,
+                          failed_segment_ids_json=?,attempt=?,idempotency_key=?,
+                          created_at=?,started_at=?,updated_at=?,finished_at=?,
+                          parent_task_id=?,recovery_of=?,artifact_dir=?,error_summary=?,
+                          owner_id=?,heartbeat_at=?,control_intent=?,log_lines_json=?,
+                          version=?
+                        WHERE task_id=?
+                        """,
+                        (
+                            values["status"], values["source"],
+                            json.dumps(values["scope"], ensure_ascii=False),
+                            json.dumps(values["options"], ensure_ascii=False),
+                            json.dumps(values["progress"], ensure_ascii=False),
+                            json.dumps(values["failed_segment_ids"], ensure_ascii=False),
+                            values["attempt"], values["idempotency_key"],
+                            values["created_at"], values["started_at"],
+                            values["updated_at"], values["finished_at"],
+                            values["parent_task_id"], values["recovery_of"],
+                            values["artifact_dir"], values["error_summary"],
+                            values["owner_id"], values["heartbeat_at"],
+                            values["control_intent"],
+                            json.dumps(values["log_lines"], ensure_ascii=False),
+                            values["version"], values["task_id"],
+                        ),
+                    )
+        finally:
+            connection.close()
 
-        Returns:
-            TaskRecord 列表（按最近更新时间倒序）。
+    @staticmethod
+    def create_production_task(record: TaskRecord) -> tuple[str, TaskRecord]:
+        """Atomically create a production task.
+
+        Returns ``("created"|"idempotent"|"idempotency_conflict"|"active", record)``.
         """
-        task_dir = TaskRepository.get_task_dir()
-        if not os.path.isdir(task_dir):
-            return []
-        records: list[TaskRecord] = []
-        for name in os.listdir(task_dir):
-            if not name.endswith(".json"):
+        record.scope = _canonical_scope(record.scope)
+        record.options = _canonical_options(record.options)
+        connection = TaskRepository._connect(record.project, create=True)
+        if connection is None:
+            raise FileNotFoundError(f"项目不存在: {record.project}")
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            if record.idempotency_key:
+                row = connection.execute(
+                    """
+                    SELECT * FROM production_tasks
+                    WHERE project=? AND task_type=? AND idempotency_key=?
+                    ORDER BY updated_at DESC, task_id DESC LIMIT 1
+                    """,
+                    (record.project, record.task_type, record.idempotency_key),
+                ).fetchone()
+                if row is not None:
+                    existing = TaskRepository._row_to_record(row)
+                    connection.commit()
+                    if TaskRepository.same_production_payload(
+                        existing, record.scope, record.options
+                    ):
+                        return "idempotent", existing
+                    return "idempotency_conflict", existing
+            placeholders = ",".join("?" for _ in _ACTIVE_STATES)
+            row = connection.execute(
+                f"""
+                SELECT * FROM production_tasks
+                WHERE project=? AND status IN ({placeholders})
+                ORDER BY updated_at DESC, task_id DESC LIMIT 1
+                """,
+                (record.project, *_ACTIVE_STATES),
+            ).fetchone()
+            if row is not None:
+                connection.commit()
+                return "active", TaskRepository._row_to_record(row)
+            TaskRepository._insert_record(connection, record)
+            connection.commit()
+            return "created", record
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    @staticmethod
+    def create_runtime_task(record: TaskRecord) -> tuple[str, TaskRecord]:
+        """Atomically enqueue a non-production task for the singleton runtime."""
+        if record.task_type not in _RUNTIME_TASK_TYPES - {_PRODUCTION_TYPE}:
+            raise ValueError(f"不支持的 runtime task_type: {record.task_type}")
+        connection = TaskRepository._connect(record.project, create=True)
+        if connection is None:
+            raise FileNotFoundError(f"项目不存在: {record.project}")
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            if record.idempotency_key:
+                row = connection.execute(
+                    """
+                    SELECT * FROM production_tasks
+                    WHERE project=? AND task_type=? AND idempotency_key=?
+                    ORDER BY updated_at DESC, task_id DESC LIMIT 1
+                    """,
+                    (record.project, record.task_type, record.idempotency_key),
+                ).fetchone()
+                if row is not None:
+                    connection.commit()
+                    return "idempotent", TaskRepository._row_to_record(row)
+            placeholders = ",".join("?" for _ in _ACTIVE_STATES)
+            row = connection.execute(
+                f"""
+                SELECT * FROM production_tasks
+                WHERE project=? AND status IN ({placeholders})
+                ORDER BY updated_at DESC, task_id DESC LIMIT 1
+                """,
+                (record.project, *_ACTIVE_STATES),
+            ).fetchone()
+            if row is not None:
+                connection.commit()
+                return "active", TaskRepository._row_to_record(row)
+            TaskRepository._insert_record(connection, record)
+            connection.commit()
+            return "created", record
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    @staticmethod
+    def load_task(task_id: str) -> Optional[TaskRecord]:
+        identifier = str(task_id or "").strip()
+        if not identifier:
+            return None
+        for project in TaskRepository._project_names():
+            connection = TaskRepository._connect(project, create=True)
+            if connection is None:
                 continue
-            path = os.path.join(task_dir, name)
             try:
-                with open(path, encoding="utf-8") as f:
-                    data = json.load(f)
-                record = TaskRecord.from_dict(data) if isinstance(data, dict) else None
-                if record is None:
-                    continue
-                if project and record.project != project:
-                    continue
-                if task_type and record.task_type != task_type:
-                    continue
-                if status and record.status != status:
-                    continue
-                if source and record.source != source:
-                    continue
-                records.append(record)
-            except (json.JSONDecodeError, OSError) as exc:
-                logger.warning("扫描任务记录 %s 失败: %s", name, exc)
+                row = connection.execute(
+                    "SELECT * FROM production_tasks WHERE task_id=?", (identifier,)
+                ).fetchone()
+                if row is not None:
+                    return TaskRepository._row_to_record(row)
+            finally:
+                connection.close()
+        return TaskRepository._legacy_load(identifier)
+
+    @staticmethod
+    def list_tasks(
+        project: Optional[str] = None,
+        task_type: Optional[str] = None,
+        status: Optional[str] = None,
+        source: Optional[str] = None,
+    ) -> list[TaskRecord]:
+        records: list[TaskRecord] = []
+        for name in TaskRepository._project_names(project):
+            connection = TaskRepository._connect(name, create=True)
+            if connection is None:
                 continue
+            try:
+                query = "SELECT * FROM production_tasks WHERE 1=1"
+                params: list[Any] = []
+                if task_type:
+                    query += " AND task_type=?"
+                    params.append(task_type)
+                if status:
+                    query += " AND status=?"
+                    params.append(status)
+                if source:
+                    query += " AND source=?"
+                    params.append(source)
+                for row in connection.execute(query, params):
+                    records.append(TaskRepository._row_to_record(row))
+            finally:
+                connection.close()
+
+        # Preserve legacy supplements and records for projects without a DB.
+        try:
+            names = os.listdir(TaskRepository.get_task_dir())
+        except OSError:
+            names = []
+        seen = {record.task_id for record in records}
+        for filename in names:
+            if not filename.endswith(".json"):
+                continue
+            record = TaskRepository._legacy_load(filename[:-5])
+            if record is None or record.task_id in seen:
+                continue
+            if project and record.project != project:
+                continue
+            if task_type and record.task_type != task_type:
+                continue
+            if status and record.status != status:
+                continue
+            if source and record.source != source:
+                continue
+            records.append(record)
         return sorted(
             records,
-            key=lambda r: (r.updated_at or r.created_at or "", r.task_id),
+            key=lambda item: (item.updated_at or item.created_at or "", item.task_id),
             reverse=True,
         )
 
@@ -257,7 +729,6 @@ class TaskRepository:
         task_type: str,
         idempotency_key: str,
     ) -> Optional[TaskRecord]:
-        """Find the newest task matching a stable replay key."""
         key = str(idempotency_key or "").strip()
         if not key:
             return None
@@ -267,55 +738,286 @@ class TaskRepository:
         return None
 
     @staticmethod
-    def delete_task(task_id: str) -> None:
-        """删除任务记录 JSON 文件。
+    def request_control(task_id: str, action: str) -> TaskRecord:
+        """Persist a pause/resume/cancel request transactionally."""
+        record = TaskRepository.load_task(task_id)
+        if record is None or record.task_type != _PRODUCTION_TYPE:
+            raise KeyError(task_id)
+        connection = TaskRepository._connect(record.project, create=True)
+        if connection is None:
+            raise KeyError(task_id)
+        now = _utc_now()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM production_tasks WHERE task_id=?", (record.task_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            current = TaskRepository._row_to_record(row)
+            new_status = current.status
+            intent = current.control_intent
+            if action == "pause":
+                if current.status in {"pausing", "paused"}:
+                    pass
+                elif current.status == "pending" and not current.owner_id:
+                    new_status, intent = "paused", "pause"
+                elif current.status == "running":
+                    new_status, intent = "pausing", "pause"
+                else:
+                    raise ValueError(current.status)
+            elif action == "resume":
+                if current.status != "paused":
+                    raise ValueError(current.status)
+                if current.owner_id:
+                    intent = "resume"
+                else:
+                    new_status, intent = "pending", ""
+            elif action == "cancel":
+                if current.status == "interrupted":
+                    new_status, intent = "cancelled", ""
+                elif current.status in _TERMINAL_STATES:
+                    connection.commit()
+                    return current
+                if current.status == "pending" and not current.owner_id:
+                    new_status, intent = "cancelled", ""
+                elif current.status == "paused" and not current.owner_id:
+                    new_status, intent = "cancelled", ""
+                else:
+                    new_status, intent = "cancelling", "cancel"
+            else:
+                raise ValueError(action)
+            finished_at = now if new_status == "cancelled" else current.finished_at
+            connection.execute(
+                """
+                UPDATE production_tasks
+                SET status=?,control_intent=?,updated_at=?,finished_at=?,version=version+1
+                WHERE task_id=?
+                """,
+                (new_status, intent, now, finished_at, current.task_id),
+            )
+            connection.commit()
+            row = connection.execute(
+                "SELECT * FROM production_tasks WHERE task_id=?", (current.task_id,)
+            ).fetchone()
+            return TaskRepository._row_to_record(row)
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
-        Args:
-            task_id: 任务 ID。
-        """
-        task_dir = TaskRepository.get_task_dir()
-        path = os.path.join(task_dir, f"{task_id}.json")
-        if os.path.isfile(path):
+    @staticmethod
+    def claim_next_pending(owner_id: str) -> Optional[TaskRecord]:
+        """Claim the oldest pending GPU task for the singleton runtime."""
+        pending = [
+            record
+            for record in TaskRepository.list_tasks(status="pending")
+            if record.task_type in _RUNTIME_TASK_TYPES
+        ]
+        pending.sort(key=lambda item: (item.created_at or "", item.task_id))
+        for candidate in pending:
+            connection = TaskRepository._connect(candidate.project, create=True)
+            if connection is None:
+                continue
             try:
+                now = _utc_now()
+                connection.execute("BEGIN IMMEDIATE")
+                changed = connection.execute(
+                    """
+                    UPDATE production_tasks
+                    SET owner_id=?,heartbeat_at=?,updated_at=?,version=version+1
+                    WHERE task_id=? AND status='pending' AND owner_id=''
+                    """,
+                    (owner_id, now, now, candidate.task_id),
+                ).rowcount
+                connection.commit()
+                if changed:
+                    row = connection.execute(
+                        "SELECT * FROM production_tasks WHERE task_id=?",
+                        (candidate.task_id,),
+                    ).fetchone()
+                    return TaskRepository._row_to_record(row)
+            finally:
+                connection.close()
+        return None
+
+    @staticmethod
+    def update_runtime_heartbeat(owner_id: str) -> None:
+        now = _utc_now()
+        for project in TaskRepository._project_names():
+            connection = TaskRepository._connect(project, create=True)
+            if connection is None:
+                continue
+            try:
+                with connection:
+                    connection.execute(
+                        """
+                        UPDATE production_tasks SET heartbeat_at=?
+                        WHERE owner_id=? AND status IN
+                          ('pending','running','pausing','paused','cancelling')
+                        """,
+                        (now, owner_id),
+                    )
+            finally:
+                connection.close()
+
+    @staticmethod
+    def mark_orphaned_interrupted(new_owner_id: str) -> list[str]:
+        """Mark prior claimed tasks interrupted after the caller owns the OS lock."""
+        changed: list[str] = []
+        now = _utc_now()
+        for project in TaskRepository._project_names():
+            connection = TaskRepository._connect(project, create=True)
+            if connection is None:
+                continue
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                rows = connection.execute(
+                    """
+                    SELECT task_id FROM production_tasks
+                    WHERE status IN ('pending','running','pausing','paused','cancelling')
+                      AND owner_id<>'' AND owner_id<>?
+                    """,
+                    (new_owner_id,),
+                ).fetchall()
+                ids = [row["task_id"] for row in rows]
+                if ids:
+                    placeholders = ",".join("?" for _ in ids)
+                    connection.execute(
+                        f"""
+                        UPDATE production_tasks
+                        SET status='interrupted',control_intent='',updated_at=?,
+                            finished_at=?,error_summary=CASE
+                              WHEN error_summary='' THEN '生产运行时异常退出'
+                              ELSE error_summary END,
+                            version=version+1
+                        WHERE task_id IN ({placeholders})
+                        """,
+                        (now, now, *ids),
+                    )
+                    changed.extend(ids)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
+        return changed
+
+    @staticmethod
+    def persist_runtime_state(
+        task_id: str,
+        owner_id: str,
+        *,
+        status: str,
+        progress: dict[str, Any],
+        failed_segment_ids: list[str],
+        error_summary: str,
+        log_lines: list[str],
+    ) -> Optional[TaskRecord]:
+        """Persist a worker snapshot without erasing a stronger control request."""
+        record = TaskRepository.load_task(task_id)
+        if record is None:
+            return None
+        connection = TaskRepository._connect(record.project, create=True)
+        if connection is None:
+            return None
+        now = _utc_now()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM production_tasks WHERE task_id=?", (task_id,)
+            ).fetchone()
+            if row is None:
+                connection.commit()
+                return None
+            current = TaskRepository._row_to_record(row)
+            if current.owner_id != owner_id:
+                connection.commit()
+                return current
+            effective_status = status
+            intent = current.control_intent
+            if intent == "cancel" and status not in _TERMINAL_STATES:
+                effective_status = "cancelling"
+            elif intent == "pause" and status == "running":
+                effective_status = "pausing"
+            if status == "running" and intent == "resume":
+                intent = ""
+            if effective_status in _TERMINAL_STATES:
+                intent = ""
+            started_at = current.started_at
+            if status == "running" and not started_at:
+                started_at = now
+            finished_at = current.finished_at
+            if effective_status in _TERMINAL_STATES:
+                finished_at = now
+            connection.execute(
+                """
+                UPDATE production_tasks SET
+                  status=?,progress_json=?,failed_segment_ids_json=?,
+                  error_summary=?,log_lines_json=?,started_at=?,updated_at=?,
+                  finished_at=?,heartbeat_at=?,control_intent=?,version=version+1
+                WHERE task_id=? AND owner_id=?
+                """,
+                (
+                    effective_status,
+                    json.dumps(progress, ensure_ascii=False),
+                    json.dumps([str(item) for item in failed_segment_ids], ensure_ascii=False),
+                    str(error_summary or "")[:500],
+                    json.dumps([str(item) for item in log_lines[-50:]], ensure_ascii=False),
+                    started_at, now, finished_at, now, intent, task_id, owner_id,
+                ),
+            )
+            connection.commit()
+            updated = connection.execute(
+                "SELECT * FROM production_tasks WHERE task_id=?", (task_id,)
+            ).fetchone()
+            return TaskRepository._row_to_record(updated)
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    @staticmethod
+    def delete_task(task_id: str) -> None:
+        record = TaskRepository.load_task(task_id)
+        if record is not None and record.task_type in _RUNTIME_TASK_TYPES:
+            connection = TaskRepository._connect(record.project, create=True)
+            if connection is not None:
+                try:
+                    with connection:
+                        connection.execute(
+                            "DELETE FROM production_tasks WHERE task_id=?", (record.task_id,)
+                        )
+                finally:
+                    connection.close()
+        path = os.path.join(TaskRepository.get_task_dir(), f"{task_id}.json")
+        try:
+            if os.path.isfile(path):
                 os.remove(path)
-            except OSError as exc:
-                logger.warning("删除任务记录 %s 失败: %s", task_id, exc)
+        except OSError as exc:
+            logger.warning("删除任务记录 %s 失败: %s", task_id, exc)
 
     @staticmethod
     def cleanup_old_tasks(max_age_days: int = 7) -> int:
-        """删除超期任务记录（按 created_at 或文件 mtime）。
-
-        Args:
-            max_age_days: 过期天数阈值（默认 7 天）。
-
-        Returns:
-            删除的任务记录数量。
-        """
-        task_dir = TaskRepository.get_task_dir()
-        if not os.path.isdir(task_dir):
-            return 0
+        """Delete old terminal tasks; active runtime rows are never removed."""
         cutoff = time.time() - max_age_days * 86400
         cleaned = 0
-        for name in os.listdir(task_dir):
-            if not name.endswith(".json"):
+        for record in TaskRepository.list_tasks():
+            if record.status not in _TERMINAL_STATES:
                 continue
-            path = os.path.join(task_dir, name)
-            # 优先用 created_at 字段判断
-            record = TaskRepository.load_task(name[:-5])  # 去掉 .json
-            if record and record.created_at:
-                try:
-                    # 解析 ISO 8601 时间戳
-                    from datetime import datetime
-                    dt = datetime.fromisoformat(record.created_at)
-                    record_time = dt.timestamp()
-                except (ValueError, OSError):
-                    record_time = os.path.getmtime(path)
-            else:
-                record_time = os.path.getmtime(path)
+            timestamp = record.finished_at or record.created_at
+            try:
+                parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                record_time = parsed.timestamp()
+            except (ValueError, TypeError, OSError):
+                continue
             if record_time < cutoff:
-                try:
-                    os.remove(path)
-                    cleaned += 1
-                except OSError as exc:
-                    logger.warning("清理任务记录 %s 失败: %s", name, exc)
+                TaskRepository.delete_task(record.task_id)
+                cleaned += 1
         return cleaned
+
+
+__all__ = ["TaskRecord", "TaskRepository"]

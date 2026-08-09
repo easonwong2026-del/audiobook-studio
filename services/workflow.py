@@ -1,0 +1,246 @@
+"""Derived book workflow state for Web and Agent control planes."""
+from __future__ import annotations
+
+from typing import Any
+
+from repositories.project_repo import ProjectRepository
+from repositories.quality_repo import QualityRepository
+from services.production_jobs import ProductionJobService
+from services.quality import QualityService
+from services.voice_cast import VoiceCastResolver
+
+
+class WorkflowService:
+    """Derive workflow stage from durable facts instead of persisting a second stage."""
+
+    @staticmethod
+    def _action(
+        action: str,
+        tool: str,
+        project_name: str,
+        reason: str,
+        *,
+        count: int = 0,
+        **arguments: Any,
+    ) -> dict[str, Any]:
+        return {
+            "action": action,
+            "tool": tool,
+            "arguments": {"project_name": project_name, **arguments},
+            "reason": reason,
+            "count": int(count or 0),
+        }
+
+    @classmethod
+    def get_state(cls, project_name: str) -> dict[str, Any]:
+        project = str(project_name or "").strip()
+        if not project:
+            raise ValueError("project_name 不能为空")
+        meta, script, bindings = ProjectRepository.load_project(project)
+        chapters = [
+            chapter for chapter in script.get("chapters", [])
+            if isinstance(chapter, dict)
+        ]
+        segments = [
+            segment
+            for chapter in chapters
+            for segment in chapter.get("segments", [])
+            if isinstance(segment, dict)
+        ]
+        total = len(segments)
+        statuses = dict(getattr(meta, "segments_status", {}) or {})
+        done = sum(statuses.get(str(segment.get("id"))) == "done" for segment in segments)
+        failed = sum(statuses.get(str(segment.get("id"))) == "failed" for segment in segments)
+        remaining = max(total - done, 0)
+
+        try:
+            cast = VoiceCastResolver.get_voice_binding_status(project)
+        except Exception:
+            legacy_bindings = (
+                bindings.get("bindings", {}) if isinstance(bindings, dict) else {}
+            )
+            roles = list((script.get("voices") or {}).keys())
+            bound = sum(bool(legacy_bindings.get(role)) for role in roles)
+            cast = {
+                "bound": bound,
+                "unbound": max(len(roles) - bound, 0),
+                "cast_locked": False,
+                "synthesis_ready": bool(roles) and bound == len(roles),
+                "mode": "legacy_manual",
+            }
+        unbound = int(cast.get("unbound", 0) or 0)
+        cast_ready = bool(cast.get("synthesis_ready", False))
+
+        active_task = ProductionJobService.get_active_task(project)
+        repairs = QualityRepository.list_history(project, "repair_history")
+        active_repairs = [
+            item for item in repairs
+            if item.get("status") in {
+                "preparing", "submitting", "pending", "running",
+                "pausing", "paused", "cancelling",
+            }
+        ]
+        quality = QualityService.get_quality_report(project)
+        quality_summary = quality["summary"]
+        technical_failures = sum(
+            item.get("technical_outcome") == "fail"
+            and statuses.get(str(item.get("segment_id") or "")) == "done"
+            for item in quality.get("segments", [])
+        )
+
+        exports = QualityRepository.list_history(project, "export_jobs")
+        active_exports = [
+            item for item in exports if item.get("status") in {"pending", "running"}
+        ]
+        manifests = QualityRepository.list_history(project, "delivery_manifests")
+        delivered = next(
+            (item for item in manifests if item.get("ready") is True),
+            None,
+        )
+
+        blockers: list[dict[str, Any]] = []
+        actions: list[dict[str, Any]] = []
+        if delivered:
+            stage = "delivered"
+            actions.append(cls._action(
+                "inspect_delivery",
+                "get_delivery_manifest",
+                project,
+                "项目已有可交付成品清单。",
+            ))
+        elif active_exports:
+            stage = "exporting"
+            actions.append(cls._action(
+                "check_export",
+                "get_export_task",
+                project,
+                "导出任务正在运行。",
+                export_id=active_exports[0].get("export_id"),
+            ))
+        elif not cast_ready:
+            stage = "prepared" if not (script.get("voices") or {}) else "cast_pending"
+            blockers.append({
+                "code": "VOICE_CAST_NOT_READY",
+                "message": f"还有 {unbound} 个角色未完成声音绑定。",
+                "count": unbound,
+            })
+            actions.append(cls._action(
+                "complete_voice_cast",
+                "get_voice_binding_status",
+                project,
+                "完成角色声音绑定并锁定 Voice Cast。",
+                count=unbound,
+            ))
+        elif active_task:
+            stage = "producing"
+            actions.append(cls._action(
+                "check_production",
+                "get_production_task",
+                project,
+                "生产任务正在运行。",
+                task_id=active_task.get("task_id"),
+            ))
+        elif active_repairs:
+            stage = "needs_fix"
+            actions.append(cls._action(
+                "check_repair",
+                "get_repair_task",
+                project,
+                "段落修复任务正在运行。",
+                repair_id=active_repairs[0].get("repair_id"),
+            ))
+        elif failed or technical_failures or quality_summary.get("needs_fix", 0):
+            stage = "needs_fix"
+            if failed:
+                blockers.append({
+                    "code": "SYNTHESIS_FAILED",
+                    "message": f"有 {failed} 个段落生产失败。",
+                    "count": failed,
+                })
+                actions.append(cls._action(
+                    "retry_failed_segments",
+                    "list_production_tasks",
+                    project,
+                    "查找最近任务并重试失败段落。",
+                    count=failed,
+                    status="error",
+                ))
+            quality_fix = int(quality_summary.get("needs_fix", 0) or 0) + technical_failures
+            if quality_fix:
+                blockers.append({
+                    "code": "QUALITY_FIX_REQUIRED",
+                    "message": f"有 {quality_fix} 个段落需要修复。",
+                    "count": quality_fix,
+                })
+                actions.append(cls._action(
+                    "repair_segments",
+                    "list_review_segments",
+                    project,
+                    "读取需要修复的 QA 段落。",
+                    count=quality_fix,
+                    status="needs_fix",
+                ))
+        elif remaining:
+            stage = "ready_for_production"
+            actions.append(cls._action(
+                "produce_remaining",
+                "start_production",
+                project,
+                f"生产剩余 {remaining} 个段落。",
+                count=remaining,
+                scope={"all": True},
+            ))
+        elif quality_summary.get("passed", 0) == total and total > 0:
+            stage = "quality_passed"
+            actions.append(cls._action(
+                "plan_export",
+                "plan_export",
+                project,
+                "全部段落已通过质量检查，可以规划交付。",
+            ))
+        else:
+            stage = "quality_check"
+            unchecked = (
+                int(quality_summary.get("needs_review", 0) or 0)
+                + int(quality_summary.get("technical_warning", 0) or 0)
+            )
+            blockers.append({
+                "code": "QUALITY_REVIEW_REQUIRED",
+                "message": f"还有 {unchecked} 个段落需要质量检查。",
+                "count": unchecked,
+            })
+            actions.append(cls._action(
+                "review_segments",
+                "list_review_segments",
+                project,
+                "检查尚未通过的段落音频。",
+                count=unchecked,
+            ))
+
+        return {
+            "project": project,
+            "stage": stage,
+            "summary": {
+                "chapters": len(chapters),
+                "segments": total,
+                "completed": done,
+                "remaining": remaining,
+                "failed": failed,
+                "roles_bound": int(cast.get("bound", 0) or 0),
+                "roles_unbound": unbound,
+                "quality": quality_summary,
+                "active_production_task": (
+                    active_task.get("task_id") if active_task else None
+                ),
+                "active_repairs": len(active_repairs),
+                "active_exports": len(active_exports),
+                "delivered": bool(delivered),
+            },
+            "blockers": blockers,
+            "next_actions": actions,
+        }
+
+    get_workflow_state = get_state
+
+
+__all__ = ["WorkflowService"]

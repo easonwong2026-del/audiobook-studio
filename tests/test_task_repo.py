@@ -13,8 +13,6 @@ import os
 import time
 import uuid
 
-import pytest
-
 from repositories.task_repo import TaskRecord, TaskRepository
 
 
@@ -107,10 +105,12 @@ class TestTaskRepository:
         TaskRepository.save_task(TaskRecord(t1, "synthesis", "book_a", "done"))
         TaskRepository.save_task(TaskRecord(t2, "supplement", "book_a", "running"))
 
-        all_tasks = TaskRepository.list_tasks()
+        all_tasks = TaskRepository.list_tasks(project="book_a")
         assert len(all_tasks) == 2
 
-        syn_tasks = TaskRepository.list_tasks(task_type="synthesis")
+        syn_tasks = TaskRepository.list_tasks(
+            project="book_a", task_type="synthesis"
+        )
         assert len(syn_tasks) == 1
         assert syn_tasks[0].task_id == t1
 
@@ -206,5 +206,5 @@ class TestTaskRepository:
         assert loaded is None  # 损坏返回 None
 
         # list_tasks 也应跳过损坏文件
-        tasks = TaskRepository.list_tasks()
+        tasks = TaskRepository.list_tasks(project="corrupt_fixture")
         assert len(tasks) == 0

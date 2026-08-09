@@ -218,5 +218,6 @@ def test_heavy_audio_modules_are_not_eager_app_imports():
     app = _text("app.py")
     assert "\nfrom lib import tts_engine\n" not in app
     assert "\nfrom lib import audio_pipeline\n" not in app
-    assert "def _tts_engine()" in app
+    assert "def _tts_engine()" not in app
+    assert "RuntimeTTSService.test_voice_and_concat_wavs" in app
     assert "def _audio_pipeline()" in app

@@ -119,6 +119,11 @@ def test_stdio_methods_and_no_gradio_import():
         "set_voice_cast", "get_voice_cast", "bind_cast_role",
         "validate_voice_cast", "finalize_voice_cast", "get_voice_binding_status",
         "check_chapter_roles",
+        "get_workflow_state", "get_quality_report", "list_review_segments",
+        "get_segment_review", "mark_segment_review", "run_technical_qa",
+        "regenerate_segments", "get_repair_task", "list_repairs",
+        "plan_export", "start_export", "get_export_task", "list_exports",
+        "get_delivery_manifest",
     }
     path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "mcp_server")
     for root, _dirs, files in os.walk(path):
@@ -131,3 +136,67 @@ def test_stdio_methods_and_no_gradio_import():
                 or isinstance(node, ast.ImportFrom) and node.module == "gradio"
                 for node in ast.walk(tree)
             )
+
+
+def test_phase4_workflow_smoke_and_schema_errors_are_structured(isolated_projects):
+    create_project({"project_name": "MCP 工作流", "script": _script()})
+    response = handle_request({
+        "jsonrpc": "2.0",
+        "id": 10,
+        "method": "tools/call",
+        "params": {
+            "name": "get_workflow_state",
+            "arguments": {"project_name": "MCP 工作流"},
+        },
+    })
+    result = response["result"]
+    assert result["isError"] is False
+    assert result["structuredContent"]["stage"] in {"cast_pending", "prepared"}
+    assert result["structuredContent"]["next_actions"]
+
+    filtered = handle_request({
+        "jsonrpc": "2.0",
+        "id": 9,
+        "method": "tools/call",
+        "params": {
+            "name": "list_review_segments",
+            "arguments": {
+                "project_name": "MCP 工作流",
+                "status": "technical_warning",
+            },
+        },
+    })["result"]
+    assert filtered["isError"] is False
+    assert len(filtered["structuredContent"]) == 2
+
+    invalid = handle_request({
+        "jsonrpc": "2.0",
+        "id": 11,
+        "method": "tools/call",
+        "params": {
+            "name": "get_quality_report",
+            "arguments": {"project_name": "MCP 工作流", "unexpected": True},
+        },
+    })
+    error_result = invalid["result"]
+    assert error_result["isError"] is True
+    assert set(error_result["structuredContent"]["error"]) == {
+        "code", "message", "fix_hint", "details",
+    }
+
+    rejected = handle_request({
+        "jsonrpc": "2.0",
+        "id": 12,
+        "method": "tools/call",
+        "params": {
+            "name": "set_character_roster",
+            "arguments": {
+                "project_name": "不存在",
+                "roles": [{"role_id": "narrator", "name": "旁白"}],
+            },
+        },
+    })["result"]
+    assert rejected["isError"] is True
+    assert set(rejected["structuredContent"]["error"]) == {
+        "code", "message", "fix_hint", "details",
+    }

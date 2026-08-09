@@ -32,13 +32,15 @@ repositories/
   project_repo.py          # ProjectRepository — 项目 CRUD + meta 原子写
   config_repo.py           # ConfigRepository — 配置读写 + 原子写
   binding_repo.py          # BindingRepository — 绑定业务逻辑（非 I/O）
-  task_repo.py             # TaskRepository — 轻量任务状态
+  task_repo.py             # TaskRepository — 项目内 SQLite 任务状态
+  quality_repo.py          # Revision / QA / Repair / Export / Manifest
 
 修改的文件：
   lib/config.py            # ConfigData 改为引用 ConfigRepository（向后兼容包装）
   services/project.py      # pm.* → ProjectRepository.*
-  services/synthesis.py    # 新增 TaskRepository.save_task() 记录可恢复状态
-  services/supplement.py   # 新增 TaskRepository.save_task() 记录可��复状态
+  services/production_runtime.py # OS 单实例锁 + 唯一 TTS worker
+  services/synthesis.py    # runtime 私有的段边界状态机
+  services/supplement.py   # 通过 runtime utility task 补录
 
 新增测试文件：
   tests/test_config_repo.py
@@ -526,18 +528,18 @@ def atomic_write(path: str, data: dict) -> None:
    - `resolve_binding_path(path, project_dir)` — path 已绝对则原样返回；相对则拼接 `project_dir` 返回
    
 2. **TaskRepository**（`repositories/task_repo.py`）：
-   - `get_task_dir()` — 返回 `<preview_dir>/task_records/`
-   - `save_task(record)` — 原子写 `<task_dir>/<task_id>.json`
-   - `load_task(task_id)` — 读 JSON 反序列化为 TaskRecord；不存在返回 None
-   - `list_tasks(project, task_type)` — 扫描 task_dir，按文件名载入，按 project/task_type 过滤
-   - `delete_task(task_id)` — 删除 JSON 文件
-   - `cleanup_old_tasks(max_age_days)` — 按 created_at 过滤超期记录并删除
+   - 正式任务存于项目 `01_项目配置/production_tasks.sqlite3`
+   - `BEGIN IMMEDIATE` + partial unique index 保证项目 active 唯一
+   - 幂等键在事务内比较规范化 scope/options；不同 payload 返回冲突
+   - owner、heartbeat、control intent、version、日志与 attempt history 持久化
+   - 旧 `<preview>/task_records/*.json` 只读导入，补录测试夹具保持兼容
+   - cleanup 只删除过期 terminal rows，绝不删除 active/recovery task
 
 3. 新增测试：
    - `tests/test_binding_repo.py`：分类扫描、文件复制、绑定校验
    - `tests/test_task_repo.py`：save/load/list/delete/cleanup 全链路
 
-#### T05: 服务层集成 + 补录/合成任务状态接入 + 全量回归
+#### T05: 单例 runtime + 补录/合成任务状态接入 + 全量回归
 
 | 字段 | 内容 |
 |------|------|
@@ -548,14 +550,14 @@ def atomic_write(path: str, data: dict) -> None:
 | **Priority** | P1 |
 
 **做什么**：
-1. **修改 `services/synthesis.py`**：
-   - `SynthesisService.start()` 内，在提交 worker 前调用 `TaskRepository.save_task(TaskRecord(task_id, "synthesis", project, "running"))`
-   - worker 终态（done/error/cancelled）后调用 `TaskRepository.save_task(...)` 更新状态
-   - **注意**：不在 worker 每段 yield 时更新任务状态（避免高频写盘），仅在任务启动和结束各写一次
+1. **`services/production_runtime.py` + `services/synthesis.py`**：
+   - runtime 全生命周期持有跨平台 OS 文件锁，只有 lock owner 能判 interrupted
+   - Web/MCP 只写 SQLite command；worker 持久化 heartbeat、进度和终态
+   - pause/cancel 先写 intent，worker 在段边界确认 paused/cancelled
    
-2. **修改 `services/supplement.py`**：
-   - `do_supplement_synth` 中创建 `SupplementTaskState` 后，同步写一条 `TaskRepository.save_task(TaskRecord(task_id, "supplement", project, "running"))`
-   - 补录完成/失败时更新 TaskRecord 状态
+2. **`services/runtime_tts.py` + `services/supplement.py`**：
+   - 试听与补录也进入同一 runtime 队列，Web 不 import/init TTS
+   - 音频先写唯一 `.part.wav`，校验后原子发布到项目 cache
    
 3. **验证 `app.py`**：
    - 确认所有 handler 的 `pm.*` 直接调用已经通过 `ProjectService` 间接走 `ProjectRepository`

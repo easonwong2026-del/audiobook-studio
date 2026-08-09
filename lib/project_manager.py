@@ -4,16 +4,13 @@
 向后兼容打开旧版存放在程序内 workspace/projects 的历史项目。
 """
 from __future__ import annotations
-import json
 import logging
-import os
-import shutil
-import time
 
 from .types import ProjectMeta
 from .snapshot import ProjectSnapshot
-from . import chapter_identity, project_paths, segment_cache
+from . import chapter_identity
 from . import config as _cfg
+from repositories.project_repo import ProjectRepository
 
 logger = logging.getLogger(__name__)
 
@@ -24,246 +21,73 @@ WORKSPACE_ROOT = _cfg.get_projects_root()
 LEGACY_ROOT = _cfg.get_legacy_dir()
 
 
+def _repository() -> type[ProjectRepository]:
+    """Synchronize mutable compatibility roots and return the canonical repo."""
+    ProjectRepository.WORKSPACE_ROOT = WORKSPACE_ROOT
+    ProjectRepository.LEGACY_ROOT = LEGACY_ROOT
+    ProjectRepository._INITIALIZED = True
+    return ProjectRepository
+
+
 def _resolve_dir(name: str) -> str:
-    """返回项目实际目录：优先新数据目录，其次 legacy 目录，否则落在新目录。"""
-    new = os.path.join(WORKSPACE_ROOT, name)
-    if os.path.isdir(new):
-        return new
-    old = os.path.join(LEGACY_ROOT, name)
-    if os.path.isdir(old):
-        return old
-    return new
+    """Compatibility wrapper for the canonical repository resolver."""
+    return _repository().get_project_dir(name)
 
 
 def scan_projects() -> list[str]:
-    """扫描所有项目名（新数据目录 + legacy 目录合并，新目录优先去重）。"""
-    names = set()
-    for root in (WORKSPACE_ROOT, LEGACY_ROOT):
-        if os.path.isdir(root):
-            names.update(
-                d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))
-            )
-    return sorted(names)
+    """Compatibility wrapper for :meth:`ProjectRepository.scan_projects`."""
+    return _repository().scan_projects()
 
 
 def create_project(name: str, script_path: str) -> str:
-    """创建项目目录结构，复制 JSON，写 project.json（始终落在新数据目录）。"""
-    project_dir = os.path.join(WORKSPACE_ROOT, name)
-    if os.path.exists(project_dir):
-        raise FileExistsError(f"项目 '{name}' 已存在")
-
-    paths = project_paths.ensure_layout(project_dir, prefer_canonical=True, compatibility=True)
-
-    # 复制剧本 JSON
-    with open(script_path, encoding="utf-8") as f:
-        script = chapter_identity.normalize_script_for_project(json.load(f))
-    with open(os.path.join(project_dir, "structured_script.json"), "w", encoding="utf-8") as f:
-        json.dump(script, f, ensure_ascii=False, indent=2)
-    shutil.copy2(script_path, os.path.join(paths["source"], chapter_identity.safe_filename(os.path.basename(script_path))))
-    for index, chapter in enumerate(script.get("chapters", [])):
-        if isinstance(chapter, dict):
-            with open(os.path.join(paths["chapter_text"], f"{chapter_identity.chapter_file_stem(chapter, index, len(script.get('chapters', [])))}.json"), "w", encoding="utf-8") as f:
-                json.dump(chapter, f, ensure_ascii=False, indent=2)
-    total_segments = 0
-    for ch in script.get("chapters", []):
-        total_segments += len(ch.get("segments", []))
-
-    # 空 voice_bindings
-    voice_bindings = {
-        "bindings": {name: None for name in script.get("voices", {})},
-        "bound_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "verified": []
-    }
-    with open(os.path.join(project_dir, "voice_bindings.json"), "w", encoding="utf-8") as f:
-        json.dump(voice_bindings, f, ensure_ascii=False, indent=2)
-    shutil.copy2(
-        os.path.join(project_dir, "voice_bindings.json"),
-        os.path.join(paths["voices"], "voice_bindings.json"),
-    )
-
-    # project.json
-    meta = ProjectMeta(
-        project_name=name,
-        created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
-        updated_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
-        total_chapters=len(script.get("chapters", [])),
-        total_segments=total_segments,
-        pending_count=total_segments,
-        segments_status={
-            seg["id"]: "pending"
-            for ch in script.get("chapters", [])
-            for seg in ch.get("segments", [])
-        },
-        storage_version=project_paths.STORAGE_VERSION,
-        directories=project_paths.layout_manifest(project_dir),
-        source_file=os.path.relpath(
-            os.path.join(paths["source"], chapter_identity.safe_filename(os.path.basename(script_path))),
-            project_dir,
-        ),
-    )
-    _save_meta(project_dir, meta)
-    if meta.storage_version >= project_paths.STORAGE_VERSION:
-        try:
-            shutil.copy2(
-                os.path.join(project_dir, "project.json"),
-                os.path.join(paths["config"], "project.json"),
-            )
-        except OSError as exc:
-            logger.warning("同步项目配置副本失败: %s", exc)
-
-    return name
+    """Compatibility wrapper; new disk writes live only in the repository."""
+    return _repository().create_project(name, script_path)
 
 
 def open_project(name: str) -> tuple[ProjectMeta, dict, dict]:
-    """加载项目，返回 (meta, script, voice_bindings)。向后兼容 legacy 目录。"""
-    project_dir = _resolve_dir(name)
-    if not os.path.isdir(project_dir):
-        raise FileNotFoundError(f"项目 '{name}' 不存在")
-
-    meta = _load_meta(project_dir)
-    with open(os.path.join(project_dir, "structured_script.json"), encoding="utf-8") as f:
-        script = json.load(f)
-    with open(os.path.join(project_dir, "voice_bindings.json"), encoding="utf-8") as f:
-        bindings = json.load(f)
-
-    return meta, script, bindings
+    """Compatibility wrapper for the canonical load path."""
+    return _repository().load_project(name)
 
 
 def load_snapshot(name: str) -> "ProjectSnapshot":
-    """加载项目并产出 ``ProjectSnapshot``（供打开项目统一入口复用，自动拆出子键）。"""
-    meta, script, bd = open_project(name)
-    return ProjectSnapshot.build(name, meta, script, bd, _resolve_dir(name))
+    """Compatibility wrapper for the canonical snapshot path."""
+    return _repository().load_snapshot(name)
 
 
 def delete_project(name: str):
-    """删除项目（解析到实际存在的目录）。"""
-    project_dir = _resolve_dir(name)
-    if os.path.isdir(project_dir):
-        shutil.rmtree(project_dir)
+    """Compatibility wrapper for the canonical delete path."""
+    return _repository().delete_project(name)
 
 
 def get_project_dir(name: str) -> str:
-    """返回项目目录绝对路径（解析 legacy，便于读取既有项目产物）。"""
-    return _resolve_dir(name)
+    """Compatibility wrapper for the canonical project resolver."""
+    return _repository().get_project_dir(name)
 
 
 def update_segment_status(name: str, seg_id: str, status: str):
-    """更新单段状态并写入 project.json。"""
-    project_dir = _resolve_dir(name)
-    meta = _load_meta(project_dir)
-    meta.segments_status[seg_id] = status
-
-    # 重新统计
-    meta.completed_count = sum(1 for s in meta.segments_status.values() if s == "done")
-    meta.failed_count = sum(1 for s in meta.segments_status.values() if s == "failed")
-    meta.pending_count = sum(1 for s in meta.segments_status.values() if s == "pending")
-    meta.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S")
-
-    _save_meta(project_dir, meta)
+    """Compatibility wrapper for the canonical segment status mutation."""
+    return _repository().update_segment_status(name, seg_id, status)
 
 
 def get_remaining(name: str) -> list[str]:
-    """返回所有待合成的段 ID（pending + failed + done 但 wav 不存在）。"""
-    project_dir = _resolve_dir(name)
-    meta = _load_meta(project_dir)
-    seg_dir = project_paths.project_dir(project_dir, "segments")
-    remaining = []
-    for seg_id, status in meta.segments_status.items():
-        # ``skipped`` is a selection marker, not a completed production
-        # result.  It must become eligible again when a later all-book job (or
-        # a matching chapter job) is started.
-        if status in ("pending", "failed", "skipped"):
-            remaining.append(seg_id)
-        elif status == "done":
-            # B7：用参数感知的缓存键判定（兼容历史裸文件 + glob 任意参数变体），
-            #     标记 done 但对应 wav 实际不存在 → 重置为 pending。
-            if not segment_cache.has_segment_wav(seg_dir, seg_id):
-                meta.segments_status[seg_id] = "pending"
-                meta.completed_count -= 1
-                meta.pending_count += 1
-                remaining.append(seg_id)
-    if meta.completed_count < 0: meta.completed_count = 0
-    _save_meta(project_dir, meta)
-    return remaining
+    """Compatibility wrapper for the canonical recovery query."""
+    return _repository().get_remaining(name)
 
 
 def _meta_path(project_dir: str) -> str:
-    return os.path.join(project_dir, "project.json")
+    return _repository()._meta_path(project_dir)
 
 
 def _load_meta(project_dir: str) -> ProjectMeta:
-    with open(_meta_path(project_dir), encoding="utf-8") as f:
-        data = json.load(f)
-    meta = ProjectMeta(**data)
-    _repair_meta(project_dir, meta)
-    return meta
+    return _repository()._load_meta(project_dir)
 
 
 def _repair_meta(project_dir: str, meta: ProjectMeta):
-    """自动修复: 确保 segments_status 的 key 与 structured_script.json 的 seg_id 一致"""
-    script_path = os.path.join(project_dir, "structured_script.json")
-    if not os.path.isfile(script_path):
-        return
-    with open(script_path, encoding="utf-8") as f:
-        script = json.load(f)
-
-    # 收集 JSON 中所有段 ID
-    json_ids = set()
-    for ch in script.get("chapters", []):
-        for seg in ch.get("segments", []):
-            json_ids.add(seg["id"])
-
-    # 已有的 status 键
-    old_ids = set(meta.segments_status.keys())
-
-    if json_ids == old_ids:
-        return  # 一致，无需修复
-
-    logger.info(f"Repairing segments_status: {len(old_ids)} → {len(json_ids)} IDs")
-    # 重建：保留 done 状态，其他重置为 pending
-    new_status = {}
-    for sid in json_ids:
-        old_status = meta.segments_status.get(sid, "pending")
-        # B7：用参数感知缓存键判定该段是否已真正合成（兼容历史裸文件）。
-        seg_dir = project_paths.project_dir(project_dir, "segments")
-        if old_status == "done" and segment_cache.has_segment_wav(seg_dir, sid):
-            new_status[sid] = "done"
-        else:
-            new_status[sid] = "pending"
-
-    meta.segments_status = new_status
-    meta.total_segments = len(json_ids)
-    meta.completed_count = sum(1 for v in new_status.values() if v == "done")
-    meta.failed_count = sum(1 for v in new_status.values() if v == "failed")
-    meta.pending_count = meta.total_segments - meta.completed_count - meta.failed_count
-    _save_meta(project_dir, meta)
+    return _repository()._repair_meta(project_dir, meta)
 
 
 def _save_meta(project_dir: str, meta: ProjectMeta):
-    path = _meta_path(project_dir)
-    tmp_path = path + ".tmp"
-    payload = {
-        "project_name": meta.project_name,
-        "created_at": meta.created_at,
-        "updated_at": meta.updated_at,
-        "total_chapters": meta.total_chapters,
-        "total_segments": meta.total_segments,
-        "completed_count": meta.completed_count,
-        "failed_count": meta.failed_count,
-        "pending_count": meta.pending_count,
-        "segments_status": meta.segments_status,
-        "voice_bindings_path": meta.voice_bindings_path,
-        "storage_version": meta.storage_version,
-        "directories": meta.directories,
-        "source_file": meta.source_file,
-    }
-    # 原子写：先写临时文件，fsync 后再 os.replace 替换，
-    # 避免写入中途崩溃（断电 / 异常）留下半截 project.json（R4）。
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp_path, path)
+    return _repository()._save_meta(project_dir, meta)
 
 
 def get_synthesis_overrides(name: str) -> dict:
@@ -278,17 +102,7 @@ def get_synthesis_overrides(name: str) -> dict:
     Returns:
         覆盖参数字典（键见 ``set_synthesis_overrides``），缺省为 ``{}``。
     """
-    project_dir = _resolve_dir(name)
-    path = os.path.join(project_dir, "synthesis_overrides.json")
-    if not os.path.isfile(path):
-        return {}
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.warning("读取 synthesis_overrides.json 失败，回退空覆盖: %s", exc)
-        return {}
+    return _repository().get_synthesis_overrides(name)
 
 
 def set_synthesis_overrides(name: str, overrides: dict) -> None:
@@ -304,10 +118,7 @@ def set_synthesis_overrides(name: str, overrides: dict) -> None:
             - ``emo_alpha``: float。
             - ``speech_rate``: float。
     """
-    project_dir = _resolve_dir(name)
-    path = os.path.join(project_dir, "synthesis_overrides.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(overrides, f, ensure_ascii=False, indent=2)
+    return _repository().set_synthesis_overrides(name, overrides)
 
 
 def list_projects() -> list[dict]:
@@ -320,44 +131,12 @@ def list_projects() -> list[dict]:
     Returns:
         项目摘要字典列表，按项目名排序。
     """
-    summaries = []
-    for name in scan_projects():
-        try:
-            project_dir = _resolve_dir(name)
-            meta = _load_meta(project_dir)
-        except Exception as exc:  # pylint: disable=broad-except
-            logger.warning("list_projects 读 %s 失败: %s", name, exc)
-            continue
-        total = getattr(meta, "total_segments", 0) or 0
-        done = getattr(meta, "completed_count", 0) or 0
-        failed = getattr(meta, "failed_count", 0) or 0
-        status = _project_status(total, done, failed)
-        progress = (done / total) if total else 0.0
-        summaries.append({
-            "name": name,
-            "chapters": getattr(meta, "total_chapters", 0) or 0,
-            "done": done,
-            "failed": failed,
-            "total": total,
-            "progress": progress,
-            "status": status,
-        })
-    return summaries
+    return _repository().list_projects()
 
 
 def _project_status(total: int, done: int, failed: int) -> str:
-    """推导书架状态色块符号（§11.7）。"""
-    if total == 0:
-        return "⚪未开始"
-    if failed > 0 and done == 0:
-        return "🔴有失败"
-    if done == total and failed == 0:
-        return "✅完成"
-    if failed > 0:
-        return "🟡部分"
-    if done == 0:
-        return "⚪未开始"
-    return "🟢进行中"
+    """Compatibility wrapper for the shared bookshelf status derivation."""
+    return _repository()._project_status(total, done, failed)
 
 
 def build_chapter_tree(project: str) -> str:
@@ -410,17 +189,7 @@ def get_synthesis_selections(name: str) -> dict:
     Returns:
         勾选字典（含 ``chapters`` 键为选中章节 id 列表），缺省为 ``{}``。
     """
-    project_dir = _resolve_dir(name)
-    path = os.path.join(project_dir, "synthesis_selections.json")
-    if not os.path.isfile(path):
-        return {}
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.warning("读取 synthesis_selections.json 失败，回退空: %s", exc)
-        return {}
+    return _repository().get_synthesis_selections(name)
 
 
 def set_synthesis_selections(name: str, selections: dict) -> None:
@@ -430,11 +199,7 @@ def set_synthesis_selections(name: str, selections: dict) -> None:
         name: 项目名。
         selections: 勾选字典（约定含 ``chapters`` 键，值为选中章节 id 列表）。
     """
-    project_dir = _resolve_dir(name)
-    path = os.path.join(project_dir, "synthesis_selections.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(selections if isinstance(selections, dict) else {}, f,
-                  ensure_ascii=False, indent=2)
+    return _repository().set_synthesis_selections(name, selections)
 
 
 def build_role_choices(script: dict, bindings: dict, role_categories: dict | None = None) -> list[tuple]:

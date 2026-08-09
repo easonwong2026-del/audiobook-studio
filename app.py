@@ -16,7 +16,7 @@ import gradio as gr
 logger = logging.getLogger(__name__)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from lib import __version__, chapter_identity, config, project_paths, script_loader, segment_cache, voice_lib
+from lib import __version__, chapter_identity, config, project_paths, script_loader, voice_lib
 from lib import dataframe_style as df_style
 from lib import progress as synth_progress
 from lib import project_manager as _pm
@@ -27,11 +27,16 @@ from services import (
     ProjectStorageService,
     ProductionJobError,
     ProductionJobService,
+    QualityService,
+    RepairError,
+    RepairService,
+    RuntimeTTSService,
     SupplementService,
     SupplementTaskState,
     VoiceAssetService,
     VoiceCastError,
     VoiceCastResolver,
+    WorkflowService,
 )
 from services.session import SessionState
 from services.review_audio import ReviewAudioService
@@ -68,12 +73,6 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 # 音色库外置于数据目录（默认 ~/AudiobookStudio/voice_library），与程序目录解耦。
 # 注意：音色库路径必须在调用时动态解析（config.get_voice_library），
 # 不得在此处模块级缓存，否则运行期切换数据目录后路径不会更新（见方案 §5.2）。
-
-
-def _tts_engine():
-    """按需加载数值计算与 TTS 适配层，缩短 UI 首次构建路径。"""
-    from lib import tts_engine
-    return tts_engine
 
 
 def _audio_pipeline():
@@ -489,16 +488,13 @@ def preview_bound_voice(role, audio_file, from_lib, ss):
     if not audio or not os.path.isfile(audio):
         return None
     try:
-        tts = _tts_engine()
-        tts.init_engine()
-        parts = tts.test_voice(audio)
-        if not parts or not all(os.path.isfile(p) for p in parts):
-            return None
-        # 把三句测试句拼接为一段连续音频，供单一 gr.Audio 播放
-        out_dir = config.get_preview_dir()
-        out = os.path.join(out_dir, f"preview_{_safe_name(role)}.wav")
-        tts._concat_wavs(parts, out)
-        return out if os.path.isfile(out) else None
+        # test_voice_and_concat_wavs 在单例 runtime 中完成三句试听与拼接；
+        # Web 进程只等待项目内持久任务，不加载第二份模型。
+        return RuntimeTTSService.test_voice_and_concat_wavs(
+            ss.project,
+            role,
+            audio,
+        )
     except Exception:
         return None
 
@@ -509,6 +505,14 @@ def do_synthesis(ss, num_beams=2, progress=gr.Progress(),
     proj = ss.project
     if not proj:
         yield ("请先在项目管理中打开项目", [])
+        return
+    existing = ProductionJobService.get_active_task(proj)
+    if existing is not None:
+        yield (
+            f"项目已有生产任务 `{existing['task_id']}`（{existing['status']}），"
+            "请先继续监控或控制该任务。",
+            [],
+        )
         return
     # 2.3 O2：解析覆盖并持久化，保证预览 / 导出一致
     emotion_override = None if emotion == "(按剧本默认)" else emotion
@@ -775,15 +779,75 @@ def _safe_path_for_file_component(path):
 
 def do_export(fmt, bitrate, output_dir, *args):
     """一键导出（D1：用 *args 吸收 ss，零改动过 glue 测试）。"""
-    ss = args[0] if args else None
+    qa_policy = "require_passed"
+    ss = None
+    if len(args) >= 2:
+        qa_policy, ss = args[0], args[1]
+    elif args:
+        ss = args[0]
     if not ss or not ss.project:
         return None, "请先打开项目"
     try:
-        out = ExportService.export(ProjectService.get_project_dir(ss.project), fmt, bitrate, output_dir)
-        return _safe_path_for_file_component(out), "导出完成"
+        result = ExportService.start_export(
+            ss.project,
+            fmt,
+            bitrate=bitrate,
+            qa_policy=str(qa_policy or "require_passed"),
+        )
+        outputs = result.get("outputs") or []
+        if not outputs:
+            return None, "导出任务已结束，但没有生成交付文件。"
+        project_dir = ProjectService.get_project_dir(ss.project)
+        relative = str(outputs[0].get("relative_path") or "")
+        out = os.path.normpath(os.path.join(project_dir, *relative.split("/")))
+        if output_dir and output_dir.strip():
+            destination_dir = os.path.abspath(os.path.expanduser(output_dir.strip()))
+            os.makedirs(destination_dir, exist_ok=True)
+            destination = os.path.join(destination_dir, os.path.basename(out))
+            shutil.copy2(out, destination)
+            out = destination
+        manifest = result.get("delivery_manifest") or {}
+        return (
+            _safe_path_for_file_component(out),
+            f"✅ 导出完成 · {manifest.get('chapters', 0)} 章 · "
+            f"{manifest.get('segments', 0)} 段 · "
+            f"Manifest {manifest.get('manifest_id', '')}",
+        )
     except Exception as e:
-        # R2：显式报错（含中间 WAV 路径 / ffmpeg 安装链接 / 可改 WAV 建议）
         return None, str(e)
+
+
+def refresh_export_readiness(fmt, qa_policy, ss):
+    """Render the formal delivery gate used by Web and MCP."""
+    if not ss or not ss.project:
+        return "#### 交付准备度\n请先打开项目。"
+    try:
+        plan = ExportService.plan_export(
+            ss.project,
+            fmt or "wav",
+            qa_policy=qa_policy or "require_passed",
+        )
+        summary = plan.get("summary", {})
+        metadata = summary.get("metadata", {})
+        lines = [
+            "#### 交付准备度",
+            f"- 合成音频：{summary.get('active_revisions', 0)}/{summary.get('segments', 0)}",
+            f"- 生产失败：{summary.get('failed_segments', 0)}",
+            f"- 章节：{summary.get('chapters', 0)}",
+            f"- FFmpeg：{'正常' if summary.get('ffmpeg_ready') else '不可用'}",
+            f"- Metadata：{'正常' if metadata.get('title') else '缺少书名'}",
+        ]
+        if plan.get("ready"):
+            lines.append("\n✅ 已满足当前 QA 策略，可以导出成品。")
+        else:
+            lines.append("\n**尚未就绪：**")
+            lines.extend(
+                f"- {item.get('message', item.get('code', '未知问题'))}"
+                for item in plan.get("blockers", [])[:12]
+            )
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"#### 交付准备度\n❌ 检查失败：{exc}"
 
 def do_export_subtitles(ss, sub_choice):
     """O1：生成字幕（srt / lrc），走全新 handler，绝不改 do_export 三参签名与接线。
@@ -798,8 +862,21 @@ def do_export_subtitles(ss, sub_choice):
         return None, "未选择字幕格式"
     fmts = ("srt", "lrc") if sub_choice == "both" else (sub_choice,)
     try:
+        report = QualityService.get_quality_report(ss.project)
+        segment_paths = {}
+        for item in report.get("segments", []):
+            revision = item.get("audio_revision") or {}
+            relative_path = str(revision.get("relative_path") or "")
+            if relative_path:
+                segment_paths[str(item.get("segment_id") or "")] = os.path.join(
+                    ProjectService.get_project_dir(ss.project),
+                    *relative_path.split("/"),
+                )
         paths = ExportService.export_subtitles(
-            ProjectService.get_project_dir(ss.project), formats=fmts
+            ProjectService.get_project_dir(ss.project),
+            formats=fmts,
+            segment_paths=segment_paths,
+            require_complete=True,
         )
         if not paths:
             return None, "未找到已合成段落，无法生成字幕（请先合成）"
@@ -815,6 +892,237 @@ def _selected_segment_id(choice, script=None):
 def _audio_update(path: str | None):
     """Keep an Audio component visible while changing only its value."""
     return gr.update(value=path, visible=True)
+
+
+def _quality_summary_markdown(report):
+    summary = report.get("summary", {}) if isinstance(report, dict) else {}
+    return (
+        "#### 质量状态\n"
+        f"通过 **{summary.get('passed', 0)}** · "
+        f"待检查 **{summary.get('needs_review', 0)}** · "
+        f"需修复 **{summary.get('needs_fix', 0)}** · "
+        f"技术警告 **{summary.get('technical_warning', 0)}** · "
+        f"重合成中 **{summary.get('regenerating', 0)}**"
+    )
+
+
+def _segment_quality_markdown(item):
+    if not isinstance(item, dict):
+        return "选择段落后显示技术 QA 与人工 Review。"
+    technical = item.get("technical_qa") or {}
+    human = item.get("human_review") or {}
+    revision = item.get("audio_revision") or {}
+    checks = technical.get("checks") or []
+    lines = [
+        f"#### 段落 {item.get('segment_id', '')}",
+        f"- Audio revision：{revision.get('audio_revision', '—')}",
+        f"- 统一质量状态：`{item.get('quality_status', 'needs_review')}`",
+        f"- 技术 QA：`{item.get('technical_outcome', 'unreviewed')}`",
+        f"- 人工 Review：`{item.get('review_status', 'unreviewed')}`",
+    ]
+    if checks:
+        lines.append("- 技术问题：" + "、".join(
+            str(check.get("code") or "") for check in checks[:8]
+        ))
+    if human.get("review_note"):
+        lines.append(f"- 备注：{human['review_note']}")
+    return "\n".join(lines)
+
+
+def _review_segment_choices(ss, status_filter="all", chapter_id=None):
+    if not ss or not ss.project:
+        return [], {}, {}
+    snapshot = _snap(ss)
+    report = QualityService.get_quality_report(ss.project)
+    quality_by_id = {
+        str(item.get("segment_id")): item for item in report.get("segments", [])
+    }
+    project_dir = ProjectService.get_project_dir(ss.project)
+    choices = []
+    selected_chapter = str(chapter_id or "").strip()
+    for chapter in snapshot.script.get("chapters", []):
+        if selected_chapter and str(chapter.get("id") or "") != selected_chapter:
+            continue
+        for segment in chapter.get("segments", []):
+            segment_id = str(segment.get("id") or "")
+            quality = quality_by_id.get(segment_id, {})
+            if status_filter not in (None, "", "all"):
+                if quality.get("quality_status") != status_filter:
+                    continue
+            revision = quality.get("audio_revision") or {}
+            relative_path = str(revision.get("relative_path") or "")
+            audio_path = (
+                os.path.join(project_dir, *relative_path.split("/"))
+                if relative_path else ""
+            )
+            if not audio_path or not os.path.isfile(audio_path):
+                continue
+            text = " ".join(str(segment.get("text") or "").split())
+            label = (
+                f"{segment_id} · {segment.get('role') or segment.get('speaker') or ''} · "
+                f"{text[:36]}{'…' if len(text) > 36 else ''}"
+            )
+            choices.append((label, segment_id))
+    return choices, quality_by_id, report
+
+
+def refresh_quality_workspace(status_filter, chapter_id, ss):
+    """Refresh QA filters from one project snapshot and one quality report."""
+    try:
+        choices, quality_by_id, report = _review_segment_choices(
+            ss, status_filter or "all", chapter_id
+        )
+        selected = choices[0][1] if choices else None
+        item = quality_by_id.get(str(selected)) if selected else None
+        return (
+            _quality_summary_markdown(report),
+            gr.update(choices=choices, value=selected),
+            gr.update(choices=choices, value=[]),
+            _segment_quality_markdown(item),
+        )
+    except Exception as exc:
+        return (
+            f"#### 质量状态\n❌ 刷新失败：{exc}",
+            gr.update(choices=[], value=None),
+            gr.update(choices=[], value=[]),
+            "无法读取段落质量状态。",
+        )
+
+
+def show_segment_quality(choice, ss):
+    if not ss or not ss.project or not choice:
+        return "选择段落后显示技术 QA 与人工 Review。"
+    segment_id = _selected_segment_id(choice, _snap(ss).script)
+    return _segment_quality_markdown(
+        QualityService.get_segment_quality(ss.project, segment_id)
+    )
+
+
+def run_selected_technical_qa(choice, ss):
+    if not ss or not ss.project or not choice:
+        return "请选择段落后运行技术 QA。", "#### 质量状态"
+    try:
+        segment_id = _selected_segment_id(choice, _snap(ss).script)
+        QualityService.run_technical_qa(ss.project, segment_id)
+        item = QualityService.get_segment_quality(ss.project, segment_id)
+        report = QualityService.get_quality_report(ss.project)
+        return _segment_quality_markdown(item), _quality_summary_markdown(report)
+    except Exception as exc:
+        return f"❌ 技术 QA 失败：{exc}", "#### 质量状态"
+
+
+def _next_review_value(choices, current, quality_by_id):
+    values = [value for _label, value in choices]
+    if not values:
+        return None
+    start = values.index(str(current)) + 1 if str(current) in values else 0
+    ordered = values[start:] + values[:start]
+    return next(
+        (
+            value for value in ordered
+            if quality_by_id.get(value, {}).get("quality_status") != "passed"
+        ),
+        values[min(start, len(values) - 1)],
+    )
+
+
+def mark_selected_review(
+    choice, review_status, issue_type, review_note, status_filter, chapter_id, ss,
+    auto_next=False,
+):
+    if not ss or not ss.project or not choice:
+        return "请选择段落。", "#### 质量状态", gr.update()
+    try:
+        segment_id = _selected_segment_id(choice, _snap(ss).script)
+        QualityService.mark_review(
+            ss.project,
+            segment_id,
+            review_status,
+            issue_type=issue_type or "",
+            review_note=review_note or "",
+            reviewed_by="web",
+        )
+        choices, quality_by_id, report = _review_segment_choices(
+            ss, status_filter or "all", chapter_id
+        )
+        next_value = (
+            _next_review_value(choices, segment_id, quality_by_id)
+            if auto_next else segment_id
+        )
+        current = quality_by_id.get(str(next_value)) or QualityService.get_segment_quality(
+            ss.project, segment_id
+        )
+        return (
+            _segment_quality_markdown(current),
+            _quality_summary_markdown(report),
+            gr.update(choices=choices, value=next_value),
+        )
+    except Exception as exc:
+        return f"❌ 保存质检失败：{exc}", "#### 质量状态", gr.update()
+
+
+def mark_selected_passed(choice, issue_type, note, status_filter, chapter_id, ss):
+    return mark_selected_review(
+        choice,
+        "passed",
+        issue_type,
+        note,
+        status_filter,
+        chapter_id,
+        ss,
+        auto_next=True,
+    )
+
+
+def navigate_review_segment(direction, choice, status_filter, chapter_id, ss):
+    choices, quality_by_id, _report = _review_segment_choices(
+        ss, status_filter or "all", chapter_id
+    )
+    values = [value for _label, value in choices]
+    if not values:
+        return gr.update(value=None), "当前筛选没有可试听段落。"
+    current = str(choice or "")
+    index = values.index(current) if current in values else 0
+    index = (index + (1 if direction == "next" else -1)) % len(values)
+    selected = values[index]
+    return (
+        gr.update(choices=choices, value=selected),
+        _segment_quality_markdown(quality_by_id.get(selected)),
+    )
+
+
+def bulk_pass_technical_qa(chapter_id, status_filter, ss):
+    """Explicitly pass technically clean segments in the selected chapter."""
+    if not ss or not ss.project or not chapter_id:
+        return "请选择章节后再批量通过。", "#### 质量状态", gr.update()
+    snapshot = _snap(ss)
+    segment_ids = [
+        str(segment.get("id") or "")
+        for chapter in snapshot.script.get("chapters", [])
+        if str(chapter.get("id") or "") == str(chapter_id)
+        for segment in chapter.get("segments", [])
+        if isinstance(segment, dict)
+    ]
+    try:
+        result = QualityService.pass_technically_clean(
+            ss.project,
+            segment_ids,
+            reviewed_by="web_bulk",
+        )
+        choices, _quality_by_id, report = _review_segment_choices(
+            ss,
+            status_filter or "all",
+            chapter_id,
+        )
+        selected = choices[0][1] if choices else None
+        return (
+            f"✅ 已批量通过 **{result['passed']}** 段；"
+            f"跳过 **{result['skipped']}** 段（技术 QA 未 pass 或已通过）。",
+            _quality_summary_markdown(report),
+            gr.update(choices=choices, value=selected),
+        )
+    except Exception as exc:
+        return f"❌ 批量通过失败：{exc}", "#### 质量状态", gr.update()
 
 
 def initialize_review_page(ss):
@@ -870,64 +1178,56 @@ def play_segment(choices, ss):
     yield _audio_update(result.path), result.status
 
 def regenerate_segment(choices, emotion, emo_alpha, speech_rate, voice_choice, ss):
+    """Submit revision-safe repair through the single Production Runtime."""
     if not ss or not ss.project or not choices:
-        return _audio_update(None), "请选择段落", "⚪ 尚未开始重合成。"
-    if isinstance(choices,str): choices=[choices]
-    bindings=ss.bindings
-    # 阶段三：复用会话态快照的剧本 dict。
+        yield _audio_update(None), "请选择段落", "⚪ 尚未开始重合成。"
+        return
+    selected = choices if isinstance(choices, list) else [choices]
     script = _snap(ss).script
-    proj_dir=ProjectService.get_project_dir(ss.project)
-    tts = _tts_engine()
-    tts.init_engine(); seg_dir=project_paths.project_dir(proj_dir, "segments", create=True)
-    os.makedirs(seg_dir,exist_ok=True); results=[]
-    # 如果选了音色库音频，覆盖绑定
-    override_voice = _lib_path(voice_choice) if voice_choice else None
-    for choice in choices:
-        sid=_selected_segment_id(choice, script)
-        for ch in script.get("chapters",[]):
-            for seg in ch.get("segments",[]):
-                if str(seg.get("id")) != str(sid): continue
-                speaker = override_voice or bindings.get(seg["role"])
-                if not speaker: results.append(f"❌ {sid}: 角色未绑定"); break
-                try:
-                    # B7：重合成写入参数感知缓存键路径，与批量链路命名一致
-                    director_meta = segment_cache.director_metadata_for(seg)
-                    speaker_fingerprint = None
-                    if os.path.isfile(os.path.join(proj_dir, "voice_cast.json")):
-                        speaker_fingerprint = segment_cache.speaker_fingerprint_for_path(speaker)
-                    out=segment_cache.segment_wav_path(
-                        seg_dir, sid, emotion, emo_alpha, speech_rate,
-                        seg.get("pinyin_hints"), director_meta, speaker_fingerprint,
-                    )
-                    from lib import directed_synthesis
-                    directed_synthesis.synthesize(
-                        segment=seg, speaker_audio=speaker,
-                        emotion=emotion, emo_alpha=emo_alpha, speech_rate=speech_rate,
-                        pinyin_hints=seg.get("pinyin_hints"), output_path=out,
-                        engine=tts,
-                    )
-                    ProjectService.update_segment_status(ss.project,sid,"done"); results.append(f"✅ {sid}")
-                except Exception as e: results.append(f"❌ {sid}: {str(e)[:40]}")
-                break
-    first_sid=_selected_segment_id(choices[0], script); first_fp=None
-    for ch in script.get("chapters",[]):
-        for seg in ch.get("segments",[]):
-            if str(seg.get("id")) == str(first_sid):
-                # B7：用同一缓存键推导真实 wav 名
-                first_speaker_fingerprint = None
-                if os.path.isfile(os.path.join(proj_dir, "voice_cast.json")):
-                    first_speaker = override_voice or bindings.get(seg["role"])
-                    first_speaker_fingerprint = segment_cache.speaker_fingerprint_for_path(first_speaker)
-                first_fp=segment_cache.find_segment_wav(seg_dir, first_sid, seg["text"], seg["role"],
-                    emotion, emo_alpha, speech_rate, seg.get("pinyin_hints"),
-                    segment_cache.director_metadata_for(seg), first_speaker_fingerprint)
-                break
-        if first_fp: break
-    # 2.4 M-3：批量重合成结束后释放碎片化显存（不卸载模型）
-    tts.empty_cache()
-    # 段状态已写盘（ProjectService.update_segment_status），使快照失效以便下次读取重载
-    ss.invalidate_snapshot()
-    return (_audio_update(first_fp), "\n".join(results), "✅ 已完成所选段落重合成。请重新选择段落以刷新播放器。")
+    segment_ids = [_selected_segment_id(choice, script) for choice in selected]
+    try:
+        started = RepairService.start(
+            ss.project,
+            segment_ids,
+            emotion=emotion,
+            emo_alpha=emo_alpha,
+            speech_rate=speech_rate,
+            voice_override=_lib_path(voice_choice) if voice_choice else None,
+            source="web",
+            requested_by="web",
+        )
+        repair_id = started["repair_id"]
+        current = started
+        while current.get("status") in {
+            "preparing", "submitting", "pending", "running",
+            "pausing", "paused", "cancelling",
+        }:
+            yield (
+                _audio_update(None),
+                f"⏳ Repair {repair_id}：{current.get('status')}",
+                "重合成由唯一 Production Runtime 执行，退出页面不会中断任务。",
+            )
+            time.sleep(0.5)
+            current = RepairService.refresh(ss.project, repair_id)
+        if current.get("status") not in {"done", "partial"}:
+            yield (
+                _audio_update(None),
+                f"❌ Repair {repair_id}：{current.get('status')}",
+                str(current.get("error") or "重合成未完成"),
+            )
+            return
+        first_audio = QualityService.resolve_active_audio(ss.project, segment_ids[0])
+        ss.invalidate_snapshot()
+        yield (
+            _audio_update(first_audio),
+            f"✅ Repair {repair_id} 完成",
+            "新 audio revision 已进入技术 QA，旧 revision 已保留。",
+        )
+    except (RepairError, ProductionJobError) as exc:
+        yield _audio_update(None), f"❌ {exc}", "重合成未启动。"
+    except Exception as exc:
+        logger.exception("段落 Repair 失败")
+        yield _audio_update(None), f"❌ {exc}", "重合成失败。"
 
 # ═══════════ 角色单独补录 / 补合成导出（T1-T4） ═══════════
 
@@ -1029,12 +1329,17 @@ def do_supplement_synth(sup_role, sup_mode, sup_text, sup_json_role, sup_json_li
     num_beams = int(sup_quality) if sup_quality else 2
 
     # 5.3：任务隔离——每次补录独立目录（task_id 用 uuid，非秒级时间戳），互不覆盖。
-    # 产物落在 <data_dir>/preview/supplement_tasks/<task_id>/（001.wav... + manifest.json + preview.wav）。
+    # 产物落在项目 cache/supplement_tasks/<task_id>/，随项目备份与迁移。
     import uuid as _uuid
 
     from lib import audio_format as _af
     task_id = _uuid.uuid4().hex
-    task_dir = os.path.join(config.get_workspace_paths().task_cache_dir, task_id)
+    project_dir = ProjectService.get_project_dir(ss.project)
+    task_dir = os.path.join(
+        project_paths.project_dir(project_dir, "cache", create=True),
+        "supplement_tasks",
+        task_id,
+    )
     os.makedirs(task_dir, exist_ok=True)
     task = SupplementTaskState(
         task_id=task_id, project=ss.project, role=role,
@@ -1042,26 +1347,14 @@ def do_supplement_synth(sup_role, sup_mode, sup_text, sup_json_role, sup_json_li
         created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
         task_dir=task_dir,
     )
-    # 清理过期任务（>7 天），避免 supplement_tasks 无限增长
-    try:
-        SupplementService.cleanup_old_tasks(max_age_days=7)
-    except Exception:  # pylint: disable=broad-except
-        pass
-
-    tts = _tts_engine()
-    tts.init_engine()
     try:
         results = SupplementService.synthesize_lines(
             role=role, lines=lines, speaker_audio=speaker,
             overrides=overrides, num_beams=num_beams, task=task,
         )
     except Exception as e:
-        tts.empty_cache()
         task.status = "error"
         return [], f"❌ 补合成异常：{str(e)[:200]}"
-    finally:
-        # 2.4 M-3：补合成结束后释放碎片化显存（不卸载模型，与 regenerate_segment 同策略）。
-        tts.empty_cache()
 
     # 写 manifest.json（任务隔离产物清单，便于回放 / 调试）
     try:
@@ -1680,7 +1973,6 @@ def _dashboard_snapshot(ss):
         total_chapters = len(chapters)
         total_segments = getattr(meta, "total_segments", 0)
         completed_segments = getattr(meta, "completed_count", 0)
-        failed_segments = getattr(meta, "failed_count", 0)
         statuses = getattr(meta, "segments_status", {}) or {}
         completed_chapters = sum(
             1 for chapter in chapters
@@ -1691,36 +1983,46 @@ def _dashboard_snapshot(ss):
         role_total = len(roles)
         roles_bound = sum(1 for role in roles if ss.bindings.get(role))
 
-        issues: list[tuple[str, str]] = []
-        unbound = role_total - roles_bound
-        if unbound:
-            issues.append(("warning", f"还有 {unbound} 个角色未绑定声音"))
-        if failed_segments:
-            issues.append(("error", f"有 {failed_segments} 个段落需要检查或重新合成"))
-        remaining = max(total_segments - completed_segments, 0)
-        if not unbound and remaining:
-            issues.append(("info", f"还有 {remaining} 个段落等待完成"))
-
-        if unbound:
-            next_step = "配置角色声音"
-            next_detail = "所有角色完成绑定后，才能开始整本书的生产。"
-        elif failed_segments or remaining:
-            next_step = "开始或继续生产"
-            next_detail = "已有结果会自动保留，可随时进入队列继续合成与质检。"
-        else:
-            next_step = "交付成品"
-            next_detail = "章节已全部完成，可导出有声书和字幕文件。"
-
-        state = getattr(ss, "synthesis", None)
-        if state is not None:
-            task_label = f"生产任务 · {getattr(state, 'status', 'unknown')}"
-            task_detail = f"已完成 {getattr(state, 'completed', 0)}/{getattr(state, 'total', 0)} 段"
-        elif completed_segments:
-            task_label = "最近一次生产结果"
-            task_detail = f"项目已完成 {completed_segments}/{total_segments} 段，可继续质检或交付。"
-        else:
-            task_label = "尚未开始生产"
-            task_detail = "完成角色声音配置后，即可按剧本开始合成。"
+        workflow = WorkflowService.get_state(ss.project)
+        stage = str(workflow.get("stage") or "prepared")
+        stage_labels = {
+            "prepared": "项目已准备",
+            "cast_pending": "等待角色声音",
+            "ready_for_production": "可以开始生产",
+            "producing": "生产进行中",
+            "quality_check": "进入质量检查",
+            "needs_fix": "需要修复",
+            "quality_passed": "质量已通过",
+            "exporting": "正在导出",
+            "delivered": "已经交付",
+        }
+        actions = workflow.get("next_actions") or []
+        next_action = actions[0] if actions else {}
+        next_step = stage_labels.get(stage, stage)
+        next_detail = str(
+            next_action.get("reason") or "按工作流状态继续下一步。"
+        )
+        issues: list[tuple[str, str]] = [
+            (
+                "error" if blocker.get("code") in {
+                    "SYNTHESIS_FAILED", "QUALITY_FIX_REQUIRED"
+                } else "warning",
+                str(blocker.get("message") or blocker.get("code") or ""),
+            )
+            for blocker in workflow.get("blockers", [])
+        ]
+        active_task = workflow.get("summary", {}).get("active_production_task")
+        quality = workflow.get("summary", {}).get("quality", {})
+        task_label = (
+            f"生产任务 · {active_task}"
+            if active_task else f"工作流 · {stage_labels.get(stage, stage)}"
+        )
+        task_detail = (
+            f"合成 {completed_segments}/{total_segments} 段；"
+            f"QA 通过 {quality.get('passed', 0)}，"
+            f"待检查 {quality.get('needs_review', 0)}，"
+            f"需修复 {quality.get('needs_fix', 0)}。"
+        )
 
         return project_dashboard_html(
             title=title,
@@ -1778,6 +2080,11 @@ def _open_chain_rest(event):
     e = e.then(refresh_top_status, [ss], [top_status])
     e = e.then(preview_chapters, [ss], _review_outputs())
     e = e.then(preview_chapter_options, [ss], [e_chapter_sel])
+    e = e.then(
+        refresh_quality_workspace,
+        [e_quality_filter, e_chapter_sel, ss],
+        [e_quality_summary, e_seg_preview_sel, e_seg_regen_sel, e_segment_quality],
+    )
     e = e.then(refresh_queue_list, [ss], [s_queue_list])
     e = e.then(refresh_production_task, [ss], [s_task_status])
     e = e.then(render_chapter_tree, [p_sel], [p_chapter_tree])
@@ -1788,6 +2095,11 @@ def _open_chain_rest(event):
     e = e.then(refresh_production_voice_choices, [], [e_voice, sup_voice])
     e = e.then(refresh_production_check, [ss], [production_check])
     e = e.then(refresh_export_default_dir, [ss], [e_save_dir_hint])
+    e = e.then(
+        refresh_export_readiness,
+        [e_fmt, e_qa_policy, ss],
+        [e_readiness],
+    )
     e = e.then(
         refresh_overview, [ss],
         [ov_status, ov_progress, ov_task, ov_issues, ov_bookshelf],
@@ -1934,6 +2246,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             review_page = create_review_page()
             grp_review = review_page["group"]
             e_review_refresh = review_page["e_review_refresh"]
+            e_quality_summary = review_page["e_quality_summary"]
             e_chapter_table = review_page["e_chapter_table"]
             e_chapter_sel = review_page["e_chapter_sel"]
             e_chapter_reload = review_page["e_chapter_reload"]
@@ -1941,6 +2254,9 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             e_chapter_audio_status = review_page["e_chapter_audio_status"]
             e_chapter_status = review_page["e_chapter_status"]
             e_seg_preview_sel = review_page["e_seg_preview_sel"]
+            e_quality_filter = review_page["e_quality_filter"]
+            e_prev = review_page["e_prev"]
+            e_next = review_page["e_next"]
             e_seg_regen_sel = review_page["e_seg_regen_sel"]
             e_seg_sel = review_page["e_seg_sel"]
             e_emo = review_page["e_emo"]
@@ -1950,14 +2266,26 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             e_regenerate = review_page["e_regenerate"]
             e_seg_audio = review_page["e_seg_audio"]
             e_seg_audio_status = review_page["e_seg_audio_status"]
+            e_segment_quality = review_page["e_segment_quality"]
+            e_run_qa = review_page["e_run_qa"]
+            e_review_status = review_page["e_review_status"]
+            e_issue_type = review_page["e_issue_type"]
+            e_review_note = review_page["e_review_note"]
+            e_mark_review = review_page["e_mark_review"]
+            e_mark_passed = review_page["e_mark_passed"]
+            e_bulk_pass = review_page["e_bulk_pass"]
+            e_bulk_pass_msg = review_page["e_bulk_pass_msg"]
             e_seg_status = review_page["e_seg_status"]
             e_regenerate_msg = review_page["e_regenerate_msg"]
 
             # ───────── 导出 ─────────
             export_page = create_export_page()
             grp_export = export_page["group"]
+            e_readiness = export_page["e_readiness"]
+            e_readiness_refresh = export_page["e_readiness_refresh"]
             e_fmt = export_page["e_fmt"]
             e_br = export_page["e_br"]
+            e_qa_policy = export_page["e_qa_policy"]
             e_save_dir = export_page["e_save_dir"]
             e_save_dir_hint = export_page["e_save_dir_hint"]
             e_go = export_page["e_go"]
@@ -2058,13 +2386,17 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         refresh_production_check, [ss], [production_check]).then(
         preview_chapters, [ss], _review_outputs()).then(
         preview_chapter_options, [ss], [e_chapter_sel]).then(
+        refresh_quality_workspace,
+        [e_quality_filter, e_chapter_sel, ss],
+        [e_quality_summary, e_seg_preview_sel, e_seg_regen_sel, e_segment_quality]).then(
         refresh_queue_list, [ss], [s_queue_list]).then(
         refresh_production_task, [ss], [s_task_status]).then(
         refresh_supplement_roles, [ss], [sup_role])
     nav_export.click(
         lambda: _goto("export"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-export')?.classList.add('active'); }").then(
-        refresh_export_default_dir, [ss], [e_save_dir_hint])
+        refresh_export_default_dir, [ss], [e_save_dir_hint]).then(
+        refresh_export_readiness, [e_fmt, e_qa_policy, ss], [e_readiness])
 
     # ── 生产阶段内部导航：合成中心 / 试听质检 / 角色补录 ──
     production_stage.change(_goto, [production_stage], _GROUPS).then(
@@ -2076,6 +2408,10 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         _review_outputs(),
     ).then(
         preview_chapter_options, [ss], [e_chapter_sel]
+    ).then(
+        refresh_quality_workspace,
+        [e_quality_filter, e_chapter_sel, ss],
+        [e_quality_summary, e_seg_preview_sel, e_seg_regen_sel, e_segment_quality],
     )
 
     # ── 概览页：书架点选 → 回填 p_sel → open_project 首步 → 打开链刷新 → 切页 ──
@@ -2108,13 +2444,17 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         refresh_production_check, [ss], [production_check]).then(
         preview_chapters, [ss], _review_outputs()).then(
         preview_chapter_options, [ss], [e_chapter_sel]).then(
+        refresh_quality_workspace,
+        [e_quality_filter, e_chapter_sel, ss],
+        [e_quality_summary, e_seg_preview_sel, e_seg_regen_sel, e_segment_quality]).then(
         refresh_queue_list, [ss], [s_queue_list]).then(
         refresh_production_task, [ss], [s_task_status]).then(
         refresh_supplement_roles, [ss], [sup_role])
     ov_export.click(
         lambda: _goto("export"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-export')?.classList.add('active'); }").then(
-        refresh_export_default_dir, [ss], [e_save_dir_hint])
+        refresh_export_default_dir, [ss], [e_save_dir_hint]).then(
+        refresh_export_readiness, [e_fmt, e_qa_policy, ss], [e_readiness])
 
     # ═══════════ events（业务接线，沿用 v2） ═══════════
 
@@ -2249,10 +2589,62 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     s_resume.click(resume_synthesis, [ss], [s_queue_list, s_pause, s_resume]).then(
         refresh_production_task, [ss], [s_task_status])
     s_open_btn.click(open_segments_folder, [ss], s_open_msg)
-    e_chapter_sel.change(preview_chapter, [ss, e_chapter_sel], [e_chapter_audio, e_chapter_audio_status])
+    e_chapter_sel.change(preview_chapter, [ss, e_chapter_sel],
+                         [e_chapter_audio, e_chapter_audio_status]).then(
+        refresh_quality_workspace,
+        [e_quality_filter, e_chapter_sel, ss],
+        [e_quality_summary, e_seg_preview_sel, e_seg_regen_sel, e_segment_quality],
+    )
     e_chapter_reload.click(preview_chapter, [ss, e_chapter_sel], [e_chapter_audio, e_chapter_audio_status])
     e_seg_preview_sel.change(
         play_segment, [e_seg_preview_sel, ss], [e_seg_audio, e_seg_audio_status]
+    ).then(
+        show_segment_quality, [e_seg_preview_sel, ss], [e_segment_quality]
+    )
+    e_quality_filter.change(
+        refresh_quality_workspace,
+        [e_quality_filter, e_chapter_sel, ss],
+        [e_quality_summary, e_seg_preview_sel, e_seg_regen_sel, e_segment_quality],
+    )
+    e_prev.click(
+        lambda choice, status, chapter, state: navigate_review_segment(
+            "previous", choice, status, chapter, state
+        ),
+        [e_seg_preview_sel, e_quality_filter, e_chapter_sel, ss],
+        [e_seg_preview_sel, e_segment_quality],
+    )
+    e_next.click(
+        lambda choice, status, chapter, state: navigate_review_segment(
+            "next", choice, status, chapter, state
+        ),
+        [e_seg_preview_sel, e_quality_filter, e_chapter_sel, ss],
+        [e_seg_preview_sel, e_segment_quality],
+    )
+    e_run_qa.click(
+        run_selected_technical_qa,
+        [e_seg_preview_sel, ss],
+        [e_segment_quality, e_quality_summary],
+    )
+    e_mark_review.click(
+        mark_selected_review,
+        [
+            e_seg_preview_sel, e_review_status, e_issue_type,
+            e_review_note, e_quality_filter, e_chapter_sel, ss,
+        ],
+        [e_segment_quality, e_quality_summary, e_seg_preview_sel],
+    )
+    e_mark_passed.click(
+        mark_selected_passed,
+        [
+            e_seg_preview_sel, e_issue_type, e_review_note,
+            e_quality_filter, e_chapter_sel, ss,
+        ],
+        [e_segment_quality, e_quality_summary, e_seg_preview_sel],
+    )
+    e_bulk_pass.click(
+        bulk_pass_technical_qa,
+        [e_chapter_sel, e_quality_filter, ss],
+        [e_bulk_pass_msg, e_quality_summary, e_seg_preview_sel],
     )
     e_regenerate.click(
         regenerate_segment,
@@ -2261,8 +2653,35 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     )
     e_review_refresh.click(
         preview_chapters, [ss], _review_outputs(),
-    ).then(preview_chapter_options, [ss], [e_chapter_sel])
-    e_go.click(do_export, [e_fmt, e_br, e_save_dir, ss], [e_out, e_path])
+    ).then(preview_chapter_options, [ss], [e_chapter_sel]).then(
+        refresh_quality_workspace,
+        [e_quality_filter, e_chapter_sel, ss],
+        [e_quality_summary, e_seg_preview_sel, e_seg_regen_sel, e_segment_quality],
+    )
+    e_readiness_refresh.click(
+        refresh_export_readiness,
+        [e_fmt, e_qa_policy, ss],
+        [e_readiness],
+    )
+    e_fmt.change(
+        refresh_export_readiness,
+        [e_fmt, e_qa_policy, ss],
+        [e_readiness],
+    )
+    e_qa_policy.change(
+        refresh_export_readiness,
+        [e_fmt, e_qa_policy, ss],
+        [e_readiness],
+    )
+    e_go.click(
+        do_export,
+        [e_fmt, e_br, e_save_dir, e_qa_policy, ss],
+        [e_out, e_path],
+    ).then(
+        refresh_export_readiness,
+        [e_fmt, e_qa_policy, ss],
+        [e_readiness],
+    )
     e_subtitle_btn.click(do_export_subtitles, [ss, e_subtitle], [e_subtitle_out, e_subtitle_msg])
 
     # ── 角色单独补录 / 补合成导出 ──

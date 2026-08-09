@@ -7,6 +7,8 @@ import zipfile
 import pytest
 
 from repositories.project_repo import ProjectRepository
+from repositories.quality_repo import QualityRepository
+from repositories.task_repo import TaskRecord, TaskRepository
 from services.project_backup import ProjectBackupService
 
 
@@ -30,6 +32,33 @@ def _make_project(tmp_path, monkeypatch):
 
 def test_backup_manifest_and_restore(tmp_path, monkeypatch):
     _make_project(tmp_path, monkeypatch)
+    TaskRepository.save_task(TaskRecord(
+        task_id="task_backup",
+        task_type="synthesis",
+        project="backup_book",
+        status="done",
+        created_at="2026-08-09T00:00:00Z",
+        updated_at="2026-08-09T00:01:00Z",
+        finished_at="2026-08-09T00:01:00Z",
+    ))
+    repair = QualityRepository.create_history_record(
+        "backup_book",
+        "repair_history",
+        "repair",
+        {"status": "done"},
+    )
+    export = QualityRepository.create_history_record(
+        "backup_book",
+        "export_jobs",
+        "export",
+        {"status": "done"},
+    )
+    manifest_record = QualityRepository.create_history_record(
+        "backup_book",
+        "delivery_manifests",
+        "manifest",
+        {"ready": True, "export_id": export["export_id"]},
+    )
     archive = ProjectBackupService.create_backup("backup_book")
     assert archive.endswith(".audiobook-project.zip")
     with zipfile.ZipFile(archive) as zip_file:
@@ -41,6 +70,11 @@ def test_backup_manifest_and_restore(tmp_path, monkeypatch):
     restored = ProjectBackupService.restore_backup(archive)
     assert restored.endswith("backup_book")
     assert "backup_book" in ProjectRepository.scan_projects()
+    assert TaskRepository.load_task("task_backup").status == "done"
+    state = QualityRepository.load("backup_book")
+    assert repair["repair_id"] in state["repair_history"]
+    assert export["export_id"] in state["export_jobs"]
+    assert manifest_record["manifest_id"] in state["delivery_manifests"]
 
 
 def test_restore_rejects_zip_slip(tmp_path, monkeypatch):
