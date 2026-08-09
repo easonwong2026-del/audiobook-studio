@@ -16,6 +16,7 @@ from repositories.task_repo import TaskRecord, TaskRepository
 from repositories.voice_cast_repo import VoiceCastRepository
 from services.export import (
     DeliveryInputChanged,
+    ExportCancelled,
     ExportOwnershipLost,
     ExportIdempotencyConflict,
     ExportPlanError,
@@ -23,7 +24,7 @@ from services.export import (
 )
 from services.production_jobs import ProductionJobService
 from services.quality import QualityService
-from services.production_runtime import ProductionRuntimeClient
+from services.production_runtime import ProductionRuntime, ProductionRuntimeClient
 from services.voice_cast import VoiceCastResolver
 from services.workflow import WorkflowService
 
@@ -299,6 +300,82 @@ def test_export_worker_cannot_publish_after_runtime_ownership_loss(
         ExportService.execute_export_job(running, owner_id=owner)
 
     assert TaskRepository.load_task(running.task_id).status == "interrupted"
+    assert not any(
+        item.get("ready")
+        for item in QualityRepository.list_history(
+            delivery_project, "delivery_manifests"
+        )
+    )
+    export_dir = os.path.join(
+        ProjectRepository.get_project_dir(delivery_project),
+        "exports",
+        running.task_id,
+    )
+    assert not os.path.exists(export_dir)
+
+
+def test_export_cancel_fence_finishes_cancelled_not_error(
+    delivery_project,
+    monkeypatch,
+    tmp_path,
+):
+    _finish_and_review(delivery_project)
+    plan = ExportService.plan_export(delivery_project, "wav")
+    record = TaskRecord(
+        task_id="export_cancel_fence",
+        task_type="export",
+        project=delivery_project,
+        status="pending",
+        options=ExportService._task_options(plan, bitrate="192k"),
+        source="mcp",
+        created_at="2026-08-09T00:00:00Z",
+        updated_at="2026-08-09T00:00:00Z",
+    )
+    outcome, _ = TaskRepository.create_runtime_task(record)
+    assert outcome == "created"
+    owner = "runtime-cancel-owner"
+    claimed = TaskRepository.claim_next_pending(owner, {"export"})
+    assert claimed is not None
+    running = TaskRepository.persist_runtime_state(
+        claimed.task_id,
+        owner,
+        status="running",
+        progress=claimed.progress,
+        failed_segment_ids=[],
+        error_summary="",
+        log_lines=[],
+    )
+    assert running is not None
+    cancelled_request = TaskRepository.request_control(
+        running.task_id,
+        "cancel",
+    )
+    assert cancelled_request.status == "cancelling"
+    assert cancelled_request.control_intent == "cancel"
+    with pytest.raises(ExportCancelled):
+        ExportService._assert_export_ownership(running, owner)
+
+    runtime = ProductionRuntime(
+        owner_id=owner,
+        lock_path=str(tmp_path / "cancel-runtime.lock"),
+    )
+    # Force the deterministic race window: the worker's first cancellation
+    # poll is false, so the next ownership fence must classify cancelling+cancel
+    # as ExportCancelled rather than ownership loss.
+    monkeypatch.setattr(
+        ProductionRuntime,
+        "_export_cancel_requested",
+        staticmethod(lambda _task_id: False),
+    )
+    try:
+        runtime._run_export_task(running)
+    finally:
+        runtime.stop()
+
+    final = TaskRepository.load_task(running.task_id)
+    assert final is not None
+    assert final.status == "cancelled"
+    assert not final.error_summary
     assert not any(
         item.get("ready")
         for item in QualityRepository.list_history(

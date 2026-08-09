@@ -688,11 +688,11 @@ class ExportService:
         if not owner_id:
             return
         current = TaskRepository.load_task(record.task_id)
-        if (
-            current is None
-            or current.owner_id != str(owner_id)
-            or current.status != "running"
-        ):
+        if current is None or current.owner_id != str(owner_id):
+            raise ExportOwnershipLost()
+        if current.status == "cancelling" and current.control_intent == "cancel":
+            raise ExportCancelled("正式导出已取消")
+        if current.status != "running":
             raise ExportOwnershipLost()
 
     @classmethod
