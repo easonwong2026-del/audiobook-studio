@@ -197,6 +197,12 @@ class ProjectBackupService:
             if errors:
                 raise ValueError("恢复项目剧本校验失败：" + "；".join(errors[:3]))
             os.replace(temporary, final_dir)
+            # A copied SQLite/legacy task record may contain an owner from a
+            # different machine.  Normalize it before exposing the project so
+            # no restored job is mistaken for live runtime work.
+            from repositories.task_repo import TaskRepository
+
+            TaskRepository.normalize_restored_tasks(safe_name)
             return os.path.normpath(final_dir)
         except Exception:
             if os.path.lexists(temporary):

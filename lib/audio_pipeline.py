@@ -11,6 +11,7 @@ import gc
 import logging
 import os
 import subprocess
+import uuid
 import wave
 from typing import Any
 
@@ -42,7 +43,9 @@ def _uses_director_timing(script: dict) -> bool:
 def export_book(project_dir: str, format: str = "mp3", bitrate: str = "192k",
                 output_dir: str = "", enable_eq: bool = False,
                 target_lufs: float = -16.0,
-                segment_paths: dict[str, str] | None = None) -> str:
+                segment_paths: dict[str, str] | None = None,
+                *, streaming_postprocess: bool = False,
+                atomic_publish: bool = False) -> str:
     """拼接段落并导出成品（wav / mp3 / m4b）。
 
     后处理顺序：拼接 → 均衡(D3, 默认关闭) → 响度(D1, LUFS-16)
@@ -120,7 +123,11 @@ def export_book(project_dir: str, format: str = "mp3", bitrate: str = "192k",
 
     # 统一 dtype 到 int16，避免拼接时 dtype 不一致报错。
     rate = canonical_rate
-    wav_path = os.path.normpath(os.path.join(out_dir, f"{safe_title}.wav"))
+    final_wav_path = os.path.normpath(os.path.join(out_dir, f"{safe_title}.wav"))
+    wav_path = (
+        f"{final_wav_path}.{uuid.uuid4().hex}.part.wav"
+        if atomic_publish else final_wav_path
+    )
     chapter_markers = _write_streaming_book_wav(
         entries,
         wav_path,
@@ -132,14 +139,26 @@ def export_book(project_dir: str, format: str = "mp3", bitrate: str = "192k",
     from . import postprocess
 
     # D3 人声均衡（默认关闭，零回归）
-    postprocess.apply_eq(wav_path, enable=enable_eq)
+    if streaming_postprocess:
+        postprocess.apply_eq_streaming(wav_path, enable=enable_eq)
+    else:
+        postprocess.apply_eq(wav_path, enable=enable_eq)
     # D1 响度归一（LUFS-16，保证多角色 / 多批次音量统一）
-    postprocess.normalize_loudness(wav_path, target_lufs=target_lufs)
+    if streaming_postprocess:
+        postprocess.normalize_loudness_streaming(
+            wav_path, target_lufs=target_lufs,
+        )
+    else:
+        postprocess.normalize_loudness(wav_path, target_lufs=target_lufs)
 
     # MP3/M4B 需要 ffmpeg 转码 + 写标签
     if format in ("mp3", "m4b"):
         ext = "mp3" if format == "mp3" else "m4b"
-        out_path = os.path.normpath(os.path.join(out_dir, f"{safe_title}.{ext}"))
+        final_out_path = os.path.normpath(os.path.join(out_dir, f"{safe_title}.{ext}"))
+        out_path = (
+            f"{final_out_path}.{uuid.uuid4().hex}.part.{ext}"
+            if atomic_publish else final_out_path
+        )
         codec = "libmp3lame" if format == "mp3" else "aac"
         try:
             subprocess.run(
@@ -148,7 +167,10 @@ def export_book(project_dir: str, format: str = "mp3", bitrate: str = "192k",
             )
             # D2 写标签（best-effort：标签失败不破坏音频导出）
             _write_tags(format, out_path, script, project_dir, chapter_markers, rate, logger)
-            os.remove(wav_path)  # cleanup intermediate wav
+            if atomic_publish:
+                os.replace(out_path, final_out_path)
+            if os.path.isfile(wav_path):
+                os.remove(wav_path)  # cleanup intermediate wav
         except FileNotFoundError as e:
             # R2：ffmpeg 未安装 / 未加入 PATH —— 显式报错，不再静默回退 WAV
             raise ExportError(
@@ -165,8 +187,11 @@ def export_book(project_dir: str, format: str = "mp3", bitrate: str = "192k",
                 "请检查 ffmpeg 安装：https://ffmpeg.org/download.html\n"
                 "或改用 WAV 格式导出（无需 ffmpeg 转码）。"
             ) from e
-        return out_path
+        return final_out_path if atomic_publish else out_path
 
+    if atomic_publish:
+        os.replace(wav_path, final_wav_path)
+        return final_wav_path
     return wav_path
 
 
@@ -344,6 +369,8 @@ def generate_subtitles(
     output_dir: str = "",
     segment_paths: dict[str, str] | None = None,
     require_complete: bool = False,
+    *,
+    atomic_publish: bool = False,
 ) -> list:
     """生成字幕文件（srt / lrc），时间戳复用导出拼接的静音规则（SEG/CH_SILENCE_SEC）。
 
@@ -447,13 +474,23 @@ def generate_subtitles(
 
     written: list = []
     if "srt" in formats:
-        p = os.path.join(out_dir, f"{chapter_identity.safe_filename(title, 'audiobook')}.srt")
+        final_path = os.path.join(
+            out_dir, f"{chapter_identity.safe_filename(title, 'audiobook')}.srt"
+        )
+        p = f"{final_path}.{uuid.uuid4().hex}.part" if atomic_publish else final_path
         _write_srt(p, rows)
-        written.append(p)
+        if atomic_publish:
+            os.replace(p, final_path)
+        written.append(final_path)
     if "lrc" in formats:
-        p = os.path.join(out_dir, f"{chapter_identity.safe_filename(title, 'audiobook')}.lrc")
+        final_path = os.path.join(
+            out_dir, f"{chapter_identity.safe_filename(title, 'audiobook')}.lrc"
+        )
+        p = f"{final_path}.{uuid.uuid4().hex}.part" if atomic_publish else final_path
         _write_lrc(p, rows)
-        written.append(p)
+        if atomic_publish:
+            os.replace(p, final_path)
+        written.append(final_path)
     return written
 
 

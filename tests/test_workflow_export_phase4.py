@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import time
 
 import numpy as np
 import pytest
@@ -9,9 +10,18 @@ from scipy.io import wavfile
 
 from lib import postprocess, project_paths
 from repositories.project_repo import ProjectRepository
-from services.export import ExportPlanError, ExportService
+from repositories.quality_repo import QualityRepository
+from repositories.task_repo import TaskRecord, TaskRepository
+from repositories.voice_cast_repo import VoiceCastRepository
+from services.export import (
+    DeliveryInputChanged,
+    ExportIdempotencyConflict,
+    ExportPlanError,
+    ExportService,
+)
 from services.production_jobs import ProductionJobService
 from services.quality import QualityService
+from services.production_runtime import ProductionRuntimeClient
 from services.voice_cast import VoiceCastResolver
 from services.workflow import WorkflowService
 
@@ -121,8 +131,18 @@ def test_formal_export_requires_qa_and_returns_only_public_paths(delivery_projec
         subtitle_formats=("srt", "lrc"),
         idempotency_key="delivery-once",
     )
+    assert exported["status"] in {"pending", "running", "done"}
+    deadline = time.monotonic() + 5.0
+    while exported["status"] not in {"done", "error", "interrupted"} and time.monotonic() < deadline:
+        time.sleep(0.05)
+        exported = ExportService.get_export_task(
+            delivery_project, exported["export_id"]
+        )
     assert exported["status"] == "done"
-    manifest = exported["delivery_manifest"]
+    manifest = ExportService.get_delivery_manifest(
+        delivery_project, exported["export_id"]
+    )
+    assert manifest is not None
     assert manifest["ready"] is True
     assert {item["format"] for item in manifest["outputs"]} == {"wav", "srt", "lrc"}
     assert all(not os.path.isabs(item["relative_path"]) for item in manifest["outputs"])
@@ -130,3 +150,101 @@ def test_formal_export_requires_qa_and_returns_only_public_paths(delivery_projec
 
     workflow = WorkflowService.get_state(delivery_project)
     assert workflow["stage"] == "delivered"
+
+
+def test_plan_export_blocks_active_production_and_repair(delivery_project):
+    _finish_and_review(delivery_project)
+    task = TaskRecord(
+        task_id="synthesis_active_for_export",
+        task_type="synthesis",
+        project=delivery_project,
+        status="running",
+        owner_id="runtime-test",
+    )
+    TaskRepository.save_task(task)
+    try:
+        plan = ExportService.plan_export(delivery_project, "wav")
+        assert plan["ready"] is False
+        assert any(item["code"] == "PRODUCTION_ACTIVE" for item in plan["blockers"])
+    finally:
+        TaskRepository.delete_task(task.task_id)
+
+    repair = QualityRepository.create_history_record(
+        delivery_project,
+        "repair_history",
+        "repair",
+        {"status": "running", "segment_ids": ["001-001"]},
+    )
+    plan = ExportService.plan_export(delivery_project, "wav")
+    assert any(item["code"] == "REPAIR_ACTIVE" for item in plan["blockers"])
+    assert repair["repair_id"]
+
+
+def test_export_idempotency_replay_and_conflict(delivery_project):
+    _finish_and_review(delivery_project)
+    first = ExportService.start_export(
+        delivery_project, "wav", idempotency_key="export-same"
+    )
+    replay = ExportService.start_export(
+        delivery_project, "wav", idempotency_key="export-same"
+    )
+    assert replay["created"] is False
+    assert replay["export_id"] == first["export_id"]
+    with pytest.raises(ExportIdempotencyConflict):
+        ExportService.start_export(
+            delivery_project, "mp3", idempotency_key="export-same"
+        )
+
+
+def test_export_worker_rejects_delivery_input_mutation(delivery_project, monkeypatch):
+    _finish_and_review(delivery_project)
+    plan = ExportService.plan_export(delivery_project, "wav")
+    record = TaskRecord(
+        task_id="export_snapshot_toc",
+        task_type="export",
+        project=delivery_project,
+        status="running",
+        options=ExportService._task_options(plan, bitrate="192k"),
+    )
+
+    def mutate_during_export(project_dir, _fmt, _bitrate, output_dir="", **_kwargs):
+        output = os.path.join(output_dir, "toc.wav")
+        wavfile.write(output, 22050, np.ones(2205, dtype=np.int16))
+        VoiceCastRepository.save_cast(
+            project_dir,
+            {"version": "1.0", "status": "locked", "roles": {
+                "changed": {"voice_asset_id": "different", "voice_sha256": "changed"},
+            }},
+        )
+        return output
+
+    monkeypatch.setattr(ExportService, "export", staticmethod(mutate_during_export))
+    with pytest.raises(DeliveryInputChanged):
+        ExportService.execute_export_job(record)
+    assert not QualityRepository.list_history(delivery_project, "delivery_manifests")
+
+
+def test_start_export_returns_before_slow_worker_finishes(delivery_project, monkeypatch):
+    _finish_and_review(delivery_project)
+
+    def slow_export(_project_dir, _fmt, _bitrate, output_dir="", **_kwargs):
+        time.sleep(0.25)
+        output = os.path.join(output_dir, "slow.wav")
+        wavfile.write(output, 22050, np.ones(2205, dtype=np.int16))
+        return output
+
+    monkeypatch.setattr(ExportService, "export", staticmethod(slow_export))
+    started = time.monotonic()
+    submitted = ExportService.start_export(delivery_project, "wav")
+    elapsed = time.monotonic() - started
+    assert elapsed < 0.20
+    assert submitted["status"] in {"pending", "running"}
+    finished = submitted
+    deadline = time.monotonic() + 5.0
+    while finished["status"] not in {"done", "error", "interrupted"} and time.monotonic() < deadline:
+        time.sleep(0.05)
+        finished = ExportService.get_export_task(
+            delivery_project, submitted["export_id"]
+        )
+    assert finished["status"] == "done"
+    ProductionRuntimeClient.reset_inline()

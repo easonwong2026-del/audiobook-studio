@@ -73,9 +73,10 @@ def ensure_project_mutation_allowed(
             and (
                 record.task_type == "synthesis"
                 or (
-                    record.task_type in {"supplement", "voice_preview", "export"}
+                    record.task_type in {"supplement", "voice_preview"}
                     and bool(record.idempotency_key)
                 )
+                or record.task_type == "export"
             )
         ),
         None,

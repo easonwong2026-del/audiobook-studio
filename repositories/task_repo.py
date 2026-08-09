@@ -28,7 +28,12 @@ logger = logging.getLogger(__name__)
 
 _DB_FILENAME = "production_tasks.sqlite3"
 _PRODUCTION_TYPE = "synthesis"
-_RUNTIME_TASK_TYPES = frozenset({"synthesis", "supplement", "voice_preview"})
+_RUNTIME_TASK_TYPES = frozenset({
+    "synthesis",
+    "supplement",
+    "voice_preview",
+    "export",
+})
 _ACTIVE_STATES = ("pending", "running", "pausing", "paused", "cancelling")
 _TERMINAL_STATES = ("cancelled", "done", "error", "interrupted")
 
@@ -625,8 +630,14 @@ class TaskRepository:
                     (record.project, record.task_type, record.idempotency_key),
                 ).fetchone()
                 if row is not None:
+                    existing = TaskRepository._row_to_record(row)
                     connection.commit()
-                    return "idempotent", TaskRepository._row_to_record(row)
+                    if (
+                        existing.scope == record.scope
+                        and existing.options == record.options
+                    ):
+                        return "idempotent", existing
+                    return "idempotency_conflict", existing
             placeholders = ",".join("?" for _ in _ACTIVE_STATES)
             row = connection.execute(
                 f"""
@@ -741,7 +752,7 @@ class TaskRepository:
     def request_control(task_id: str, action: str) -> TaskRecord:
         """Persist a pause/resume/cancel request transactionally."""
         record = TaskRepository.load_task(task_id)
-        if record is None or record.task_type != _PRODUCTION_TYPE:
+        if record is None or record.task_type not in _RUNTIME_TASK_TYPES:
             raise KeyError(task_id)
         connection = TaskRepository._connect(record.project, create=True)
         if connection is None:
@@ -757,6 +768,8 @@ class TaskRepository:
             current = TaskRepository._row_to_record(row)
             new_status = current.status
             intent = current.control_intent
+            if current.task_type == "export" and action != "cancel":
+                raise ValueError("正式导出仅支持 cancel")
             if action == "pause":
                 if current.status in {"pausing", "paused"}:
                     pass
@@ -808,12 +821,20 @@ class TaskRepository:
             connection.close()
 
     @staticmethod
-    def claim_next_pending(owner_id: str) -> Optional[TaskRecord]:
-        """Claim the oldest pending GPU task for the singleton runtime."""
+    def claim_next_pending(
+        owner_id: str,
+        task_types: set[str] | frozenset[str] | None = None,
+    ) -> Optional[TaskRecord]:
+        """Claim the oldest pending task for the singleton runtime.
+
+        ``task_types`` lets the runtime keep the GPU synthesis lane separate
+        from CPU/IO export work while retaining one SQLite ownership protocol.
+        """
         pending = [
             record
             for record in TaskRepository.list_tasks(status="pending")
             if record.task_type in _RUNTIME_TASK_TYPES
+            and (task_types is None or record.task_type in task_types)
         ]
         pending.sort(key=lambda item: (item.created_at or "", item.task_id))
         for candidate in pending:
@@ -933,7 +954,10 @@ class TaskRepository:
                 connection.commit()
                 return None
             current = TaskRepository._row_to_record(row)
-            if current.owner_id != owner_id:
+            if (
+                current.owner_id != owner_id
+                or current.status not in _ACTIVE_STATES
+            ):
                 connection.commit()
                 return current
             effective_status = status
@@ -1018,6 +1042,31 @@ class TaskRepository:
                 TaskRepository.delete_task(record.task_id)
                 cleaned += 1
         return cleaned
+
+    @staticmethod
+    def normalize_restored_tasks(project: str) -> int:
+        """Turn copied active runtime rows into recoverable interruptions.
+
+        A backup can contain a stale owner/heartbeat from another machine.  A
+        restored project must never advertise those rows as live work; the
+        next explicit retry can create a fresh attempt under the new runtime.
+        """
+        now = _utc_now()
+        changed = 0
+        for record in TaskRepository.list_tasks(project=project):
+            if record.status not in _ACTIVE_STATES:
+                continue
+            record.status = "interrupted"
+            record.owner_id = ""
+            record.heartbeat_at = ""
+            record.control_intent = ""
+            record.finished_at = now
+            record.updated_at = now
+            record.error_summary = record.error_summary or "从项目备份恢复后需重新启动任务"
+            record.version += 1
+            TaskRepository.save_task(record)
+            changed += 1
+        return changed
 
 
 __all__ = ["TaskRecord", "TaskRepository"]
