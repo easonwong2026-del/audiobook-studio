@@ -13,6 +13,9 @@ logger = logging.getLogger(__name__)
 
 # 懒加载：首次调用才初始化模型
 _tts = None
+_CAPABILITY_ENGINE_ID: int | None = None
+_INFER_PARAM_NAMES: frozenset[str] = frozenset()
+_INFER_HAS_VAR_KEYWORD = False
 
 # 引擎互斥锁（RLock）：保证 init_engine 与 synthesize_segment 串行化，防止多角色 /
 # 批量并发调用时引擎内部状态竞争。必须用 RLock——OOM 时 synthesize_segment 会递归
@@ -33,6 +36,27 @@ def engine_lock():
 # 容量默认 16（可由 config.json 的 embedding_cache_max 覆盖），超出自动淘汰最久
 # 未用，防止多角色长篇小说下 embedding 随角色数线性膨胀占用显存 / 内存。
 _SPEAKER_EMB_CACHE = SpeakerEmbeddingLRU(maxsize=_cfg.get_int("embedding_cache_max", 16))
+
+
+def _engine_capabilities() -> tuple[frozenset[str], bool]:
+    """Inspect one engine generation only once, outside the segment hot path."""
+    global _CAPABILITY_ENGINE_ID, _INFER_PARAM_NAMES, _INFER_HAS_VAR_KEYWORD
+    engine_id = id(_tts)
+    if _CAPABILITY_ENGINE_ID == engine_id:
+        return _INFER_PARAM_NAMES, _INFER_HAS_VAR_KEYWORD
+    if _tts is None:
+        _CAPABILITY_ENGINE_ID = engine_id
+        _INFER_PARAM_NAMES = frozenset()
+        _INFER_HAS_VAR_KEYWORD = False
+        return _INFER_PARAM_NAMES, _INFER_HAS_VAR_KEYWORD
+    signature = inspect.signature(_tts.infer)
+    _INFER_PARAM_NAMES = frozenset(signature.parameters)
+    _INFER_HAS_VAR_KEYWORD = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+    _CAPABILITY_ENGINE_ID = engine_id
+    return _INFER_PARAM_NAMES, _INFER_HAS_VAR_KEYWORD
 
 
 def init_engine(model_dir: str = None, use_fp16: bool = True, use_cuda_kernel: bool = True, use_deepspeed: bool = False, use_accel: bool = False):
@@ -73,6 +97,7 @@ def init_engine(model_dir: str = None, use_fp16: bool = True, use_cuda_kernel: b
             use_accel=use_accel,
             use_cuda_kernel=use_cuda_kernel,
         )
+        _engine_capabilities()
         logger.info("Model loaded.")
 
 
@@ -92,7 +117,17 @@ def synthesize_segment(
     # 引擎互斥（RLock）：保证合成与模型加载串行化；OOM 递归调用自身时同一线程
     # 可重入，不会死锁。调用方无需再加锁。
     with _ENGINE_LOCK:
-        import torch
+        try:
+            import torch
+            oom_error = torch.cuda.OutOfMemoryError
+        except ModuleNotFoundError:
+            # Lightweight adapter tests may inject an engine without installing
+            # PyTorch.  A real IndexTTS engine can only be initialized when
+            # torch is present, so this fallback never hides a production OOM.
+            class _UnavailableCudaOOM(Exception):
+                pass
+
+            oom_error = _UnavailableCudaOOM
 
         if _tts is None:
             raise RuntimeError("TTS engine not initialized. Call init_engine() first.")
@@ -103,22 +138,24 @@ def synthesize_segment(
         use_emo = emotion and emotion != "neutral"
         emo_text = emotion if use_emo else None
 
-        # 2.4 S-1：预取并复用缓存的 speaker embedding（LRU 容器，提取失败降级为 None）。
-        spk_emb = get_speaker_embedding(speaker_audio)
+        # Capability discovery is cached per engine instance.  Tests and
+        # integrations may still replace ``_tts`` directly; the identity check
+        # refreshes the cache once for that replacement.
+        param_names, has_var_keyword = _engine_capabilities()
+        # Only engines that explicitly accept an embedding can benefit from
+        # extraction.  Current IndexTTS2 does not, so avoid a guaranteed
+        # exception and fallback on every segment.
+        spk_emb = (
+            get_speaker_embedding(speaker_audio)
+            if "spk_embedding" in param_names
+            else None
+        )
 
-        # 引擎 infer 签名（仅取一次），用于下方条件透传可选参数，避免参数名不符抛 TypeError。
-        sig = inspect.signature(_tts.infer)
-        param_names = set(sig.parameters.keys())
         # 真实 IndexTTS2.infer 用 **generation_kwargs（VAR_KEYWORD）接收 GPT 生成参数（如 num_beams），
         # 因此 param_names 中并不显式包含 num_beams；仅凭 "num_beams" in param_names 判断会恒为 False，
         # 导致 num_beams 默认 2 未生效（引擎走内部默认 3）。这里额外判定签名是否含 VAR_KEYWORD，含则透传 num_beams。
         # 注意：speed / pinyin_hints 不是 GPT 生成参数，透传进 **generation_kwargs 会被 GPT.generate 拒绝（实测 ValueError），
         # 故这两项仅按显式形参判定，不随 has_var_keyword 放开。
-        has_var_keyword = any(
-            p.kind == inspect.Parameter.VAR_KEYWORD
-            for p in sig.parameters.values()
-        )
-
         for attempt in range(MAX_RETRIES):
             try:
                 # 根据 IndexTTS2.infer 实际签名条件透传可选参数，
@@ -161,7 +198,7 @@ def synthesize_segment(
                 empty_cache()  # 2.4 M-3：段级碎片化显存清理（守卫式，无 CUDA 时 no-op）
                 return output_path
 
-            except torch.cuda.OutOfMemoryError:
+            except oom_error:
                 empty_cache()
                 if attempt == 0:
                     logger.warning("OOM, retrying after cache clear...")

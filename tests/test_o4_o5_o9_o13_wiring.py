@@ -209,5 +209,5 @@ def test_redline_do_export_wiring_unchanged():
     assert node is not None, "未找到 e_go.click"
     inputs = node.args[1]
     ids = [e.id if isinstance(e, ast.Name) else None for e in inputs.elts]
-    assert ids == ["e_fmt", "e_br", "e_save_dir", "ss"], \
+    assert ids == ["e_fmt", "e_br", "e_save_dir", "e_qa_policy", "ss"], \
         f"e_go.click 接线被改动（红线）: {ids}"

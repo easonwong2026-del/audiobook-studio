@@ -17,7 +17,7 @@ import time
 import uuid
 import time as _time
 from dataclasses import dataclass, field
-from typing import ClassVar, Optional
+from typing import ClassVar, Optional, TextIO
 
 from lib import script_loader
 from lib import chapter_identity, project_paths
@@ -67,6 +67,90 @@ class ProjectSlotInspection:
     modified_at: Optional[float] = None
 
 
+@dataclass
+class SegmentStatusBatch:
+    """Incremental project-status writer for long production runs.
+
+    The writer loads ``project.json`` once, updates counters in O(1) per
+    segment and appends a crash-recovery journal.  Chapter boundaries call
+    :meth:`checkpoint` to fsync that journal without rewriting the whole
+    project JSON; the task boundary calls :meth:`flush` to consolidate one
+    final snapshot.  ``close`` is an alias used from ``finally`` blocks.
+    """
+
+    project_dir: str
+    meta: ProjectMeta
+    flush_every: int = 100
+    _dirty: int = 0
+    _journal_file: TextIO | None = field(default=None, init=False, repr=False)
+
+    _COUNTER_BY_STATUS: ClassVar[dict[str, str]] = {
+        "done": "completed_count",
+        "failed": "failed_count",
+        "pending": "pending_count",
+    }
+
+    def update(self, segment_id: str, status: str) -> None:
+        segment_id = str(segment_id)
+        status = str(status)
+        previous = str(self.meta.segments_status.get(segment_id, "pending"))
+        if previous == status:
+            return
+        previous_counter = self._COUNTER_BY_STATUS.get(previous)
+        next_counter = self._COUNTER_BY_STATUS.get(status)
+        if previous_counter:
+            setattr(
+                self.meta,
+                previous_counter,
+                max(int(getattr(self.meta, previous_counter, 0) or 0) - 1, 0),
+            )
+        if next_counter:
+            setattr(
+                self.meta,
+                next_counter,
+                int(getattr(self.meta, next_counter, 0) or 0) + 1,
+            )
+        self.meta.segments_status[segment_id] = status
+        self.meta.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        if self._journal_file is None:
+            path = ProjectRepository._status_journal_path(self.project_dir)
+            self._journal_file = open(path, "a", encoding="utf-8", buffering=1)
+        payload = {
+            "segment_id": segment_id,
+            "status": status,
+            "updated_at": self.meta.updated_at,
+        }
+        self._journal_file.write(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+        )
+        self._dirty += 1
+        if self.flush_every > 0 and self._dirty >= int(self.flush_every):
+            self.flush()
+
+    def checkpoint(self) -> None:
+        """Durably flush the journal without rewriting the full project JSON."""
+        if not self._dirty:
+            return
+        if self._journal_file is not None:
+            self._journal_file.flush()
+            os.fsync(self._journal_file.fileno())
+
+    def flush(self) -> None:
+        if not self._dirty:
+            return
+        try:
+            self.checkpoint()
+        finally:
+            if self._journal_file is not None:
+                self._journal_file.close()
+                self._journal_file = None
+        ProjectRepository._save_meta(self.project_dir, self.meta)
+        ProjectRepository._clear_status_journal(self.project_dir)
+        self._dirty = 0
+
+    close = flush
+
+
 class ProjectRepository:
     """项目仓库：项目 CRUD + 原子写 + 快照加载。
 
@@ -85,6 +169,12 @@ class ProjectRepository:
     def _ensure_roots(cls):
         """确保 WORKSPACE_ROOT / LEGACY_ROOT 已初始化。"""
         if cls._INITIALIZED:
+            return
+        # Tests and compatibility integrations historically assign both roots
+        # directly.  Treat that explicit pair as authoritative instead of
+        # silently replacing it from global config on the next operation.
+        if cls.WORKSPACE_ROOT is not None and cls.LEGACY_ROOT is not None:
+            cls._INITIALIZED = True
             return
         from lib import config as _cfg
         cls.WORKSPACE_ROOT = _cfg.get_projects_root()
@@ -118,7 +208,62 @@ class ProjectRepository:
             data = json.load(f)
         meta = ProjectMeta(**data)
         ProjectRepository._repair_meta(project_dir, meta)
+        ProjectRepository._replay_status_journal(project_dir, meta)
         return meta
+
+    @staticmethod
+    def _status_journal_path(project_dir: str) -> str:
+        config_dir = project_paths.project_dir(project_dir, "config", create=True)
+        return os.path.join(config_dir, "segment_status.journal.jsonl")
+
+    @staticmethod
+    def _replay_status_journal(project_dir: str, meta: ProjectMeta) -> None:
+        """Overlay uncheckpointed segment states onto an in-memory snapshot."""
+        path = ProjectRepository._status_journal_path(project_dir)
+        if not os.path.isfile(path):
+            return
+        try:
+            with open(path, encoding="utf-8") as file:
+                events = [json.loads(line) for line in file if line.strip()]
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("读取段状态恢复日志失败: %s", exc)
+            return
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            segment_id = str(event.get("segment_id") or "")
+            status = str(event.get("status") or "")
+            if not segment_id or not status:
+                continue
+            previous = str(meta.segments_status.get(segment_id, "pending"))
+            if previous == status:
+                continue
+            previous_counter = SegmentStatusBatch._COUNTER_BY_STATUS.get(previous)
+            next_counter = SegmentStatusBatch._COUNTER_BY_STATUS.get(status)
+            if previous_counter:
+                setattr(
+                    meta,
+                    previous_counter,
+                    max(int(getattr(meta, previous_counter, 0) or 0) - 1, 0),
+                )
+            if next_counter:
+                setattr(
+                    meta,
+                    next_counter,
+                    int(getattr(meta, next_counter, 0) or 0) + 1,
+                )
+            meta.segments_status[segment_id] = status
+            meta.updated_at = str(event.get("updated_at") or meta.updated_at)
+
+    @staticmethod
+    def _clear_status_journal(project_dir: str) -> None:
+        path = ProjectRepository._status_journal_path(project_dir)
+        if not os.path.isfile(path):
+            return
+        try:
+            os.remove(path)
+        except OSError as exc:
+            logger.warning("清理段状态恢复日志失败: %s", exc)
 
     @staticmethod
     def _repair_meta(project_dir: str, meta: ProjectMeta) -> None:
@@ -712,20 +857,23 @@ class ProjectRepository:
             seg_id: 段 ID。
             status: 新状态（"pending" / "done" / "failed" 等）。
         """
+        writer = ProjectRepository.segment_status_batch(name, flush_every=1)
+        writer.update(seg_id, status)
+        writer.flush()
+
+    @staticmethod
+    def segment_status_batch(
+        name: str,
+        *,
+        flush_every: int = 100,
+    ) -> SegmentStatusBatch:
+        """Return a task-local incremental segment status writer."""
         project_dir = ProjectRepository._resolve_dir(name)
-        meta = ProjectRepository._load_meta(project_dir)
-        meta.segments_status[seg_id] = status
-
-        # 重新统计
-        meta.completed_count = sum(
-            1 for s in meta.segments_status.values() if s == "done")
-        meta.failed_count = sum(
-            1 for s in meta.segments_status.values() if s == "failed")
-        meta.pending_count = sum(
-            1 for s in meta.segments_status.values() if s == "pending")
-        meta.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S")
-
-        ProjectRepository._save_meta(project_dir, meta)
+        return SegmentStatusBatch(
+            project_dir=project_dir,
+            meta=ProjectRepository._load_meta(project_dir),
+            flush_every=max(int(flush_every or 0), 0),
+        )
 
     @staticmethod
     def invalidate_done_segments(name: str, segment_ids: list[str]) -> int:
@@ -826,8 +974,9 @@ class ProjectRepository:
         meta = ProjectRepository._load_meta(project_dir)
         seg_dir = project_paths.project_dir(project_dir, "segments")
         remaining: list[str] = []
+        changed = False
         for seg_id, status in meta.segments_status.items():
-            if status in ("pending", "failed"):
+            if status in ("pending", "failed", "skipped"):
                 remaining.append(seg_id)
             elif status == "done":
                 # 标记 done 但对应 wav 实际不存在 → 重置为 pending
@@ -837,9 +986,13 @@ class ProjectRepository:
                     meta.completed_count -= 1
                     meta.pending_count += 1
                     remaining.append(seg_id)
+                    changed = True
         if meta.completed_count < 0:
             meta.completed_count = 0
-        ProjectRepository._save_meta(project_dir, meta)
+            changed = True
+        if changed:
+            meta.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+            ProjectRepository._save_meta(project_dir, meta)
         return remaining
 
     # --- synthesis_overrides.json ---

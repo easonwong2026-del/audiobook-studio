@@ -64,6 +64,13 @@ def _project_dir(project_name: str) -> str:
     return path
 
 
+def _guard_mutation(project_name: str, operation: str) -> None:
+    """Keep cast/roster writes from racing an active production attempt."""
+    from .project import ensure_project_mutation_allowed
+
+    ensure_project_mutation_allowed(project_name, operation)
+
+
 def _role_records(value: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Normalize roster roles from either the public list or mapping form."""
     if isinstance(value, dict) and "roles" in value:
@@ -354,6 +361,7 @@ class VoiceCastResolver:
 
     @classmethod
     def set_character_roster(cls, project_name: str, roster: Any = None, roles: Any = None) -> dict[str, Any]:
+        _guard_mutation(project_name, "set_character_roster")
         project_dir = _project_dir(project_name)
         if VoiceCastRepository.load_roster(project_dir) is not None or os.path.isfile(
             os.path.join(project_dir, VoiceCastRepository.ROSTER_FILE)
@@ -368,6 +376,7 @@ class VoiceCastResolver:
 
     @classmethod
     def add_character_roles(cls, project_name: str, roles: Any = None, roster: Any = None) -> dict[str, Any]:
+        _guard_mutation(project_name, "add_character_roles")
         project_dir = _project_dir(project_name)
         current_document = _read_roster(project_name)
         current = _roster_map(current_document)
@@ -394,6 +403,7 @@ class VoiceCastResolver:
             payload = role_id
             role_id = payload.get("role_id")
             updates = payload.get("updates") if isinstance(payload.get("updates"), dict) else payload
+        _guard_mutation(project_name, "update_character_role")
         project_dir = _project_dir(project_name)
         roster = _roster_map(_read_roster(project_name))
         target = str(role_id or "").strip()
@@ -587,6 +597,7 @@ class VoiceCastResolver:
 
     @classmethod
     def set_voice_cast(cls, project_name: str, cast: Any = None, roles: Any = None) -> dict[str, Any]:
+        _guard_mutation(project_name, "set_voice_cast")
         project_dir = _project_dir(project_name)
         if os.path.isfile(os.path.join(project_dir, VoiceCastRepository.CAST_FILE)):
             raise VoiceCastError("CAST_EXISTS", "Voice Cast 已存在，请使用 bind_cast_role 或 update 流程")
@@ -621,6 +632,7 @@ class VoiceCastResolver:
 
     @classmethod
     def apply_cast(cls, project_name: str, cast: Any = None, role_ids: list[str] | None = None) -> dict[str, Any]:
+        _guard_mutation(project_name, "apply_voice_cast")
         project_dir = _project_dir(project_name)
         roster = _roster_map(_read_roster(project_name))
         document = _normalize_cast(project_name, cast if cast is not None else _read_cast(project_name) or {}, roster)
@@ -724,6 +736,7 @@ class VoiceCastResolver:
             role_id = payload.get("role_id")
             voice_asset_id = payload.get("voice_asset_id")
             force_rebind = bool(payload.get("force_rebind", force_rebind))
+        _guard_mutation(project_name, "bind_cast_role")
         project_dir = _project_dir(project_name)
         rid = str(role_id or "").strip()
         roster = _roster_map(_read_roster(project_name))
@@ -769,11 +782,9 @@ class VoiceCastResolver:
         invalidated = 0
         if force_rebind and old_id != aid:
             invalidated = ProjectRepository.invalidate_done_segments(project_name, affected_ids)
-            try:
-                from lib import tts_engine
-                tts_engine.invalidate_speaker_cache(old_path)
-            except Exception:
-                pass
+            # The singleton runtime owns the embedding cache.  Rebinding writes
+            # a content-hashed project voice path, so the next job naturally
+            # uses a new cache key without importing TTS in this client process.
         return {
             "success": True,
             "role_id": rid,
@@ -785,6 +796,7 @@ class VoiceCastResolver:
 
     @classmethod
     def finalize_voice_cast(cls, project_name: str) -> dict[str, Any]:
+        _guard_mutation(project_name, "finalize_voice_cast")
         project_dir = _project_dir(project_name)
         validation = cls.validate_voice_cast(project_name)
         if not validation["ready"]:

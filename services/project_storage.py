@@ -10,6 +10,8 @@ from lib import project_paths
 from repositories.project_repo import ProjectRepository
 from repositories.project_storage_repo import ProjectStorageRepository, ProjectStorageSummary
 
+from .project import ensure_project_mutation_allowed
+
 
 def _inside(path: str, root: str) -> bool:
     try:
@@ -80,6 +82,7 @@ class ProjectStorageService:
 
     @staticmethod
     def archive(name: str) -> str:
+        ensure_project_mutation_allowed(name, "archive_project")
         return ProjectStorageRepository.archive_project(name)
 
     @staticmethod
@@ -117,6 +120,7 @@ class ProjectStorageService:
 
     @staticmethod
     def execute_cleanup(name: str, token: str) -> dict[str, Any]:
+        ensure_project_mutation_allowed(name, "execute_cleanup")
         return ProjectStorageRepository.execute_cleanup(name, token)
 
     @staticmethod
@@ -126,6 +130,7 @@ class ProjectStorageService:
     @staticmethod
     def repair_integrity(name: str) -> dict[str, Any]:
         """Repair only safe metadata/directories, then return a fresh report."""
+        ensure_project_mutation_allowed(name, "repair_integrity")
         _safe_name, project_dir = ProjectStorageRepository._resolve_project(name)
         repaired: list[str] = []
         if project_paths.is_v2_project(project_dir):
@@ -164,6 +169,7 @@ class ProjectStorageService:
         The source is retained.  This makes a location change recoverable; the
         caller can archive the original after confirming the copied project.
         """
+        ensure_project_mutation_allowed(name, "migrate_project")
         safe_name, project_dir = ProjectStorageRepository._resolve_project(name)
         raw_target = str(target_root or "").strip()
         if not raw_target:

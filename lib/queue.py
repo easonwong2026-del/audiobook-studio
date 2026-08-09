@@ -4,12 +4,32 @@ from __future__ import annotations
 import logging
 import os
 import time
+import uuid
+import wave
 from typing import Generator, Optional
 
-from . import project_manager as pm
 from . import project_paths, script_loader, segment_cache
+from repositories.project_repo import ProjectRepository
 
 logger = logging.getLogger(__name__)
+
+
+def _publish_segment(temp_path: str, final_path: str) -> None:
+    """Validate a completed WAV and atomically publish it into the cache."""
+    try:
+        if not os.path.isfile(temp_path) or os.path.getsize(temp_path) <= 0:
+            raise RuntimeError("合成结果为空")
+        with wave.open(temp_path, "rb") as audio:
+            if audio.getnframes() <= 0 or audio.getframerate() <= 0:
+                raise RuntimeError("合成结果不是有效 WAV")
+        os.replace(temp_path, final_path)
+    except Exception:
+        try:
+            if os.path.isfile(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _seg_cache_key(seg, emotion: str = None, emo_alpha: float = None,
@@ -63,14 +83,15 @@ def synthesize_project(
     cb_seg_state=None,
     selected_chapters: Optional[list] = None,
     selected_segment_ids: Optional[list] = None,
+    voice_overrides: Optional[dict[str, str]] = None,
 ) -> Generator[str, None, None]:
     # NumPy / SciPy 随 TTS 适配层按需加载，不进入应用启动热路径。
     from . import tts_engine
 
-    project_dir = pm.get_project_dir(project_name)
+    project_dir = ProjectRepository.get_project_dir(project_name)
     # P2 提速：open_project 已把剧本读入内存（dict），直接用 from_dict 构造 Script，
     # 避免对同一个 structured_script.json 做第二次磁盘读取。
-    _, script_data, bindings_document = pm.open_project(project_name)
+    _, script_data, bindings_document = ProjectRepository.load_project(project_name)
     script = script_loader.from_dict(script_data)
 
     segments_dir = project_paths.project_dir(project_dir, "segments", create=True)
@@ -86,12 +107,18 @@ def synthesize_project(
         {str(segment_id) for segment_id in selected_segment_ids}
         if selected_segment_ids else None
     )
-    remaining = pm.get_remaining(project_name)
+    per_segment_voice = {
+        str(segment_id): str(path)
+        for segment_id, path in (voice_overrides or {}).items()
+        if str(segment_id).strip() and str(path).strip()
+    }
+    remaining = ProjectRepository.get_remaining(project_name)
     if selected_segment_set is not None:
         remaining = [segment_id for segment_id in remaining if segment_id in selected_segment_set]
     if not remaining:
         yield "[0] all_done 所有段落已完成"
         return
+    remaining_set = set(remaining)
 
     total = script_loader.count_segments(script)
     if selected_segment_set is not None:
@@ -124,102 +151,113 @@ def synthesize_project(
         "speech_rate": speech_rate if speech_rate is not None else 1.0,
     }
 
-    for ch in script.chapters:
-        ch_label = str(ch.id)
-        ch_unselected = selected_set is not None and ch_label not in selected_set
-        for seg in ch.segments:
-            if selected_segment_set is not None and str(seg.id) not in selected_segment_set:
-                continue
-            # O5：未选中章节 -> 标 skipped 并跳过（不合成、不写 wav）
-            if ch_unselected:
-                if seg.id in remaining:
-                    pm.update_segment_status(project_name, seg.id, "skipped")
-                continue
-            if seg.id not in remaining:
-                continue
+    status_writer = ProjectRepository.segment_status_batch(project_name, flush_every=0)
+    try:
+        for ch in script.chapters:
+            ch_label = str(ch.id)
+            ch_unselected = selected_set is not None and ch_label not in selected_set
+            for seg in ch.segments:
+                if selected_segment_set is not None and str(seg.id) not in selected_segment_set:
+                    continue
+                # O5：未选中章节 -> 标 skipped 并跳过（不合成、不写 wav）
+                if ch_unselected:
+                    if seg.id in remaining_set:
+                        status_writer.update(seg.id, "skipped")
+                    continue
+                if seg.id not in remaining_set:
+                    continue
 
-            speaker = voice_bindings.get(seg.role)
-            if not speaker and cast_active and getattr(seg, "role_id", None):
-                cast_binding = cast_role_bindings.get(str(seg.role_id))
-                if isinstance(cast_binding, dict):
-                    speaker = cast_binding.get("project_voice_path")
-            if not speaker:
-                yield f"[X] {seg.id} 角色'{seg.role}'未绑定音频"
-                pm.update_segment_status(project_name, seg.id, "failed")
-                continue
+                speaker = per_segment_voice.get(str(seg.id)) or voice_bindings.get(seg.role)
+                if not speaker and cast_active and getattr(seg, "role_id", None):
+                    cast_binding = cast_role_bindings.get(str(seg.role_id))
+                    if isinstance(cast_binding, dict):
+                        speaker = cast_binding.get("project_voice_path")
+                if not speaker:
+                    yield f"[X] {seg.id} 角色'{seg.role}'未绑定音频"
+                    status_writer.update(seg.id, "failed")
+                    continue
 
-            if not os.path.isabs(str(speaker)):
-                speaker = os.path.join(project_dir, str(speaker))
-            if not os.path.isfile(speaker):
-                yield f"[X] {seg.id} 音频文件不存在"
-                pm.update_segment_status(project_name, seg.id, "failed")
-                continue
+                if not os.path.isabs(str(speaker)):
+                    speaker = os.path.join(project_dir, str(speaker))
+                if not os.path.isfile(speaker):
+                    yield f"[X] {seg.id} 音频文件不存在"
+                    status_writer.update(seg.id, "failed")
+                    continue
 
-            speaker_fingerprint = None
-            if cast_active:
-                resolved_speaker = speaker
-                if resolved_speaker not in speaker_fingerprints:
-                    speaker_fingerprints[resolved_speaker] = segment_cache.speaker_fingerprint_for_path(resolved_speaker)
-                speaker_fingerprint = speaker_fingerprints[resolved_speaker]
+                speaker_fingerprint = None
+                if cast_active or str(seg.id) in per_segment_voice:
+                    resolved_speaker = speaker
+                    if resolved_speaker not in speaker_fingerprints:
+                        speaker_fingerprints[resolved_speaker] = (
+                            segment_cache.speaker_fingerprint_for_path(resolved_speaker)
+                        )
+                    speaker_fingerprint = speaker_fingerprints[resolved_speaker]
 
-            seg_start = time.time()
-            try:
-                # 2.3 O2：用有效合成参数（全局覆盖 + 段落默认）派生缓存键与调用参数，
-                # 保证「覆盖变化 → 文件名变化 → 重合成命中一致」（一致性根因修复）。
-                emotion_eff, emo_alpha_eff, speech_rate_eff = segment_cache.effective_params(seg, overrides)
-                # B7：缓存键 = 段标识 + 合成参数内容哈希（_seg_cache_key）。
-                #     参数(emotion/emo_alpha/speech_rate/pinyin_hints) 任一变化 →
-                #     文件名变化 → 旧文件不再被命中 → 触发重新合成。
-                seg_path = os.path.join(
-                    segments_dir,
-                    f"{_seg_cache_key(seg, emotion_eff, emo_alpha_eff, speech_rate_eff, speaker_fingerprint)}.wav",
-                )
-
-                if not os.path.isfile(seg_path):
-                    yield f"[/] {seg.id} {seg.role} 合成中..."
-                    # O3/O12：段「运行」点回调（内存态 running，不写 meta）
-                    if cb_seg_state:
-                        cb_seg_state(seg.id, "running", 0.0)
-                    from . import directed_synthesis
-                    directed_synthesis.synthesize(
-                        segment=seg,
-                        speaker_audio=speaker,
-                        emotion=emotion_eff,
-                        emo_alpha=emo_alpha_eff,
-                        speech_rate=speech_rate_eff,
-                        pinyin_hints=getattr(seg, 'pinyin_hints', None),
-                        output_path=seg_path,
-                        num_beams=num_beams,
-                        engine=tts_engine,
+                seg_start = time.time()
+                try:
+                    # 2.3 O2：用有效合成参数（全局覆盖 + 段落默认）派生缓存键与调用参数，
+                    # 保证「覆盖变化 → 文件名变化 → 重合成命中一致」（一致性根因修复）。
+                    emotion_eff, emo_alpha_eff, speech_rate_eff = (
+                        segment_cache.effective_params(seg, overrides)
                     )
-                    yield "[/] vram_clean"
+                    # B7：缓存键 = 段标识 + 合成参数内容哈希。
+                    seg_path = os.path.join(
+                        segments_dir,
+                        f"{_seg_cache_key(seg, emotion_eff, emo_alpha_eff, speech_rate_eff, speaker_fingerprint)}.wav",
+                    )
 
-                elapsed = time.time() - seg_start
-                pm.update_segment_status(project_name, seg.id, "done")
-                done += 1
-                # O3/O12：段「完成」点回调（内存态 done，不写 meta）
-                if cb_seg_state:
-                    cb_seg_state(seg.id, "done", 1.0)
+                    if not os.path.isfile(seg_path):
+                        yield f"[/] {seg.id} {seg.role} 合成中..."
+                        if cb_seg_state:
+                            cb_seg_state(seg.id, "running", 0.0)
+                        from . import directed_synthesis
 
-                # ✅ seg_id|role|音色名|耗时
-                voice_name = os.path.splitext(os.path.basename(speaker))[0][:20]
-                yield f"[+] {seg.id}|{seg.role}|{voice_name}|{elapsed:.1f}s"
+                        temp_path = os.path.join(
+                            segments_dir,
+                            f".{os.path.basename(seg_path)}.{uuid.uuid4().hex}.part.wav",
+                        )
+                        directed_synthesis.synthesize(
+                            segment=seg,
+                            speaker_audio=speaker,
+                            emotion=emotion_eff,
+                            emo_alpha=emo_alpha_eff,
+                            speech_rate=speech_rate_eff,
+                            pinyin_hints=getattr(seg, "pinyin_hints", None),
+                            output_path=temp_path,
+                            num_beams=num_beams,
+                            engine=tts_engine,
+                        )
+                        _publish_segment(temp_path, seg_path)
+                        yield "[/] vram_clean"
 
-                if cb_audio:
-                    cb_audio(seg.id, seg_path)
+                    elapsed = time.time() - seg_start
+                    status_writer.update(seg.id, "done")
+                    done += 1
+                    if cb_seg_state:
+                        cb_seg_state(seg.id, "done", 1.0)
 
-            except Exception as e:
-                logger.exception(f"合成失败 {seg.id}")
-                pm.update_segment_status(project_name, seg.id, "failed")
-                # O3/O12：段「失败」点回调（内存态 error，不写 meta）
-                if cb_seg_state:
-                    cb_seg_state(seg.id, "error", 0.0)
-                yield f"[X] {seg.id} 失败: {str(e)[:60]}"
+                    voice_name = os.path.splitext(os.path.basename(speaker))[0][:20]
+                    yield f"[+] {seg.id}|{seg.role}|{voice_name}|{elapsed:.1f}s"
 
-            if cb_progress:
-                cb_progress(done / total)
+                    if cb_audio:
+                        cb_audio(seg.id, seg_path)
 
-        yield f"[=] ch{ch.id}|{ch.title}"
+                except Exception as exc:
+                    logger.exception("合成失败 %s", seg.id)
+                    status_writer.update(seg.id, "failed")
+                    if cb_seg_state:
+                        cb_seg_state(seg.id, "error", 0.0)
+                    yield f"[X] {seg.id} 失败: {str(exc)[:60]}"
 
-    elapsed_total = time.time() - start_time
-    yield f"[0] done|{total}|{elapsed_total:.0f}s"
+                if cb_progress:
+                    cb_progress(done / total)
+
+            # Chapter boundary fsyncs the O(1) recovery journal.  The task
+            # boundary consolidates project.json once, avoiding O(N²) rewrites.
+            status_writer.checkpoint()
+            yield f"[=] ch{ch.id}|{ch.title}"
+
+        elapsed_total = time.time() - start_time
+        yield f"[0] done|{total}|{elapsed_total:.0f}s"
+    finally:
+        status_writer.close()

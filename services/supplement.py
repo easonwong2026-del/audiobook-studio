@@ -10,11 +10,10 @@
 
 所有方法均为 ``@staticmethod``，便于在单元测试中以假引擎 / 假 ffmpeg 直接调用。
 
-阶段四重构：新增 TaskRepository.save_task() 记录补录任务可恢复状态。
+阶段四重构：正式项目的补录通过单例 production runtime 与项目内任务库执行。
 """
 from __future__ import annotations
 
-import logging
 import os
 import re
 import shutil
@@ -24,9 +23,6 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 
 from lib import config, script_loader
-from repositories.task_repo import TaskRecord, TaskRepository
-
-logger = logging.getLogger(__name__)
 
 # 按标点切分长段时保留的标点集合（句末标点，切分后保留）。
 _SPLIT_PUNCT = "。！？；"
@@ -410,13 +406,6 @@ class SupplementService:
             'status': 'ok'|'failed', 'error': str}``。失败的 ``error`` 形如
             ``❌ 句N: <错误前120字>``。
         """
-        from lib import tts_engine
-
-        overrides = overrides or {}
-        emotion = overrides.get("emotion")
-        emo_alpha = overrides.get("emo_alpha", 1.0)
-        speech_rate = overrides.get("speech_rate", 1.0)
-
         # 解析任务隔离目录：传入 task 复用其 task_dir，否则新建隔离子目录。
         if task is not None:
             task_dir = task.task_dir
@@ -425,81 +414,31 @@ class SupplementService:
             task_id = uuid.uuid4().hex
             task_dir = os.path.join(base, _SUPPLEMENT_TASKS_DIRNAME, task_id)
         os.makedirs(task_dir, exist_ok=True)
+        from .runtime_tts import RuntimeTTSService
 
-        # 写入 TaskRecord（running）
-        project = task.project if task is not None else ""
-        tid = task.task_id if task is not None else uuid.uuid4().hex
-        try:
-            TaskRepository.save_task(TaskRecord(
-                task_id=tid,
-                task_type="supplement",
-                project=project,
-                status="running",
-                artifact_dir=task_dir,
-                created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
-            ))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("保存补录任务状态失败: %s", exc)
-
-        results: list[dict] = []
-        items: list[SupplementItemResult] = []
-        for i, text in enumerate(lines):
-            text = (text or "").strip()
-            out = os.path.join(task_dir, f"{i + 1:03d}.wav")
-            if not text:
-                results.append({
-                    "index": i, "text": "", "wav_path": None,
-                    "status": "failed", "error": f"❌ 句{i + 1}: 文本为空",
-                })
-                items.append(SupplementItemResult(
-                    index=i, text="", wav_path=None, status="failed", error="文本为空"))
-                continue
-            try:
-                wav = tts_engine.synthesize_segment(
-                    text=text,
-                    speaker_audio=speaker_audio,
-                    emotion=emotion if emotion else "neutral",
-                    emo_alpha=float(emo_alpha) if emo_alpha is not None else 1.0,
-                    speech_rate=float(speech_rate) if speech_rate is not None else 1.0,
-                    output_path=out,
-                    num_beams=num_beams,
-                )
-                results.append({
-                    "index": i, "text": text, "wav_path": wav,
-                    "status": "ok", "error": "",
-                })
-                items.append(SupplementItemResult(
-                    index=i, text=text, wav_path=wav, status="ok", error=""))
-            except Exception as exc:  # noqa: BLE001
-                results.append({
-                    "index": i, "text": text, "wav_path": None,
-                    "status": "failed",
-                    "error": f"❌ 句{i + 1}: {str(exc)[:120]}",
-                })
-                items.append(SupplementItemResult(
-                    index=i, text=text, wav_path=None, status="failed",
-                    error=str(exc)[:120]))
+        results = RuntimeTTSService.synthesize_supplement(
+            project_name=task.project if task is not None else "",
+            role=role,
+            lines=lines,
+            speaker_audio=speaker_audio,
+            overrides=overrides,
+            num_beams=num_beams,
+            artifact_dir=task_dir,
+        )
+        items = [
+            SupplementItemResult(
+                index=int(item.get("index", index)),
+                text=str(item.get("text") or ""),
+                wav_path=(
+                    str(item["wav_path"]) if item.get("wav_path") else None
+                ),
+                status=str(item.get("status") or "failed"),
+                error=str(item.get("error") or ""),
+            )
+            for index, item in enumerate(results)
+        ]
         if task is not None:
             task.items = items
-
-        # 写入 TaskRecord（done/error）
-        has_ok = any(r["status"] == "ok" for r in results)
-        has_err = any(r["status"] == "failed" for r in results)
-        final_status = "done" if has_ok and not has_err else ("error" if has_err and not has_ok else "done")
-        error_lines = [r["error"] for r in results if r["error"]]
-        try:
-            TaskRepository.save_task(TaskRecord(
-                task_id=tid,
-                task_type="supplement",
-                project=project,
-                status=final_status,
-                artifact_dir=task_dir,
-                error_summary="\n".join(error_lines)[:500] if error_lines else "",
-                created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
-            ))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("保存补录完成状态失败: %s", exc)
-
         return results
 
     @staticmethod

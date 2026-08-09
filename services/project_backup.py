@@ -69,6 +69,9 @@ class ProjectBackupService:
 
     @staticmethod
     def create_backup(project_name: str, target_dir: str | None = None) -> str:
+        from .project import ensure_project_mutation_allowed
+
+        ensure_project_mutation_allowed(project_name, "create_project_backup")
         safe_name, project_dir = ProjectStorageRepository._resolve_project(project_name)
         data_root = os.path.realpath(config.get_data_dir())
         output_dir = os.path.abspath(os.path.expanduser(target_dir)) if target_dir else os.path.join(data_root, "backups")

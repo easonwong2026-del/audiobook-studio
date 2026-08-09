@@ -11,12 +11,10 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import time
 
 import pytest
 
-from lib.types import ProjectMeta
 from repositories.project_repo import ProjectRepository
 from repositories.exceptions import ProjectNotFoundError
 
@@ -141,6 +139,49 @@ class TestProjectRepository:
             assert meta.completed_count == 1
             assert meta.failed_count == 1
             assert meta.pending_count == 0
+        finally:
+            ProjectRepository.WORKSPACE_ROOT = orig_ws
+            ProjectRepository.LEGACY_ROOT = orig_lg
+
+    def test_segment_status_batch_flushes_once_with_incremental_counts(self, tmp_path):
+        """Long jobs keep counters in memory until an explicit checkpoint."""
+        orig_ws = ProjectRepository.WORKSPACE_ROOT
+        orig_lg = ProjectRepository.LEGACY_ROOT
+        try:
+            ProjectRepository.WORKSPACE_ROOT = str(tmp_path / "ws")
+            ProjectRepository.LEGACY_ROOT = str(tmp_path / "legacy")
+            script_path = _make_minimal_script(tmp_path, "batch.json")
+            ProjectRepository.create_project("batch_status", script_path)
+
+            writer = ProjectRepository.segment_status_batch(
+                "batch_status",
+                flush_every=100,
+            )
+            writer.update("1-001", "done")
+            writer.update("1-002", "failed")
+
+            # Readers replay the O(1) recovery journal immediately even though
+            # the large project.json checkpoint has not been rewritten.
+            before, _, _ = ProjectRepository.load_project("batch_status")
+            assert before.completed_count == 1
+            assert before.failed_count == 1
+            project_dir = ProjectRepository.get_project_dir("batch_status")
+            with open(os.path.join(project_dir, "project.json"), encoding="utf-8") as file:
+                raw_before_flush = json.load(file)
+            assert raw_before_flush["completed_count"] == 0
+            assert raw_before_flush["failed_count"] == 0
+
+            writer.checkpoint()
+            with open(os.path.join(project_dir, "project.json"), encoding="utf-8") as file:
+                raw_after_checkpoint = json.load(file)
+            assert raw_after_checkpoint["completed_count"] == 0
+            assert raw_after_checkpoint["failed_count"] == 0
+
+            writer.flush()
+            after, _, _ = ProjectRepository.load_project("batch_status")
+            assert after.completed_count == 1
+            assert after.failed_count == 1
+            assert after.pending_count == 0
         finally:
             ProjectRepository.WORKSPACE_ROOT = orig_ws
             ProjectRepository.LEGACY_ROOT = orig_lg
@@ -592,7 +633,6 @@ class TestAtomicCreateFailure:
     def test_os_replace_failure(self, monkeypatch):
         """os.replace 失败时清理临时目录。"""
         from repositories.project_repo import ProjectRepository
-        import repositories._atomic as atomic_mod
         call_count = [0]
         orig_replace = os.replace
         def counting_replace(src, dst):
