@@ -8,7 +8,7 @@ import pytest
 
 from repositories.project_repo import ProjectRepository
 from repositories.task_repo import TaskRecord, TaskRepository
-from services import ProductionJobService, ProjectService
+from services import ProductionJobError, ProductionJobService, ProjectService
 from services.synthesis import SynthesisService
 
 
@@ -107,6 +107,115 @@ def test_start_idempotency_and_active_project_constraint(production_project, mon
     with pytest.raises(Exception) as error:
         ProductionJobService.start(production_project, {"all": True}, source="web")
     assert getattr(error.value, "code", None) == "PROJECT_HAS_ACTIVE_TASK"
+
+
+@pytest.mark.parametrize("task_type", ["synthesis", "export"])
+@pytest.mark.parametrize(
+    ("initial_status", "expected_status"),
+    [
+        ("interrupted", "cancelled"),
+        ("pending", "cancelled"),
+        ("paused", "cancelled"),
+        ("cancelled", "cancelled"),
+        ("done", "done"),
+        ("error", "error"),
+    ],
+)
+def test_cancel_is_terminal_and_idempotent_for_runtime_tasks(
+    production_project,
+    task_type,
+    initial_status,
+    expected_status,
+):
+    task_id = f"cancel_{task_type}_{initial_status}"
+    record = TaskRecord(
+        task_id=task_id,
+        task_type=task_type,
+        project=production_project,
+        status=initial_status,
+        source="mcp",
+        created_at="2026-08-09T00:00:00Z",
+        updated_at="2026-08-09T00:00:00Z",
+    )
+    if task_type == "export":
+        outcome, _ = TaskRepository.create_runtime_task(record)
+        assert outcome == "created"
+    else:
+        TaskRepository.save_task(record)
+
+    first = TaskRepository.request_control(task_id, "cancel")
+    assert first.status == expected_status
+    if initial_status in {"interrupted", "pending", "paused"}:
+        assert first.control_intent == ""
+        assert first.finished_at
+
+    second = TaskRepository.request_control(task_id, "cancel")
+    assert second.status == expected_status
+    assert second.version == first.version
+    assert second.updated_at == first.updated_at
+    assert second.finished_at == first.finished_at
+
+
+def test_active_export_blocks_start_production(production_project, monkeypatch):
+    export = TaskRecord(
+        task_id="active_export_for_production",
+        task_type="export",
+        project=production_project,
+        status="running",
+        owner_id="export-runtime",
+        source="mcp",
+        created_at="2026-08-09T00:00:00Z",
+        updated_at="2026-08-09T00:00:00Z",
+    )
+    outcome, _ = TaskRepository.create_runtime_task(export)
+    assert outcome == "created"
+    monkeypatch.setattr(SynthesisService, "start", staticmethod(_fake_start))
+
+    with pytest.raises(ProductionJobError) as error:
+        ProductionJobService.start(
+            production_project,
+            {"all": True},
+            source="mcp",
+        )
+
+    assert error.value.code == "PROJECT_HAS_ACTIVE_TASK"
+    assert error.value.details["task_id"] == export.task_id
+    assert error.value.details["status"] == export.status
+
+
+@pytest.mark.parametrize("task_type", ["synthesis", "export"])
+@pytest.mark.parametrize("initial_status", ["pending", "paused"])
+def test_claimed_pending_or_paused_cancel_requests_worker_stop(
+    production_project,
+    task_type,
+    initial_status,
+):
+    task_id = f"claimed_cancel_{task_type}_{initial_status}"
+    record = TaskRecord(
+        task_id=task_id,
+        task_type=task_type,
+        project=production_project,
+        status=initial_status,
+        owner_id="runtime-owner",
+        source="mcp",
+        created_at="2026-08-09T00:00:00Z",
+        updated_at="2026-08-09T00:00:00Z",
+    )
+    if task_type == "export":
+        outcome, _ = TaskRepository.create_runtime_task(record)
+        assert outcome == "created"
+    else:
+        TaskRepository.save_task(record)
+
+    first = TaskRepository.request_control(task_id, "cancel")
+    assert first.status == "cancelling"
+    assert first.control_intent == "cancel"
+
+    second = TaskRepository.request_control(task_id, "cancel")
+    assert second.status == "cancelling"
+    assert second.control_intent == "cancel"
+    assert second.version == first.version
+    assert second.updated_at == first.updated_at
 
 
 def test_idempotency_replays_only_same_normalized_payload(production_project, monkeypatch):

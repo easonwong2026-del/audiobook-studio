@@ -123,6 +123,7 @@ jobs:
           tests/test_delivery_freshness.py
           tests/test_repair_phase4.py
           tests/test_workflow_export_phase4.py
+          tests/test_export_duration.py
           tests/test_audio_pipeline_streaming.py
           tests/test_export_r2.py
           tests/test_project_backup.py

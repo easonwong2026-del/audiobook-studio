@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import zipfile
 
 import pytest
@@ -119,3 +120,32 @@ def test_restore_normalizes_copied_active_runtime_tasks(tmp_path, monkeypatch):
     assert restored is not None
     assert restored.status == "interrupted"
     assert restored.owner_id == ""
+
+
+def test_restore_normalization_failure_does_not_publish_project(tmp_path, monkeypatch):
+    _make_project(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "services.project.ensure_project_mutation_allowed",
+        lambda *_args, **_kwargs: None,
+    )
+    archive = ProjectBackupService.create_backup("backup_book")
+    ProjectRepository.archive_project("backup_book")
+
+    def fail_normalization(*_args, **_kwargs):
+        raise RuntimeError("normalization failed")
+
+    monkeypatch.setattr(
+        TaskRepository,
+        "normalize_restored_tasks",
+        staticmethod(fail_normalization),
+    )
+    with pytest.raises(RuntimeError, match="normalization failed"):
+        ProjectBackupService.restore_backup(archive)
+
+    final_dir = ProjectRepository.get_project_dir("backup_book")
+    assert not os.path.exists(final_dir)
+    workspace = os.path.dirname(final_dir)
+    assert not any(
+        name.startswith(".tmp_restore_")
+        for name in os.listdir(workspace)
+    )

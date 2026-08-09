@@ -96,12 +96,17 @@ class WorkflowService:
             if item.get("status") not in {"pending", "running"}:
                 continue
             task_id = str(item.get("task_id") or "")
-            if task_id:
-                task = TaskRepository.load_task(task_id)
-                if task is None or task.status not in {
-                    "pending", "running", "cancelling",
-                }:
-                    continue
+            # Since #31, SQLite TaskRepository is the only source of truth for
+            # live exports.  #30 history rows without a durable task_id are
+            # retained as audit history but can never keep the workflow in an
+            # exporting state after a crash or upgrade.
+            if not task_id:
+                continue
+            task = TaskRepository.load_task(task_id)
+            if task is None or task.status not in {
+                "pending", "running", "cancelling",
+            }:
+                continue
             active_exports.append(item)
         history_task_ids = {
             str(item.get("task_id") or "") for item in active_exports

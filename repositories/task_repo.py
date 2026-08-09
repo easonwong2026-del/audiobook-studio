@@ -376,7 +376,7 @@ class TaskRepository:
                     continue
                 if (
                     record is None
-                    or record.task_type != _PRODUCTION_TYPE
+                    or record.task_type not in _RUNTIME_TASK_TYPES
                     or record.project != project
                 ):
                     continue
@@ -511,8 +511,8 @@ class TaskRepository:
 
     @staticmethod
     def save_task(record: TaskRecord) -> None:
-        """Persist a task, using SQLite for real project production tasks."""
-        if record.task_type != _PRODUCTION_TYPE:
+        """Persist a task in project SQLite for every runtime task type."""
+        if record.task_type not in _RUNTIME_TASK_TYPES:
             TaskRepository._legacy_save(record)
             return
         connection = TaskRepository._connect(record.project, create=True)
@@ -787,15 +787,18 @@ class TaskRepository:
                 else:
                     new_status, intent = "pending", ""
             elif action == "cancel":
-                if current.status == "interrupted":
-                    new_status, intent = "cancelled", ""
-                elif current.status in _TERMINAL_STATES:
+                if current.status in {"cancelled", "done", "error"}:
                     connection.commit()
                     return current
-                if current.status == "pending" and not current.owner_id:
+                if current.status == "interrupted":
                     new_status, intent = "cancelled", ""
-                elif current.status == "paused" and not current.owner_id:
+                elif current.status in {"pending", "paused"} and not current.owner_id:
                     new_status, intent = "cancelled", ""
+                elif current.status == "cancelling":
+                    # A second cancel is an idempotent acknowledgement of the
+                    # existing request; do not churn version/updated_at.
+                    connection.commit()
+                    return current
                 else:
                     new_status, intent = "cancelling", "cancel"
             else:
@@ -1044,13 +1047,129 @@ class TaskRepository:
         return cleaned
 
     @staticmethod
-    def normalize_restored_tasks(project: str) -> int:
+    def _normalize_task_connection(
+        connection: sqlite3.Connection,
+        *,
+        project: str,
+    ) -> int:
+        """Normalize active rows in one already-open project task database.
+
+        Restore must be able to normalize a database while it is still under
+        ``.tmp_restore_*``.  Calling ``save_task`` for those rows would resolve
+        the project name through ``ProjectRepository`` and could accidentally
+        write a different, already-published project.  Keeping the transaction
+        on the supplied connection makes the operation both path-safe and
+        atomic.
+        """
+        now = _utc_now()
+        changed = 0
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            rows = connection.execute(
+                """
+                SELECT task_id FROM production_tasks
+                WHERE project=? AND status IN ('pending','running','pausing','paused','cancelling')
+                """,
+                (project,),
+            ).fetchall()
+            if rows:
+                ids = [str(row["task_id"]) for row in rows]
+                connection.execute(
+                    """
+                    UPDATE production_tasks
+                    SET status='interrupted', owner_id='', heartbeat_at='',
+                        control_intent='', finished_at=?, updated_at=?,
+                        error_summary=CASE
+                          WHEN error_summary='' THEN '从项目备份恢复后需重新启动任务'
+                          ELSE error_summary END,
+                        version=version+1
+                    WHERE project=? AND status IN
+                      ('pending','running','pausing','paused','cancelling')
+                    """,
+                    (now, now, project),
+                )
+                changed = len(ids)
+            connection.commit()
+            return changed
+        except Exception:
+            connection.rollback()
+            raise
+
+    @staticmethod
+    def normalize_restored_task_database(
+        project_dir: str,
+        *,
+        project: str,
+    ) -> int:
+        """Normalize a copied task DB rooted at ``project_dir``.
+
+        ``project_dir`` may be a temporary restore tree that is not visible to
+        ``ProjectRepository`` yet.  No database is created when the backup did
+        not contain one; malformed or unreadable databases deliberately raise
+        so restore can discard the temporary tree instead of publishing a
+        partially normalized project.
+        """
+        root = os.path.abspath(str(project_dir or ""))
+        if not root or not os.path.isdir(root):
+            raise FileNotFoundError(f"恢复项目目录不存在: {project_dir}")
+        config_dir = project_paths.project_dir(root, "config", create=False)
+        database = os.path.join(config_dir, _DB_FILENAME)
+        if not os.path.isfile(database):
+            return 0
+        connection = sqlite3.connect(database, timeout=10.0)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout=10000")
+        try:
+            # Do not silently repair a malformed copied database here.  The
+            # schema must already be present for task normalization to be
+            # trustworthy; failures abort restore before publication.
+            tables = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='production_tasks'"
+            ).fetchone()
+            if tables is None:
+                raise sqlite3.DatabaseError("恢复任务数据库缺少 production_tasks 表")
+            return TaskRepository._normalize_task_connection(
+                connection,
+                project=str(project),
+            )
+        finally:
+            connection.close()
+
+    @staticmethod
+    def normalize_restored_tasks(
+        project: str,
+        *,
+        project_dir: str | None = None,
+    ) -> int:
         """Turn copied active runtime rows into recoverable interruptions.
 
         A backup can contain a stale owner/heartbeat from another machine.  A
         restored project must never advertise those rows as live work; the
         next explicit retry can create a fresh attempt under the new runtime.
+        When ``project_dir`` is supplied, normalization happens directly in
+        that tree (normally before an atomic restore publish).
         """
+        if project_dir is not None:
+            return TaskRepository.normalize_restored_task_database(
+                project_dir,
+                project=str(project),
+            )
+        database = TaskRepository.get_database_path(str(project), create=False)
+        if database and os.path.isfile(database):
+            connection = sqlite3.connect(database, timeout=10.0)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA busy_timeout=10000")
+            try:
+                return TaskRepository._normalize_task_connection(
+                    connection,
+                    project=str(project),
+                )
+            finally:
+                connection.close()
+
+        # Legacy task records have no project-local SQLite database.  Keep the
+        # compatibility path for those projects, but use the same repository
+        # save behavior as before.
         now = _utc_now()
         changed = 0
         for record in TaskRepository.list_tasks(project=project):

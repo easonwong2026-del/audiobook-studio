@@ -15,6 +15,7 @@ from repositories.task_repo import TaskRecord, TaskRepository
 from repositories.voice_cast_repo import VoiceCastRepository
 from services.export import (
     DeliveryInputChanged,
+    ExportOwnershipLost,
     ExportIdempotencyConflict,
     ExportPlanError,
     ExportService,
@@ -113,6 +114,20 @@ def test_workflow_moves_from_ready_to_quality_passed(delivery_project):
     passed = WorkflowService.get_state(delivery_project)
     assert passed["stage"] == "quality_passed"
     assert passed["next_actions"][0]["tool"] == "plan_export"
+
+
+def test_legacy_export_history_without_task_is_not_live(delivery_project):
+    _finish_and_review(delivery_project)
+    QualityRepository.create_history_record(
+        delivery_project,
+        "export_jobs",
+        "export",
+        {"status": "running", "task_id": "", "format": "wav"},
+    )
+
+    state = WorkflowService.get_state(delivery_project)
+    assert state["summary"]["active_exports"] == 0
+    assert state["stage"] == "quality_passed"
 
 
 def test_formal_export_requires_qa_and_returns_only_public_paths(delivery_project):
@@ -227,6 +242,74 @@ def test_export_worker_rejects_delivery_input_mutation(delivery_project, monkeyp
     with pytest.raises(DeliveryInputChanged):
         ExportService.execute_export_job(record)
     assert not QualityRepository.list_history(delivery_project, "delivery_manifests")
+
+
+def test_export_worker_cannot_publish_after_runtime_ownership_loss(
+    delivery_project,
+    monkeypatch,
+):
+    _finish_and_review(delivery_project)
+    plan = ExportService.plan_export(delivery_project, "wav")
+    options = ExportService._task_options(plan, bitrate="192k")
+    record = TaskRecord(
+        task_id="export_runtime_fence",
+        task_type="export",
+        project=delivery_project,
+        status="pending",
+        options=options,
+        source="mcp",
+        created_at="2026-08-09T00:00:00Z",
+        updated_at="2026-08-09T00:00:00Z",
+    )
+    outcome, _ = TaskRepository.create_runtime_task(record)
+    assert outcome == "created"
+    owner = "runtime-fence-owner"
+    claimed = TaskRepository.claim_next_pending(owner, {"export"})
+    assert claimed is not None
+    running = TaskRepository.persist_runtime_state(
+        claimed.task_id,
+        owner,
+        status="running",
+        progress=claimed.progress,
+        failed_segment_ids=[],
+        error_summary="",
+        log_lines=[],
+    )
+    assert running is not None
+
+    def publish_then_lose_ownership(
+        _project_dir,
+        _fmt,
+        _bitrate,
+        output_dir="",
+        **_kwargs,
+    ):
+        output = os.path.join(output_dir, "fenced.wav")
+        wavfile.write(output, 22050, np.ones(2205, dtype=np.int16))
+        TaskRepository.mark_orphaned_interrupted("new-runtime-owner")
+        return output
+
+    monkeypatch.setattr(
+        ExportService,
+        "export",
+        staticmethod(publish_then_lose_ownership),
+    )
+    with pytest.raises(ExportOwnershipLost):
+        ExportService.execute_export_job(running, owner_id=owner)
+
+    assert TaskRepository.load_task(running.task_id).status == "interrupted"
+    assert not any(
+        item.get("ready")
+        for item in QualityRepository.list_history(
+            delivery_project, "delivery_manifests"
+        )
+    )
+    export_dir = os.path.join(
+        ProjectRepository.get_project_dir(delivery_project),
+        "exports",
+        running.task_id,
+    )
+    assert not os.path.exists(export_dir)
 
 
 def test_start_export_returns_before_slow_worker_finishes(delivery_project, monkeypatch):

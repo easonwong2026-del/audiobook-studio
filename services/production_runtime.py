@@ -55,6 +55,8 @@ class ProductionRuntime:
         )
         self._export_future: Future[Any] | None = None
         self._export_record: TaskRecord | None = None
+        self._ownership_lock = threading.RLock()
+        self._lock_release_deferred = False
 
     @property
     def is_running(self) -> bool:
@@ -70,6 +72,12 @@ class ProductionRuntime:
     def start_background(self) -> bool:
         if self.is_running:
             return True
+        with self._state_lock:
+            if self._export_future is not None and not self._export_future.done():
+                # A stopped runtime keeps ownership while its export worker is
+                # still capable of publishing.  It cannot be restarted or
+                # replaced in-process until that worker has settled.
+                return False
         if not self.lock.acquire(blocking=False):
             return False
         # This is the only legal interruption-repair point.  Merely reading a
@@ -92,11 +100,20 @@ class ProductionRuntime:
         try:
             self._run_loop()
         finally:
-            self.lock.release()
+            self._release_lock_when_export_safe()
         return True
 
     def stop(self, timeout: float = 2.0) -> None:
         self._stop.set()
+        with self._state_lock:
+            export_future = self._export_future
+            export_record = self._export_record
+        if export_future is not None and not export_future.done() and export_record:
+            try:
+                TaskRepository.request_control(export_record.task_id, "cancel")
+            except (KeyError, ValueError):
+                # The worker may already have reached a terminal state.
+                pass
         thread = self._thread
         if thread and thread is not threading.current_thread():
             thread.join(timeout=max(timeout, 0.0))
@@ -105,22 +122,36 @@ class ProductionRuntime:
         # reset.  Drain an in-flight export while the caller's project context
         # is still valid, but retain the timeout guarantee for a genuinely
         # long-running worker.
-        export_future = self._export_future
         remaining = max(float(timeout), 0.0)
         if export_future is not None and not export_future.done() and remaining:
-            started = time.monotonic()
             try:
                 export_future.result(timeout=remaining)
             except Exception:
                 # The runtime already persists task failures; stopping should
                 # not re-raise a worker exception into a client cleanup path.
                 pass
-            remaining = max(remaining - (time.monotonic() - started), 0.0)
         self._export_executor.shutdown(
             wait=bool(export_future is None or export_future.done()),
             cancel_futures=True,
         )
-        self.lock.release()
+        # If the timeout expires, the export thread remains alive and the OS
+        # singleton lock must remain held. The completion callback below
+        # releases it only after the worker can no longer publish.
+        self._release_lock_when_export_safe()
+
+    def _release_lock_when_export_safe(self) -> None:
+        """Release singleton ownership only after an export worker settles."""
+        with self._ownership_lock:
+            future = self._export_future
+            if future is not None and not future.done():
+                if not self._lock_release_deferred:
+                    self._lock_release_deferred = True
+                    future.add_done_callback(
+                        lambda _future: self._release_lock_when_export_safe()
+                    )
+                return
+            self._lock_release_deferred = False
+            self.lock.release()
 
     def poke(self) -> None:
         """Apply a just-written command promptly in inline/test mode."""
@@ -178,7 +209,7 @@ class ProductionRuntime:
             # by acquiring the OS lock before it can repair interrupted tasks.
             if self._thread is threading.current_thread():
                 self._thread = None
-            self.lock.release()
+            self._release_lock_when_export_safe()
 
     @staticmethod
     def _bindings(record: TaskRecord) -> dict[str, Any]:
@@ -296,6 +327,7 @@ class ProductionRuntime:
             result = ExportService.execute_export_job(
                 current,
                 is_cancelled=lambda: self._export_cancel_requested(record.task_id),
+                owner_id=self.owner_id,
             )
             progress = {
                 **dict(current.progress or {}),
