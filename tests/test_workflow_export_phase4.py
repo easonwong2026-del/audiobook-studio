@@ -41,6 +41,10 @@ SCRIPT = {
 
 @pytest.fixture
 def delivery_project(tmp_path, monkeypatch):
+    # Export is intentionally asynchronous.  Stop a prior inline runtime
+    # before changing the process-global project roots so its worker cannot
+    # observe this fixture's temporary directory mid-creation.
+    ProductionRuntimeClient.reset_inline()
     original = (
         ProjectRepository.WORKSPACE_ROOT,
         ProjectRepository.LEGACY_ROOT,
@@ -80,6 +84,7 @@ def delivery_project(tmp_path, monkeypatch):
         lambda path, target_lufs=-16.0: path,
     )
     yield "delivery"
+    ProductionRuntimeClient.reset_inline()
     (
         ProjectRepository.WORKSPACE_ROOT,
         ProjectRepository.LEGACY_ROOT,

@@ -101,7 +101,25 @@ class ProductionRuntime:
         if thread and thread is not threading.current_thread():
             thread.join(timeout=max(timeout, 0.0))
         self._thread = None
-        self._export_executor.shutdown(wait=False, cancel_futures=True)
+        # Inline/test callers may replace the project roots immediately after
+        # reset.  Drain an in-flight export while the caller's project context
+        # is still valid, but retain the timeout guarantee for a genuinely
+        # long-running worker.
+        export_future = self._export_future
+        remaining = max(float(timeout), 0.0)
+        if export_future is not None and not export_future.done() and remaining:
+            started = time.monotonic()
+            try:
+                export_future.result(timeout=remaining)
+            except Exception:
+                # The runtime already persists task failures; stopping should
+                # not re-raise a worker exception into a client cleanup path.
+                pass
+            remaining = max(remaining - (time.monotonic() - started), 0.0)
+        self._export_executor.shutdown(
+            wait=bool(export_future is None or export_future.done()),
+            cancel_futures=True,
+        )
         self.lock.release()
 
     def poke(self) -> None:
