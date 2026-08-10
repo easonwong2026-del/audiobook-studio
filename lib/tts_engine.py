@@ -8,6 +8,7 @@ import threading
 from . import config as _cfg
 from . import audio_format as af
 from .segment_cache import SpeakerEmbeddingLRU
+from .failures import PHASE_ENGINE_INFER
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,36 @@ _INFER_HAS_VAR_KEYWORD = False
 # 批量并发调用时引擎内部状态竞争。必须用 RLock——OOM 时 synthesize_segment 会递归
 # 调用自身，非重入锁会在同一线程第二次获取时死锁；RLock 允许同一线程重入。
 _ENGINE_LOCK = threading.RLock()
+
+
+class EngineRuntimeFailure(RuntimeError):
+    """Stable typed failure raised from the engine adapter layer.
+
+    ``phase == engine_infer`` + ``OSError(errno=22)`` is a *known recoverable
+    engine-runtime failure candidate*; the same errno from file publish /
+    WAV validation is classified elsewhere and must not trigger an engine
+    recycle.  The root cause of sustained Errno-22 remains an open question
+    (IndexTTS2 internal state / PyTorch / CUDA native runtime); this class
+    deliberately does not claim a specific cause.
+    """
+
+    code = "TTS_ENGINE_RUNTIME_FAILURE"
+
+    def __init__(
+        self,
+        phase: str,
+        message: str,
+        *,
+        errno: int | None = None,
+        recoverable: bool = True,
+        original_exception: BaseException | None = None,
+    ) -> None:
+        self.phase = str(phase or PHASE_ENGINE_INFER)
+        self.errno = errno
+        self.recoverable = bool(recoverable)
+        self.original_exception = original_exception
+        detail = f" (errno={errno})" if errno is not None else ""
+        super().__init__(f"{self.code} phase={self.phase}{detail}: {message}")
 
 
 
@@ -198,7 +229,31 @@ def synthesize_segment(
                 generation_kwargs = {}
                 if "num_beams" in param_names or has_var_keyword:
                     generation_kwargs["num_beams"] = num_beams
-                _tts.infer(**infer_kwargs, **generation_kwargs)
+                try:
+                    _tts.infer(**infer_kwargs, **generation_kwargs)
+                except EngineRuntimeFailure:
+                    raise
+                except oom_error:
+                    raise
+                except OSError as exc:
+                    # OSError(errno=22) raised from the model call is the
+                    # observed recoverable engine-runtime failure candidate.
+                    # The exact underlying cause (IndexTTS2 internal state /
+                    # PyTorch / CUDA native runtime) is not asserted here.
+                    raise EngineRuntimeFailure(
+                        PHASE_ENGINE_INFER,
+                        str(exc),
+                        errno=getattr(exc, "errno", None),
+                        recoverable=True,
+                        original_exception=exc,
+                    ) from exc
+                except Exception as exc:
+                    raise EngineRuntimeFailure(
+                        PHASE_ENGINE_INFER,
+                        str(exc),
+                        recoverable=False,
+                        original_exception=exc,
+                    ) from exc
                 empty_cache()  # 2.4 M-3：段级碎片化显存清理（守卫式，无 CUDA 时 no-op）
                 return output_path
 
@@ -246,7 +301,11 @@ def synthesize_segment(
                             logger.debug("清理 OOM 临时文件失败: %s", exc)
                     return output_path
                 else:
-                    raise RuntimeError(f"OOM after {MAX_RETRIES} retries: {text[:50]}...")
+                    raise EngineRuntimeFailure(
+                        PHASE_ENGINE_INFER,
+                        f"OOM after {MAX_RETRIES} retries: {text[:50]}...",
+                        recoverable=True,
+                    )
 
         return output_path
 
@@ -330,6 +389,70 @@ def invalidate_speaker_cache(speaker_audio: str | None = None) -> None:
         _SPEAKER_EMB_CACHE.pop(str(speaker_audio), None)
     else:
         _SPEAKER_EMB_CACHE.clear()
+
+
+def engine_is_initialized() -> bool:
+    """Return whether an engine instance is currently attached."""
+    return _tts is not None
+
+
+def reset_engine() -> None:
+    """Detach the current engine instance and release adapter-level state.
+
+    This is the *only* sanctioned way to drop the in-process model reference
+    (``_tts = None``).  It runs under ``_ENGINE_LOCK`` and performs:
+
+    - detach the current ``_tts`` instance (dropping Python references);
+    - reset the cached capability inspection;
+    - clear the speaker-embedding LRU and adapter-level caches;
+    - ``gc.collect()`` and a guarded ``torch.cuda.empty_cache()``.
+
+    Object-level recycle cannot guarantee that every native CUDA context /
+    IndexTTS2 internal handle is released; that limitation is documented in
+    the runtime lifecycle (process-level recycle happens via runtime restart
+    and ownership takeover).
+    """
+    global _tts, _CAPABILITY_ENGINE_ID, _CAPABILITY_ENGINE_REF
+    global _INFER_PARAM_NAMES, _INFER_HAS_VAR_KEYWORD
+    with _ENGINE_LOCK:
+        _tts = None
+        _CAPABILITY_ENGINE_ID = None
+        _CAPABILITY_ENGINE_REF = None
+        _INFER_PARAM_NAMES = frozenset()
+        _INFER_HAS_VAR_KEYWORD = False
+        _SPEAKER_EMB_CACHE.clear()
+        gc.collect()
+        empty_cache()
+
+
+def gpu_snapshot() -> dict:
+    """Best-effort GPU memory snapshot for diagnostics.
+
+    Never raises and never imports torch: when torch is not loaded or CUDA
+    is unavailable it returns ``{"available": False}`` so tests and CPU
+    environments remain fully runnable.
+    """
+    result = {"available": False}
+    import sys as _sys
+
+    if "torch" not in _sys.modules:
+        return result
+    torch = _sys.modules["torch"]
+    try:
+        if not getattr(torch.cuda, "is_available", lambda: False)():
+            return result
+        free_bytes, total_bytes = torch.cuda.mem_get_info()
+        result.update({
+            "available": True,
+            "allocated": torch.cuda.memory_allocated(),
+            "reserved": torch.cuda.memory_reserved(),
+            "max_allocated": torch.cuda.max_memory_allocated(),
+            "free": free_bytes,
+            "total": total_bytes,
+        })
+    except Exception:  # pylint: disable=broad-except
+        pass
+    return result
 
 
 def _concat_wavs(paths: list[str], out_path: str) -> None:

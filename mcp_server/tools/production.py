@@ -77,9 +77,15 @@ def retry_failed_segments(arguments: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def get_runtime_health(arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    """GPU-free runtime health snapshot (never initializes the model)."""
+    return _call(ProductionJobService.get_runtime_health)
+
+
 __all__ = [
     "cancel_production",
     "get_production_task",
+    "get_runtime_health",
     "list_production_tasks",
     "pause_production",
     "plan_production",

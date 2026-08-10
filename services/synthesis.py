@@ -33,7 +33,9 @@ _MAX_LOG_LINES = 50
 # 合法状���集合（供 UI / 守卫校验）
 SYNTHESIS_STATES = (
     "pending", "running", "pausing", "paused",
+    "recovering",
     "cancelling", "cancelled", "done", "error", "interrupted",
+    "needs_attention",
 )
 
 
@@ -87,6 +89,9 @@ class SynthesisState:
         default=None, repr=False, compare=False
     )
     failed_segment_ids: list[str] = field(default_factory=list)
+    recovery: Optional[dict] = field(default=None, repr=False, compare=False)
+    engine_generation: int = 0
+    last_failure: Optional[dict] = field(default=None, repr=False, compare=False)
 
     def append_log(self, line: str) -> None:
         """追加一行日志并保留末 50 行（D5）。"""
@@ -131,7 +136,8 @@ class SynthesisService:
               selected_chapters: Optional[list] = None,
               selected_segment_ids: Optional[list] = None,
               persist_task: bool = True,
-              voice_overrides: Optional[dict[str, str]] = None) -> str:
+              voice_overrides: Optional[dict[str, str]] = None,
+              recovery=None, budget=None) -> str:
         """提交后台合成，立即返回 task_id；重活在 worker 线程执行。
 
         阶段四：在提交 worker 前写入 TaskRecord（running 态）。
@@ -171,7 +177,7 @@ class SynthesisService:
             SynthesisService._run, state, project, bindings,
             num_beams, emotion, emo_alpha, speech_rate, cb_seg_state,
             selected_chapters, selected_segment_ids, persist_task,
-            voice_overrides,
+            voice_overrides, recovery, budget,
         )
         # 写入任务状态记录（running）
         if persist_task:
@@ -283,7 +289,8 @@ class SynthesisService:
              selected_chapters: Optional[list] = None,
              selected_segment_ids: Optional[list] = None,
              persist_task: bool = True,
-             voice_overrides: Optional[dict[str, str]] = None) -> None:
+             voice_overrides: Optional[dict[str, str]] = None,
+             recovery=None, budget=None) -> None:
         """worker 主体：驱动 ``lib.queue.synthesize_project``，逐 yield 写回 ``state``。
 
         段边界检查 ``state.cancel`` -> 协作取消（置 ``cancelled`` 终态）；检查
@@ -378,6 +385,8 @@ class SynthesisService:
                 cb_seg_state=cb_seg_state, selected_chapters=selected_chapters,
                 selected_segment_ids=selected_segment_ids,
                 voice_overrides=voice_overrides,
+                recovery=recovery,
+                budget=budget,
             )
             # 手动驱动生成器：在「段边界」检查暂停/取消，并控制是否向下拉取（暂停时
             # 不调 next，从而不提交新段）。等价于原 ``for raw in gen``，但支持协作暂停。
@@ -445,16 +454,30 @@ class SynthesisService:
                     if failed_segment and failed_segment not in state.failed_segment_ids:
                         state.failed_segment_ids.append(failed_segment)
                     state.append_log(raw.replace("[X]", "❌"))
+                elif raw.startswith("[re] stop"):
+                    # Recovery budget exhausted: the queue stops pulling new
+                    # segments.  Persist needs_attention and end the run.
+                    state.status = "needs_attention"
+                    state.append_log("⛔ 自动恢复失败，停止继续生产")
+                    state.notify()
+                    break
+                elif raw.startswith("[re] cancelled"):
+                    # Cancel won during recovery; the top-of-loop cancel
+                    # check transitions the task to cancelled without
+                    # pulling more segments.
+                    state.notify()
+                    continue
                 else:
                     state.append_log(raw)
                 state.notify()
 
-            state.status = "error" if state.failed_segment_ids else "done"
-            state.progress = min(1.0, state.completed / max(state.total, 1))
-            state.append_log(
-                "❌ 合成完成，但存在失败段落"
-                if state.failed_segment_ids else "✅ 合成完成"
-            )
+            if state.status != "needs_attention":
+                state.status = "error" if state.failed_segment_ids else "done"
+                state.progress = min(1.0, state.completed / max(state.total, 1))
+                state.append_log(
+                    "❌ 合成完成，但存在失败段落"
+                    if state.failed_segment_ids else "✅ 合成完成"
+                )
             if persist_task:
                 SynthesisService._persist_legacy_task(
                     state,

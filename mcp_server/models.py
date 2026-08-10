@@ -17,6 +17,8 @@ CAPABILITIES = [
     "chapter_role_resolution",
     "production_jobs",
     "production_task_control",
+    "runtime_health",
+    "engine_self_healing",
     "workflow_state",
     "quality_review",
     "repair_jobs",

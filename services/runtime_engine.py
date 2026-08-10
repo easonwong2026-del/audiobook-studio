@@ -30,8 +30,14 @@ from repositories._atomic import atomic_write
 
 logger = logging.getLogger(__name__)
 
-# Stable engine state values exposed to status queries.
-ENGINE_STATES = ("uninitialized", "loading", "ready", "error")
+# Stable engine state values exposed to status queries:
+#   unknown         no runtime has declared state (or runtime shut down)
+#   uninitialized   runtime alive, engine not loaded yet
+#   loading         init in progress
+#   ready           engine usable
+#   recovering      engine recycle in progress (self-healing)
+#   error           init/recycle terminal failure
+ENGINE_STATES = ("unknown", "uninitialized", "loading", "ready", "recovering", "error")
 
 # Stable machine-readable error code for engine bootstrap failures.
 TTS_ENGINE_INIT_FAILED = "TTS_ENGINE_INIT_FAILED"
@@ -70,6 +76,10 @@ def read_runtime_engine_status() -> dict[str, Any]:
         "owner_id": "",
         "updated_at": "",
         "error_summary": "",
+        "engine_generation": 0,
+        "recovery_count": 0,
+        "last_error_code": "",
+        "last_recovery_at": "",
     }
     path = runtime_engine_status_path()
     try:
@@ -86,6 +96,10 @@ def read_runtime_engine_status() -> dict[str, Any]:
             "owner_id": str(data.get("owner_id") or ""),
             "updated_at": str(data.get("updated_at") or ""),
             "error_summary": sanitize_public_error(data.get("error_summary")),
+            "engine_generation": int(data.get("engine_generation") or 0),
+            "recovery_count": int(data.get("recovery_count") or 0),
+            "last_error_code": str(data.get("last_error_code") or ""),
+            "last_recovery_at": str(data.get("last_recovery_at") or ""),
         }
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return empty
@@ -116,6 +130,10 @@ class RuntimeEngineLifecycle:
         self._state = "uninitialized"
         self._error_summary = ""
         self._pid = os.getpid()
+        self._generation = 0
+        self._recovery_count = 0
+        self._last_error_code = ""
+        self._last_recovery_at = ""
 
     @property
     def state(self) -> str:
@@ -136,6 +154,10 @@ class RuntimeEngineLifecycle:
                 "owner_id": self._owner_id,
                 "pid": self._pid,
                 "updated_at": _now(),
+                "engine_generation": self._generation,
+                "recovery_count": self._recovery_count,
+                "last_error_code": self._last_error_code,
+                "last_recovery_at": self._last_recovery_at,
             }
 
     def reset(self) -> None:
@@ -143,6 +165,7 @@ class RuntimeEngineLifecycle:
         with self._condition:
             self._state = "uninitialized"
             self._error_summary = ""
+            self._last_error_code = ""
             self._publish_unlocked("uninitialized", error_summary="")
 
     def ensure_ready(self) -> None:
@@ -170,6 +193,7 @@ class RuntimeEngineLifecycle:
                 summary = sanitize_public_error(exc)
                 self._error_summary = summary
                 self._state = "error"
+                self._last_error_code = "TTS_ENGINE_INIT_FAILED"
                 self._publish_unlocked("error", error_summary=summary)
                 logger.error(
                     "runtime_event=engine_init_failure pid=%s owner=%s error=%s",
@@ -178,6 +202,7 @@ class RuntimeEngineLifecycle:
                     summary,
                 )
                 raise EngineInitError(summary) from exc
+            self._generation += 1
             self._state = "ready"
             self._publish_unlocked("ready", error_summary="")
             logger.info(
@@ -185,6 +210,58 @@ class RuntimeEngineLifecycle:
                 self._pid,
                 self._owner_id,
             )
+
+    def recycle(self) -> int:
+        """Detach the real engine, reload it, and advance the generation.
+
+        Calls ``lib.tts_engine.reset_engine()`` (actual ``_tts`` detach under
+        ``_ENGINE_LOCK``, cache clearing, ``gc``, guarded CUDA cache flush)
+        followed by a fresh ``init_engine()``.  On success the generation
+        increments and the state returns to ``ready``; on failure the state
+        becomes ``error`` and ``EngineInitError`` is raised so the caller
+        can fail the task fast.
+        """
+        with self._condition:
+            if self._state not in {"ready", "uninitialized", "error"}:
+                raise EngineInitError("引擎当前状态不能执行 recycle")
+            self._state = "recovering"
+            self._publish_unlocked("recovering", error_summary="")
+            try:
+                from lib import tts_engine
+
+                tts_engine.reset_engine()
+                tts_engine.init_engine()
+            except Exception as exc:  # pylint: disable=broad-except
+                summary = sanitize_public_error(exc)
+                self._error_summary = summary
+                self._state = "error"
+                self._last_error_code = "TTS_ENGINE_INIT_FAILED"
+                self._publish_unlocked("error", error_summary=summary)
+                logger.error(
+                    "runtime_event=engine_recycle_failure pid=%s owner=%s "
+                    "generation=%s recovery_count=%s error=%s",
+                    self._pid,
+                    self._owner_id,
+                    self._generation,
+                    self._recovery_count,
+                    summary,
+                )
+                raise EngineInitError(summary) from exc
+            self._generation += 1
+            self._recovery_count += 1
+            self._last_recovery_at = _now()
+            self._last_error_code = ""
+            self._state = "ready"
+            self._publish_unlocked("ready", error_summary="")
+            logger.info(
+                "runtime_event=engine_recycle_success pid=%s owner=%s "
+                "generation=%s recovery_count=%s",
+                self._pid,
+                self._owner_id,
+                self._generation,
+                self._recovery_count,
+            )
+            return self._generation
 
     def mark_unknown(self) -> None:
         """Declare the runtime no longer owns a live engine (shutdown)."""
@@ -202,6 +279,10 @@ class RuntimeEngineLifecycle:
                 "owner_id": self._owner_id,
                 "updated_at": _now(),
                 "error_summary": sanitize_public_error(error_summary),
+                "engine_generation": self._generation,
+                "recovery_count": self._recovery_count,
+                "last_error_code": self._last_error_code,
+                "last_recovery_at": self._last_recovery_at,
             })
         except Exception:  # pylint: disable=broad-except
             # A status snapshot is best-effort; engine work must not depend

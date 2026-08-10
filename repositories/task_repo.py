@@ -34,8 +34,8 @@ _RUNTIME_TASK_TYPES = frozenset({
     "voice_preview",
     "export",
 })
-_ACTIVE_STATES = ("pending", "running", "pausing", "paused", "cancelling")
-_TERMINAL_STATES = ("cancelled", "done", "error", "interrupted")
+_ACTIVE_STATES = ("pending", "running", "pausing", "paused", "recovering", "cancelling")
+_TERMINAL_STATES = ("cancelled", "done", "error", "interrupted", "needs_attention")
 
 
 def _default_progress() -> dict[str, Any]:
@@ -777,6 +777,10 @@ class TaskRepository:
                     new_status, intent = "paused", "pause"
                 elif current.status == "running":
                     new_status, intent = "pausing", "pause"
+                elif current.status == "recovering":
+                    # Pause wins over an in-flight engine recovery: the
+                    # worker completes safe teardown and confirms paused.
+                    intent = "pause"
                 else:
                     raise ValueError(current.status)
             elif action == "resume":
@@ -790,7 +794,7 @@ class TaskRepository:
                 if current.status in {"cancelled", "done", "error"}:
                     connection.commit()
                     return current
-                if current.status == "interrupted":
+                if current.status in {"interrupted", "needs_attention"}:
                     new_status, intent = "cancelled", ""
                 elif current.status in {"pending", "paused"} and not current.owner_id:
                     new_status, intent = "cancelled", ""

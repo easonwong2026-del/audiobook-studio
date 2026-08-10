@@ -128,6 +128,7 @@ def test_stdio_methods_and_no_gradio_import():
         "regenerate_segments", "get_repair_task", "list_repairs",
         "plan_export", "start_export", "get_export_task", "list_exports",
         "get_delivery_manifest",
+        "get_runtime_health",
     }
     path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "mcp_server")
     for root, _dirs, files in os.walk(path):

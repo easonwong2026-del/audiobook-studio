@@ -103,12 +103,45 @@ Web ─────┘                         SynthesisService / lib / TTS
 | pause_production / resume_production | 在段边界协作暂停/恢复 |
 | cancel_production | 返回 cancelling，worker 到段边界后写 cancelled |
 | retry_failed_segments | 只重试实际失败或缺失的段落 |
+| get_runtime_health | GPU-free 运行时/引擎健康快照，不加载模型 |
 
-任务状态为：`pending`、`running`、`pausing`、`paused`、`cancelling`、
-`cancelled`、`done`、`error`、`interrupted`。`pause`/`cancel` 先持久化意图，
-worker 到段边界后确认最终状态。客户端读取永远不会把任务判成
+任务状态为：`pending`、`running`、`pausing`、`paused`、`recovering`、
+`cancelling`、`cancelled`、`done`、`error`、`interrupted`、
+`needs_attention`。`pause`/`cancel` 先持久化意图，worker 到段边界后确认
+最终状态。客户端读取永远不会把任务判成
 `interrupted`；只有新的 runtime 成功取得 OS 单实例锁后，才会修复上一 owner
-遗留的 active attempt。`resume_production` 会创建 child attempt，保留恢复历史。
+遗留的 active attempt。`resume_production` 会创建 child attempt，保留恢复历史；
+`resume_production` 也接受 `needs_attention` 任务（重试剩余段落）。
+
+### Self-healing（失败驱动的引擎恢复）
+
+`ProductionRuntime` 在 claim task 后做 engine preflight；合成期若出现
+`phase=engine_infer` 且 `OSError(errno=22)` 之类的 recoverable engine-runtime
+failure，运行时自动暂停提交新 segment：
+
+```text
+running → recovering (1/2) → engine recycle（真实 reset + reload）→ 重试同一 segment
+        → success → running
+        → still failing ×2 → needs_attention
+```
+
+- 恢复预算（`lib/failures.RecoveryBudget`）：`segment_retry_limit=1`、
+  `engine_recycle_limit=2`、`systemic_failure_threshold=3`（同一 fingerprint
+  出现在 3 个不同 segment 时停止拉取新段）。
+- `recovering` 是 active 状态；`needs_attention` 是 terminal-like 状态，允许
+  `resume_production`（retry_task）、`cancel_production` 与 `get_runtime_health`
+  （inspect），不阻塞新任务。
+- `get_production_task` 在恢复中/需处理时返回 `recovery` 对象：
+  `reason_code`、`attempt`、`max_attempts`、`engine_generation`、
+  `retry_segment`、`fingerprint`、`exception_type`、`errno`、`phase`、
+  `recovered`、`last_recovery_at`；`needs_attention` 额外返回 `error` 与
+  `next_actions`。
+- 引擎 recycle 调用 `tts_engine.reset_engine()`（真实 detach `_tts`、清空
+  embedding/capability cache、`gc`、guarded `empty_cache`）后重新 `init_engine()`，
+  generation +1。对象级 recycle 不保证清除 CUDA context/native handle；
+  recycle 失败时 runtime 退出，下一次任务由新 runtime 进程接管（process 级恢复）。
+- 普通 segment failure（文本/资产/IO）与 engine failure 严格分离：
+  `errno=22` 来自 `atomic_publish`/`wav_validate` 时不会触发 engine recycle。
 
 任务存放在项目 `01_项目配置/production_tasks.sqlite3`。同一项目同时只允许一个
 active production task。重复的 `project + task_type + idempotency_key` 且 payload
@@ -134,6 +167,11 @@ active pointer；正式导出固定一份 revision snapshot，并生成 Delivery
 | regenerate_segments / get_repair_task / list_repairs | 创建和查询 revision-safe 修复 |
 | plan_export / start_export / get_export_task / list_exports | 正式导出的 readiness、执行和历史 |
 | get_delivery_manifest | 获取交付物相对路径、校验和与 revision snapshot 摘要 |
+
+`get_workflow_state` 在任务 `recovering` 时建议等待 recovery（不推荐重复
+`start_production`）；任务 `needs_attention` 时返回 `retry_task`（
+`resume_production`）、`inspect_runtime_health`（`get_runtime_health`）与
+`cancel_task` 三个 next_actions。
 
 `plan_export` 会检查缺段、生产失败、QA policy、metadata、active production/repair/export、
 regenerating revision、项目完成度和 FFmpeg。它同时返回确定性的

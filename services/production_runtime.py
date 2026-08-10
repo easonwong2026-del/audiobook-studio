@@ -25,6 +25,7 @@ from repositories.task_repo import TaskRecord, TaskRepository
 
 from .runtime_lock import ProcessFileLock
 from .runtime_engine import EngineInitError, RuntimeEngineLifecycle
+from lib.failures import RecoveryBudget, RecoveryHooks, SynthesisFailure
 from .synthesis import SynthesisService, SynthesisState
 
 logger = logging.getLogger(__name__)
@@ -145,8 +146,19 @@ class ProductionRuntime:
     def stop(self, timeout: float = 2.0) -> None:
         self._stop.set()
         with self._state_lock:
+            state = self._current_state
             export_future = self._export_future
             export_record = self._export_record
+        if state is not None:
+            # Release a worker that is blocked in a pause gate (normal
+            # segment boundary or engine-recovery gate).  Persistence is
+            # detached first so the durable task keeps its last active
+            # state (paused/recovering/running) and is repaired by the
+            # normal orphan-interrupt path on the next runtime takeover,
+            # instead of being misclassified as a user cancel.
+            state.on_update = None
+            state.paused = False
+            state.cancel = True
         if export_future is not None and not export_future.done() and export_record:
             try:
                 TaskRepository.request_control(export_record.task_id, "cancel")
@@ -220,7 +232,7 @@ class ProductionRuntime:
                 else:
                     self._apply_control(state)
                     future = state.future
-                    if state.status in {"cancelled", "done", "error"} and (
+                    if state.status in {"cancelled", "done", "error", "needs_attention"} and (
                         future is None or future.done()
                     ):
                         with self._state_lock:
@@ -345,6 +357,7 @@ class ProductionRuntime:
         except EngineInitError as exc:
             self._fail_synthesis_engine_init(record, state, exc)
             return
+        state.engine_generation = self._engine.snapshot()["engine_generation"]
         options = record.options if isinstance(record.options, dict) else {}
         _runtime_event(
             "task_start",
@@ -369,12 +382,138 @@ class ProductionRuntime:
                     if isinstance(options.get("voice_overrides"), dict)
                     else None
                 ),
+                recovery=self._build_recovery_hooks(state, record),
+                budget=RecoveryBudget(),
             )
         except Exception as exc:
             state.status = "error"
             state.error = str(exc)
             state.append_log(f"❌ 启动生产运行时失败: {exc}")
             state.notify()
+
+    def _build_recovery_hooks(
+        self,
+        state: SynthesisState,
+        record: TaskRecord,
+    ) -> RecoveryHooks:
+        """Build the runtime-owned self-healing callbacks for one task."""
+
+        def _recycle() -> int:
+            generation = self._engine.recycle()
+            state.engine_generation = generation
+            return generation
+
+        def _cancel_requested() -> bool:
+            return bool(state.cancel)
+
+        def _pause_gate() -> None:
+            while state.paused and not state.cancel:
+                if state.status != "paused":
+                    state.status = "paused"
+                    state.append_log("⏸ 恢复前已暂停，等待人工恢复")
+                    state.notify()
+                time.sleep(0.1)
+
+        def _on_recovery(event: dict) -> None:
+            payload = dict(event)
+            event_name = str(payload.get("event") or "")
+            previous = dict(state.recovery or {})
+            state.engine_generation = int(
+                payload.get("engine_generation") or state.engine_generation or 0
+            )
+            state.recovery = {
+                "reason_code": str(
+                    payload.get("reason_code") or previous.get("reason_code") or ""
+                ),
+                "attempt": int(
+                    payload.get("attempt") or previous.get("attempt") or 0
+                ),
+                "max_attempts": int(
+                    payload.get("max_attempts") or previous.get("max_attempts") or 0
+                ),
+                "engine_generation": state.engine_generation,
+                "retry_segment": str(
+                    payload.get("segment_id") or previous.get("retry_segment") or ""
+                ),
+                "fingerprint": str(
+                    payload.get("fingerprint") or previous.get("fingerprint") or ""
+                ),
+                "exception_type": str(
+                    payload.get("exception_type")
+                    or previous.get("exception_type")
+                    or ""
+                ),
+                "errno": (
+                    payload.get("errno")
+                    if payload.get("errno") is not None
+                    else previous.get("errno")
+                ),
+                "phase": str(
+                    payload.get("phase") or previous.get("phase") or ""
+                ),
+                "recovered": event_name == "recovered",
+                "last_recovery_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            }
+            if event_name == "recovering":
+                state.status = "recovering"
+                state.append_log(
+                    "🔄 检测到 TTS 运行时异常，正在自动恢复 "
+                    f"{payload.get('attempt')}/{payload.get('max_attempts')}，"
+                    f"将重试 {payload.get('segment_id')}"
+                )
+            elif event_name == "recovered":
+                state.status = "running"
+                state.append_log(
+                    f"✅ TTS 已恢复（generation {state.engine_generation}），继续生产"
+                )
+            elif event_name == "recycle_failed":
+                state.append_log("❌ 引擎回收失败")
+            elif event_name == "exhausted":
+                state.status = "needs_attention"
+                state.append_log("❌ 自动恢复失败，需要处理")
+            state.notify()
+
+        def _on_failure(failure: SynthesisFailure) -> None:
+            state.last_failure = failure.as_dict()
+            try:
+                from lib import tts_engine
+
+                gpu = tts_engine.gpu_snapshot()
+            except Exception:  # pylint: disable=broad-except
+                gpu = {}
+            engine = self._engine.snapshot()
+            logger.error(
+                "runtime_event=segment_failure task_id=%s project=%s "
+                "owner=%s pid=%s engine_state=%s engine_generation=%s "
+                "recovery_attempt=%s chapter_id=%s segment_id=%s phase=%s "
+                "exception_type=%s errno=%s message=%s origin=%s "
+                "fingerprint=%s num_beams=%s gpu=%s",
+                record.task_id,
+                record.project,
+                self.owner_id,
+                os.getpid(),
+                engine["state"],
+                engine["engine_generation"],
+                state.recovery.get("attempt") if isinstance(state.recovery, dict) else None,
+                failure.chapter_id,
+                failure.segment_id,
+                failure.phase,
+                failure.exception_type,
+                failure.errno,
+                failure.message[:160],
+                failure.traceback_origin,
+                failure.fingerprint,
+                (record.options or {}).get("num_beams", 2),
+                gpu,
+            )
+
+        return RecoveryHooks(
+            recycle=_recycle,
+            cancel_requested=_cancel_requested,
+            pause_gate=_pause_gate,
+            on_recovery=_on_recovery,
+            on_failure=_on_failure,
+        )
 
     def _fail_synthesis_engine_init(
         self,
@@ -776,6 +915,8 @@ class ProductionRuntime:
             "percent": round((completed / total) * 100, 1) if total else 0.0,
             "current_chapter": chapter,
             "current_segment": state.current_segment,
+            "engine_generation": int(state.engine_generation or 0),
+            "recovery": state.recovery,
         }
 
     def _on_state_update(self, state: SynthesisState) -> None:
@@ -783,10 +924,26 @@ class ProductionRuntime:
             record = self._current_record
         if record is None or record.task_id != state.task_id:
             return
+        # Engine-generation fencing: an update carrying a stale generation
+        # must never overwrite the state published after an engine recycle.
+        current_generation = self._engine.snapshot()["engine_generation"]
+        if (
+            int(state.engine_generation or 0) > 0
+            and int(state.engine_generation or 0) < current_generation
+        ):
+            logger.warning(
+                "runtime_event=stale_generation_update task_id=%s "
+                "state_generation=%s engine_generation=%s status=%s",
+                state.task_id,
+                state.engine_generation,
+                current_generation,
+                state.status,
+            )
+            return
         if state.status == "done" and state.failed_segment_ids:
             state.status = "error"
             state.error = "存在失败段落"
-        if state.status in {"cancelled", "done", "error"}:
+        if state.status in {"cancelled", "done", "error", "needs_attention"}:
             _runtime_event(
                 "task_terminal",
                 task_id=state.task_id,

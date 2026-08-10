@@ -860,9 +860,13 @@ class VoiceCastResolver:
                 "new_roles": 0,
                 "cast_locked": False,
                 "cast_ready": cast_ready,
+                "production_ready": cast_ready,
                 "runtime_status": runtime_status["state"],
                 "engine_ready": runtime_status["state"] == "ready",
-                "synthesis_ready": cast_ready and runtime_status["state"] == "ready",
+                # Eligibility to START synthesis: an unknown/uninitialized
+                # engine is fine (the runtime preflights on task claim);
+                # only a declared engine error blocks starting.
+                "synthesis_ready": cast_ready and runtime_status["state"] != "error",
                 "roles": items,
             }
         roster = _roster_map(roster_document)
@@ -926,9 +930,10 @@ class VoiceCastResolver:
             "new_role_details": list(new_role_details.values()),
             "cast_locked": cast.get("status") == "locked",
             "cast_ready": cast_ready,
+            "production_ready": cast_ready,
             "runtime_status": runtime_status["state"],
             "engine_ready": runtime_status["state"] == "ready",
-            "synthesis_ready": cast_ready and runtime_status["state"] == "ready",
+            "synthesis_ready": cast_ready and runtime_status["state"] != "error",
             "roles": items,
             "errors": validation["errors"],
             "warnings": validation["warnings"],

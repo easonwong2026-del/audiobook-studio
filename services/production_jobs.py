@@ -25,13 +25,15 @@ logger = logging.getLogger(__name__)
 
 PRODUCTION_TASK_TYPE = "synthesis"
 PRODUCTION_STATES = (
-    "pending", "running", "pausing", "paused", "cancelling",
-    "cancelled", "done", "error", "interrupted",
+    "pending", "running", "pausing", "paused", "recovering", "cancelling",
+    "cancelled", "done", "error", "interrupted", "needs_attention",
 )
 ACTIVE_PRODUCTION_STATES = frozenset({
-    "pending", "running", "pausing", "paused", "cancelling",
+    "pending", "running", "pausing", "paused", "recovering", "cancelling",
 })
-TERMINAL_PRODUCTION_STATES = frozenset({"cancelled", "done", "error"})
+TERMINAL_PRODUCTION_STATES = frozenset({
+    "cancelled", "done", "error", "needs_attention",
+})
 VALID_SOURCES = frozenset({"mcp", "web", "system", "recovery"})
 
 
@@ -338,16 +340,21 @@ class ProductionJobService:
             item for item in status.get("warnings", [])
             if isinstance(item, dict)
         )
-        cast_ready = bool(selected_ready) and not blockers
+        production_ready = bool(selected_ready) and not blockers
+        # engine_state unknown/uninitialized is NOT a blocker: the runtime
+        # preflights the engine when it claims the task.  Only a declared
+        # engine error makes starting pointless (it would fail fast).
+        synthesis_ready = production_ready and runtime_status != "error"
         return {
             "locked": cast_locked,
             "bound": int(status.get("bound", 0) or 0),
             "unbound": int(status.get("unbound", 0) or 0),
             "mode": mode,
-            "cast_ready": cast_ready,
+            "cast_ready": production_ready,
             "runtime_status": runtime_status,
             "engine_ready": engine_ready,
-            "synthesis_ready": cast_ready and engine_ready,
+            "production_ready": production_ready,
+            "synthesis_ready": synthesis_ready,
         }, blockers, warnings
 
     @classmethod
@@ -660,6 +667,9 @@ class ProductionJobService:
         base_progress["failed"] = len(failed_ids) if failed_ids else int(base_progress.get("failed", 0) or 0)
         base_progress["percent"] = round((completed / total) * 100, 1) if total else 0.0
         # Do not expose artifact_dir: it is intentionally a private local path.
+        recovery = base_progress.get("recovery")
+        recovery_payload = recovery if isinstance(recovery, dict) else None
+        engine_generation = int(base_progress.get("engine_generation") or 0)
         response = {
             "task_id": record.task_id,
             "task_type": record.task_type,
@@ -683,6 +693,33 @@ class ProductionJobService:
             "heartbeat_at": record.heartbeat_at,
             "error_summary": _public_error(record.error_summary),
         }
+        if recovery_payload:
+            response["recovery"] = {
+                key: recovery_payload[key]
+                for key in (
+                    "reason_code", "attempt", "max_attempts",
+                    "engine_generation", "retry_segment", "fingerprint",
+                    "exception_type", "errno", "phase", "recovered",
+                    "last_recovery_at",
+                )
+                if key in recovery_payload
+            }
+        if engine_generation:
+            response["engine_generation"] = engine_generation
+        if status == "needs_attention":
+            error_details = {
+                "code": str(recovery_payload.get("reason_code") or record.error_summary.split(":")[0] if record.error_summary else "TTS_ENGINE_RUNTIME_FAILURE"),
+            }
+            if recovery_payload:
+                for key in ("exception_type", "errno", "phase", "fingerprint"):
+                    if recovery_payload.get(key) not in (None, ""):
+                        error_details[key] = recovery_payload[key]
+            response["error"] = error_details
+            response["next_actions"] = [
+                "retry_task",
+                "inspect_runtime_health",
+                "cancel_task",
+            ]
         if log_lines:
             response["log_lines"] = log_lines
         return response
@@ -781,7 +818,7 @@ class ProductionJobService:
     @classmethod
     def resume(cls, task_id: str) -> dict[str, Any]:
         record = cls._get_record(task_id)
-        if record.status == "interrupted":
+        if record.status in {"interrupted", "needs_attention"}:
             return cls._resume_interrupted(record)
         try:
             updated = TaskRepository.request_control(record.task_id, "resume")
@@ -852,6 +889,35 @@ class ProductionJobService:
         return result
 
     retry_failed = retry_failed_segments
+
+    @classmethod
+    def get_runtime_health(cls) -> dict[str, Any]:
+        """GPU-free runtime health snapshot for Agent inspection."""
+        from services.runtime_engine import read_runtime_engine_status
+
+        status = read_runtime_engine_status()
+        active_task: Optional[dict[str, Any]] = None
+        for record in TaskRepository.list_tasks(status=None, task_type=None):
+            if record.status in ACTIVE_PRODUCTION_STATES and record.task_type == "synthesis":
+                active_task = {
+                    "task_id": record.task_id,
+                    "project": record.project,
+                    "status": record.status,
+                }
+                break
+        return {
+            "runtime_state": status["state"],
+            "owner_id": status["owner_id"],
+            "pid": status["pid"],
+            "engine_state": status["state"],
+            "engine_generation": status["engine_generation"],
+            "recovery_count": status["recovery_count"],
+            "last_error_code": status["last_error_code"],
+            "last_recovery_at": status["last_recovery_at"],
+            "updated_at": status["updated_at"],
+            "active_task_id": active_task["task_id"] if active_task else None,
+            "active_task": active_task,
+        }
 
 
 __all__ = [

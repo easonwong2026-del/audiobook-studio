@@ -34,6 +34,7 @@ from .tools.voice_cast import (
 from .tools.production import (
     cancel_production,
     get_production_task,
+    get_runtime_health,
     list_production_tasks,
     pause_production,
     plan_production,
@@ -332,8 +333,9 @@ _TOOLS: dict[str, dict[str, Any]] = {
                 "status": {
                     "type": "string",
                     "enum": [
-                        "pending", "running", "pausing", "paused", "cancelling",
-                        "cancelled", "done", "error", "interrupted",
+                        "pending", "running", "pausing", "paused", "recovering",
+                        "cancelling", "cancelled", "done", "error",
+                        "interrupted", "needs_attention",
                     ],
                 },
                 "source": {"type": "string", "enum": ["mcp", "web", "system", "recovery"]},
@@ -383,6 +385,11 @@ _TOOLS: dict[str, dict[str, Any]] = {
             },
             "additionalProperties": False,
         },
+    },
+    "get_runtime_health": {
+        "name": "get_runtime_health",
+        "description": "返回 GPU-free 的 TTS 运行时 / 引擎健康快照（不加载模型）。",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
 }
 
@@ -627,6 +634,7 @@ _HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "resume_production": resume_production,
     "cancel_production": cancel_production,
     "retry_failed_segments": retry_failed_segments,
+    "get_runtime_health": get_runtime_health,
     "get_workflow_state": get_workflow_state,
     "get_quality_report": get_quality_report,
     "list_review_segments": list_review_segments,
@@ -729,7 +737,11 @@ def _normalize_tool_payload(payload: Any) -> tuple[Any, bool]:
     if not isinstance(payload, dict):
         return payload, False
     raw_error = payload.get("error")
-    if isinstance(raw_error, dict):
+    # A payload with a top-level "error" key is a failure envelope only when
+    # it carries the full error contract (code + message).  Task snapshots
+    # may legitimately expose an "error" object for needs_attention without
+    # being a tool failure.
+    if isinstance(raw_error, dict) and "message" in raw_error:
         details = raw_error.get("details")
         if not isinstance(details, dict):
             details = {
