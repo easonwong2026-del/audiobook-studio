@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 # 懒加载：首次调用才初始化模型
 _tts = None
 _CAPABILITY_ENGINE_ID: int | None = None
+_CAPABILITY_ENGINE_REF = None
 _INFER_PARAM_NAMES: frozenset[str] = frozenset()
 _INFER_HAS_VAR_KEYWORD = False
 
@@ -40,12 +41,14 @@ _SPEAKER_EMB_CACHE = SpeakerEmbeddingLRU(maxsize=_cfg.get_int("embedding_cache_m
 
 def _engine_capabilities() -> tuple[frozenset[str], bool]:
     """Inspect one engine generation only once, outside the segment hot path."""
-    global _CAPABILITY_ENGINE_ID, _INFER_PARAM_NAMES, _INFER_HAS_VAR_KEYWORD
+    global _CAPABILITY_ENGINE_ID, _CAPABILITY_ENGINE_REF
+    global _INFER_PARAM_NAMES, _INFER_HAS_VAR_KEYWORD
     engine_id = id(_tts)
-    if _CAPABILITY_ENGINE_ID == engine_id:
+    if _CAPABILITY_ENGINE_REF is _tts:
         return _INFER_PARAM_NAMES, _INFER_HAS_VAR_KEYWORD
     if _tts is None:
         _CAPABILITY_ENGINE_ID = engine_id
+        _CAPABILITY_ENGINE_REF = _tts
         _INFER_PARAM_NAMES = frozenset()
         _INFER_HAS_VAR_KEYWORD = False
         return _INFER_PARAM_NAMES, _INFER_HAS_VAR_KEYWORD
@@ -56,6 +59,7 @@ def _engine_capabilities() -> tuple[frozenset[str], bool]:
         for parameter in signature.parameters.values()
     )
     _CAPABILITY_ENGINE_ID = engine_id
+    _CAPABILITY_ENGINE_REF = _tts
     return _INFER_PARAM_NAMES, _INFER_HAS_VAR_KEYWORD
 
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import zipfile
 
 import pytest
@@ -92,3 +93,59 @@ def test_restore_rejects_zip_slip(tmp_path, monkeypatch):
         zip_file.writestr("../outside.txt", b"")
     with pytest.raises(ValueError):
         ProjectBackupService.restore_backup(str(archive_path))
+
+
+def test_restore_normalizes_copied_active_runtime_tasks(tmp_path, monkeypatch):
+    _make_project(tmp_path, monkeypatch)
+    # The public backup API correctly blocks active work.  Bypass that guard
+    # here only to construct a portable fixture containing a stale owner.
+    monkeypatch.setattr(
+        "services.project.ensure_project_mutation_allowed",
+        lambda *_args, **_kwargs: None,
+    )
+    TaskRepository.save_task(TaskRecord(
+        task_id="export_backup_active",
+        task_type="export",
+        project="backup_book",
+        status="running",
+        owner_id="old-machine-runtime",
+        heartbeat_at="2026-08-09T00:00:00Z",
+        created_at="2026-08-09T00:00:00Z",
+        updated_at="2026-08-09T00:01:00Z",
+    ))
+    archive = ProjectBackupService.create_backup("backup_book")
+    ProjectRepository.archive_project("backup_book")
+    ProjectBackupService.restore_backup(archive)
+    restored = TaskRepository.load_task("export_backup_active")
+    assert restored is not None
+    assert restored.status == "interrupted"
+    assert restored.owner_id == ""
+
+
+def test_restore_normalization_failure_does_not_publish_project(tmp_path, monkeypatch):
+    _make_project(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "services.project.ensure_project_mutation_allowed",
+        lambda *_args, **_kwargs: None,
+    )
+    archive = ProjectBackupService.create_backup("backup_book")
+    ProjectRepository.archive_project("backup_book")
+
+    def fail_normalization(*_args, **_kwargs):
+        raise RuntimeError("normalization failed")
+
+    monkeypatch.setattr(
+        TaskRepository,
+        "normalize_restored_tasks",
+        staticmethod(fail_normalization),
+    )
+    with pytest.raises(RuntimeError, match="normalization failed"):
+        ProjectBackupService.restore_backup(archive)
+
+    final_dir = ProjectRepository.get_project_dir("backup_book")
+    assert not os.path.exists(final_dir)
+    workspace = os.path.dirname(final_dir)
+    assert not any(
+        name.startswith(".tmp_restore_")
+        for name in os.listdir(workspace)
+    )

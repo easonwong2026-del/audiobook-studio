@@ -247,6 +247,67 @@ def test_client_exit_does_not_release_runtime_process_lock(runtime_project, tmp_
     contender.release()
 
 
+def test_runtime_stop_retains_lock_until_export_worker_finishes(tmp_path):
+    lock_path = str(tmp_path / "runtime.lock")
+    runtime = ProductionRuntime(lock_path=lock_path, poll_interval=0.02)
+    assert runtime.start_background() is True
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocked_export():
+        started.set()
+        release.wait(5)
+
+    future = runtime._export_executor.submit(blocked_export)
+    runtime._export_future = future
+    assert started.wait(2)
+    runtime.stop(timeout=0.01)
+
+    contender = ProcessFileLock(lock_path)
+    assert contender.acquire(blocking=False) is False
+    release.set()
+    future.result(timeout=2)
+    deadline = time.time() + 2
+    while time.time() < deadline and not contender.acquire(blocking=False):
+        time.sleep(0.01)
+    assert contender.acquired is True
+    contender.release()
+
+
+def test_runtime_restart_interrupts_orphaned_export(runtime_project, tmp_path):
+    task = TaskRecord(
+        task_id="orphaned_export",
+        task_type="export",
+        project="book",
+        status="running",
+        owner_id="old-runtime",
+        created_at="2026-08-09T00:00:00Z",
+        updated_at="2026-08-09T00:00:00Z",
+    )
+    outcome, _ = TaskRepository.create_runtime_task(task)
+    assert outcome == "created"
+
+    runtime = ProductionRuntime(
+        owner_id="new-runtime",
+        lock_path=str(tmp_path / "runtime.lock"),
+        poll_interval=0.02,
+    )
+    assert runtime.start_background() is True
+    try:
+        deadline = time.time() + 2
+        while time.time() < deadline:
+            restored = TaskRepository.load_task(task.task_id)
+            if restored is not None and restored.status == "interrupted":
+                break
+            time.sleep(0.01)
+        restored = TaskRepository.load_task(task.task_id)
+        assert restored is not None
+        assert restored.status == "interrupted"
+        assert not restored.control_intent
+    finally:
+        runtime.stop()
+
+
 def test_worker_acknowledges_pause_only_at_generator_boundary(monkeypatch):
     def fake_synthesis(*_args, **_kwargs):
         yield "[0] done|0|0s"

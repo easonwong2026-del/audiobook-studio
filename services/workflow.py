@@ -5,8 +5,10 @@ from typing import Any
 
 from repositories.project_repo import ProjectRepository
 from repositories.quality_repo import QualityRepository
+from repositories.task_repo import TaskRepository
 from services.production_jobs import ProductionJobService
 from services.quality import QualityService
+from services.delivery import compute_delivery_input_snapshot
 from services.voice_cast import VoiceCastResolver
 
 
@@ -89,35 +91,76 @@ class WorkflowService:
         )
 
         exports = QualityRepository.list_history(project, "export_jobs")
-        active_exports = [
-            item for item in exports if item.get("status") in {"pending", "running"}
-        ]
+        active_exports = []
+        for item in exports:
+            if item.get("status") not in {"pending", "running"}:
+                continue
+            task_id = str(item.get("task_id") or "")
+            # Since #31, SQLite TaskRepository is the only source of truth for
+            # live exports.  #30 history rows without a durable task_id are
+            # retained as audit history but can never keep the workflow in an
+            # exporting state after a crash or upgrade.
+            if not task_id:
+                continue
+            task = TaskRepository.load_task(task_id)
+            if task is None or task.status not in {
+                "pending", "running", "cancelling",
+            }:
+                continue
+            active_exports.append(item)
+        history_task_ids = {
+            str(item.get("task_id") or "") for item in active_exports
+        }
+        for task in TaskRepository.list_tasks(project=project, task_type="export"):
+            if task.status in {"pending", "running", "cancelling"} and task.task_id not in history_task_ids:
+                active_exports.append({
+                    "export_id": task.task_id,
+                    "task_id": task.task_id,
+                    "status": task.status,
+                })
         manifests = QualityRepository.list_history(project, "delivery_manifests")
+        try:
+            delivery_snapshot = compute_delivery_input_snapshot(project)
+            current_delivery_hash = str(
+                delivery_snapshot.get("delivery_input_hash") or ""
+            )
+        except Exception:
+            # Workflow state should remain queryable for a partially-created or
+            # legacy project.  An unavailable snapshot can never make an old
+            # manifest current, so it is safe to treat delivery as stale.
+            delivery_snapshot = {}
+            current_delivery_hash = ""
         delivered = next(
-            (item for item in manifests if item.get("ready") is True),
+            (
+                item
+                for item in manifests
+                if item.get("ready") is True
+                and current_delivery_hash
+                and (
+                    not str(item.get("export_id") or "")
+                    or (
+                        (manifest_task := TaskRepository.load_task(
+                            str(item.get("export_id") or "")
+                        )) is not None
+                        and manifest_task.status == "done"
+                    )
+                )
+                and str(
+                    item.get("delivery_input_hash")
+                    or item.get("freshness_hash")
+                    or item.get("delivery_input_snapshot_hash")
+                    or item.get("input_snapshot_hash")
+                    or ""
+                )
+                == current_delivery_hash
+            ),
             None,
         )
+        latest_manifest = manifests[0] if manifests else None
 
         blockers: list[dict[str, Any]] = []
         actions: list[dict[str, Any]] = []
-        if delivered:
-            stage = "delivered"
-            actions.append(cls._action(
-                "inspect_delivery",
-                "get_delivery_manifest",
-                project,
-                "项目已有可交付成品清单。",
-            ))
-        elif active_exports:
-            stage = "exporting"
-            actions.append(cls._action(
-                "check_export",
-                "get_export_task",
-                project,
-                "导出任务正在运行。",
-                export_id=active_exports[0].get("export_id"),
-            ))
-        elif not cast_ready:
+        if not cast_ready:
             stage = "prepared" if not (script.get("voices") or {}) else "cast_pending"
             blockers.append({
                 "code": "VOICE_CAST_NOT_READY",
@@ -191,13 +234,38 @@ class WorkflowService:
                 scope={"all": True},
             ))
         elif quality_summary.get("passed", 0) == total and total > 0:
-            stage = "quality_passed"
-            actions.append(cls._action(
-                "plan_export",
-                "plan_export",
-                project,
-                "全部段落已通过质量检查，可以规划交付。",
-            ))
+            if active_exports:
+                stage = "exporting"
+                actions.append(cls._action(
+                    "check_export",
+                    "get_export_task",
+                    project,
+                    "导出任务正在运行。",
+                    export_id=active_exports[0].get("export_id"),
+                ))
+            elif delivered:
+                stage = "delivered"
+                actions.append(cls._action(
+                    "inspect_delivery",
+                    "get_delivery_manifest",
+                    project,
+                    "当前项目输入与最近一次可交付成品一致。",
+                    manifest_id=delivered.get("manifest_id"),
+                ))
+            else:
+                stage = "quality_passed"
+                reason = (
+                    "历史 Delivery Manifest 缺少 freshness hash 或输入已变化，"
+                    "需要重新导出。"
+                    if latest_manifest
+                    else "全部段落已通过质量检查，可以规划交付。"
+                )
+                actions.append(cls._action(
+                    "plan_export",
+                    "plan_export",
+                    project,
+                    reason,
+                ))
         else:
             stage = "quality_check"
             unchecked = (
@@ -235,6 +303,17 @@ class WorkflowService:
                 "active_repairs": len(active_repairs),
                 "active_exports": len(active_exports),
                 "delivered": bool(delivered),
+                "delivery_input_hash": current_delivery_hash,
+                "delivery_manifest_id": (
+                    delivered.get("manifest_id")
+                    if delivered else (
+                        latest_manifest.get("manifest_id")
+                        if latest_manifest else None
+                    )
+                ),
+                "delivery_manifest_stale": bool(
+                    latest_manifest and not delivered
+                ),
             },
             "blockers": blockers,
             "next_actions": actions,

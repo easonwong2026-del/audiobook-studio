@@ -196,6 +196,19 @@ class ProjectBackupService:
             errors = script_loader.validate_script(script)
             if errors:
                 raise ValueError("恢复项目剧本校验失败：" + "；".join(errors[:3]))
+
+            # Normalize copied runtime state while the restore is still
+            # private.  ``normalize_restored_tasks`` receives the temporary
+            # project root explicitly so it cannot resolve the project name to
+            # an already-published directory.  Any database/normalization
+            # failure therefore aborts before ``os.replace`` and the except
+            # block removes the complete temporary tree.
+            from repositories.task_repo import TaskRepository
+
+            TaskRepository.normalize_restored_tasks(
+                safe_name,
+                project_dir=temporary,
+            )
             os.replace(temporary, final_dir)
             return os.path.normpath(final_dir)
         except Exception:

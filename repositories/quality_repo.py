@@ -325,6 +325,53 @@ class QualityRepository:
         return cls._mutate(project_name, change)
 
     @classmethod
+    def save_technical_qa_batch(
+        cls,
+        project_name: str,
+        results: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Persist many technical-QA results in one cross-process mutation.
+
+        ``quality_state.json`` is a whole-state snapshot.  Calling the
+        single-result mutation once per segment would therefore repeatedly
+        acquire the OS lock and rewrite the complete snapshot.  Batch callers
+        prepare one result per analyzed revision and pay that cost only once.
+        Results without a revision (for example an ``AUDIO_MISSING`` finding)
+        are returned to the caller but cannot be indexed in ``technical_qa``
+        and are consequently skipped here.
+        """
+        prepared: list[dict[str, Any]] = []
+        for result in results:
+            if isinstance(result, tuple) and len(result) == 2:
+                revision_id, raw_result = result
+                if not isinstance(raw_result, dict):
+                    continue
+                payload = _json_safe(raw_result)
+                payload.setdefault("revision_id", str(revision_id or ""))
+            elif isinstance(result, dict):
+                payload = _json_safe(result)
+            else:
+                continue
+            revision_id = str(payload.get("revision_id") or "").strip()
+            if not revision_id:
+                continue
+            payload["revision_id"] = revision_id
+            payload.setdefault("checked_at", _now())
+            prepared.append(payload)
+
+        def change(state: dict[str, Any]) -> list[dict[str, Any]]:
+            saved: list[dict[str, Any]] = []
+            for payload in prepared:
+                revision_id = str(payload["revision_id"])
+                if revision_id not in state["revisions"]:
+                    continue
+                state["technical_qa"][revision_id] = payload
+                saved.append(payload)
+            return saved
+
+        return cls._mutate(project_name, change) if prepared else []
+
+    @classmethod
     def save_human_review(
         cls, project_name: str, revision_id: str, review: dict[str, Any]
     ) -> dict[str, Any]:

@@ -8,14 +8,19 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import shutil
+import subprocess
 import uuid
 import wave
+from datetime import datetime, timezone
 from typing import Any
 
 from repositories.project_repo import ProjectRepository
 from repositories.quality_repo import QualityRepository
+from repositories.task_repo import TaskRecord, TaskRepository
+from services.delivery import compute_delivery_input_snapshot
 from services.quality import QualityService
 
 logger = logging.getLogger(__name__)
@@ -29,6 +34,64 @@ class ExportPlanError(RuntimeError):
         self.code = "EXPORT_NOT_READY"
         self.plan = plan
 
+    def as_payload(self) -> dict[str, Any]:
+        blockers = self.plan.get("blockers", []) if isinstance(self.plan, dict) else []
+        first = blockers[0] if blockers and isinstance(blockers[0], dict) else {}
+        code = str(first.get("code") or self.code)
+        return {
+            "error": {
+                "code": code,
+                "message": str(first.get("message") or "交付准备度检查未通过"),
+                "fix_hint": "处理 blockers 后重新调用 plan_export。",
+                "details": {"blockers": blockers},
+            }
+        }
+
+
+class ExportIdempotencyConflict(RuntimeError):
+    code = "IDEMPOTENCY_CONFLICT"
+
+    def __init__(self, export_id: str) -> None:
+        super().__init__("相同 idempotency_key 已对应不同的导出参数")
+        self.export_id = str(export_id)
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "error": {
+                "code": self.code,
+                "message": str(self),
+                "fix_hint": "更换 idempotency_key，或使用原始导出参数重试。",
+                "details": {"export_id": self.export_id},
+            }
+        }
+
+
+class DeliveryInputChanged(RuntimeError):
+    code = "DELIVERY_INPUT_CHANGED"
+
+    def __init__(self) -> None:
+        super().__init__("导出计划与执行时的交付输入不一致")
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "error": {
+                "code": self.code,
+                "message": str(self),
+                "fix_hint": "重新调用 plan_export，再创建新的导出任务。",
+                "details": {},
+            }
+        }
+
+
+class ExportCancelled(RuntimeError):
+    code = "EXPORT_CANCELLED"
+
+
+class ExportOwnershipLost(RuntimeError):
+    """Raised when an export worker is no longer fenced to its runtime."""
+
+    code = "EXPORT_OWNERSHIP_LOST"
+
 
 class ExportService:
     """导出成品：委托 ``audio_pipeline.export_book``，错误直接上抛。"""
@@ -36,7 +99,9 @@ class ExportService:
     @staticmethod
     def export(project_dir: str, fmt: str, bitrate: str = "192k",
                output_dir: str = "",
-               *, segment_paths: dict[str, str] | None = None) -> str:
+               *, segment_paths: dict[str, str] | None = None,
+               streaming_postprocess: bool = False,
+               atomic_publish: bool = False) -> str:
         """导出指定格式成品。
 
         Args:
@@ -60,6 +125,8 @@ class ExportService:
             bitrate=bitrate,
             output_dir=output_dir,
             segment_paths=segment_paths,
+            streaming_postprocess=streaming_postprocess,
+            atomic_publish=atomic_publish,
         )
 
     @staticmethod
@@ -108,6 +175,72 @@ class ExportService:
         ).encode("utf-8")
         return hashlib.sha256(payload).hexdigest()
 
+    @staticmethod
+    def _active_blockers(
+        project: str,
+        *,
+        exclude_task_id: str = "",
+    ) -> list[dict[str, Any]]:
+        blockers: list[dict[str, Any]] = []
+        for record in TaskRepository.list_tasks(project=project):
+            if record.task_id == exclude_task_id:
+                continue
+            if record.status not in {
+                "pending", "running", "pausing", "paused", "cancelling",
+            }:
+                continue
+            if record.task_type == "export":
+                blockers.append({
+                    "code": "EXPORT_ACTIVE",
+                    "message": "项目存在正在运行的导出任务",
+                    "task_id": record.task_id,
+                    "status": record.status,
+                })
+            else:
+                blockers.append({
+                    "code": "PRODUCTION_ACTIVE",
+                    "message": "项目存在正在运行的生产任务",
+                    "task_id": record.task_id,
+                    "status": record.status,
+                })
+        repairs = QualityRepository.list_history(project, "repair_history")
+        for repair in repairs:
+            if repair.get("status") not in {
+                "preparing", "submitting", "pending", "running",
+                "pausing", "paused", "cancelling",
+            }:
+                continue
+            task_id = str(repair.get("task_id") or "")
+            if task_id and task_id == exclude_task_id:
+                continue
+            blockers.append({
+                "code": "REPAIR_ACTIVE",
+                "message": "项目存在正在运行的修复任务",
+                "repair_id": repair.get("repair_id"),
+                "task_id": task_id,
+                "status": repair.get("status"),
+            })
+        state = QualityRepository.load(project)
+        regenerating = [
+            str(item.get("segment_id") or "")
+            for item in state.get("revisions", {}).values()
+            if isinstance(item, dict) and item.get("status") == "regenerating"
+        ]
+        if regenerating:
+            blockers.append({
+                "code": "REVISION_REGENERATING",
+                "message": "项目存在尚未完成的音频 revision",
+                "segment_ids": sorted(set(regenerating)),
+            })
+        return blockers
+
+    @staticmethod
+    def _freshness(project: str) -> dict[str, Any]:
+        snapshot = compute_delivery_input_snapshot(project)
+        if not isinstance(snapshot, dict):
+            raise ValueError("delivery input snapshot 必须是 JSON object")
+        return snapshot
+
     @classmethod
     def plan_export(
         cls,
@@ -116,6 +249,7 @@ class ExportService:
         *,
         qa_policy: str = "require_passed",
         subtitle_formats: tuple[str, ...] | list[str] = (),
+        exclude_task_id: str = "",
     ) -> dict[str, Any]:
         """Return a machine-readable readiness plan without exporting files."""
         project = str(project_name or "").strip()
@@ -133,6 +267,7 @@ class ExportService:
                 "code": "QA_POLICY_UNSUPPORTED",
                 "message": f"不支持的 QA 策略: {policy}",
             })
+        blockers.extend(cls._active_blockers(project, exclude_task_id=exclude_task_id))
         meta, script, _bindings = ProjectRepository.load_project(project)
         segments = cls._segments(script)
         project_status = dict(getattr(meta, "segments_status", {}) or {})
@@ -225,6 +360,17 @@ class ExportService:
                 "message": f"项目仍有 {len(failed_ids)} 个生产失败段落",
                 "segment_ids": failed_ids,
             })
+        incomplete_ids = [
+            str(segment.get("id"))
+            for segment in segments
+            if project_status.get(str(segment.get("id"))) != "done"
+        ]
+        if incomplete_ids:
+            blockers.append({
+                "code": "PROJECT_NOT_COMPLETE",
+                "message": f"仍有 {len(incomplete_ids)} 个必需段落未完成生产",
+                "segment_ids": incomplete_ids,
+            })
         script_meta = script.get("meta") if isinstance(script.get("meta"), dict) else {}
         if not str(script_meta.get("title") or "").strip():
             blockers.append({
@@ -256,6 +402,21 @@ class ExportService:
         revision_snapshot = sorted(
             revisions, key=lambda item: item["segment_id"]
         )
+        try:
+            delivery_snapshot = cls._freshness(project)
+            delivery_input_hash = str(
+                delivery_snapshot.get("delivery_input_hash") or ""
+            )
+            if not delivery_input_hash:
+                raise ValueError("delivery_input_hash 为空")
+        except Exception as exc:
+            delivery_snapshot = {}
+            delivery_input_hash = ""
+            blockers.append({
+                "code": "DELIVERY_INPUT_UNAVAILABLE",
+                "message": "无法建立当前交付输入快照",
+                "details": {"type": type(exc).__name__},
+            })
         return {
             "ready": not blockers,
             "project": project,
@@ -275,6 +436,8 @@ class ExportService:
             },
             "revision_snapshot": revision_snapshot,
             "revision_snapshot_hash": cls._snapshot_hash(revision_snapshot),
+            "delivery_input_snapshot": delivery_snapshot,
+            "delivery_input_hash": delivery_input_hash,
             "blockers": blockers,
             "warnings": warnings,
         }
@@ -303,6 +466,434 @@ class ExportService:
                 continue
         return round(duration, 3)
 
+    @staticmethod
+    def _parse_duration(value: Any) -> float | None:
+        """Return a finite non-negative duration, or ``None`` for bad metadata."""
+        try:
+            duration = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(duration) or duration < 0:
+            return None
+        return duration
+
+    @classmethod
+    def _artifact_duration(
+        cls,
+        path: str,
+        fmt: str | None = None,
+        *,
+        fallback: float | None = None,
+    ) -> float:
+        """Read duration from a published artifact without loading its payload.
+
+        WAV duration is derived from its RIFF frame metadata.  Compressed
+        artifacts are inspected with ``ffprobe`` first and ``mutagen`` second;
+        both read container/frame metadata only.  ``fallback`` is deliberately
+        explicit and is expected to be the pipeline's timing-aware duration
+        (including inserted segment/chapter silence), never a plain sum of
+        source segment lengths.
+        """
+        artifact = os.path.abspath(str(path or ""))
+        suffix = str(fmt or os.path.splitext(artifact)[1].lstrip(".")).lower()
+        if suffix == "wav":
+            try:
+                with wave.open(artifact, "rb") as audio:
+                    rate = int(audio.getframerate())
+                    frames = int(audio.getnframes())
+                if rate > 0 and frames >= 0:
+                    return round(frames / rate, 3)
+            except (OSError, wave.Error, EOFError, ValueError):
+                # A malformed WAV can still be handled by ffprobe/mutagen or
+                # the explicit timing-aware fallback below.
+                pass
+
+        # A configured ffmpeg path may live beside a matching ffprobe binary.
+        # Keep this local import so the service remains importable without the
+        # optional media tools installed.
+        probe_candidates: list[str] = []
+        try:
+            from lib import config
+
+            configured = str(config.get_ffmpeg_path() or "")
+            if configured and os.path.isabs(configured):
+                directory = os.path.dirname(configured)
+                basename = os.path.basename(configured)
+                if basename.lower().startswith("ffmpeg"):
+                    probe_candidates.extend([
+                        os.path.join(directory, "ffprobe"),
+                        os.path.join(directory, "ffprobe.exe"),
+                    ])
+        except Exception:  # pragma: no cover - defensive config isolation
+            configured = ""
+        for name in ("ffprobe", "ffprobe.exe"):
+            located = shutil.which(name)
+            if located:
+                probe_candidates.append(located)
+        seen_probes: set[str] = set()
+        for probe in probe_candidates:
+            probe = os.path.abspath(probe) if os.path.isabs(probe) else probe
+            if probe in seen_probes or not (
+                os.path.isabs(probe) and os.path.isfile(probe)
+            ) and not shutil.which(probe):
+                continue
+            seen_probes.add(probe)
+            try:
+                result = subprocess.run(
+                    [
+                        probe,
+                        "-v", "error",
+                        "-show_entries", "format=duration",
+                        "-of", "default=noprint_wrappers=1:nokey=1",
+                        artifact,
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            duration = cls._parse_duration(result.stdout.strip())
+            if result.returncode == 0 and duration is not None:
+                return round(duration, 3)
+
+        try:
+            from mutagen import File as mutagen_file
+
+            media = mutagen_file(artifact)
+            info = getattr(media, "info", None) if media is not None else None
+            duration = cls._parse_duration(getattr(info, "length", None))
+            if duration is not None:
+                return round(duration, 3)
+        except Exception as exc:  # optional mutagen raises format-specific errors
+            logger.debug("读取压缩 artifact 时长失败，将使用 timing fallback: %s", exc)
+
+        duration = cls._parse_duration(fallback)
+        if duration is not None:
+            return round(duration, 3)
+        raise ValueError(f"无法读取正式 artifact 时长: {path}")
+
+    @classmethod
+    def _timed_export_duration(
+        cls,
+        project_dir: str,
+        segment_paths: dict[str, str],
+    ) -> float:
+        """Calculate a timing-aware fallback including export silence rules."""
+        script_path = os.path.join(project_dir, "structured_script.json")
+        with open(script_path, encoding="utf-8") as file:
+            script = json.load(file)
+        from lib import audio_pipeline
+
+        director_timing = audio_pipeline._uses_director_timing(script)
+        previous_chapter: int | None = None
+        duration = 0.0
+        for chapter_index, chapter in enumerate(script.get("chapters", [])):
+            if not isinstance(chapter, dict):
+                continue
+            for segment in chapter.get("segments", []):
+                if not isinstance(segment, dict):
+                    continue
+                path = segment_paths.get(str(segment.get("id") or ""))
+                if not path or not os.path.isfile(path):
+                    continue
+                if previous_chapter is not None and not director_timing:
+                    duration += (
+                        audio_pipeline.CH_SILENCE_SEC
+                        if chapter_index != previous_chapter
+                        else audio_pipeline.SEG_SILENCE_SEC
+                    )
+                duration += cls._source_duration([path])
+                previous_chapter = chapter_index
+        return round(duration, 3)
+
+    @classmethod
+    def _task_options(
+        cls,
+        plan: dict[str, Any],
+        *,
+        bitrate: str,
+    ) -> dict[str, Any]:
+        return {
+            "format": str(plan["format"]),
+            "bitrate": str(bitrate or "192k"),
+            "qa_policy": str(plan["qa_policy"]),
+            "subtitle_formats": list(plan.get("subtitle_formats") or []),
+            "revision_snapshot_hash": str(plan.get("revision_snapshot_hash") or ""),
+            "revision_snapshot": list(plan.get("revision_snapshot") or []),
+            "delivery_input_hash": str(plan.get("delivery_input_hash") or ""),
+            "delivery_input_snapshot": dict(
+                plan.get("delivery_input_snapshot") or {}
+            ),
+        }
+
+    @classmethod
+    def _history_for_task(
+        cls, project: str, task_id: str
+    ) -> dict[str, Any] | None:
+        return QualityRepository.find_history_by_field(
+            project, "export_jobs", "task_id", str(task_id)
+        )
+
+    @classmethod
+    def _ensure_history(
+        cls,
+        record: TaskRecord,
+    ) -> dict[str, Any]:
+        existing = cls._history_for_task(record.project, record.task_id)
+        if existing:
+            return existing
+        options = record.options if isinstance(record.options, dict) else {}
+        return QualityRepository.create_history_record(
+            record.project,
+            "export_jobs",
+            "export",
+            {
+                "project": record.project,
+                "task_id": record.task_id,
+                "status": record.status,
+                "format": options.get("format", "wav"),
+                "bitrate": options.get("bitrate", "192k"),
+                "qa_policy": options.get("qa_policy", "require_passed"),
+                "subtitle_formats": list(options.get("subtitle_formats") or []),
+                "revision_snapshot_hash": options.get("revision_snapshot_hash", ""),
+                "revision_snapshot": list(options.get("revision_snapshot") or []),
+                "delivery_input_hash": options.get("delivery_input_hash", ""),
+                "delivery_input_snapshot": dict(
+                    options.get("delivery_input_snapshot") or {}
+                ),
+                "idempotency_key": record.idempotency_key,
+                "outputs": [],
+                "error": None,
+                "manifest_id": "",
+            },
+        )
+
+    @classmethod
+    def _remove_partial_outputs(cls, paths: list[str]) -> None:
+        for path in paths:
+            try:
+                if os.path.isfile(path):
+                    os.remove(path)
+            except OSError:
+                logger.warning("清理导出临时文件失败: %s", path)
+
+    @staticmethod
+    def _assert_export_ownership(
+        record: TaskRecord,
+        owner_id: str | None,
+    ) -> None:
+        """Fence publication to the runtime that claimed the durable task."""
+        if not owner_id:
+            return
+        current = TaskRepository.load_task(record.task_id)
+        if current is None or current.owner_id != str(owner_id):
+            raise ExportOwnershipLost()
+        if current.status == "cancelling" and current.control_intent == "cancel":
+            raise ExportCancelled("正式导出已取消")
+        if current.status != "running":
+            raise ExportOwnershipLost()
+
+    @classmethod
+    def _validate_execution_snapshot(
+        cls,
+        record: TaskRecord,
+    ) -> dict[str, Any]:
+        options = record.options if isinstance(record.options, dict) else {}
+        current = cls.plan_export(
+            record.project,
+            str(options.get("format") or "wav"),
+            qa_policy=str(options.get("qa_policy") or "require_passed"),
+            subtitle_formats=list(options.get("subtitle_formats") or []),
+            exclude_task_id=record.task_id,
+        )
+        expected_hash = str(options.get("delivery_input_hash") or "")
+        expected_revision_hash = str(options.get("revision_snapshot_hash") or "")
+        if (
+            not expected_hash
+            or expected_hash != str(current.get("delivery_input_hash") or "")
+            or expected_revision_hash != str(current.get("revision_snapshot_hash") or "")
+        ):
+            raise DeliveryInputChanged()
+        if not current.get("ready"):
+            raise ExportPlanError(current)
+        return current
+
+    @classmethod
+    def execute_export_job(
+        cls,
+        record: TaskRecord,
+        *,
+        is_cancelled: Any = None,
+        owner_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Execute one immutable export snapshot inside the singleton runtime."""
+        if callable(is_cancelled) and is_cancelled():
+            raise ExportCancelled("正式导出已取消")
+        cls._assert_export_ownership(record, owner_id)
+        cls._validate_execution_snapshot(record)
+        options = record.options if isinstance(record.options, dict) else {}
+        history = cls._ensure_history(record)
+        QualityRepository.update_history_record(
+            record.project,
+            "export_jobs",
+            history["export_id"],
+            status="running",
+        )
+        project = record.project
+        project_dir = ProjectRepository.get_project_dir(project)
+        export_dir = os.path.join(
+            project_dir, "exports", str(record.task_id)
+        )
+        os.makedirs(export_dir, exist_ok=True)
+        segment_paths = {
+            str(item["segment_id"]): os.path.join(
+                project_dir, *str(item["relative_path"]).split("/")
+            )
+            for item in options.get("revision_snapshot", [])
+            if isinstance(item, dict)
+        }
+        produced: list[str] = []
+        manifest: dict[str, Any] | None = None
+        try:
+            if callable(is_cancelled) and is_cancelled():
+                raise ExportCancelled("正式导出已取消")
+            output = cls.export(
+                project_dir,
+                str(options.get("format") or "wav"),
+                str(options.get("bitrate") or "192k"),
+                output_dir=export_dir,
+                segment_paths=segment_paths,
+                streaming_postprocess=True,
+                atomic_publish=True,
+            )
+            produced.append(output)
+            if callable(is_cancelled) and is_cancelled():
+                raise ExportCancelled("正式导出已取消")
+            cls._assert_export_ownership(record, owner_id)
+            if options.get("subtitle_formats"):
+                from lib import audio_pipeline
+
+                if callable(is_cancelled) and is_cancelled():
+                    raise ExportCancelled("正式导出已取消")
+                cls._assert_export_ownership(record, owner_id)
+                produced.extend(audio_pipeline.generate_subtitles(
+                    project_dir,
+                    formats=options["subtitle_formats"],
+                    output_dir=export_dir,
+                    segment_paths=segment_paths,
+                    require_complete=True,
+                    atomic_publish=True,
+                ))
+            cls._assert_export_ownership(record, owner_id)
+            final = cls._validate_execution_snapshot(record)
+            if str(final.get("delivery_input_hash") or "") != str(
+                options.get("delivery_input_hash") or ""
+            ):
+                raise DeliveryInputChanged()
+            duration_fallback = cls._timed_export_duration(
+                project_dir,
+                segment_paths,
+            )
+            duration = cls._artifact_duration(
+                output,
+                options.get("format"),
+                fallback=duration_fallback,
+            )
+            artifacts = []
+            for path in produced:
+                if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+                    raise RuntimeError("正式导出未生成有效 artifact")
+                artifacts.append({
+                    "artifact_id": f"artifact_{uuid.uuid4().hex[:20]}",
+                    "format": os.path.splitext(path)[1].lstrip(".").lower(),
+                    "relative_path": cls._relative_output(project, path),
+                    "size": os.path.getsize(path),
+                    "sha256": cls._file_sha256(path),
+                    "duration_seconds": duration if path == output else None,
+                })
+            cls._assert_export_ownership(record, owner_id)
+            manifest = QualityRepository.create_history_record(
+                project,
+                "delivery_manifests",
+                "manifest",
+                {
+                    "project": project,
+                    "export_id": record.task_id,
+                    # Publish the manifest in two phases.  A worker that loses
+                    # its fence may leave audit history, but never a ready
+                    # Delivery Manifest or a done task.
+                    "ready": False,
+                    "format": options.get("format", "wav"),
+                    "outputs": artifacts,
+                    "duration_seconds": duration,
+                    "chapters": final["summary"]["chapters"],
+                    "segments": final["summary"]["segments"],
+                    "qa_policy": options.get("qa_policy", "require_passed"),
+                    "revision_snapshot_hash": options.get("revision_snapshot_hash", ""),
+                    "revision_snapshot": options.get("revision_snapshot", []),
+                    "delivery_input_hash": options.get("delivery_input_hash", ""),
+                    "delivery_input_snapshot": options.get("delivery_input_snapshot", {}),
+                    "metadata": final["summary"]["metadata"],
+                },
+            )
+            cls._assert_export_ownership(record, owner_id)
+            manifest = QualityRepository.update_history_record(
+                project,
+                "delivery_manifests",
+                manifest["manifest_id"],
+                ready=True,
+            )
+            cls._assert_export_ownership(record, owner_id)
+            updated = QualityRepository.update_history_record(
+                project,
+                "export_jobs",
+                history["export_id"],
+                status="done",
+                outputs=artifacts,
+                manifest_id=manifest["manifest_id"],
+                finished_at=manifest["created_at"],
+                delivery_input_hash=options.get("delivery_input_hash", ""),
+            )
+            cls._assert_export_ownership(record, owner_id)
+            return {
+                **cls._public_export(updated),
+                "delivery_manifest": cls._public_manifest(manifest),
+            }
+        except Exception as exc:
+            cls._remove_partial_outputs(produced)
+            # Each durable export owns a unique directory, so an interrupted
+            # or failed run can safely remove every `.part`/intermediate file
+            # without touching a prior official artifact.
+            shutil.rmtree(export_dir, ignore_errors=True)
+            try:
+                if manifest is not None:
+                    QualityRepository.update_history_record(
+                        project,
+                        "delivery_manifests",
+                        manifest["manifest_id"],
+                        ready=False,
+                        error={
+                            "code": getattr(exc, "code", type(exc).__name__),
+                            "message": "正式导出未完成",
+                        },
+                    )
+                history_error = None if isinstance(exc, ExportCancelled) else {
+                    "code": getattr(exc, "code", type(exc).__name__),
+                    "message": "正式导出未完成",
+                }
+                QualityRepository.update_history_record(
+                    project,
+                    "export_jobs",
+                    history["export_id"],
+                    status=("cancelled" if isinstance(exc, ExportCancelled) else "error"),
+                    error=history_error,
+                )
+            except Exception:
+                logger.exception("更新导出历史失败: %s", record.task_id)
+            raise
+
     @classmethod
     def start_export(
         cls,
@@ -314,15 +905,25 @@ class ExportService:
         subtitle_formats: tuple[str, ...] | list[str] = (),
         idempotency_key: str = "",
     ) -> dict[str, Any]:
-        """Run a formal export and persist job/artifact/delivery history."""
+        """Create a durable export job and return without waiting for the book."""
         project = str(project_name or "").strip()
         key = str(idempotency_key or "").strip()
-        if key:
-            replay = QualityRepository.find_history_by_field(
-                project, "export_jobs", "idempotency_key", key
+        existing = (
+            TaskRepository.find_by_idempotency(project, "export", key)
+            if key else None
+        )
+        if existing is not None:
+            replay_plan = cls.plan_export(
+                project,
+                fmt,
+                qa_policy=qa_policy,
+                subtitle_formats=subtitle_formats,
+                exclude_task_id=existing.task_id,
             )
-            if replay:
-                return {"created": False, **cls._public_export(replay)}
+            replay_options = cls._task_options(replay_plan, bitrate=bitrate)
+            if existing.options == replay_options:
+                return {"created": False, **cls._public_export(existing)}
+            raise ExportIdempotencyConflict(existing.task_id)
         plan = cls.plan_export(
             project,
             fmt,
@@ -331,114 +932,77 @@ class ExportService:
         )
         if not plan["ready"]:
             raise ExportPlanError(plan)
-        job = QualityRepository.create_history_record(
-            project,
-            "export_jobs",
-            "export",
-            {
-                "project": project,
-                "status": "pending",
-                "format": plan["format"],
-                "bitrate": str(bitrate or "192k"),
-                "qa_policy": plan["qa_policy"],
-                "subtitle_formats": plan["subtitle_formats"],
-                "revision_snapshot_hash": plan["revision_snapshot_hash"],
-                "revision_snapshot": plan["revision_snapshot"],
-                "idempotency_key": key,
-                "outputs": [],
-                "error": None,
-                "manifest_id": "",
-            },
+        options = cls._task_options(plan, bitrate=bitrate)
+        export_id = f"export_{uuid.uuid4().hex[:20]}"
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        task = TaskRecord(
+            task_id=export_id,
+            task_type="export",
+            project=project,
+            status="pending",
+            source="mcp",
+            scope={"all": True, "chapter_ids": [], "segment_ids": []},
+            options=options,
+            progress={"total": 1, "completed": 0, "failed": 0, "percent": 0.0},
+            idempotency_key=key,
+            created_at=now,
+            updated_at=now,
         )
-        export_id = job["export_id"]
-        try:
-            QualityRepository.update_history_record(
-                project, "export_jobs", export_id, status="running"
-            )
-            project_dir = ProjectRepository.get_project_dir(project)
-            segment_paths = {
-                item["segment_id"]: os.path.join(
-                    project_dir,
-                    *str(item["relative_path"]).split("/"),
-                )
-                for item in plan["revision_snapshot"]
-            }
-            output = cls.export(
-                project_dir,
-                plan["format"],
-                bitrate,
-                output_dir="",
-                segment_paths=segment_paths,
-            )
-            produced = [output]
-            if plan["subtitle_formats"]:
-                from lib import audio_pipeline
+        outcome, durable = TaskRepository.create_runtime_task(task)
+        if outcome == "idempotent":
+            return {"created": False, **cls._public_export(durable)}
+        if outcome == "idempotency_conflict":
+            raise ExportIdempotencyConflict(durable.task_id)
+        if outcome == "active":
+            plan["ready"] = False
+            plan.setdefault("blockers", []).append({
+                "code": "EXPORT_ACTIVE" if durable.task_type == "export" else "PRODUCTION_ACTIVE",
+                "message": "项目存在正在运行的任务",
+                "task_id": durable.task_id,
+                "status": durable.status,
+            })
+            raise ExportPlanError(plan)
+        cls._ensure_history(durable)
+        from services.production_runtime import ProductionRuntimeClient
 
-                produced.extend(audio_pipeline.generate_subtitles(
-                    project_dir,
-                    formats=plan["subtitle_formats"],
-                    segment_paths=segment_paths,
-                    require_complete=True,
-                ))
-            duration = cls._source_duration(list(segment_paths.values()))
-            artifacts = [
-                {
-                    "artifact_id": f"artifact_{uuid.uuid4().hex[:20]}",
-                    "format": os.path.splitext(path)[1].lstrip(".").lower(),
-                    "relative_path": cls._relative_output(project, path),
-                    "size": os.path.getsize(path),
-                    "sha256": cls._file_sha256(path),
-                    "duration_seconds": duration if path == output else None,
-                }
-                for path in produced
-            ]
-            manifest = QualityRepository.create_history_record(
-                project,
-                "delivery_manifests",
-                "manifest",
-                {
-                    "project": project,
-                    "export_id": export_id,
-                    "ready": True,
-                    "format": plan["format"],
-                    "outputs": artifacts,
-                    "duration_seconds": duration,
-                    "chapters": plan["summary"]["chapters"],
-                    "segments": plan["summary"]["segments"],
-                    "qa_policy": plan["qa_policy"],
-                    "revision_snapshot_hash": plan["revision_snapshot_hash"],
-                    "metadata": plan["summary"]["metadata"],
-                },
-            )
-            job = QualityRepository.update_history_record(
-                project,
-                "export_jobs",
-                export_id,
-                status="done",
-                outputs=artifacts,
-                manifest_id=manifest["manifest_id"],
-                finished_at=manifest["created_at"],
-            )
-            return {
-                "created": True,
-                **cls._public_export(job),
-                "delivery_manifest": cls._public_manifest(manifest),
-            }
-        except Exception as exc:
-            QualityRepository.update_history_record(
-                project,
-                "export_jobs",
-                export_id,
-                status="error",
-                error={
-                    "code": type(exc).__name__,
-                    "message": "正式导出失败",
-                },
-            )
-            raise
+        ProductionRuntimeClient.ensure_running()
+        return {"created": True, **cls._public_export(durable)}
 
     @staticmethod
     def _public_export(record: dict[str, Any]) -> dict[str, Any]:
+        if isinstance(record, TaskRecord):
+            options = record.options if isinstance(record.options, dict) else {}
+            error_code = "EXPORT_INTERRUPTED" if record.status == "interrupted" else "EXPORT_ERROR"
+            if record.error_summary and ":" in record.error_summary:
+                candidate = record.error_summary.split(":", 1)[0].strip()
+                if candidate and candidate.replace("_", "").isalnum():
+                    error_code = candidate
+            return {
+                "export_id": record.task_id,
+                "task_id": record.task_id,
+                "project": record.project,
+                "status": record.status,
+                "format": options.get("format", "wav"),
+                "bitrate": options.get("bitrate", "192k"),
+                "qa_policy": options.get("qa_policy", "require_passed"),
+                "subtitle_formats": list(options.get("subtitle_formats") or []),
+                "revision_snapshot_hash": options.get("revision_snapshot_hash", ""),
+                "delivery_input_hash": options.get("delivery_input_hash", ""),
+                "idempotency_key": record.idempotency_key,
+                "outputs": record.progress.get("result", {}).get("outputs", [])
+                if isinstance(record.progress, dict)
+                else [],
+                "manifest_id": record.progress.get("result", {}).get("manifest_id", "")
+                if isinstance(record.progress, dict)
+                else "",
+                "error": {
+                    "code": error_code,
+                    "message": record.error_summary,
+                } if record.error_summary else None,
+                "created_at": record.created_at,
+                "updated_at": record.updated_at,
+                "finished_at": record.finished_at,
+            }
         return {
             key: record.get(key)
             for key in (
@@ -450,6 +1014,7 @@ class ExportService:
                 "qa_policy",
                 "subtitle_formats",
                 "revision_snapshot_hash",
+                "delivery_input_hash",
                 "idempotency_key",
                 "outputs",
                 "manifest_id",
@@ -477,6 +1042,8 @@ class ExportService:
                 "segments",
                 "qa_policy",
                 "revision_snapshot_hash",
+                "delivery_input_hash",
+                "delivery_input_snapshot",
                 "metadata",
                 "created_at",
                 "updated_at",
@@ -488,21 +1055,32 @@ class ExportService:
     def get_export_task(
         cls, project_name: str, export_id: str
     ) -> dict[str, Any]:
-        record = QualityRepository.get_history_record(
-            project_name, "export_jobs", export_id
-        )
+        record = TaskRepository.load_task(export_id)
+        if record is not None and record.task_type == "export":
+            return cls._public_export(record)
+        record = QualityRepository.get_history_record(project_name, "export_jobs", export_id)
         if not record:
             raise KeyError(f"导出任务不存在: {export_id}")
         return cls._public_export(record)
 
     @classmethod
     def list_exports(cls, project_name: str) -> list[dict[str, Any]]:
-        return [
+        durable = [
+            cls._public_export(record)
+            for record in TaskRepository.list_tasks(
+                project=project_name, task_type="export"
+            )
+        ]
+        durable_ids = {str(item.get("export_id")) for item in durable}
+        history = [
             cls._public_export(record)
             for record in QualityRepository.list_history(
                 project_name, "export_jobs"
             )
+            if str(record.get("task_id") or record.get("export_id") or "")
+            not in durable_ids
         ]
+        return durable + history
 
     @classmethod
     def get_delivery_manifest(

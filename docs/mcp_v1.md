@@ -125,9 +125,27 @@ active pointer；正式导出固定一份 revision snapshot，并生成 Delivery
 | plan_export / start_export / get_export_task / list_exports | 正式导出的 readiness、执行和历史 |
 | get_delivery_manifest | 获取交付物相对路径、校验和与 revision snapshot 摘要 |
 
-`plan_export` 会检查缺段、生产失败、QA policy、metadata 和 FFmpeg。字幕使用同一
-active revision snapshot，并在任何段落缺失时整体失败，不会静默生成部分字幕。
-所有公开返回只包含项目相对路径，不暴露本机绝对路径。
+`plan_export` 会检查缺段、生产失败、QA policy、metadata、active production/repair/export、
+regenerating revision、项目完成度和 FFmpeg。它同时返回确定性的
+`delivery_input_snapshot` / `delivery_input_hash`，覆盖 structured script、段落顺序、
+active revision、音频 checksum、cache identity、voice fingerprint、Voice Cast 和正式
+metadata。历史 Manifest 没有匹配的 freshness hash 时只作为历史记录，不会让 workflow
+进入 `delivered`。
+
+`start_export` 只做 readiness/snapshot 和 SQLite durable task 创建，立即返回
+`export_id` 与 `pending`（或 `running`）状态。整书 WAV、后处理、FFmpeg、字幕和 manifest
+由同一 `production_runtime` 管理的 CPU/IO worker 执行；`get_export_task` / `list_exports`
+轮询 SQLite lifecycle。执行前后会再次比较 delivery input hash 和 revision snapshot，
+变化时以 `DELIVERY_INPUT_CHANGED` 失败。输出写入 task 专属临时目录，校验后 atomic
+publish；runtime 中断会把任务标记为 `interrupted`，不会留下 `ready=true` 的新 Manifest。
+同一 idempotency key 与完整 payload 一致时 replay，不一致返回 `IDEMPOTENCY_CONFLICT`。
+字幕使用同一 active revision snapshot，并在任何段落缺失时整体失败，不会静默生成部分
+字幕。所有公开返回只包含项目相对路径，不暴露本机绝对路径。
+
+Technical QA 在多段/全书 MCP 调用中先 analyze，再通过一次 batch mutation 保存
+`quality_state.json`；单段 API 保持兼容。正式整书后处理使用 bounded streaming
+buffers，FFmpeg 可用时走 loudnorm two-pass，WAV-only 环境使用 bounded fallback，
+不会把整本书一次性读入 NumPy float64。
 
 ## 后续边界
 

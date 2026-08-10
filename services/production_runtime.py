@@ -6,6 +6,7 @@ processes communicate by writing transactional commands to ``TaskRepository``.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import Future, ThreadPoolExecutor
 import logging
 import os
 import re
@@ -48,6 +49,14 @@ class ProductionRuntime:
         self._current_segment_to_chapter: dict[str, str] = {}
         self._state_lock = threading.RLock()
         self._last_heartbeat = 0.0
+        self._export_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="audiobook-formal-export",
+        )
+        self._export_future: Future[Any] | None = None
+        self._export_record: TaskRecord | None = None
+        self._ownership_lock = threading.RLock()
+        self._lock_release_deferred = False
 
     @property
     def is_running(self) -> bool:
@@ -63,6 +72,12 @@ class ProductionRuntime:
     def start_background(self) -> bool:
         if self.is_running:
             return True
+        with self._state_lock:
+            if self._export_future is not None and not self._export_future.done():
+                # A stopped runtime keeps ownership while its export worker is
+                # still capable of publishing.  It cannot be restarted or
+                # replaced in-process until that worker has settled.
+                return False
         if not self.lock.acquire(blocking=False):
             return False
         # This is the only legal interruption-repair point.  Merely reading a
@@ -85,16 +100,58 @@ class ProductionRuntime:
         try:
             self._run_loop()
         finally:
-            self.lock.release()
+            self._release_lock_when_export_safe()
         return True
 
     def stop(self, timeout: float = 2.0) -> None:
         self._stop.set()
+        with self._state_lock:
+            export_future = self._export_future
+            export_record = self._export_record
+        if export_future is not None and not export_future.done() and export_record:
+            try:
+                TaskRepository.request_control(export_record.task_id, "cancel")
+            except (KeyError, ValueError):
+                # The worker may already have reached a terminal state.
+                pass
         thread = self._thread
         if thread and thread is not threading.current_thread():
             thread.join(timeout=max(timeout, 0.0))
         self._thread = None
-        self.lock.release()
+        # Inline/test callers may replace the project roots immediately after
+        # reset.  Drain an in-flight export while the caller's project context
+        # is still valid, but retain the timeout guarantee for a genuinely
+        # long-running worker.
+        remaining = max(float(timeout), 0.0)
+        if export_future is not None and not export_future.done() and remaining:
+            try:
+                export_future.result(timeout=remaining)
+            except Exception:
+                # The runtime already persists task failures; stopping should
+                # not re-raise a worker exception into a client cleanup path.
+                pass
+        self._export_executor.shutdown(
+            wait=bool(export_future is None or export_future.done()),
+            cancel_futures=True,
+        )
+        # If the timeout expires, the export thread remains alive and the OS
+        # singleton lock must remain held. The completion callback below
+        # releases it only after the worker can no longer publish.
+        self._release_lock_when_export_safe()
+
+    def _release_lock_when_export_safe(self) -> None:
+        """Release singleton ownership only after an export worker settles."""
+        with self._ownership_lock:
+            future = self._export_future
+            if future is not None and not future.done():
+                if not self._lock_release_deferred:
+                    self._lock_release_deferred = True
+                    future.add_done_callback(
+                        lambda _future: self._release_lock_when_export_safe()
+                    )
+                return
+            self._lock_release_deferred = False
+            self.lock.release()
 
     def poke(self) -> None:
         """Apply a just-written command promptly in inline/test mode."""
@@ -109,7 +166,9 @@ class ProductionRuntime:
                 with self._state_lock:
                     state = self._current_state
                 if state is None:
-                    record = TaskRepository.claim_next_pending(self.owner_id)
+                    record = TaskRepository.claim_next_pending(
+                        self.owner_id, {"synthesis"}
+                    )
                     if record is not None:
                         self._launch(record)
                 else:
@@ -122,6 +181,21 @@ class ProductionRuntime:
                             self._current_state = None
                             self._current_record = None
                             self._current_segment_to_chapter = {}
+                if self._export_future is not None and self._export_future.done():
+                    self._export_future = None
+                    self._export_record = None
+                if self._export_future is None:
+                    export_record = TaskRepository.claim_next_pending(
+                        self.owner_id, {"export"}
+                    )
+                    if export_record is not None:
+                        self._launch_export(export_record)
+                if self._current_state is None and self._export_future is None:
+                    utility_record = TaskRepository.claim_next_pending(
+                        self.owner_id, {"supplement", "voice_preview"}
+                    )
+                    if utility_record is not None:
+                        self._launch(utility_record)
                 now = time.monotonic()
                 if now - self._last_heartbeat >= 1.0:
                     TaskRepository.update_runtime_heartbeat(self.owner_id)
@@ -135,7 +209,7 @@ class ProductionRuntime:
             # by acquiring the OS lock before it can repair interrupted tasks.
             if self._thread is threading.current_thread():
                 self._thread = None
-            self.lock.release()
+            self._release_lock_when_export_safe()
 
     @staticmethod
     def _bindings(record: TaskRecord) -> dict[str, Any]:
@@ -221,6 +295,87 @@ class ProductionRuntime:
             state.error = str(exc)
             state.append_log(f"❌ 启动生产运行时失败: {exc}")
             state.notify()
+
+    def _launch_export(self, record: TaskRecord) -> None:
+        """Submit formal export to a managed CPU/IO worker.
+
+        The polling loop never performs the book export itself, so heartbeat,
+        ownership takeover, and command processing continue while FFmpeg or a
+        long WAV write is running.
+        """
+        with self._state_lock:
+            self._export_record = record
+        self._export_future = self._export_executor.submit(
+            self._run_export_task,
+            record,
+        )
+
+    def _run_export_task(self, record: TaskRecord) -> None:
+        from .export import ExportCancelled, ExportService
+
+        running = TaskRepository.persist_runtime_state(
+            record.task_id,
+            self.owner_id,
+            status="running",
+            progress=record.progress,
+            failed_segment_ids=[],
+            error_summary="",
+            log_lines=["运行时开始执行正式导出"],
+        )
+        current = running or record
+        try:
+            result = ExportService.execute_export_job(
+                current,
+                is_cancelled=lambda: self._export_cancel_requested(record.task_id),
+                owner_id=self.owner_id,
+            )
+            progress = {
+                **dict(current.progress or {}),
+                "total": 1,
+                "completed": 1,
+                "failed": 0,
+                "percent": 100.0,
+                "result": result,
+            }
+            TaskRepository.persist_runtime_state(
+                record.task_id,
+                self.owner_id,
+                status="done",
+                progress=progress,
+                failed_segment_ids=[],
+                error_summary="",
+                log_lines=["运行时完成正式导出"],
+            )
+        except ExportCancelled:
+            TaskRepository.persist_runtime_state(
+                record.task_id,
+                self.owner_id,
+                status="cancelled",
+                progress=dict(current.progress or {}),
+                failed_segment_ids=[],
+                # Cancellation is a terminal control outcome, not a task
+                # error. Keep the durable task error field empty so clients
+                # cannot misclassify a successful cancel as a failure.
+                error_summary="",
+                log_lines=["正式导出已取消"],
+            )
+        except Exception as exc:
+            logger.exception("正式导出任务失败: %s", record.task_id)
+            code = str(getattr(exc, "code", "EXPORT_ERROR"))
+            TaskRepository.persist_runtime_state(
+                record.task_id,
+                self.owner_id,
+                status="error",
+                progress=dict(current.progress or {}),
+                failed_segment_ids=[],
+                error_summary=f"{code}: {exc}",
+                log_lines=[f"正式导出任务失败: {code}"],
+            )
+
+    @staticmethod
+    def _export_cancel_requested(task_id: str) -> bool:
+        record = TaskRepository.load_task(task_id)
+        return bool(record and record.control_intent == "cancel")
 
     @staticmethod
     def _safe_component(value: str) -> str:
