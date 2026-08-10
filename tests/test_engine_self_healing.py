@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import wave
 
@@ -411,7 +412,9 @@ def test_j_recovery_budget_exhausted_becomes_needs_attention(
 
 def test_k_cancel_during_recovery_wins(healing_project, monkeypatch):
     calls: list[str] = []
-    reset_calls: list[str] = []
+    recycle_calls: list[int] = []
+    events: list[dict] = []
+    cancelled = {"flag": False}
 
     def flaky(**kwargs):
         calls.append(str(kwargs.get("text") or ""))
@@ -422,30 +425,46 @@ def test_k_cancel_during_recovery_wins(healing_project, monkeypatch):
             recoverable=True,
         )
 
-    def slow_reset():
-        reset_calls.append("reset")
-        time.sleep(0.5)
+    def recycle():
+        recycle_calls.append(1)
+        # The user cancels while the engine recycle is in flight: no retry
+        # and no further recycle may happen afterwards.
+        cancelled["flag"] = True
+        return 2
 
     monkeypatch.setattr(tts_engine, "synthesize_segment", flaky)
-    monkeypatch.setattr(tts_engine, "reset_engine", slow_reset)
-    created = ProductionJobService.start(
-        healing_project["project"], {"all": True}, source="mcp"
+    hooks = RecoveryHooks(
+        recycle=recycle,
+        cancel_requested=lambda: cancelled["flag"],
+        pause_gate=lambda: None,
+        on_recovery=events.append,
+        on_failure=lambda _failure: None,
     )
-    _wait_status(created["task_id"], "recovering")
-    ProductionJobService.cancel(created["task_id"])
-    record = _wait_terminal(created["task_id"])
+    gen = queue_module.synthesize_project(
+        healing_project["project"],
+        {"旁白": healing_project["voice"]},
+        recovery=hooks,
+        budget=RecoveryBudget(),
+    )
+    lines = list(gen)
 
-    assert record.status == "cancelled"
-    # One recycle was already in flight, but no retry and no second recycle.
+    assert "[re] cancelled" in lines
     assert len(calls) == 1
-    assert len(reset_calls) == 1
-    assert record.progress["completed"] == 0
-    assert record.failed_segment_ids == []
+    assert len(recycle_calls) == 1
+    assert not any(line.startswith("[+]") for line in lines)
+    assert not any(
+        event.get("event") == "recovered"
+        for event in events
+    )
 
 
 def test_l_pause_during_recovery_is_not_bypassed(healing_project, monkeypatch):
     calls: list[str] = []
-    reset_calls: list[str] = []
+    events: list[dict] = []
+    failures: list = []
+    recycle_calls: list[int] = []
+    gate_entered = threading.Event()
+    released = threading.Event()
 
     def flaky(**kwargs):
         calls.append(str(kwargs.get("text") or ""))
@@ -458,25 +477,56 @@ def test_l_pause_during_recovery_is_not_bypassed(healing_project, monkeypatch):
             )
         return _write_wav(str(kwargs["output_path"]))
 
-    def slow_reset():
-        reset_calls.append("reset")
-        time.sleep(0.5)
+    def pause_gate():
+        # Simulate a human pause during recovery: the gate blocks the
+        # worker, and no new segment work may happen until resume.
+        gate_entered.set()
+        released.wait(10)
 
     monkeypatch.setattr(tts_engine, "synthesize_segment", flaky)
-    monkeypatch.setattr(tts_engine, "reset_engine", slow_reset)
-    created = ProductionJobService.start(
-        healing_project["project"], {"all": True}, source="mcp"
+    hooks = RecoveryHooks(
+        recycle=lambda: (recycle_calls.append(1) or 2),
+        cancel_requested=lambda: False,
+        pause_gate=pause_gate,
+        on_recovery=events.append,
+        on_failure=failures.append,
     )
-    _wait_status(created["task_id"], "recovering")
-    ProductionJobService.pause(created["task_id"])
-    _wait_status(created["task_id"], "paused")
-    ProductionJobService.resume(created["task_id"])
-    record = _wait_terminal(created["task_id"])
+    lines: list[str] = []
 
-    assert record.status == "done"
-    assert record.progress["completed"] == 4
-    assert len(reset_calls) == 1
-    assert len(calls) == 5  # 4 segments + 1 retry after the paused recycle
+    def consume():
+        gen = queue_module.synthesize_project(
+            healing_project["project"],
+            {"旁白": healing_project["voice"]},
+            recovery=hooks,
+            budget=RecoveryBudget(),
+        )
+        for line in gen:
+            lines.append(line)
+
+    worker = threading.Thread(target=consume)
+    worker.start()
+    assert gate_entered.wait(10)
+    # While the pause gate holds, recovery must not run new engine work.
+    time.sleep(0.2)
+    assert len(recycle_calls) == 0
+    assert calls == ["第1段"]  # only the initial failed attempt
+    assert any(
+        event.get("event") == "recovering"
+        for event in events
+    )
+
+    # Resume: the gate releases and the same segment is retried.
+    released.set()
+    worker.join(15)
+    assert not worker.is_alive()
+    assert len(recycle_calls) == 1
+    assert calls == ["第1段", "第1段", "第2段", "第3段", "第4段"]
+    assert any(line.startswith("[+] 001-001") for line in lines)
+    assert sum(1 for line in lines if line.startswith("[+]")) == 4
+    assert any(
+        event.get("event") == "recovered"
+        for event in events
+    )
 
 
 def test_m_stale_generation_update_is_fenced(healing_project, tmp_path):
