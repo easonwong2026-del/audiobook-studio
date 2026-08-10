@@ -8,6 +8,7 @@ import time
 
 import pytest
 
+from lib import project_manager as pm
 from repositories.project_repo import ProjectRepository
 from repositories.task_repo import TaskRecord, TaskRepository
 from services.production_runtime import ProductionRuntime
@@ -89,6 +90,8 @@ def runtime_project(tmp_path, monkeypatch):
     ProjectRepository.WORKSPACE_ROOT = os.path.join(data_dir, "projects")
     ProjectRepository.LEGACY_ROOT = os.path.join(data_dir, "legacy")
     ProjectRepository._INITIALIZED = True
+    monkeypatch.setattr(pm, "WORKSPACE_ROOT", ProjectRepository.WORKSPACE_ROOT)
+    monkeypatch.setattr(pm, "LEGACY_ROOT", ProjectRepository.LEGACY_ROOT)
     ProjectRepository.create_project_from_data("book", SCRIPT)
     return data_dir
 
@@ -306,6 +309,118 @@ def test_runtime_restart_interrupts_orphaned_export(runtime_project, tmp_path):
         assert not restored.control_intent
     finally:
         runtime.stop()
+
+
+def test_runtime_takeover_interrupts_old_synthesis_and_blocks_stale_publish(
+    runtime_project,
+    tmp_path,
+    monkeypatch,
+):
+    """A dead runtime's claimed task is interrupted on takeover and the
+    stale owner can never publish over the new ownership (Test G)."""
+    from lib import tts_engine
+    from services.synthesis import SynthesisService
+
+    monkeypatch.setattr(tts_engine, "init_engine", lambda: None)
+    monkeypatch.setattr(tts_engine, "empty_cache", lambda: None)
+    started: list[str] = []
+
+    def fake_start(state, *_args, **_kwargs):
+        started.append(state.task_id)
+        state.status = "running"
+        state.notify()
+        return state.task_id
+
+    monkeypatch.setattr(SynthesisService, "start", staticmethod(fake_start))
+    now = "2026-08-09T00:00:00Z"
+    lock_path = str(tmp_path / "runtime.lock")
+    old_task = TaskRecord(
+        task_id="old_synthesis",
+        task_type="synthesis",
+        project="book",
+        status="pending",
+        source="mcp",
+        scope={"all": True, "chapter_ids": [], "segment_ids": []},
+        progress={"total": 1, "completed": 0, "failed": 0},
+        created_at=now,
+        updated_at=now,
+    )
+    outcome, _ = TaskRepository.create_production_task(old_task)
+    assert outcome == "created"
+
+    old_runtime = ProductionRuntime(
+        owner_id="old-runtime",
+        lock_path=lock_path,
+        poll_interval=0.02,
+    )
+    assert old_runtime.start_background() is True
+    try:
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            record = TaskRepository.load_task("old_synthesis")
+            if record is not None and record.status == "running":
+                break
+            time.sleep(0.01)
+        record = TaskRepository.load_task("old_synthesis")
+        assert record is not None and record.status == "running"
+        assert record.owner_id == "old-runtime"
+        assert started == ["old_synthesis"]
+    finally:
+        old_runtime.stop()
+
+    new_runtime = ProductionRuntime(
+        owner_id="new-runtime",
+        lock_path=lock_path,
+        poll_interval=0.02,
+    )
+    assert new_runtime.start_background() is True
+    try:
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            record = TaskRepository.load_task("old_synthesis")
+            if record is not None and record.status == "interrupted":
+                break
+            time.sleep(0.01)
+        assert record is not None and record.status == "interrupted"
+
+        # The stale owner can still call its in-memory callbacks, but the
+        # durable repository must refuse to publish over the interruption.
+        stale_state = SynthesisState(
+            task_id="old_synthesis",
+            project="book",
+            status="running",
+            completed=1,
+        )
+        old_runtime._on_state_update(stale_state)
+        record = TaskRepository.load_task("old_synthesis")
+        assert record.status == "interrupted"
+        assert record.progress["completed"] == 0
+
+        new_task = TaskRecord(
+            task_id="new_synthesis",
+            task_type="synthesis",
+            project="book",
+            status="pending",
+            source="mcp",
+            scope={"all": True, "chapter_ids": [], "segment_ids": []},
+            progress={"total": 1, "completed": 0, "failed": 0},
+            created_at=now,
+            updated_at=now,
+        )
+        outcome, _ = TaskRepository.create_production_task(new_task)
+        assert outcome == "created"
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            record = TaskRepository.load_task("new_synthesis")
+            if record is not None and record.status == "running":
+                break
+            time.sleep(0.01)
+        record = TaskRepository.load_task("new_synthesis")
+        assert record is not None and record.status == "running"
+        assert record.owner_id == "new-runtime"
+        assert started == ["old_synthesis", "new_synthesis"]
+    finally:
+        new_runtime.stop()
 
 
 def test_worker_acknowledges_pause_only_at_generator_boundary(monkeypatch):

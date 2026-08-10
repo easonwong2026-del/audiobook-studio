@@ -16,6 +16,12 @@ CAPABILITIES = [
     "voice_cast",
     "chapter_role_resolution",
     "production_jobs",
+    "production_task_control",
+    "workflow_state",
+    "quality_review",
+    "repair_jobs",
+    "export_jobs",
+    "delivery_manifests",
 ]
 
 

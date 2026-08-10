@@ -656,12 +656,23 @@ def _jsonrpc_error(request_id: Any, code: int, message: str, data: Any = None) -
 
 
 def _tool_call_result(payload: Any, *, is_error: bool = False) -> dict[str, Any]:
+    # MCP requires structuredContent to be a JSON object.  Adapters should
+    # return objects; this safety net keeps list/primitive payloads from
+    # breaking clients with an invalid_type error.
+    structured = payload
+    if not isinstance(payload, dict):
+        logger.warning(
+            "MCP tool returned non-object payload (type=%s); wrapping for "
+            "structuredContent compatibility",
+            type(payload).__name__,
+        )
+        structured = {"result": payload}
     return {
         "content": [{
             "type": "text",
-            "text": json.dumps(payload, ensure_ascii=False, sort_keys=True),
+            "text": json.dumps(structured, ensure_ascii=False, sort_keys=True),
         }],
-        "structuredContent": payload,
+        "structuredContent": structured,
         "isError": is_error,
     }
 

@@ -44,7 +44,11 @@ def get_export_task(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def list_exports(arguments: dict[str, Any]) -> list[dict[str, Any]]:
-    return ExportService.list_exports(str(arguments.get("project_name") or ""))
+    return {
+        "exports": ExportService.list_exports(
+            str(arguments.get("project_name") or "")
+        )
+    }
 
 
 def get_delivery_manifest(arguments: dict[str, Any]) -> dict[str, Any]:

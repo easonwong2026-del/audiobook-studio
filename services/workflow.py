@@ -67,11 +67,16 @@ class WorkflowService:
                 "bound": bound,
                 "unbound": max(len(roles) - bound, 0),
                 "cast_locked": False,
+                "cast_ready": bool(roles) and bound == len(roles),
                 "synthesis_ready": bool(roles) and bound == len(roles),
                 "mode": "legacy_manual",
             }
         unbound = int(cast.get("unbound", 0) or 0)
-        cast_ready = bool(cast.get("synthesis_ready", False))
+        cast_ready = bool(
+            cast.get("cast_ready", cast.get("synthesis_ready", False))
+        )
+        engine_ready = bool(cast.get("engine_ready", False))
+        runtime_status = str(cast.get("runtime_status") or "unknown")
 
         active_task = ProductionJobService.get_active_task(project)
         repairs = QualityRepository.list_history(project, "repair_history")
@@ -296,6 +301,9 @@ class WorkflowService:
                 "failed": failed,
                 "roles_bound": int(cast.get("bound", 0) or 0),
                 "roles_unbound": unbound,
+                "cast_ready": cast_ready,
+                "engine_ready": engine_ready,
+                "runtime_status": runtime_status,
                 "quality": quality_summary,
                 "active_production_task": (
                     active_task.get("task_id") if active_task else None

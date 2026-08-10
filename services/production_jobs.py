@@ -326,18 +326,28 @@ class ProductionJobService:
                     "message": "所选范围尚未达到合成就绪状态。",
                     "fix_hint": "完成所需角色的声音绑定并重新检查。",
                 })
+        runtime_status = str(status.get("runtime_status") or "unknown")
+        engine_ready = bool(status.get("engine_ready", False))
+        if runtime_status == "error":
+            warnings.append({
+                "code": "RUNTIME_ENGINE_ERROR",
+                "message": "TTS 引擎初始化失败，生产任务会立即失败。",
+                "fix_hint": "修复模型 / CUDA / 显存问题后重新启动运行时再试。",
+            })
         warnings.extend(
             item for item in status.get("warnings", [])
             if isinstance(item, dict)
         )
+        cast_ready = bool(selected_ready) and not blockers
         return {
             "locked": cast_locked,
             "bound": int(status.get("bound", 0) or 0),
             "unbound": int(status.get("unbound", 0) or 0),
             "mode": mode,
-            "synthesis_ready": bool(
-                selected_ready
-            ) and not blockers,
+            "cast_ready": cast_ready,
+            "runtime_status": runtime_status,
+            "engine_ready": engine_ready,
+            "synthesis_ready": cast_ready and engine_ready,
         }, blockers, warnings
 
     @classmethod

@@ -24,9 +24,16 @@ from repositories.project_repo import ProjectRepository
 from repositories.task_repo import TaskRecord, TaskRepository
 
 from .runtime_lock import ProcessFileLock
+from .runtime_engine import EngineInitError, RuntimeEngineLifecycle
 from .synthesis import SynthesisService, SynthesisState
 
 logger = logging.getLogger(__name__)
+
+
+def _runtime_event(event: str, **fields: Any) -> None:
+    """Emit one structured runtime lifecycle event into the runtime log."""
+    parts = [f"{key}={value}" for key, value in fields.items() if value not in (None, "")]
+    logger.info("runtime_event=%s %s", event, " ".join(parts))
 
 
 class ProductionRuntime:
@@ -57,6 +64,8 @@ class ProductionRuntime:
         self._export_record: TaskRecord | None = None
         self._ownership_lock = threading.RLock()
         self._lock_release_deferred = False
+        self._engine = RuntimeEngineLifecycle(owner_id=self.owner_id)
+        self._engine_failure = False
 
     @property
     def is_running(self) -> bool:
@@ -68,6 +77,18 @@ class ProductionRuntime:
             if state is not None and state.task_id == str(task_id or ""):
                 return state
             return None
+
+    def engine_snapshot(self) -> dict[str, Any]:
+        """Thread-safe engine lifecycle snapshot (tests/diagnostics)."""
+        return self._engine.snapshot()
+
+    def ensure_engine_ready(self) -> None:
+        """Initialize the process-local TTS engine exactly once per serve cycle."""
+        self._engine.ensure_ready()
+
+    def reset_engine(self) -> None:
+        """Force a fresh engine lifecycle (used by tests and restart)."""
+        self._engine.reset()
 
     def start_background(self) -> bool:
         if self.is_running:
@@ -82,7 +103,16 @@ class ProductionRuntime:
             return False
         # This is the only legal interruption-repair point.  Merely reading a
         # task from a client process must never infer worker death.
-        TaskRepository.mark_orphaned_interrupted(self.owner_id)
+        orphaned = TaskRepository.mark_orphaned_interrupted(self.owner_id)
+        self._engine_failure = False
+        self._engine.reset()
+        _runtime_event(
+            "runtime_start",
+            mode="inline",
+            pid=os.getpid(),
+            owner=self.owner_id,
+            orphan_takeover=len(orphaned) or None,
+        )
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._run_loop,
@@ -95,13 +125,22 @@ class ProductionRuntime:
     def serve_forever(self) -> bool:
         if not self.lock.acquire(blocking=False):
             return False
-        TaskRepository.mark_orphaned_interrupted(self.owner_id)
+        orphaned = TaskRepository.mark_orphaned_interrupted(self.owner_id)
+        self._engine_failure = False
+        self._engine.reset()
+        _runtime_event(
+            "runtime_start",
+            mode="serve",
+            pid=os.getpid(),
+            owner=self.owner_id,
+            orphan_takeover=len(orphaned) or None,
+        )
         self._stop.clear()
         try:
             self._run_loop()
         finally:
             self._release_lock_when_export_safe()
-        return True
+        return not self._engine_failure
 
     def stop(self, timeout: float = 2.0) -> None:
         self._stop.set()
@@ -170,6 +209,13 @@ class ProductionRuntime:
                         self.owner_id, {"synthesis"}
                     )
                     if record is not None:
+                        _runtime_event(
+                            "task_claim",
+                            task_id=record.task_id,
+                            task_type=record.task_type,
+                            project=record.project,
+                            owner=self.owner_id,
+                        )
                         self._launch(record)
                 else:
                     self._apply_control(state)
@@ -189,12 +235,26 @@ class ProductionRuntime:
                         self.owner_id, {"export"}
                     )
                     if export_record is not None:
+                        _runtime_event(
+                            "task_claim",
+                            task_id=export_record.task_id,
+                            task_type=export_record.task_type,
+                            project=export_record.project,
+                            owner=self.owner_id,
+                        )
                         self._launch_export(export_record)
                 if self._current_state is None and self._export_future is None:
                     utility_record = TaskRepository.claim_next_pending(
                         self.owner_id, {"supplement", "voice_preview"}
                     )
                     if utility_record is not None:
+                        _runtime_event(
+                            "task_claim",
+                            task_id=utility_record.task_id,
+                            task_type=utility_record.task_type,
+                            project=utility_record.project,
+                            owner=self.owner_id,
+                        )
                         self._launch(utility_record)
                 now = time.monotonic()
                 if now - self._last_heartbeat >= 1.0:
@@ -209,6 +269,13 @@ class ProductionRuntime:
             # by acquiring the OS lock before it can repair interrupted tasks.
             if self._thread is threading.current_thread():
                 self._thread = None
+            self._engine.mark_unknown()
+            _runtime_event(
+                "runtime_shutdown",
+                pid=os.getpid(),
+                owner=self.owner_id,
+                reason="engine_init_failure" if self._engine_failure else "stop",
+            )
             self._release_lock_when_export_safe()
 
     @staticmethod
@@ -271,7 +338,20 @@ class ProductionRuntime:
             self._current_segment_to_chapter = self._segment_to_chapter(
                 record.project
             )
+        # P0: engine preflight inside the runtime process.  A failed init is
+        # fatal for the whole task: no segment loop, no per-segment errors.
+        try:
+            self._engine.ensure_ready()
+        except EngineInitError as exc:
+            self._fail_synthesis_engine_init(record, state, exc)
+            return
         options = record.options if isinstance(record.options, dict) else {}
+        _runtime_event(
+            "task_start",
+            task_id=record.task_id,
+            task_type=record.task_type,
+            project=record.project,
+        )
         try:
             SynthesisService.start(
                 state,
@@ -295,6 +375,49 @@ class ProductionRuntime:
             state.error = str(exc)
             state.append_log(f"❌ 启动生产运行时失败: {exc}")
             state.notify()
+
+    def _fail_synthesis_engine_init(
+        self,
+        record: TaskRecord,
+        state: SynthesisState,
+        exc: EngineInitError,
+    ) -> None:
+        """Persist one terminal engine-init failure and shut the runtime down."""
+        state.status = "error"
+        state.error = str(exc)
+        state.completed = 0
+        state.failed_segment_ids = []
+        progress = {
+            "total": max(int(state.total or 0), 0),
+            "completed": 0,
+            "failed": 0,
+            "attempted": 0,
+            "percent": 0.0,
+            "current_chapter": None,
+            "current_segment": None,
+        }
+        state.append_log("❌ TTS 引擎初始化失败，任务未开始")
+        state.append_log(f"错误: {exc.summary}")
+        try:
+            TaskRepository.persist_runtime_state(
+                record.task_id,
+                self.owner_id,
+                status="error",
+                progress=progress,
+                failed_segment_ids=[],
+                error_summary=str(exc),
+                log_lines=list(state.log_lines),
+            )
+        except Exception:
+            logger.exception("持久化引擎初始化失败状态失败: %s", record.task_id)
+        logger.error(
+            "runtime_event=task_engine_fatal task_id=%s project=%s error=%s",
+            record.task_id,
+            record.project,
+            exc.summary,
+        )
+        self._engine_failure = True
+        self._stop.set()
 
     def _launch_export(self, record: TaskRecord) -> None:
         """Submit formal export to a managed CPU/IO worker.
@@ -346,6 +469,12 @@ class ProductionRuntime:
                 error_summary="",
                 log_lines=["运行时完成正式导出"],
             )
+            _runtime_event(
+                "task_terminal",
+                task_id=record.task_id,
+                task_type="export",
+                status="done",
+            )
         except ExportCancelled:
             TaskRepository.persist_runtime_state(
                 record.task_id,
@@ -359,6 +488,12 @@ class ProductionRuntime:
                 error_summary="",
                 log_lines=["正式导出已取消"],
             )
+            _runtime_event(
+                "task_terminal",
+                task_id=record.task_id,
+                task_type="export",
+                status="cancelled",
+            )
         except Exception as exc:
             logger.exception("正式导出任务失败: %s", record.task_id)
             code = str(getattr(exc, "code", "EXPORT_ERROR"))
@@ -370,6 +505,12 @@ class ProductionRuntime:
                 failed_segment_ids=[],
                 error_summary=f"{code}: {exc}",
                 log_lines=[f"正式导出任务失败: {code}"],
+            )
+            _runtime_event(
+                "task_terminal",
+                task_id=record.task_id,
+                task_type="export",
+                status="error",
             )
 
     @staticmethod
@@ -390,14 +531,16 @@ class ProductionRuntime:
             if audio.getnframes() <= 0 or audio.getframerate() <= 0:
                 raise RuntimeError("TTS 生成的 WAV 为空")
 
-    @staticmethod
     def run_voice_preview_direct(
+        self,
         speaker_audio: str,
         role: str,
         artifact_dir: str,
     ) -> str:
         """Runtime-owned direct worker; public callers submit through RuntimeTTSService."""
-        from lib import config, tts_engine
+        from lib import config
+
+        self._engine.ensure_ready()
 
         destination = artifact_dir or os.path.join(
             config.get_preview_dir(),
@@ -405,7 +548,8 @@ class ProductionRuntime:
             uuid.uuid4().hex,
         )
         os.makedirs(destination, exist_ok=True)
-        tts_engine.init_engine()
+        from lib import tts_engine
+
         parts = tts_engine.test_voice(speaker_audio)
         if not parts:
             raise RuntimeError("声音试听未生成音频")
@@ -424,8 +568,8 @@ class ProductionRuntime:
         os.replace(temporary, output)
         return output
 
-    @staticmethod
     def run_supplement_direct(
+        self,
         payload: dict[str, Any],
         artifact_dir: str,
         *,
@@ -434,7 +578,10 @@ class ProductionRuntime:
         validate_output: bool = False,
     ) -> list[dict[str, Any]]:
         """Runtime-owned isolated supplement worker."""
-        from lib import config, tts_engine
+        from lib import config
+
+        if initialize:
+            self._engine.ensure_ready()
 
         destination = artifact_dir or os.path.join(
             config.get_preview_dir(),
@@ -455,8 +602,8 @@ class ProductionRuntime:
         except (TypeError, ValueError):
             beams = 2
         speaker_audio = str(payload.get("speaker_audio") or "")
-        if initialize:
-            tts_engine.init_engine()
+        from lib import tts_engine
+
         results: list[dict[str, Any]] = []
         for index, raw_text in enumerate(payload.get("lines", [])):
             if callable(heartbeat):
@@ -604,6 +751,15 @@ class ProductionRuntime:
                 error_summary=str(exc),
                 log_lines=[f"运行时任务失败: {exc}"],
             )
+            if isinstance(exc, EngineInitError):
+                self._engine_failure = True
+                self._stop.set()
+                logger.error(
+                    "runtime_event=task_engine_fatal task_id=%s task_type=%s error=%s",
+                    record.task_id,
+                    record.task_type,
+                    exc.summary,
+                )
 
     def _progress(self, state: SynthesisState, record: TaskRecord) -> dict[str, Any]:
         total = max(int(state.total or record.progress.get("total", 0) or 0), 0)
@@ -630,6 +786,15 @@ class ProductionRuntime:
         if state.status == "done" and state.failed_segment_ids:
             state.status = "error"
             state.error = "存在失败段落"
+        if state.status in {"cancelled", "done", "error"}:
+            _runtime_event(
+                "task_terminal",
+                task_id=state.task_id,
+                task_type="synthesis",
+                status=state.status,
+                completed=state.completed,
+                failed=len(state.failed_segment_ids),
+            )
         try:
             updated = TaskRepository.persist_runtime_state(
                 state.task_id,

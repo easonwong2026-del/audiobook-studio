@@ -131,7 +131,7 @@ class RuntimeTTSService:
         project = str(project_name or "").strip()
         if not project or not TaskRepository.get_database_path(project, create=True):
             # Compatibility for isolated service tests without a real project.
-            return ProductionRuntime.run_voice_preview_direct(
+            return ProductionRuntime().run_voice_preview_direct(
                 str(speaker_audio), str(role or "voice"), ""
             )
         task_id = f"preview_{uuid.uuid4().hex[:20]}"
@@ -177,7 +177,7 @@ class RuntimeTTSService:
         }
         if not project or not TaskRepository.get_database_path(project, create=True):
             # Legacy/unit-test fixtures have no durable project queue.
-            return ProductionRuntime.run_supplement_direct(payload, artifact_dir)
+            return ProductionRuntime().run_supplement_direct(payload, artifact_dir)
         record = cls._submit(
             project_name=project,
             task_type="supplement",

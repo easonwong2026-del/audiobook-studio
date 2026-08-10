@@ -46,12 +46,15 @@ def get_production_task(arguments: dict[str, Any]) -> dict[str, Any]:
 
 def list_production_tasks(arguments: dict[str, Any] | None = None) -> list[dict[str, Any]] | dict[str, Any]:
     arguments = arguments or {}
-    return _call(
+    result = _call(
         ProductionJobService.list_tasks,
         arguments.get("project_name"),
         arguments.get("status"),
         arguments.get("source"),
     )
+    if isinstance(result, list):
+        return {"tasks": result}
+    return result
 
 
 def pause_production(arguments: dict[str, Any]) -> dict[str, Any]:

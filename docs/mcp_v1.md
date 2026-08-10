@@ -35,7 +35,7 @@ stderr。当前没有网络监听，也不要求 Gradio 已启动。
 | server_info | 返回 API、structured_script 和能力版本 |
 | validate_structured_script | 直接校验内存 JSON，返回 valid/can_create/summary/errors/warnings/script_summary |
 | create_project | 复用校验、项目槽位检查、canonical storage 和原子创建 |
-| list_projects | 返回项目名、书名、章节/片段统计、进度、占用和修改时间 |
+| list_projects | 返回对象 `{"projects": [...]}`：项目名、书名、章节/片段统计、进度、占用和修改时间 |
 | get_project | 返回 meta、角色、声音绑定、合成、存储和完整性摘要，不嵌入完整剧本 |
 
 validate_structured_script 和 create_project 接受：
@@ -65,8 +65,18 @@ Phase 2 增加全局音色资产目录和项目角色/演员表生命周期：
 | list_voice_assets / get_voice_asset | 返回稳定 voice_asset_id 和脱敏元数据 |
 | set/get/add/update/validate_character_roster | 管理 Character Roster |
 | set/get/bind/validate/finalize_voice_cast | 管理 Voice Cast、锁定和重绑定 |
-| get_voice_binding_status | 返回绑定、锁定和 synthesis_ready 状态 |
+| get_voice_binding_status | 返回绑定、锁定、cast_ready、runtime_status/engine_ready 与 synthesis_ready（cast 与引擎就绪取交集） |
 | check_chapter_roles | 检查章节中的已知、新增和未绑定角色 |
+
+所有 list_* 工具都把数组包在对象里返回（如 `{"projects": [...]}`、
+`{"tasks": [...]}`），保证 `structuredContent` 始终是 JSON object，避免
+MCP 客户端 `invalid_type structuredContent` 校验失败。
+
+`synthesis_ready` 拆分为三层：`cast_ready`（角色全部绑定并锁定）、
+`runtime_status`/`engine_ready`（独立 Runtime 进程声明的引擎状态，来自
+`logs/runtime_engine_status.json`，status 查询不加载 GPU 模型）、以及
+`synthesis_ready = cast_ready AND engine_ready`。Runtime 未启动时
+`runtime_status` 为 `unknown`，未加载引擎时为 `uninitialized`。
 
 ## Phase 3 production jobs
 
