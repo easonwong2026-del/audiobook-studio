@@ -19,6 +19,7 @@ from typing import Any
 
 from repositories.project_repo import ProjectRepository
 from repositories.quality_repo import QualityRepository
+from lib.procutil import run_no_window
 from repositories.task_repo import TaskRecord, TaskRepository
 from services.delivery import compute_delivery_input_snapshot
 from services.quality import QualityService
@@ -539,7 +540,7 @@ class ExportService:
                 continue
             seen_probes.add(probe)
             try:
-                result = subprocess.run(
+                result = run_no_window(
                     [
                         probe,
                         "-v", "error",

@@ -160,6 +160,7 @@ class TaskRecord:
     control_intent: str = ""
     log_lines: list[str] = field(default_factory=list)
     version: int = 0
+    startup: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         scope = {"all": False, "chapter_ids": [], "segment_ids": []}
@@ -193,6 +194,7 @@ class TaskRecord:
             "control_intent": self.control_intent,
             "log_lines": [str(item) for item in self.log_lines[-50:]],
             "version": max(int(self.version or 0), 0),
+            "startup": dict(self.startup) if isinstance(self.startup, dict) else {},
         }
 
     @staticmethod
@@ -242,6 +244,7 @@ class TaskRecord:
             control_intent=str(data.get("control_intent") or ""),
             log_lines=logs,
             version=version,
+            startup=data.get("startup", {}) if isinstance(data.get("startup", {}), dict) else {},
         )
 
 
@@ -338,6 +341,7 @@ class TaskRepository:
                 heartbeat_at TEXT NOT NULL DEFAULT '',
                 control_intent TEXT NOT NULL DEFAULT '',
                 log_lines_json TEXT NOT NULL DEFAULT '[]',
+                startup_json TEXT NOT NULL DEFAULT '{}',
                 version INTEGER NOT NULL DEFAULT 0
             );
             CREATE UNIQUE INDEX IF NOT EXISTS uq_production_active_project
@@ -351,6 +355,17 @@ class TaskRepository:
             """
         )
         connection.commit()
+        # 旧库迁移：为已存在的 production_tasks 表补 startup_json 列。
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(production_tasks)")
+        }
+        if "startup_json" not in columns:
+            connection.execute(
+                "ALTER TABLE production_tasks "
+                "ADD COLUMN startup_json TEXT NOT NULL DEFAULT '{}'"
+            )
+            connection.commit()
 
     @staticmethod
     def _migrate_legacy_json(project: str, connection: sqlite3.Connection) -> None:
@@ -402,8 +417,8 @@ class TaskRepository:
                 progress_json,failed_segment_ids_json,attempt,idempotency_key,
                 created_at,started_at,updated_at,finished_at,parent_task_id,
                 recovery_of,artifact_dir,error_summary,owner_id,heartbeat_at,
-                control_intent,log_lines_json,version
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                control_intent,log_lines_json,startup_json,version
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 values["task_id"], values["task_type"], values["project"],
@@ -419,6 +434,7 @@ class TaskRepository:
                 values["error_summary"], values["owner_id"],
                 values["heartbeat_at"], values["control_intent"],
                 json.dumps(values["log_lines"], ensure_ascii=False),
+                json.dumps(values["startup"], ensure_ascii=False),
                 values["version"],
             ),
         )
@@ -454,6 +470,7 @@ class TaskRepository:
             heartbeat_at=row["heartbeat_at"],
             control_intent=row["control_intent"],
             log_lines=[str(item) for item in _json_list(row["log_lines_json"])][-50:],
+            startup=_json_dict(row["startup_json"], {}),
             version=max(int(row["version"] or 0), 0),
         )
 
@@ -536,7 +553,7 @@ class TaskRepository:
                           created_at=?,started_at=?,updated_at=?,finished_at=?,
                           parent_task_id=?,recovery_of=?,artifact_dir=?,error_summary=?,
                           owner_id=?,heartbeat_at=?,control_intent=?,log_lines_json=?,
-                          version=?
+                          startup_json=?,version=?
                         WHERE task_id=?
                         """,
                         (
@@ -553,6 +570,7 @@ class TaskRepository:
                             values["owner_id"], values["heartbeat_at"],
                             values["control_intent"],
                             json.dumps(values["log_lines"], ensure_ascii=False),
+                            json.dumps(values["startup"], ensure_ascii=False),
                             values["version"], values["task_id"],
                         ),
                     )
@@ -889,6 +907,81 @@ class TaskRepository:
                     )
             finally:
                 connection.close()
+
+    @staticmethod
+    def update_startup(
+        task_id: str,
+        owner_id: str = "",
+        **fields: Any,
+    ) -> Optional[TaskRecord]:
+        """Merge startup phase fields into a task row (durable, guarded).
+
+        Ownership guard:
+        - ``owner_id`` given → must match the row owner (runtime wrote it) or the
+          row must not be claimed yet.
+        - ``owner_id`` empty → only allowed while the row is still unclaimed
+          (client-side pre-claim writes such as ``task_submitted``).
+
+        Returns the refreshed record, or ``None`` when the row is missing /
+        ownership was lost (the caller should treat it as a no-op).
+        """
+        record = TaskRepository.load_task(task_id)
+        if record is None:
+            return None
+        connection = TaskRepository._connect(record.project, create=True)
+        if connection is None:
+            return None
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM production_tasks WHERE task_id=?", (task_id,)
+            ).fetchone()
+            if row is None:
+                connection.commit()
+                return None
+            current = TaskRepository._row_to_record(row)
+            if owner_id and current.owner_id and current.owner_id != owner_id:
+                connection.commit()
+                return current
+            if not owner_id and current.owner_id:
+                connection.commit()
+                return current
+            startup = _json_dict(row["startup_json"], {})
+            merged = dict(startup)
+            for key, value in fields.items():
+                if value is not None:
+                    merged[key] = value
+            now = _utc_now()
+            connection.execute(
+                "UPDATE production_tasks SET startup_json=?, updated_at=? WHERE task_id=?",
+                (json.dumps(merged, ensure_ascii=False), now, task_id),
+            )
+            connection.commit()
+            updated = connection.execute(
+                "SELECT * FROM production_tasks WHERE task_id=?", (task_id,)
+            ).fetchone()
+            return TaskRepository._row_to_record(updated)
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    @staticmethod
+    def update_startup_phase(
+        task_id: str,
+        phase: str,
+        owner_id: str = "",
+        **extra: Any,
+    ) -> Optional[TaskRecord]:
+        """Advance the durable startup phase with a fresh phase timestamp."""
+        return TaskRepository.update_startup(
+            task_id,
+            owner_id,
+            phase=phase,
+            phase_started_at=_utc_now(),
+            **extra,
+        )
 
     @staticmethod
     def mark_orphaned_interrupted(new_owner_id: str) -> list[str]:

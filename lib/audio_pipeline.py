@@ -22,6 +22,7 @@ from . import audio_format as af
 from . import chapter_identity, config, project_paths
 from . import segment_cache
 from .exceptions import ExportError
+from .procutil import run_no_window
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +162,7 @@ def export_book(project_dir: str, format: str = "mp3", bitrate: str = "192k",
         )
         codec = "libmp3lame" if format == "mp3" else "aac"
         try:
-            subprocess.run(
+            run_no_window(
                 [_ffmpeg_executable(), "-y", "-i", wav_path, "-b:a", bitrate, "-codec:a", codec, out_path],
                 check=True, capture_output=True, text=True
             )
@@ -707,7 +708,7 @@ def export_supplement(paths: list, out_path: str, format: str = "mp3", bitrate: 
         out_path_real = os.path.splitext(out_path)[0] + "." + ext
         codec = "libmp3lame" if format == "mp3" else "aac"
         try:
-            subprocess.run(
+            run_no_window(
                 [_ffmpeg_executable(), "-y", "-i", wav_path, "-b:a", bitrate, "-codec:a", codec, out_path_real],
                 check=True, capture_output=True, text=True
             )

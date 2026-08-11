@@ -10,6 +10,8 @@ import os
 import shutil
 import subprocess
 
+from .procutil import run_no_window
+
 logger = logging.getLogger(__name__)
 
 
@@ -100,7 +102,7 @@ def write_m4b_chapters(path: str, title: str, author: str,
         try:
             with open(tmp_meta, "w", encoding="utf-8") as fh:
                 fh.write(meta_txt)
-            subprocess.run(
+            run_no_window(
                 [ff, "-y", "-i", path, "-i", tmp_meta,
                  "-map", "0", "-map_chapters", "1", "-c", "copy", tmp_out],
                 check=True, capture_output=True, text=True,

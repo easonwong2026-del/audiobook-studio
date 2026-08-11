@@ -28,6 +28,7 @@ from lib import dataframe_style as df_style
 from lib import progress as synth_progress
 from lib import project_manager as _pm
 from services import (
+    ACTIVE_PRODUCTION_STATES,
     ExportService,
     ProductionJobError,
     ProductionJobService,
@@ -233,6 +234,20 @@ def _production_source_label(source: str) -> str:
     }.get(source, source or "系统")
 
 
+_STARTUP_PHASE_LABELS = {
+    "task_submitted": "🚀 任务已提交，正在启动生产运行时…",
+    "runtime_starting": "🚀 正在启动生产运行时…",
+    "runtime_available": "🚀 生产运行时已启动",
+    "task_claimed": "🚀 生产运行时已接管任务",
+    "engine_loading": "⏳ 正在加载 IndexTTS2 模型…",
+    "engine_ready": "✅ TTS 模型已就绪，正在准备第一段…",
+    "preparing_first_segment": "✅ TTS 模型已就绪，正在准备第一段…",
+    "synthesizing_first_segment": "🎧 正在合成第 1 段…",
+    "running": "🎧 生产中",
+    "engine_failed": "❌ TTS 引擎初始化失败",
+}
+
+
 def _production_task_markdown(task: dict | None) -> str:
     """Render a task snapshot without exposing private filesystem paths."""
     if not task:
@@ -259,6 +274,30 @@ def _production_task_markdown(task: dict | None) -> str:
         f"- **状态**：{_production_status_label(str(task.get('status') or ''))}",
         f"- **进度**：{completed} / {total}（{percent:.1f}%）",
     ]
+    startup = task.get("startup") if isinstance(task.get("startup"), dict) else {}
+    phase = str(startup.get("startup_phase") or "")
+    if phase:
+        elapsed = startup.get("startup_phase_elapsed_seconds")
+        elapsed_text = (
+            f"（已持续 {float(elapsed):.0f} 秒）"
+            if isinstance(elapsed, (int, float)) and elapsed is not None
+            else ""
+        )
+        if phase == "engine_failed":
+            error_code = str(startup.get("engine_error_code") or "TTS_ENGINE_INIT_FAILED")
+            summary = str(startup.get("engine_error_summary") or "引擎初始化失败")
+            lines.append(
+                f"- ❌ **TTS 引擎初始化失败**（`{error_code}`）：{summary}"
+            )
+        elif phase in _STARTUP_PHASE_LABELS:
+            lines.append(f"- {_STARTUP_PHASE_LABELS[phase]}{elapsed_text}")
+        elif phase != "running":
+            lines.append(f"- 🚀 启动阶段：`{phase}`{elapsed_text}")
+        if startup.get("startup_slow") and phase != "running":
+            lines.append(
+                "- ⏱️ **启动耗时偏长，但运行时仍存活**：IndexTTS2 冷启动通常需要 1-3 分钟，"
+                "请耐心等待（可稍后查看运行时健康状态）。"
+            )
     current_chapter = progress.get("current_chapter")
     current_segment = progress.get("current_segment")
     if current_chapter or current_segment:
@@ -321,6 +360,21 @@ def refresh_production_task(ss):
     except Exception as exc:
         logger.warning("刷新生产任务状态失败: %s", exc)
         return f"当前生产任务状态读取失败：{exc}"
+
+
+def refresh_production_task_tick(ss):
+    """Timer tick: refresh the panel and keep the timer alive while active."""
+    markdown = refresh_production_task(ss)
+    task = _latest_production_task(getattr(ss, "project", None)) if ss else None
+    active = bool(
+        task and str(task.get("status") or "") in ACTIVE_PRODUCTION_STATES
+    )
+    return markdown, gr.Timer(active=active)
+
+
+def activate_production_timer():
+    """Turn on the 1s polling timer after a start/cancel action."""
+    return gr.Timer(active=True)
 
 def delete_project(name, ss=None):
     """Archive a project by default; permanent deletion has a separate callback."""
@@ -2670,6 +2724,15 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             s_open_btn = syn_page["s_open_btn"]
             s_open_msg = syn_page["s_open_msg"]
 
+            # 生产启动阶段 1s 轮询：点击「开始合成」后 1 秒内显示真实 startup phase。
+            # active 由 tick 自动开关（有活动任务即保持轮询，终态后自动停）。
+            s_start_timer = gr.Timer(1.0, active=False)
+            s_start_timer.tick(
+                refresh_production_task_tick,
+                [ss],
+                [s_task_status, s_start_timer],
+            )
+
             # ───────── 试听与质检 ─────────
             review_page = create_review_page()
             grp_review = review_page["group"]
@@ -3055,10 +3118,12 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         )
     s_start.click(do_synthesis, [ss, s_beam, s_emo, s_override, s_alpha, s_rate, s_chapters_sel, s_scope_mode, s_segment_selection_state], outputs=[s_log, s_queue_list]).then(
         refresh_production_task, [ss], [s_task_status]).then(
-        refresh_top_status, [ss], [top_status])
+        refresh_top_status, [ss], [top_status]).then(
+        activate_production_timer, None, s_start_timer)
     s_cancel.click(cancel, [ss], outputs=s_log).then(
         refresh_production_task, [ss], [s_task_status]).then(
-        refresh_top_status, [ss], [top_status])
+        refresh_top_status, [ss], [top_status]).then(
+        activate_production_timer, None, s_start_timer)
     s_pause.click(pause_synthesis, [ss], [s_queue_list, s_pause, s_resume]).then(
         refresh_production_task, [ss], [s_task_status])
     s_resume.click(resume_synthesis, [ss], [s_queue_list, s_pause, s_resume]).then(

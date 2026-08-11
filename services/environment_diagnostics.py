@@ -13,6 +13,7 @@ from typing import Any
 
 from lib import config
 from lib.environment import resolve_python_interpreter
+from lib.procutil import run_no_window
 
 STATUS_RANK = {"ok": 0, "warning": 1, "error": 2}
 
@@ -123,7 +124,7 @@ def run_environment_diagnostics() -> dict[str, Any]:
                 "status": "error", "message": "未找到 FFmpeg", "details": {},
                 "suggestion": "安装 FFmpeg 并加入 PATH，或设置 AUDIOBOOK_STUDIO_FFMPEG。",
             }
-        proc = subprocess.run(
+        proc = run_no_window(
             [found, "-version"], capture_output=True, text=True, timeout=5, check=False,
         )
         first = (proc.stdout or proc.stderr).splitlines()[0] if (proc.stdout or proc.stderr) else ""
@@ -142,7 +143,7 @@ def run_environment_diagnostics() -> dict[str, Any]:
                 "status": "warning", "message": "未检测到 nvidia-smi", "details": {"gpu_detected": False},
                 "suggestion": "需要 GPU 推理时，请安装兼容的 NVIDIA 驱动；无 NVIDIA GPU 可忽略。",
             }
-        proc = subprocess.run(
+        proc = run_no_window(
             [binary, "--query-gpu=name", "--format=csv,noheader"],
             capture_output=True, text=True, timeout=8, check=False,
         )

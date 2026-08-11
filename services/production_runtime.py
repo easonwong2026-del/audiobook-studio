@@ -16,6 +16,7 @@ import time
 import uuid
 import wave
 from concurrent.futures import Future, ThreadPoolExecutor
+from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from typing import Any, Optional
 
@@ -35,6 +36,46 @@ def _runtime_event(event: str, **fields: Any) -> None:
     """Emit one structured runtime lifecycle event into the runtime log."""
     parts = [f"{key}={value}" for key, value in fields.items() if value not in (None, "")]
     logger.info("runtime_event=%s %s", event, " ".join(parts))
+
+
+def _iso_delta_ms(start: str, end: str) -> int | None:
+    """Milliseconds between two UTC ISO timestamps (best effort)."""
+    try:
+        begin = datetime.fromisoformat(str(start).replace("Z", "+00:00"))
+        finish = datetime.fromisoformat(str(end).replace("Z", "+00:00"))
+        return max(int((finish - begin).total_seconds() * 1000), 0)
+    except (TypeError, ValueError):
+        return None
+
+
+def _open_bootstrap_log():
+    """Open the runtime bootstrap log for stderr redirection (Windows).
+
+    Rationale: the runtime subprocess runs with ``stdout/stderr`` detached.
+    Errors raised **before** ``main()`` configures the rotating file handler
+    (import-time failures, missing module, ``--serve`` misuse) would otherwise
+    vanish into ``DEVNULL``.  Redirecting stderr into a dedicated bootstrap log
+    preserves them: 无黑框 ≠ 无日志.
+
+    Returns an open text file handle, or ``None`` (→ ``DEVNULL``) when the log
+    directory is unavailable (e.g. POSIX, where no console exists anyway).
+    """
+    if os.name != "nt":
+        return None
+    try:
+        from lib import config
+
+        log_dir = os.path.join(config.get_data_dir(), "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        return open(
+            os.path.join(log_dir, "production_runtime_bootstrap.log"),
+            "a",
+            encoding="utf-8",
+            buffering=1,
+        )
+    except Exception:  # pragma: no cover - logging must never block startup
+        logger.exception("无法打开 runtime bootstrap 日志，回退 DEVNULL")
+        return None
 
 
 class ProductionRuntime:
@@ -58,6 +99,8 @@ class ProductionRuntime:
         self._current_segment_to_chapter: dict[str, str] = {}
         self._state_lock = threading.RLock()
         self._last_heartbeat = 0.0
+        # task_ids 对哪些任务已写入 first_audio_ready（避免重复落库）
+        self._first_audio_ready_tasks: set[str] = set()
         self._export_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="audiobook-formal-export",
@@ -241,6 +284,60 @@ class ProductionRuntime:
         if state is not None:
             self._apply_control(state)
 
+    @staticmethod
+    def _utc_now() -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    def _note_task_claim(self, record: TaskRecord) -> None:
+        """Persist the durable startup transition for a claimed task."""
+        now = self._utc_now()
+        try:
+            TaskRepository.update_startup_phase(
+                record.task_id,
+                "task_claimed",
+                owner_id=self.owner_id,
+                runtime_available_at=now,
+                claimed_at=now,
+            )
+        except Exception:  # pragma: no cover - defensive persistence boundary
+            logger.exception("记录任务 claim 启动阶段失败: %s", record.task_id)
+        _runtime_event(
+            "task_claim",
+            task_id=record.task_id,
+            task_type=record.task_type,
+            project=record.project,
+            owner=self.owner_id,
+            pid=os.getpid(),
+            claimed_at=now,
+        )
+
+    def _note_startup(
+        self,
+        record: TaskRecord,
+        phase: str,
+        *,
+        engine_generation: Any = None,
+        engine_was_ready: Any = None,
+        extra: dict | None = None,
+    ) -> None:
+        """Persist a startup phase transition with optional diagnostics."""
+        fields: dict = {"phase": phase}
+        if engine_generation is not None:
+            fields["engine_generation"] = engine_generation
+        if engine_was_ready is not None:
+            fields["engine_was_ready"] = engine_was_ready
+        if extra:
+            fields.update(extra)
+        try:
+            TaskRepository.update_startup_phase(
+                record.task_id,
+                phase,
+                owner_id=self.owner_id,
+                **{key: value for key, value in fields.items() if key != "phase"},
+            )
+        except Exception:  # pragma: no cover - defensive persistence boundary
+            logger.exception("记录启动阶段 %s 失败: %s", phase, record.task_id)
+
     def _run_loop(self) -> None:
         try:
             self._engine.set_runtime_state("running")
@@ -252,13 +349,7 @@ class ProductionRuntime:
                         self.owner_id, {"synthesis"}
                     )
                     if record is not None:
-                        _runtime_event(
-                            "task_claim",
-                            task_id=record.task_id,
-                            task_type=record.task_type,
-                            project=record.project,
-                            owner=self.owner_id,
-                        )
+                        self._note_task_claim(record)
                         self._launch(record)
                 else:
                     self._apply_control(state)
@@ -284,26 +375,14 @@ class ProductionRuntime:
                         self.owner_id, {"export"}
                     )
                     if export_record is not None:
-                        _runtime_event(
-                            "task_claim",
-                            task_id=export_record.task_id,
-                            task_type=export_record.task_type,
-                            project=export_record.project,
-                            owner=self.owner_id,
-                        )
+                        self._note_task_claim(export_record)
                         self._launch_export(export_record)
                 if self._current_state is None and self._export_future is None:
                     utility_record = TaskRepository.claim_next_pending(
                         self.owner_id, {"supplement", "voice_preview"}
                     )
                     if utility_record is not None:
-                        _runtime_event(
-                            "task_claim",
-                            task_id=utility_record.task_id,
-                            task_type=utility_record.task_type,
-                            project=utility_record.project,
-                            owner=self.owner_id,
-                        )
+                        self._note_task_claim(utility_record)
                         self._launch(utility_record)
                 now = time.monotonic()
                 if now - self._last_heartbeat >= 1.0:
@@ -400,12 +479,44 @@ class ProductionRuntime:
             self._current_segment_to_chapter = segment_to_chapter
         # P0: engine preflight inside the runtime process.  A failed init is
         # fatal for the whole task: no segment loop, no per-segment errors.
+        engine_before = self._engine.snapshot()
+        load_started = self._utc_now()
+        self._note_startup(
+            record,
+            "engine_loading",
+            engine_was_ready=engine_before["state"] == "ready",
+            extra={"engine_load_started_at": load_started},
+        )
+        _runtime_event(
+            "engine_init_begin",
+            task_id=record.task_id,
+            project=record.project,
+            pid=os.getpid(),
+            engine_state=engine_before["state"],
+            engine_generation=engine_before["engine_generation"],
+            timestamp=load_started,
+        )
         try:
             self._engine.ensure_ready()
         except EngineInitError as exc:
             self._fail_synthesis_engine_init(record, state, exc)
             return
         state.engine_generation = self._engine.snapshot()["engine_generation"]
+        ready_at = self._utc_now()
+        self._note_startup(
+            record,
+            "engine_ready",
+            engine_generation=state.engine_generation,
+            extra={"engine_ready_at": ready_at},
+        )
+        _runtime_event(
+            "engine_init_success",
+            task_id=record.task_id,
+            project=record.project,
+            pid=os.getpid(),
+            engine_generation=state.engine_generation,
+            duration_ms=_iso_delta_ms(load_started, ready_at),
+        )
         # The task is now claimed by the singleton runtime.  Re-check the
         # exact task scope and lock only roles that this task will actually
         # use.  A draft whole-book cast is valid here; the lock is per role.
@@ -433,11 +544,26 @@ class ProductionRuntime:
                 state.notify()
                 return
         options = record.options if isinstance(record.options, dict) else {}
+        self._note_startup(record, "preparing_first_segment")
         _runtime_event(
             "task_start",
             task_id=record.task_id,
             task_type=record.task_type,
             project=record.project,
+        )
+        first_segment_started = self._utc_now()
+        self._note_startup(
+            record,
+            "synthesizing_first_segment",
+            extra={"first_segment_started_at": first_segment_started},
+        )
+        _runtime_event(
+            "first_segment_begin",
+            task_id=record.task_id,
+            project=record.project,
+            pid=os.getpid(),
+            engine_generation=state.engine_generation,
+            timestamp=first_segment_started,
         )
         try:
             SynthesisService.start(
@@ -672,6 +798,16 @@ class ProductionRuntime:
         progress["to_synthesize"] = progress["pending"] + progress["failed"]
         state.append_log("❌ TTS 引擎初始化失败，任务未开始")
         state.append_log(f"错误: {exc.summary}")
+        try:
+            TaskRepository.update_startup_phase(
+                record.task_id,
+                "engine_failed",
+                owner_id=self.owner_id,
+                engine_error_code="TTS_ENGINE_INIT_FAILED",
+                engine_error_summary=str(exc.summary),
+            )
+        except Exception:
+            logger.exception("记录引擎初始化失败启动阶段失败: %s", record.task_id)
         try:
             TaskRepository.persist_runtime_state(
                 record.task_id,
@@ -1093,6 +1229,30 @@ class ProductionRuntime:
                 completed=state.completed,
                 failed=len(state.failed_segment_ids),
             )
+        if (
+            state.task_id not in self._first_audio_ready_tasks
+            and int(state.completed or 0) >= 1
+            and state.status in {"running", "done"}
+        ):
+            self._first_audio_ready_tasks.add(state.task_id)
+            first_audio_at = self._utc_now()
+            try:
+                TaskRepository.update_startup_phase(
+                    state.task_id,
+                    "running",
+                    owner_id=self.owner_id,
+                    first_audio_ready_at=first_audio_at,
+                )
+            except Exception:
+                logger.exception("记录首段完成启动阶段失败: %s", state.task_id)
+            _runtime_event(
+                "first_audio_ready",
+                task_id=state.task_id,
+                project=record.project,
+                pid=os.getpid(),
+                engine_generation=current_generation,
+                timestamp=first_audio_at,
+            )
         try:
             updated = TaskRepository.persist_runtime_state(
                 state.task_id,
@@ -1142,10 +1302,15 @@ class ProductionRuntimeClient:
         return "process"
 
     @classmethod
-    def ensure_running(cls) -> None:
+    def ensure_running(cls) -> Optional[int]:
+        """Ensure the singleton runtime subprocess is running.
+
+        Returns the spawned child pid, or ``None`` when the runtime is already
+        running / disabled / inline (nothing new was spawned).
+        """
         mode = cls.mode()
         if mode in {"off", "disabled"}:
-            return
+            return None
         if mode == "inline":
             global _INLINE_RUNTIME
             retired: ProductionRuntime | None = None
@@ -1157,7 +1322,7 @@ class ProductionRuntimeClient:
                     # The old owner has not completed its durable handoff
                     # yet.  Leave the pending task for the next poke rather
                     # than allowing two inline runtimes to race for the GPU.
-                    return
+                    return None
                 with _INLINE_LOCK:
                     if _INLINE_RUNTIME is runtime:
                         _INLINE_RUNTIME = None
@@ -1168,16 +1333,26 @@ class ProductionRuntimeClient:
                 if _INLINE_RUNTIME is None:
                     _INLINE_RUNTIME = ProductionRuntime()
                 _INLINE_RUNTIME.start_background()
-            return
+            return None
+        # Process mode single-flight: a lock-holding runtime is already alive,
+        # spawning a duplicate would only churn a 5s lock-wait process.
+        from .runtime_lock import ProcessFileLock
+
+        probe = ProcessFileLock()
+        if not probe.acquire(blocking=False):
+            logger.info("runtime_event=runtime_already_running skip_spawn=true")
+            return None
+        probe.release()
         environment = dict(os.environ)
         environment["AUDIOBOOK_STUDIO_RUNTIME_MODE"] = "serve"
         command = [sys.executable, "-m", "services.production_runtime", "--serve"]
+        bootstrap = _open_bootstrap_log()
         kwargs: dict[str, Any] = {
             "cwd": os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "env": environment,
             "stdin": subprocess.DEVNULL,
             "stdout": subprocess.DEVNULL,
-            "stderr": subprocess.DEVNULL,
+            "stderr": bootstrap if bootstrap is not None else subprocess.DEVNULL,
             "close_fds": True,
         }
         if os.name == "nt":
@@ -1187,7 +1362,18 @@ class ProductionRuntimeClient:
             )
         else:
             kwargs["start_new_session"] = True
-        subprocess.Popen(command, **kwargs)
+        try:
+            child = subprocess.Popen(command, **kwargs)
+        finally:
+            if bootstrap is not None:
+                bootstrap.close()
+        logger.info(
+            "runtime_event=runtime_spawn pid=%s parent_pid=%s command=%s",
+            child.pid,
+            os.getpid(),
+            " ".join(command),
+        )
+        return child.pid
 
     @staticmethod
     def get_runtime_state(task_id: str) -> Optional[SynthesisState]:

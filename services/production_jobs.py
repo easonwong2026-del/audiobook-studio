@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from lib import project_paths, script_loader, segment_cache
+from lib.startup import enrich as enrich_startup
 from repositories.project_repo import ProjectRepository
 from repositories.task_repo import TaskRecord, TaskRepository
 
@@ -585,6 +586,11 @@ class ProductionJobService:
             updated_at=now,
             parent_task_id=str(parent_task_id or ""),
             recovery_of=str(recovery_of or ""),
+            startup={
+                "phase": "task_submitted",
+                "phase_started_at": now,
+                "submitted_at": now,
+            },
         )
         outcome, durable = TaskRepository.create_production_task(record)
         if outcome == "idempotent":
@@ -599,8 +605,26 @@ class ProductionJobService:
                 task_id=durable.task_id,
                 status=durable.status,
             )
-        ProductionRuntimeClient.ensure_running()
-        return {"created": True, **cls._task_snapshot(durable)}
+        # Durable startup phase: mark the client-side spawn step before the
+        # runtime claims the task and advances the phase machine itself.
+        spawn_ts = _now()
+        try:
+            TaskRepository.update_startup(
+                task_id,
+                phase="runtime_starting",
+                phase_started_at=spawn_ts,
+                runtime_spawn_started_at=spawn_ts,
+            )
+        except Exception:
+            logger.exception("记录 runtime_starting 启动阶段失败: %s", task_id)
+        runtime_pid = ProductionRuntimeClient.ensure_running()
+        if runtime_pid:
+            try:
+                TaskRepository.update_startup(task_id, runtime_spawn_pid=runtime_pid)
+            except Exception:
+                logger.exception("记录 runtime pid 失败: %s", task_id)
+        fresh = TaskRepository.load_task(task_id) or durable
+        return {"created": True, **cls._task_snapshot(fresh)}
 
     start_production = start
 
@@ -663,6 +687,8 @@ class ProductionJobService:
             "heartbeat_at": record.heartbeat_at,
             "error_summary": _public_error(record.error_summary),
         }
+        startup = record.startup if isinstance(record.startup, dict) else {}
+        response["startup"] = enrich_startup(startup)
         if recovery_payload:
             response["recovery"] = {
                 key: recovery_payload[key]
@@ -882,8 +908,10 @@ class ProductionJobService:
                     "project": record.project,
                     "status": record.status,
                 }
+                startup = record.startup if isinstance(record.startup, dict) else {}
+                active_task["startup"] = enrich_startup(startup)
                 break
-        return {
+        result = {
             "runtime_state": status["runtime_state"],
             "owner_id": status["owner_id"],
             "pid": status["pid"],
@@ -898,6 +926,21 @@ class ProductionJobService:
             "active_task_id": active_task["task_id"] if active_task else None,
             "active_task": active_task,
         }
+        if active_task:
+            startup = active_task.get("startup") or {}
+            for key in (
+                "startup_phase",
+                "startup_phase_started_at",
+                "startup_phase_elapsed_seconds",
+                "startup_slow",
+                "startup_diagnostics",
+            ):
+                if key in startup:
+                    result[key] = startup[key]
+            result["task_claimed"] = bool(startup.get("task_claimed"))
+            result["first_segment_started"] = bool(startup.get("first_segment_started"))
+            result["first_audio_ready"] = bool(startup.get("first_audio_ready"))
+        return result
 
 
 __all__ = [

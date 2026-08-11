@@ -17,6 +17,8 @@ import wave
 import numpy as np
 from scipy.io import wavfile
 
+from .procutil import run_no_window
+
 logger = logging.getLogger(__name__)
 
 
@@ -117,7 +119,7 @@ def normalize_loudness_streaming(
     executable = _ffmpeg_path(ffmpeg_executable)
     if not executable:
         return _chunked_gain(wav_path, target_lufs, tp)
-    measure = subprocess.run(
+    measure = run_no_window(
         [
             executable, "-hide_banner", "-nostats", "-i", wav_path,
             "-af", f"loudnorm=I={target_lufs}:TP={tp}:LRA={lra}:print_format=json",
@@ -146,7 +148,7 @@ def normalize_loudness_streaming(
         return _chunked_gain(wav_path, target_lufs, tp)
     temporary = f"{wav_path}.{os.getpid()}.loudnorm.part.wav"
     try:
-        subprocess.run(
+        run_no_window(
             [executable, "-y", "-i", wav_path, "-af", filter_expr,
              "-c:a", "pcm_s16le", temporary],
             check=True,
@@ -183,7 +185,7 @@ def apply_eq_streaming(
     lp = min(max(float(lowpass_hz), hp + 1.0), nyquist * 0.98)
     temporary = f"{wav_path}.{os.getpid()}.eq.part.wav"
     try:
-        subprocess.run(
+        run_no_window(
             [executable, "-y", "-i", wav_path,
              "-af", f"highpass=f={hp},lowpass=f={lp}",
              "-c:a", "pcm_s16le", temporary],
