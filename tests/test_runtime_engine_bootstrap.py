@@ -156,10 +156,10 @@ def test_c_concurrent_ensure_ready_inits_exactly_once(tmp_path, monkeypatch):
         poll_interval=0.05,
     )
     results: list[str] = []
-    barrier = threading.Barrier(2)
+    start_event = threading.Event()
 
     def caller() -> None:
-        barrier.wait(timeout=2)
+        start_event.wait()
         try:
             runtime.ensure_engine_ready()
             results.append("ready")
@@ -169,6 +169,7 @@ def test_c_concurrent_ensure_ready_inits_exactly_once(tmp_path, monkeypatch):
     threads = [threading.Thread(target=caller) for _ in range(2)]
     for thread in threads:
         thread.start()
+    start_event.set()
     for thread in threads:
         thread.join(10)
 
