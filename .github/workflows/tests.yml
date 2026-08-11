@@ -112,6 +112,7 @@ jobs:
           tests/test_ui_layout_regression.py
           tests/test_workspace_paths.py
           tests/test_voice_cast_phase2.py
+          tests/test_partial_production_scope.py
           tests/test_task_repo.py
           tests/test_runtime_engine_bootstrap.py
           tests/test_engine_self_healing.py
