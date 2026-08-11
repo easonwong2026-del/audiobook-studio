@@ -207,11 +207,13 @@ def _production_status_label(status: str) -> str:
         "running": "运行中",
         "pausing": "正在暂停",
         "paused": "已暂停",
+        "recovering": "自动恢复中",
         "cancelling": "正在停止",
         "cancelled": "已停止",
         "done": "已完成",
         "error": "完成但有失败段",
         "interrupted": "上次运行已中断",
+        "needs_attention": "需要处理",
     }.get(status, status or "未知")
 
 
@@ -261,6 +263,24 @@ def _production_task_markdown(task: dict | None) -> str:
         lines.append(f"- **失败**：{failed}")
     if task.get("status") == "interrupted":
         lines.append("- **提示**：检测到上次中断任务，可点击“继续”恢复剩余段落。")
+    recovery = task.get("recovery") if isinstance(task.get("recovery"), dict) else None
+    if task.get("status") == "recovering" and recovery:
+        lines.append(
+            "- 🔄 **检测到 TTS 运行时异常，正在自动恢复 "
+            f"{recovery.get('attempt', '?')}/{recovery.get('max_attempts', '?')}**"
+            + (
+                f"，将重试 `{recovery.get('retry_segment')}`"
+                if recovery.get("retry_segment") else ""
+            )
+        )
+    elif task.get("status") == "recovering":
+        lines.append("- 🔄 **TTS 正在自动恢复，请稍候**")
+    if task.get("status") == "needs_attention":
+        reason = ""
+        if recovery:
+            reason = f"（{recovery.get('reason_code') or 'TTS 运行时异常'}）"
+        lines.append(f"- ❌ **自动恢复失败，需要处理**{reason}")
+        lines.append("- **建议**：查看运行时健康状态后重试，或取消当前任务。")
     return "\n".join(lines)
 
 
@@ -272,7 +292,10 @@ def _latest_production_task(project: str) -> dict | None:
         return active
     tasks = ProductionJobService.list_tasks(project_name=project)
     return next(
-        (task for task in tasks if task.get("status") == "interrupted"),
+        (
+            task for task in tasks
+            if task.get("status") in {"interrupted", "needs_attention"}
+        ),
         None,
     )
 

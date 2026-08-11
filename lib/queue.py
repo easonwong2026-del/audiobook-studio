@@ -9,27 +9,134 @@ import wave
 from typing import Generator, Optional
 
 from . import project_paths, script_loader, segment_cache
+from .failures import (
+    DEFAULT_RECOVERY_BUDGET,
+    PHASE_ATOMIC_PUBLISH,
+    PHASE_DIRECTED_SYNTHESIS,
+    PHASE_STATUS_PERSIST,
+    PHASE_UNKNOWN,
+    PHASE_WAV_VALIDATE,
+    RecoveryBudget,
+    RecoveryHooks,
+    SynthesisFailure,
+    is_confirmed_engine_recovery,
+    sanitize_message,
+    traceback_origin,
+)
 from repositories.project_repo import ProjectRepository
 
 logger = logging.getLogger(__name__)
 
 
+class _PhaseFailure(Exception):
+    """Internal phase-tagged failure raised by lib layers below the engine."""
+
+    def __init__(self, phase: str, original: BaseException) -> None:
+        super().__init__(str(original))
+        self.phase = phase
+        self.original = original
+
+
 def _publish_segment(temp_path: str, final_path: str) -> None:
-    """Validate a completed WAV and atomically publish it into the cache."""
+    """Validate a completed WAV and atomically publish it into the cache.
+
+    Failure phases are distinguished: an empty/invalid WAV is a
+    ``wav_validate`` failure; ``os.replace`` failures are ``atomic_publish``.
+    OSError(errno=22) raised here is a file-system/publish problem and must
+    never be classified as an engine-runtime failure.
+    """
     try:
         if not os.path.isfile(temp_path) or os.path.getsize(temp_path) <= 0:
             raise RuntimeError("合成结果为空")
         with wave.open(temp_path, "rb") as audio:
             if audio.getnframes() <= 0 or audio.getframerate() <= 0:
                 raise RuntimeError("合成结果不是有效 WAV")
-        os.replace(temp_path, final_path)
-    except Exception:
+    except Exception as exc:
         try:
             if os.path.isfile(temp_path):
                 os.remove(temp_path)
         except OSError:
             pass
-        raise
+        raise _PhaseFailure(PHASE_WAV_VALIDATE, exc) from exc
+    try:
+        os.replace(temp_path, final_path)
+    except Exception as exc:
+        try:
+            if os.path.isfile(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+        raise _PhaseFailure(PHASE_ATOMIC_PUBLISH, exc) from exc
+
+
+def _classify_failure(
+    seg,
+    chapter_id: str,
+    exc: BaseException,
+) -> SynthesisFailure:
+    """Build a structured failure with the precise phase."""
+    from . import tts_engine
+
+    if isinstance(exc, tts_engine.EngineRuntimeFailure):
+        return SynthesisFailure.from_exception(
+            segment_id=getattr(seg, "id", ""),
+            chapter_id=chapter_id,
+            phase=exc.phase,
+            exc=exc,
+            recoverable=exc.recoverable,
+            engine_related=True,
+            code=exc.code,
+        )
+    if isinstance(exc, _PhaseFailure):
+        return SynthesisFailure.from_exception(
+            segment_id=getattr(seg, "id", ""),
+            chapter_id=chapter_id,
+            phase=exc.phase,
+            exc=exc.original,
+        )
+    return SynthesisFailure.from_exception(
+        segment_id=getattr(seg, "id", ""),
+        chapter_id=chapter_id,
+        phase=PHASE_UNKNOWN,
+        exc=exc,
+    )
+
+
+def _deliver_failure(
+    hooks: RecoveryHooks,
+    failure: SynthesisFailure,
+) -> None:
+    if hooks.on_failure is not None:
+        try:
+            hooks.on_failure(failure)
+        except Exception:  # pylint: disable=broad-except
+            logger.exception("结构化失败事件回调异常")
+
+
+def _record_systemic(
+    fingerprint_segments: dict[str, set[str]],
+    failure: SynthesisFailure,
+    limits: RecoveryBudget,
+) -> bool:
+    """Track distinct segments per fingerprint; True when the systemic
+    threshold is reached."""
+    if not failure.fingerprint:
+        return False
+    seen = fingerprint_segments.setdefault(failure.fingerprint, set())
+    if failure.segment_id not in seen:
+        seen.add(failure.segment_id)
+    return len(seen) >= max(int(limits.systemic_failure_threshold), 1)
+
+
+def _recovery_event(
+    hooks: RecoveryHooks,
+    event: dict,
+) -> None:
+    if hooks.on_recovery is not None:
+        try:
+            hooks.on_recovery(event)
+        except Exception:  # pylint: disable=broad-except
+            logger.exception("恢复事件回调异常")
 
 
 def _seg_cache_key(seg, emotion: str = None, emo_alpha: float = None,
@@ -84,6 +191,9 @@ def synthesize_project(
     selected_chapters: Optional[list] = None,
     selected_segment_ids: Optional[list] = None,
     voice_overrides: Optional[dict[str, str]] = None,
+    cb_failure=None,
+    recovery: Optional[RecoveryHooks] = None,
+    budget: Optional[RecoveryBudget] = None,
 ) -> Generator[str, None, None]:
     # NumPy / SciPy 随 TTS 适配层按需加载，不进入应用启动热路径。
     from . import tts_engine
@@ -152,6 +262,13 @@ def synthesize_project(
     }
 
     status_writer = ProjectRepository.segment_status_batch(project_name, flush_every=0)
+    hooks = recovery if isinstance(recovery, RecoveryHooks) else RecoveryHooks()
+    limits = budget if isinstance(budget, RecoveryBudget) else DEFAULT_RECOVERY_BUDGET
+    fingerprint_segments: dict[str, set[str]] = {}
+    # This counter intentionally lives outside the segment loop.  The
+    # engine_recycle_limit is a budget for the whole production task, not a
+    # fresh allowance for every segment.
+    engine_recycles_used = 0
     try:
         for ch in script.chapters:
             ch_label = str(ch.id)
@@ -173,6 +290,13 @@ def synthesize_project(
                     if isinstance(cast_binding, dict):
                         speaker = cast_binding.get("project_voice_path")
                 if not speaker:
+                    _deliver_failure(hooks, SynthesisFailure.from_exception(
+                        segment_id=str(seg.id),
+                        chapter_id=str(ch.id),
+                        phase=PHASE_DIRECTED_SYNTHESIS,
+                        exc=ValueError("角色未绑定音频"),
+                        code="VOICE_BINDING_MISSING",
+                    ))
                     yield f"[X] {seg.id} 角色'{seg.role}'未绑定音频"
                     status_writer.update(seg.id, "failed")
                     continue
@@ -180,6 +304,13 @@ def synthesize_project(
                 if not os.path.isabs(str(speaker)):
                     speaker = os.path.join(project_dir, str(speaker))
                 if not os.path.isfile(speaker):
+                    _deliver_failure(hooks, SynthesisFailure.from_exception(
+                        segment_id=str(seg.id),
+                        chapter_id=str(ch.id),
+                        phase=PHASE_DIRECTED_SYNTHESIS,
+                        exc=FileNotFoundError("参考音频文件不存在"),
+                        code="SPEAKER_AUDIO_MISSING",
+                    ))
                     yield f"[X] {seg.id} 音频文件不存在"
                     status_writer.update(seg.id, "failed")
                     continue
@@ -194,28 +325,56 @@ def synthesize_project(
                     speaker_fingerprint = speaker_fingerprints[resolved_speaker]
 
                 seg_start = time.time()
+                # 2.3 O2：用有效合成参数（全局覆盖 + 段落默认）派生缓存键与调用参数，
+                # 保证「覆盖变化 → 文件名变化 → 重合成命中一致」（一致性根因修复）。
+                emotion_eff, emo_alpha_eff, speech_rate_eff = (
+                    segment_cache.effective_params(seg, overrides)
+                )
+                # B7：缓存键 = 段标识 + 合成参数内容哈希。
+                seg_path = os.path.join(
+                    segments_dir,
+                    f"{_seg_cache_key(seg, emotion_eff, emo_alpha_eff, speech_rate_eff, speaker_fingerprint)}.wav",
+                )
+
+                if os.path.isfile(seg_path):
+                    # Cache hit: mark done without invoking the engine.
+                    try:
+                        status_writer.update(seg.id, "done")
+                    except Exception as exc:
+                        _deliver_failure(hooks, SynthesisFailure.from_exception(
+                            segment_id=str(seg.id),
+                            chapter_id=str(ch.id),
+                            phase=PHASE_STATUS_PERSIST,
+                            exc=exc,
+                        ))
+                    done += 1
+                    if cb_seg_state:
+                        cb_seg_state(seg.id, "done", 1.0)
+                    elapsed = time.time() - seg_start
+                    voice_name = os.path.splitext(os.path.basename(speaker))[0][:20]
+                    yield f"[+] {seg.id}|{seg.role}|{voice_name}|{elapsed:.1f}s"
+                    if cb_audio:
+                        cb_audio(seg.id, seg_path)
+                    if cb_progress:
+                        cb_progress(done / total)
+                    continue
+
+                # ---- bounded engine-recycle self-healing ----
+                segment_recovery_attempt = 0
+                stop_run = False
+                stop_reason = "recovery_budget_exhausted"
+                final_failure: Optional[SynthesisFailure] = None
                 try:
-                    # 2.3 O2：用有效合成参数（全局覆盖 + 段落默认）派生缓存键与调用参数，
-                    # 保证「覆盖变化 → 文件名变化 → 重合成命中一致」（一致性根因修复）。
-                    emotion_eff, emo_alpha_eff, speech_rate_eff = (
-                        segment_cache.effective_params(seg, overrides)
-                    )
-                    # B7：缓存键 = 段标识 + 合成参数内容哈希。
-                    seg_path = os.path.join(
+                    temp_path = os.path.join(
                         segments_dir,
-                        f"{_seg_cache_key(seg, emotion_eff, emo_alpha_eff, speech_rate_eff, speaker_fingerprint)}.wav",
+                        f".{os.path.basename(seg_path)}.{uuid.uuid4().hex}.part.wav",
                     )
+                    yield f"[/] {seg.id} {seg.role} 合成中..."
+                    if cb_seg_state:
+                        cb_seg_state(seg.id, "running", 0.0)
+                    from . import directed_synthesis
 
-                    if not os.path.isfile(seg_path):
-                        yield f"[/] {seg.id} {seg.role} 合成中..."
-                        if cb_seg_state:
-                            cb_seg_state(seg.id, "running", 0.0)
-                        from . import directed_synthesis
-
-                        temp_path = os.path.join(
-                            segments_dir,
-                            f".{os.path.basename(seg_path)}.{uuid.uuid4().hex}.part.wav",
-                        )
+                    try:
                         directed_synthesis.synthesize(
                             segment=seg,
                             speaker_audio=speaker,
@@ -227,27 +386,250 @@ def synthesize_project(
                             num_beams=num_beams,
                             engine=tts_engine,
                         )
-                        _publish_segment(temp_path, seg_path)
-                        yield "[/] vram_clean"
+                    except tts_engine.EngineRuntimeFailure:
+                        raise
+                    except Exception as exc:
+                        raise _PhaseFailure(PHASE_DIRECTED_SYNTHESIS, exc) from exc
+                    _publish_segment(temp_path, seg_path)
+                    yield "[/] vram_clean"
 
                     elapsed = time.time() - seg_start
-                    status_writer.update(seg.id, "done")
+                    try:
+                        status_writer.update(seg.id, "done")
+                    except Exception as exc:
+                        raise _PhaseFailure(PHASE_STATUS_PERSIST, exc) from exc
                     done += 1
                     if cb_seg_state:
                         cb_seg_state(seg.id, "done", 1.0)
-
                     voice_name = os.path.splitext(os.path.basename(speaker))[0][:20]
                     yield f"[+] {seg.id}|{seg.role}|{voice_name}|{elapsed:.1f}s"
-
                     if cb_audio:
                         cb_audio(seg.id, seg_path)
-
                 except Exception as exc:
+                    try:
+                        if os.path.isfile(temp_path):
+                            os.remove(temp_path)
+                    except OSError:
+                        pass
+                    failure = _classify_failure(seg, str(ch.id), exc)
+                    _deliver_failure(hooks, failure)
                     logger.exception("合成失败 %s", seg.id)
-                    status_writer.update(seg.id, "failed")
+                    systemic = _record_systemic(fingerprint_segments, failure, limits)
+                    while failure is not None:
+                        confirmed_recovery = (
+                            hooks.enabled and is_confirmed_engine_recovery(failure)
+                        )
+                        if systemic and hooks.enabled and not confirmed_recovery:
+                            # A repeated non-engine (or otherwise unapproved)
+                            # fingerprint is a systemic failure storm.  Stop
+                            # pulling new segments, but never recycle TTS for
+                            # this path.
+                            stop_run = True
+                            stop_reason = "systemic_fingerprint"
+                            final_failure = failure
+                            break
+                        if not confirmed_recovery:
+                            final_failure = failure
+                            break
+                        if engine_recycles_used >= max(
+                            int(limits.engine_recycle_limit), 0
+                        ):
+                            stop_run = True
+                            stop_reason = "recovery_budget_exhausted"
+                            final_failure = failure
+                            break
+                        engine_recycles_used += 1
+                        segment_recovery_attempt += 1
+                        _recovery_event(hooks, {
+                            "event": "recovering",
+                            "segment_id": str(seg.id),
+                            "chapter_id": str(ch.id),
+                            "attempt": engine_recycles_used,
+                            "segment_attempt": segment_recovery_attempt,
+                            "max_attempts": int(limits.engine_recycle_limit),
+                            "reason_code": failure.code or "TTS_ENGINE_RUNTIME_FAILURE",
+                            "fingerprint": failure.fingerprint,
+                            "exception_type": failure.exception_type,
+                            "errno": failure.errno,
+                            "phase": failure.phase,
+                            "message": failure.message,
+                            "traceback_origin": failure.traceback_origin,
+                            "code": failure.code,
+                        })
+                        if hooks.enabled and hooks.cancel_requested():
+                            yield "[re] cancelled"
+                            return
+                        if hooks.enabled:
+                            hooks.pause_gate()
+                        try:
+                            generation = hooks.recycle()
+                        except Exception as recycle_exc:
+                            logger.exception("引擎回收失败 %s", seg.id)
+                            recycle_original = getattr(
+                                recycle_exc, "original_exception", None
+                            )
+                            if not isinstance(recycle_original, BaseException):
+                                recycle_original = recycle_exc.__cause__
+                            if not isinstance(recycle_original, BaseException):
+                                recycle_original = recycle_exc
+                            _recovery_event(hooks, {
+                                "event": "recycle_failed",
+                                "segment_id": str(seg.id),
+                                "chapter_id": str(ch.id),
+                                "attempt": engine_recycles_used,
+                                "max_attempts": int(limits.engine_recycle_limit),
+                                "reason_code": "TTS_ENGINE_RECYCLE_FAILED",
+                                "fingerprint": failure.fingerprint,
+                                "exception_type": failure.exception_type,
+                                "errno": failure.errno,
+                                "phase": failure.phase,
+                                "message": failure.message,
+                                "traceback_origin": failure.traceback_origin,
+                                "code": "TTS_ENGINE_RECYCLE_FAILED",
+                                "recycle_exception_type": type(recycle_original).__name__,
+                                "recycle_errno": getattr(
+                                    recycle_original, "errno", None
+                                ),
+                                "recycle_message": sanitize_message(recycle_original),
+                                "recycle_traceback_origin": traceback_origin(
+                                    recycle_original
+                                ),
+                            })
+                            stop_run = True
+                            stop_reason = "engine_recycle_failed"
+                            final_failure = failure
+                            break
+                        _recovery_event(hooks, {
+                            "event": "recycle_done",
+                            "segment_id": str(seg.id),
+                            "chapter_id": str(ch.id),
+                            "engine_generation": generation,
+                            "attempt": engine_recycles_used,
+                            "segment_attempt": segment_recovery_attempt,
+                            "recycles_used": engine_recycles_used,
+                        })
+                        # Retry the SAME segment after a real engine recycle.
+                        retried_ok = False
+                        for _retry in range(max(int(limits.segment_retry_limit), 1)):
+                            if hooks.enabled and hooks.cancel_requested():
+                                yield "[re] cancelled"
+                                return
+                            if hooks.enabled:
+                                hooks.pause_gate()
+                            retry_temp = os.path.join(
+                                segments_dir,
+                                f".{os.path.basename(seg_path)}.{uuid.uuid4().hex}.part.wav",
+                            )
+                            try:
+                                yield f"[/] {seg.id} {seg.role} 重试合成中..."
+                                if cb_seg_state:
+                                    cb_seg_state(seg.id, "running", 0.0)
+                                directed_synthesis.synthesize(
+                                    segment=seg,
+                                    speaker_audio=speaker,
+                                    emotion=emotion_eff,
+                                    emo_alpha=emo_alpha_eff,
+                                    speech_rate=speech_rate_eff,
+                                    pinyin_hints=getattr(seg, "pinyin_hints", None),
+                                    output_path=retry_temp,
+                                    num_beams=num_beams,
+                                    engine=tts_engine,
+                                )
+                                _publish_segment(retry_temp, seg_path)
+                                status_writer.update(seg.id, "done")
+                                done += 1
+                                if cb_seg_state:
+                                    cb_seg_state(seg.id, "done", 1.0)
+                                voice_name = os.path.splitext(
+                                    os.path.basename(speaker)
+                                )[0][:20]
+                                yield (
+                                    f"[+] {seg.id}|{seg.role}|{voice_name}|"
+                                    f"{time.time() - seg_start:.1f}s"
+                                )
+                                if cb_audio:
+                                    cb_audio(seg.id, seg_path)
+                                retried_ok = True
+                                break
+                            except Exception as retry_exc:
+                                try:
+                                    if os.path.isfile(retry_temp):
+                                        os.remove(retry_temp)
+                                except OSError:
+                                    pass
+                                failure = _classify_failure(seg, str(ch.id), retry_exc)
+                                _deliver_failure(hooks, failure)
+                                systemic = _record_systemic(
+                                    fingerprint_segments, failure, limits
+                                )
+                                if systemic and hooks.enabled and not is_confirmed_engine_recovery(failure):
+                                    stop_run = True
+                                    stop_reason = "systemic_fingerprint"
+                                    retried_ok = False
+                                    break
+                                if not is_confirmed_engine_recovery(failure):
+                                    # Recovery no longer applies (phase changed
+                                    # or failure became non-recoverable).
+                                    retried_ok = False
+                                    break
+                        if retried_ok:
+                            _recovery_event(hooks, {
+                                "event": "recovered",
+                                "segment_id": str(seg.id),
+                                "chapter_id": str(ch.id),
+                                "attempt": engine_recycles_used,
+                                "segment_attempt": segment_recovery_attempt,
+                                "engine_generation": generation,
+                                "recycles_used": engine_recycles_used,
+                            })
+                            final_failure = None
+                            break
+                        # Retry failed: consume the next engine recycle.
+                        continue
+
+                if final_failure is not None:
+                    try:
+                        status_writer.update(seg.id, "failed")
+                    except Exception as persist_exc:
+                        _deliver_failure(hooks, SynthesisFailure.from_exception(
+                            segment_id=str(seg.id),
+                            chapter_id=str(ch.id),
+                            phase=PHASE_STATUS_PERSIST,
+                            exc=persist_exc,
+                        ))
                     if cb_seg_state:
                         cb_seg_state(seg.id, "error", 0.0)
-                    yield f"[X] {seg.id} 失败: {str(exc)[:60]}"
+                    yield f"[X] {seg.id} 失败: {final_failure.message[:80]}"
+                    if hooks.enabled and stop_run:
+                        _recovery_event(hooks, {
+                            "event": "exhausted",
+                            "segment_id": str(seg.id),
+                            "chapter_id": str(ch.id),
+                            "attempt": engine_recycles_used,
+                            "max_attempts": int(limits.engine_recycle_limit),
+                            "reason_code": (
+                                "TTS_ENGINE_RECYCLE_FAILED"
+                                if stop_reason == "engine_recycle_failed"
+                                else (
+                                    "SYSTEMIC_FAILURE_THRESHOLD"
+                                    if stop_reason == "systemic_fingerprint"
+                                    else final_failure.code
+                                    or "TTS_ENGINE_RUNTIME_FAILURE"
+                                )
+                            ),
+                            "fingerprint": final_failure.fingerprint,
+                            "exception_type": final_failure.exception_type,
+                            "errno": final_failure.errno,
+                            "phase": final_failure.phase,
+                            "message": final_failure.message,
+                            "traceback_origin": final_failure.traceback_origin,
+                            "code": final_failure.code,
+                            "recycles_used": engine_recycles_used,
+                            "reason": stop_reason,
+                        })
+                        # Engine-related budget exhaustion stops the run.
+                        yield f"[re] stop|{seg.id}|{final_failure.code or 'recovery_exhausted'}"
+                        return
 
                 if cb_progress:
                     cb_progress(done / total)

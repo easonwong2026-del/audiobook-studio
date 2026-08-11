@@ -23,7 +23,7 @@ def list_review_segments(arguments: dict[str, Any]) -> list[dict[str, Any]]:
             or item.get("quality_status") == requested
             or item.get("technical_outcome") == requested
         ]
-    return segments
+    return {"segments": segments}
 
 
 def get_segment_review(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -102,7 +102,7 @@ def get_repair_task(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def list_repairs(arguments: dict[str, Any]) -> list[dict[str, Any]]:
-    return RepairService.list(str(arguments.get("project_name") or ""))
+    return {"repairs": RepairService.list(str(arguments.get("project_name") or ""))}
 
 
 __all__ = [

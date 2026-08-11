@@ -113,6 +113,8 @@ jobs:
           tests/test_workspace_paths.py
           tests/test_voice_cast_phase2.py
           tests/test_task_repo.py
+          tests/test_runtime_engine_bootstrap.py
+          tests/test_engine_self_healing.py
           tests/test_production_jobs.py
           tests/test_production_runtime.py
           tests/test_runtime_tts.py

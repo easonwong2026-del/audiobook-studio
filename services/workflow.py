@@ -67,13 +67,28 @@ class WorkflowService:
                 "bound": bound,
                 "unbound": max(len(roles) - bound, 0),
                 "cast_locked": False,
+                "cast_ready": bool(roles) and bound == len(roles),
                 "synthesis_ready": bool(roles) and bound == len(roles),
+                "runtime_status": "unknown",
+                "engine_state": "unknown",
+                "engine_ready": False,
                 "mode": "legacy_manual",
             }
         unbound = int(cast.get("unbound", 0) or 0)
-        cast_ready = bool(cast.get("synthesis_ready", False))
+        cast_ready = bool(
+            cast.get("cast_ready", cast.get("synthesis_ready", False))
+        )
+        engine_ready = bool(cast.get("engine_ready", False))
+        runtime_status = str(cast.get("runtime_status") or "unknown")
+        engine_state = str(cast.get("engine_state") or "unknown")
 
         active_task = ProductionJobService.get_active_task(project)
+        attention_tasks = TaskRepository.list_tasks(
+            project=project,
+            task_type="synthesis",
+            status="needs_attention",
+        )
+        attention_task = attention_tasks[0] if attention_tasks else None
         repairs = QualityRepository.list_history(project, "repair_history")
         active_repairs = [
             item for item in repairs
@@ -175,13 +190,45 @@ class WorkflowService:
                 count=unbound,
             ))
         elif active_task:
-            stage = "producing"
+            if active_task.get("status") == "recovering":
+                stage = "recovering"
+                actions.append(cls._action(
+                    "wait_for_recovery",
+                    "get_production_task",
+                    project,
+                    "TTS 引擎正在自动恢复，等待 recovery 完成，不要重复提交任务。",
+                    task_id=active_task.get("task_id"),
+                ))
+            else:
+                stage = "producing"
+                actions.append(cls._action(
+                    "check_production",
+                    "get_production_task",
+                    project,
+                    "生产任务正在运行。",
+                    task_id=active_task.get("task_id"),
+                ))
+        elif attention_task:
+            stage = "needs_attention"
             actions.append(cls._action(
-                "check_production",
-                "get_production_task",
+                "retry_task",
+                "resume_production",
                 project,
-                "生产任务正在运行。",
-                task_id=active_task.get("task_id"),
+                "自动恢复已耗尽，重试剩余段落。",
+                task_id=attention_task.task_id,
+            ))
+            actions.append(cls._action(
+                "inspect_runtime_health",
+                "get_runtime_health",
+                project,
+                "检查 TTS 运行时与引擎健康状态。",
+            ))
+            actions.append(cls._action(
+                "cancel_task",
+                "cancel_production",
+                project,
+                "放弃当前任务。",
+                task_id=attention_task.task_id,
             ))
         elif active_repairs:
             stage = "needs_fix"
@@ -296,6 +343,10 @@ class WorkflowService:
                 "failed": failed,
                 "roles_bound": int(cast.get("bound", 0) or 0),
                 "roles_unbound": unbound,
+                "cast_ready": cast_ready,
+                "engine_ready": engine_ready,
+                "engine_state": engine_state,
+                "runtime_status": runtime_status,
                 "quality": quality_summary,
                 "active_production_task": (
                     active_task.get("task_id") if active_task else None

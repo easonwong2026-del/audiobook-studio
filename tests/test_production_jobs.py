@@ -6,6 +6,8 @@ import os
 
 import pytest
 
+from lib import project_manager as pm
+from lib import tts_engine
 from repositories.project_repo import ProjectRepository
 from repositories.task_repo import TaskRecord, TaskRepository
 from services import ProductionJobError, ProductionJobService, ProjectService
@@ -40,6 +42,8 @@ def production_project(tmp_path, monkeypatch):
     ProjectRepository.WORKSPACE_ROOT = str(tmp_path / "projects")
     ProjectRepository.LEGACY_ROOT = str(tmp_path / "legacy")
     ProjectRepository._INITIALIZED = True
+    monkeypatch.setattr(pm, "WORKSPACE_ROOT", ProjectRepository.WORKSPACE_ROOT)
+    monkeypatch.setattr(pm, "LEGACY_ROOT", ProjectRepository.LEGACY_ROOT)
     monkeypatch.setattr(
         TaskRepository,
         "get_task_dir",
@@ -57,6 +61,10 @@ def production_project(tmp_path, monkeypatch):
     bindings["bindings"]["旁白"] = voice_path
     with open(bindings_path, "w", encoding="utf-8") as file:
         json.dump(bindings, file, ensure_ascii=False)
+    # The inline runtime now owns engine bootstrap; keep service tests
+    # GPU-free by stubbing the engine lifecycle without touching synthesis.
+    monkeypatch.setattr(tts_engine, "init_engine", lambda: None)
+    monkeypatch.setattr(tts_engine, "empty_cache", lambda: None)
     ProductionJobService.reset_runtime()
     yield "production"
     ProductionJobService.reset_runtime()

@@ -8,6 +8,7 @@ import threading
 from . import config as _cfg
 from . import audio_format as af
 from .segment_cache import SpeakerEmbeddingLRU
+from .failures import PHASE_ENGINE_INFER
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,49 @@ _INFER_HAS_VAR_KEYWORD = False
 # 批量并发调用时引擎内部状态竞争。必须用 RLock——OOM 时 synthesize_segment 会递归
 # 调用自身，非重入锁会在同一线程第二次获取时死锁；RLock 允许同一线程重入。
 _ENGINE_LOCK = threading.RLock()
+
+TTS_ENGINE_RUNTIME_FAILURE = "TTS_ENGINE_RUNTIME_FAILURE"
+TTS_ENGINE_OOM_EXHAUSTED = "TTS_ENGINE_OOM_EXHAUSTED"
+
+
+class EngineRuntimeFailure(RuntimeError):
+    """Stable typed failure raised from the engine adapter layer.
+
+    ``phase == engine_infer`` + ``OSError(errno=22)`` is a *known recoverable
+    engine-runtime failure candidate*; the same errno from file publish /
+    WAV validation is classified elsewhere and must not trigger an engine
+    recycle.  The root cause of sustained Errno-22 remains an open question
+    (IndexTTS2 internal state / PyTorch / CUDA native runtime); this class
+    deliberately does not claim a specific cause.
+    """
+
+    code = TTS_ENGINE_RUNTIME_FAILURE
+
+    def __init__(
+        self,
+        phase: str,
+        message: str,
+        *,
+        errno: int | None = None,
+        recoverable: bool = True,
+        code: str | None = None,
+        original_exception: BaseException | None = None,
+    ) -> None:
+        self.phase = str(phase or PHASE_ENGINE_INFER)
+        self.errno = errno
+        self.code = str(code or self.code)
+        self.original_exception = original_exception
+        known_fingerprint = self.code == TTS_ENGINE_OOM_EXHAUSTED or (
+            self.phase == PHASE_ENGINE_INFER
+            and self.errno == 22
+            and isinstance(original_exception, OSError)
+        )
+        # ``recoverable=True`` is advisory only.  The adapter normalizes it
+        # against the confirmed fingerprint allow-list so an arbitrary OSError
+        # cannot enter the engine-recycle path.
+        self.recoverable = bool(recoverable) and known_fingerprint
+        detail = f" (errno={errno})" if errno is not None else ""
+        super().__init__(f"{self.code} phase={self.phase}{detail}: {message}")
 
 
 
@@ -160,6 +204,7 @@ def synthesize_segment(
         # 导致 num_beams 默认 2 未生效（引擎走内部默认 3）。这里额外判定签名是否含 VAR_KEYWORD，含则透传 num_beams。
         # 注意：speed / pinyin_hints 不是 GPT 生成参数，透传进 **generation_kwargs 会被 GPT.generate 拒绝（实测 ValueError），
         # 故这两项仅按显式形参判定，不随 has_var_keyword 放开。
+        last_oom: BaseException | None = None
         for attempt in range(MAX_RETRIES):
             try:
                 # 根据 IndexTTS2.infer 实际签名条件透传可选参数，
@@ -198,11 +243,35 @@ def synthesize_segment(
                 generation_kwargs = {}
                 if "num_beams" in param_names or has_var_keyword:
                     generation_kwargs["num_beams"] = num_beams
-                _tts.infer(**infer_kwargs, **generation_kwargs)
+                try:
+                    _tts.infer(**infer_kwargs, **generation_kwargs)
+                except EngineRuntimeFailure:
+                    raise
+                except oom_error:
+                    raise
+                except OSError as exc:
+                    # Only the observed errno=22 engine-infer fingerprint is
+                    # currently approved for automatic engine recycle.  Other
+                    # OSErrors remain structured, non-recoverable failures.
+                    raise EngineRuntimeFailure(
+                        PHASE_ENGINE_INFER,
+                        str(exc),
+                        errno=getattr(exc, "errno", None),
+                        recoverable=getattr(exc, "errno", None) == 22,
+                        original_exception=exc,
+                    ) from exc
+                except Exception as exc:
+                    raise EngineRuntimeFailure(
+                        PHASE_ENGINE_INFER,
+                        str(exc),
+                        recoverable=False,
+                        original_exception=exc,
+                    ) from exc
                 empty_cache()  # 2.4 M-3：段级碎片化显存清理（守卫式，无 CUDA 时 no-op）
                 return output_path
 
-            except oom_error:
+            except oom_error as oom_exc:
+                last_oom = oom_exc
                 empty_cache()
                 if attempt == 0:
                     logger.warning("OOM, retrying after cache clear...")
@@ -246,7 +315,13 @@ def synthesize_segment(
                             logger.debug("清理 OOM 临时文件失败: %s", exc)
                     return output_path
                 else:
-                    raise RuntimeError(f"OOM after {MAX_RETRIES} retries: {text[:50]}...")
+                    raise EngineRuntimeFailure(
+                        PHASE_ENGINE_INFER,
+                        f"OOM after {MAX_RETRIES} retries: {text[:50]}...",
+                        recoverable=True,
+                        code=TTS_ENGINE_OOM_EXHAUSTED,
+                        original_exception=last_oom,
+                    )
 
         return output_path
 
@@ -330,6 +405,70 @@ def invalidate_speaker_cache(speaker_audio: str | None = None) -> None:
         _SPEAKER_EMB_CACHE.pop(str(speaker_audio), None)
     else:
         _SPEAKER_EMB_CACHE.clear()
+
+
+def engine_is_initialized() -> bool:
+    """Return whether an engine instance is currently attached."""
+    return _tts is not None
+
+
+def reset_engine() -> None:
+    """Detach the current engine instance and release adapter-level state.
+
+    This is the *only* sanctioned way to drop the in-process model reference
+    (``_tts = None``).  It runs under ``_ENGINE_LOCK`` and performs:
+
+    - detach the current ``_tts`` instance (dropping Python references);
+    - reset the cached capability inspection;
+    - clear the speaker-embedding LRU and adapter-level caches;
+    - ``gc.collect()`` and a guarded ``torch.cuda.empty_cache()``.
+
+    Object-level recycle cannot guarantee that every native CUDA context /
+    IndexTTS2 internal handle is released; that limitation is documented in
+    the runtime lifecycle (process-level recycle happens via runtime restart
+    and ownership takeover).
+    """
+    global _tts, _CAPABILITY_ENGINE_ID, _CAPABILITY_ENGINE_REF
+    global _INFER_PARAM_NAMES, _INFER_HAS_VAR_KEYWORD
+    with _ENGINE_LOCK:
+        _tts = None
+        _CAPABILITY_ENGINE_ID = None
+        _CAPABILITY_ENGINE_REF = None
+        _INFER_PARAM_NAMES = frozenset()
+        _INFER_HAS_VAR_KEYWORD = False
+        _SPEAKER_EMB_CACHE.clear()
+        gc.collect()
+        empty_cache()
+
+
+def gpu_snapshot() -> dict:
+    """Best-effort GPU memory snapshot for diagnostics.
+
+    Never raises and never imports torch: when torch is not loaded or CUDA
+    is unavailable it returns ``{"available": False}`` so tests and CPU
+    environments remain fully runnable.
+    """
+    result = {"available": False}
+    import sys as _sys
+
+    if "torch" not in _sys.modules:
+        return result
+    torch = _sys.modules["torch"]
+    try:
+        if not getattr(torch.cuda, "is_available", lambda: False)():
+            return result
+        free_bytes, total_bytes = torch.cuda.mem_get_info()
+        result.update({
+            "available": True,
+            "allocated": torch.cuda.memory_allocated(),
+            "reserved": torch.cuda.memory_reserved(),
+            "max_allocated": torch.cuda.max_memory_allocated(),
+            "free": free_bytes,
+            "total": total_bytes,
+        })
+    except Exception:  # pylint: disable=broad-except
+        pass
+    return result
 
 
 def _concat_wavs(paths: list[str], out_path: str) -> None:

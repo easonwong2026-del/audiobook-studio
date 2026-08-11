@@ -17,6 +17,7 @@ from lib import project_paths, script_loader, segment_cache
 from repositories.project_repo import ProjectRepository
 from repositories.voice_cast_repo import VoiceCastRepository
 
+from .runtime_engine import read_runtime_engine_status
 from .voice_assets import VoiceAssetError, VoiceAssetService
 
 
@@ -848,6 +849,10 @@ class VoiceCastResolver:
                 for role in voices
             ]
             bound = sum(item["bound"] for item in items)
+            cast_ready = bound == len(items)
+            runtime_status = read_runtime_engine_status()
+            runtime_state = runtime_status["runtime_state"]
+            engine_state = runtime_status["engine_state"]
             return {
                 "project_name": project_name,
                 "mode": "legacy_manual",
@@ -856,7 +861,19 @@ class VoiceCastResolver:
                 "unbound": len(items) - bound,
                 "new_roles": 0,
                 "cast_locked": False,
-                "synthesis_ready": bound == len(items),
+                "cast_ready": cast_ready,
+                "production_ready": cast_ready,
+                "runtime_status": runtime_state,
+                "engine_state": engine_state,
+                "engine_ready": engine_state == "ready",
+                # Eligibility to START synthesis: an unknown/uninitialized
+                # engine is fine (the runtime preflights on task claim);
+                # only a declared engine error blocks starting.
+                "synthesis_ready": (
+                    cast_ready
+                    and runtime_state != "error"
+                    and engine_state != "error"
+                ),
                 "roles": items,
             }
         roster = _roster_map(roster_document)
@@ -906,6 +923,12 @@ class VoiceCastResolver:
         except Exception:
             # Status remains useful even if an in-progress script is malformed.
             new_role_details = {}
+        cast_ready = bool(
+            validation["ready"] and bound == len(items) and not new_role_details
+        )
+        runtime_status = read_runtime_engine_status()
+        runtime_state = runtime_status["runtime_state"]
+        engine_state = runtime_status["engine_state"]
         return {
             "project_name": project_name,
             "mode": "voice_cast",
@@ -915,8 +938,15 @@ class VoiceCastResolver:
             "new_roles": len(new_role_details),
             "new_role_details": list(new_role_details.values()),
             "cast_locked": cast.get("status") == "locked",
-            "synthesis_ready": bool(
-                validation["ready"] and bound == len(items) and not new_role_details
+            "cast_ready": cast_ready,
+            "production_ready": cast_ready,
+            "runtime_status": runtime_state,
+            "engine_state": engine_state,
+            "engine_ready": engine_state == "ready",
+            "synthesis_ready": (
+                cast_ready
+                and runtime_state != "error"
+                and engine_state != "error"
             ),
             "roles": items,
             "errors": validation["errors"],
