@@ -15,7 +15,7 @@ def test_ffmpeg_exists(monkeypatch, tmp_path):
     binary = tmp_path / "ffmpeg"
     binary.write_text("", encoding="utf-8")
     monkeypatch.setattr(diagnostics.config, "get_ffmpeg_path", lambda: str(binary))
-    monkeypatch.setattr(diagnostics.subprocess, "run", lambda *a, **k: type("P", (), {"returncode": 0, "stdout": "ffmpeg version 7.1\n", "stderr": ""})())
+    monkeypatch.setattr(diagnostics, "run_no_window", lambda *a, **k: type("P", (), {"returncode": 0, "stdout": "ffmpeg version 7.1\n", "stderr": ""})())
     assert _item(diagnostics.run_environment_diagnostics(), "FFmpeg")["status"] == "ok"
 
 
@@ -172,8 +172,7 @@ def test_diagnostics_invalid_env_fallback_remains_ok(monkeypatch, tmp_path):
     monkeypatch.setattr(diagnostics.config, "get_model_dir", lambda: str(model_dir))
     monkeypatch.setattr(diagnostics.config, "get_ffmpeg_path", lambda: str(ffmpeg))
     monkeypatch.setattr(
-        diagnostics.subprocess,
-        "run",
+        diagnostics, "run_no_window",
         lambda *args, **kwargs: type(
             "P", (), {"returncode": 0, "stdout": "ffmpeg version 7.1\n", "stderr": ""},
         )(),

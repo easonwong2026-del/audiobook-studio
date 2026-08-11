@@ -90,16 +90,22 @@ def _now() -> str:
 
 
 class TestProcutil:
+    # CREATE_NO_WINDOW 是 Windows 专用常量；Linux 的 subprocess 没有该属性。
+    # 测试在强制模拟 Windows 时注入同值（0x08000000），保证 Linux CI 可测。
+    _CNW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
     def test_no_window_kwargs_adds_create_no_window_on_nt(self, monkeypatch):
         monkeypatch.setattr(procutil, "_is_windows", lambda: True)
+        monkeypatch.setattr(procutil.subprocess, "CREATE_NO_WINDOW", self._CNW)
         kw = no_window_kwargs()
-        assert kw["creationflags"] & getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        assert kw["creationflags"] & self._CNW
 
     def test_no_window_kwargs_merges_existing_flags_on_nt(self, monkeypatch):
         monkeypatch.setattr(procutil, "_is_windows", lambda: True)
+        monkeypatch.setattr(procutil.subprocess, "CREATE_NO_WINDOW", self._CNW)
         kw = no_window_kwargs(creationflags=0x200)
         assert kw["creationflags"] & 0x200
-        assert kw["creationflags"] & getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        assert kw["creationflags"] & self._CNW
 
     def test_no_window_kwargs_unchanged_on_posix(self, monkeypatch):
         monkeypatch.setattr(procutil, "_is_windows", lambda: False)
@@ -108,6 +114,7 @@ class TestProcutil:
 
     def test_run_no_window_forwards_create_no_window(self, monkeypatch):
         monkeypatch.setattr(procutil, "_is_windows", lambda: True)
+        monkeypatch.setattr(procutil.subprocess, "CREATE_NO_WINDOW", self._CNW)
         captured: dict = {}
 
         def fake_run(*_args, **_kwargs):
@@ -117,7 +124,7 @@ class TestProcutil:
         monkeypatch.setattr(procutil.subprocess, "run", fake_run)
         run_no_window(["ffmpeg", "-version"], capture_output=True, text=True)
         assert captured["capture_output"] is True
-        assert captured["creationflags"] & getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        assert captured["creationflags"] & self._CNW
 
 
 # ────────────────────────────────────────────────────────────────────────────
