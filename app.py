@@ -247,6 +247,48 @@ _STARTUP_PHASE_LABELS = {
     "engine_failed": "❌ TTS 引擎初始化失败",
 }
 
+# 面向用户的质量状态中文标签。后端枚举（not_started / needs_review /
+# needs_fix / technical_warning / regenerating / passed）保持不变，仅展示层映射。
+_QUALITY_STATUS_LABELS = {
+    "not_started": "未生产",
+    "needs_review": "待试听确认",
+    "needs_fix": "需修复",
+    "technical_warning": "技术警告",
+    "regenerating": "重合成中",
+    "passed": "通过",
+}
+
+_TECHNICAL_OUTCOME_LABELS = {
+    "pass": "通过",
+    "fail": "异常",
+    "warning": "异常",
+    "none": "未执行",
+    "unreviewed": "未执行",
+}
+
+_REVIEW_STATUS_LABELS = {
+    "passed": "已通过",
+    "needs_fix": "需要修复",
+    "unreviewed": "待确认",
+    "not_started": "未生产",
+    "regenerating": "重合成中",
+}
+
+
+def _quality_status_label(status: str) -> str:
+    return _QUALITY_STATUS_LABELS.get(str(status or ""), str(status or "needs_review"))
+
+
+def _technical_outcome_label(outcome) -> str:
+    key = str(outcome or "")
+    return _TECHNICAL_OUTCOME_LABELS.get(key, key or "未执行")
+
+
+def _review_status_label(status) -> str:
+    key = str(status or "")
+    return _REVIEW_STATUS_LABELS.get(key, key or "待确认")
+
+
 
 def _production_task_markdown(task: dict | None) -> str:
     """Render a task snapshot without exposing private filesystem paths."""
@@ -1353,7 +1395,7 @@ def _quality_summary_markdown(report, project_name=None):
     return (
         "#### 质量状态\n"
         f"通过 **{summary.get('passed', 0)}** · "
-        f"待检查 **{summary.get('needs_review', 0)}** · "
+        f"待试听确认 **{summary.get('needs_review', 0)}** · "
         f"需修复 **{summary.get('needs_fix', 0)}** · "
         f"未生产 **{summary.get('not_started', 0)}** · "
         f"技术警告 **{summary.get('technical_warning', 0)}** · "
@@ -1368,12 +1410,13 @@ def _segment_quality_markdown(item):
     human = item.get("human_review") or {}
     revision = item.get("audio_revision") or {}
     checks = technical.get("checks") or []
+    quality_status = str(item.get("quality_status") or "needs_review")
     lines = [
         f"#### 段落 {item.get('segment_id', '')}",
         f"- Audio revision：{revision.get('audio_revision', '—')}",
-        f"- 统一质量状态：`{item.get('quality_status', 'needs_review')}`",
-        f"- 技术 QA：`{item.get('technical_outcome', 'unreviewed')}`",
-        f"- 人工 Review：`{item.get('review_status', 'unreviewed')}`",
+        f"- 技术检查：{_technical_outcome_label(item.get('technical_outcome'))}",
+        f"- 人工试听：{_review_status_label(item.get('review_status'))}",
+        f"- 综合状态：{_quality_status_label(quality_status)}",
     ]
     if checks:
         lines.append("- 技术问题：" + "、".join(
@@ -2505,7 +2548,7 @@ def _dashboard_snapshot(ss):
         task_detail = (
             f"合成 {completed_segments}/{total_segments} 段；"
             f"QA 通过 {quality.get('passed', 0)}，"
-            f"待检查 {quality.get('needs_review', 0)}，"
+            f"待试听确认 {quality.get('needs_review', 0)}，"
             f"需修复 {quality.get('needs_fix', 0)}。"
         )
 

@@ -22,7 +22,6 @@ from __future__ import annotations
 import argparse
 import ctypes
 import ctypes.wintypes as wt
-import json
 import os
 import subprocess
 import sys

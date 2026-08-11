@@ -5,7 +5,6 @@ import importlib.metadata
 import os
 import platform
 import shutil
-import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path

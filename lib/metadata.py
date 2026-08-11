@@ -30,7 +30,7 @@ def write_mp3_tags(path: str, title: str, author: str,
         写回后的 path。
     """
     from mutagen.mp3 import MP3
-    from mutagen.id3 import ID3, TIT2, TPE1, TALB, APIC
+    from mutagen.id3 import TIT2, TPE1, TALB, APIC
 
     audio = MP3(path)
     if audio.tags is None:

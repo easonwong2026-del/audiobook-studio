@@ -975,7 +975,6 @@ class QualityService:
             status = str(item.get("quality_status") or "needs_review")
             counts[status] = counts.get(status, 0) + 1
         not_started = counts.get("not_started", 0)
-        produced = len(items) - not_started
         if items and not_started == len(items):
             production_status = "not_started"
             quality_status = "not_available"
