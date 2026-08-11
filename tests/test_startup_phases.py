@@ -96,13 +96,13 @@ class TestProcutil:
 
     def test_no_window_kwargs_adds_create_no_window_on_nt(self, monkeypatch):
         monkeypatch.setattr(procutil, "_is_windows", lambda: True)
-        monkeypatch.setattr(procutil.subprocess, "CREATE_NO_WINDOW", self._CNW)
+        monkeypatch.setattr(procutil.subprocess, "CREATE_NO_WINDOW", self._CNW, raising=False)
         kw = no_window_kwargs()
         assert kw["creationflags"] & self._CNW
 
     def test_no_window_kwargs_merges_existing_flags_on_nt(self, monkeypatch):
         monkeypatch.setattr(procutil, "_is_windows", lambda: True)
-        monkeypatch.setattr(procutil.subprocess, "CREATE_NO_WINDOW", self._CNW)
+        monkeypatch.setattr(procutil.subprocess, "CREATE_NO_WINDOW", self._CNW, raising=False)
         kw = no_window_kwargs(creationflags=0x200)
         assert kw["creationflags"] & 0x200
         assert kw["creationflags"] & self._CNW
@@ -114,7 +114,7 @@ class TestProcutil:
 
     def test_run_no_window_forwards_create_no_window(self, monkeypatch):
         monkeypatch.setattr(procutil, "_is_windows", lambda: True)
-        monkeypatch.setattr(procutil.subprocess, "CREATE_NO_WINDOW", self._CNW)
+        monkeypatch.setattr(procutil.subprocess, "CREATE_NO_WINDOW", self._CNW, raising=False)
         captured: dict = {}
 
         def fake_run(*_args, **_kwargs):
