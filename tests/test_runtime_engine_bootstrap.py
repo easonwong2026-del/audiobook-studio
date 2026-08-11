@@ -152,6 +152,7 @@ def test_c_concurrent_ensure_ready_inits_exactly_once(tmp_path, monkeypatch):
     monkeypatch.setattr(tts_engine, "init_engine", slow_init)
     runtime = ProductionRuntime(
         lock_path=str(tmp_path / "runtime.lock"),
+        status_path=str(tmp_path / "runtime_engine_status.json"),
         poll_interval=0.05,
     )
     results: list[str] = []

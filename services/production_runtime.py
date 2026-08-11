@@ -45,6 +45,7 @@ class ProductionRuntime:
         *,
         owner_id: str | None = None,
         lock_path: str | None = None,
+        status_path: str | None = None,
         poll_interval: float = 0.1,
     ) -> None:
         self.owner_id = owner_id or f"runtime_{uuid.uuid4().hex}"
@@ -65,7 +66,10 @@ class ProductionRuntime:
         self._export_record: TaskRecord | None = None
         self._ownership_lock = threading.RLock()
         self._lock_release_deferred = False
-        self._engine = RuntimeEngineLifecycle(owner_id=self.owner_id)
+        self._engine = RuntimeEngineLifecycle(
+            owner_id=self.owner_id,
+            status_path=status_path,
+        )
         self._engine_failure = False
         self._shutdown_after_task = False
         self._shutdown_complete = threading.Event()
