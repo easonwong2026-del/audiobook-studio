@@ -48,6 +48,17 @@ def _iso_delta_ms(start: str, end: str) -> int | None:
         return None
 
 
+def _is_windows() -> bool:
+    """Windows platform probe.
+
+    独立函数而非直接读 ``os.name``：测试可通过 monkeypatch 本函数切换
+    平台分支，避免污染全局 ``os.name``（全局改动会波及 pytest 自身的
+    pathlib 行为，例如 Linux 上 ``Path()`` 被错误地实例化为
+    ``WindowsPath`` 而崩溃）。
+    """
+    return os.name == "nt"
+
+
 def _open_bootstrap_log():
     """Open the runtime bootstrap log for stderr redirection (Windows).
 
@@ -60,7 +71,7 @@ def _open_bootstrap_log():
     Returns an open text file handle, or ``None`` (→ ``DEVNULL``) when the log
     directory is unavailable (e.g. POSIX, where no console exists anyway).
     """
-    if os.name != "nt":
+    if not _is_windows():
         return None
     try:
         from lib import config
@@ -1321,7 +1332,7 @@ class ProductionRuntimeClient:
         Applies only on Windows for a stub-sized venv python (<=100 KB).
         Any resolution failure falls back to the default ``python -m ...``.
         """
-        if os.name != "nt":
+        if not _is_windows():
             return [sys.executable, "-m", "services.production_runtime", "--serve"], {}
         try:
             venv_dir = os.path.dirname(os.path.dirname(os.path.abspath(sys.executable)))
@@ -1417,7 +1428,7 @@ class ProductionRuntimeClient:
             "stderr": bootstrap if bootstrap is not None else subprocess.DEVNULL,
             "close_fds": True,
         }
-        if os.name == "nt":
+        if _is_windows():
             kwargs["creationflags"] = (
                 getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
                 | getattr(subprocess, "DETACHED_PROCESS", 0)

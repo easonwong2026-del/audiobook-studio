@@ -406,7 +406,7 @@ class TestRuntimeStartup:
         assert kwargs["stdin"] is subprocess.DEVNULL
 
     def test_resolve_runtime_launch_falls_back_without_pyvenv_cfg(self, monkeypatch, tmp_path):
-        monkeypatch.setattr("services.production_runtime.os.name", "nt")
+        monkeypatch.setattr("services.production_runtime._is_windows", lambda: True)
         fake_stub = tmp_path / "python.exe"
         fake_stub.write_bytes(b"x" * 40960)  # 45KB stub 尺寸
         monkeypatch.setattr(
@@ -419,7 +419,7 @@ class TestRuntimeStartup:
         assert env == {}
 
     def test_resolve_runtime_launch_uses_real_interpreter_for_stub(self, monkeypatch, tmp_path):
-        monkeypatch.setattr("services.production_runtime.os.name", "nt")
+        monkeypatch.setattr("services.production_runtime._is_windows", lambda: True)
         venv_dir = tmp_path / "venv"
         scripts = venv_dir / "Scripts"
         scripts.mkdir(parents=True)
@@ -447,7 +447,7 @@ class TestRuntimeStartup:
         assert env == {}
 
     def test_resolve_runtime_launch_keeps_venv_python_for_real_interpreter(self, monkeypatch, tmp_path):
-        monkeypatch.setattr("services.production_runtime.os.name", "nt")
+        monkeypatch.setattr("services.production_runtime._is_windows", lambda: True)
         venv_dir = tmp_path / "venv"
         scripts = venv_dir / "Scripts"
         scripts.mkdir(parents=True)
@@ -463,7 +463,7 @@ class TestRuntimeStartup:
 
     def test_open_bootstrap_log_on_windows(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            "services.production_runtime.os.name", "nt"
+            "services.production_runtime._is_windows", lambda: True
         )
         monkeypatch.setattr(
             "lib.config.get_data_dir", lambda: str(tmp_path)
