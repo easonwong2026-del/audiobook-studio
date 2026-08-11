@@ -16,17 +16,24 @@ import gradio as gr
 logger = logging.getLogger(__name__)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from lib import __version__, chapter_identity, config, project_paths, script_loader, voice_lib
+from lib import (
+    __version__,
+    chapter_identity,
+    config,
+    project_paths,
+    script_loader,
+    voice_lib,
+)
 from lib import dataframe_style as df_style
 from lib import progress as synth_progress
 from lib import project_manager as _pm
 from services import (
     ExportService,
+    ProductionJobError,
+    ProductionJobService,
     ProjectBackupService,
     ProjectService,
     ProjectStorageService,
-    ProductionJobError,
-    ProductionJobService,
     QualityService,
     RepairError,
     RepairService,
@@ -38,13 +45,11 @@ from services import (
     VoiceCastResolver,
     WorkflowService,
 )
-from services.session import SessionState
-from services.review_audio import ReviewAudioService
 from services.project_storage import format_size
+from services.review_audio import ReviewAudioService
+from services.session import SessionState
 from services.synthesis import SynthesisState
 from ui import create_project_handlers as create_ui
-from ui.wiring.settings_wiring import wire_settings_page
-from ui.wiring.voice_wiring import wire_voice_page
 from ui.components import (
     build_role_management_choices,
     create_production_navigation,
@@ -68,6 +73,8 @@ from ui.pages import (
 )
 from ui.shared import create_status_bar
 from ui.theme import LIGHT_CSS, THEME
+from ui.wiring.settings_wiring import wire_settings_page
+from ui.wiring.voice_wiring import wire_voice_page
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 # 音色库外置于数据目录（默认 ~/AudiobookStudio/voice_library），与程序目录解耦。
@@ -521,9 +528,314 @@ def preview_bound_voice(role, audio_file, from_lib, ss):
     except Exception:
         return None
 
+
+def _string_list(values) -> list[str]:
+    """Normalize UI multi-select values without changing their order."""
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        item = str(value or "").strip()
+        if item and item not in seen:
+            result.append(item)
+            seen.add(item)
+    return result
+
+
+def _scope_from_ui(
+    scope_mode,
+    selected_chapters=None,
+    selected_segment_ids=None,
+) -> dict[str, object]:
+    """Map the visible production-range controls to the shared scope API."""
+    mode = str(scope_mode or "all").strip().lower()
+    if mode in {"chapters", "chapter"}:
+        return {
+            "all": False,
+            "chapter_ids": _string_list(selected_chapters),
+            "segment_ids": [],
+        }
+    if mode in {"segments", "segment", "custom"}:
+        return {
+            "all": False,
+            "chapter_ids": [],
+            "segment_ids": _string_list(selected_segment_ids),
+        }
+    return {"all": True, "chapter_ids": [], "segment_ids": []}
+
+
+def _scope_mode_label(scope_mode) -> str:
+    return {
+        "all": "整本",
+        "chapters": "按章节",
+        "segments": "自定义段落",
+    }.get(str(scope_mode or "all"), "整本")
+
+
+def _chapter_options(ss) -> tuple[list[tuple[str, str]], list[str]]:
+    if not ss or not ss.project:
+        return [], []
+    snap = _snap(ss)
+    chapters = snap.script.get("chapters", []) if snap else []
+    options: list[tuple[str, str]] = []
+    ids: list[str] = []
+    for index, chapter in enumerate(chapters):
+        chapter_id = str(chapter.get("id") or "").strip()
+        if not chapter_id:
+            continue
+        ids.append(chapter_id)
+        options.append((
+            chapter_identity.chapter_label(chapter, index, len(chapters)),
+            chapter_id,
+        ))
+    return options, ids
+
+
+def _segment_records(ss, chapter_filter=None) -> list[dict]:
+    """Return compact segment records for the current custom-scope filter."""
+    if not ss or not ss.project:
+        return []
+    snap = _snap(ss)
+    if snap is None:
+        return []
+    chapters = snap.script.get("chapters", [])
+    selected_filter = str(chapter_filter or "").strip()
+    records: list[dict] = []
+    for index, chapter in enumerate(chapters):
+        chapter_id = str(chapter.get("id") or "").strip()
+        if selected_filter and selected_filter != "__all__" and chapter_id != selected_filter:
+            continue
+        chapter_label = chapter_identity.chapter_label(chapter, index, len(chapters))
+        for segment in chapter.get("segments", []):
+            if not isinstance(segment, dict):
+                continue
+            segment_id = str(segment.get("id") or "").strip()
+            if not segment_id:
+                continue
+            text = " ".join(str(segment.get("text") or "").split())
+            status = str(snap.meta.segments_status.get(segment_id, "pending"))
+            status_label = {
+                "done": "✅ 已完成",
+                "failed": "❌ 失败",
+                "running": "⏳ 合成中",
+            }.get(status, "⬜ 待合成")
+            records.append({
+                "id": segment_id,
+                "chapter_id": chapter_id,
+                "chapter_label": chapter_label,
+                "role": str(segment.get("role") or segment.get("speaker") or ""),
+                "text": text,
+                "status": status,
+                "status_label": status_label,
+            })
+    return records
+
+
+def _segment_choices(ss, chapter_filter=None) -> tuple[list[tuple[str, str]], list[str]]:
+    records = _segment_records(ss, chapter_filter)
+    choices: list[tuple[str, str]] = []
+    ids: list[str] = []
+    for record in records:
+        text = record["text"][:36] + ("…" if len(record["text"]) > 36 else "")
+        choices.append((
+            f"{record['id']} · {record['role']} · {record['status_label']} · {text}",
+            record["id"],
+        ))
+        ids.append(record["id"])
+    return choices, ids
+
+
+def _scope_preview_rows(ss, scope_mode, selected_chapters=None, selected_segment_ids=None):
+    if not ss or not ss.project:
+        return []
+    snap = _snap(ss)
+    if snap is None:
+        return []
+    mode = str(scope_mode or "all")
+    if mode == "segments":
+        selected_segments = _string_list(selected_segment_ids)
+        selected_chapter_ids = None
+    elif mode == "chapters":
+        selected_segments = None
+        selected_chapter_ids = _string_list(selected_chapters)
+    else:
+        selected_segments = None
+        selected_chapter_ids = None
+    return synth_progress.build_scope_preview_rows_from_script(
+        snap.script,
+        selected_chapters=selected_chapter_ids,
+        selected_segment_ids=selected_segments,
+        status_by_id=getattr(snap.meta, "segments_status", {}),
+    )
+
+
+def _format_scope_plan(plan: dict | None, scope_mode="all") -> str:
+    if not plan:
+        return "当前没有可用的生产范围计划。"
+    if plan.get("project_name") == "" and plan.get("blockers"):
+        return "⚠ " + str(plan["blockers"][0].get("message") or "无法读取生产计划")
+    voice = plan.get("voice_cast", {}) or {}
+    required = int(voice.get("required_role_count", 0) or 0)
+    bound = int(voice.get("bound_role_count", 0) or 0)
+    lines = [
+        f"### {_scope_mode_label(scope_mode)} · "
+        + ("✅ 当前选择可以开始生产" if plan.get("ready") else "⚠ 当前选择暂不可生产"),
+        f"准备生产：{plan.get('segments', 0)} 段 · {plan.get('chapters', 0)} 章",
+        f"需要角色：{required} · 角色已准备：{bound}/{required}",
+        (
+            f"已完成：{plan.get('already_completed', 0)} · "
+            f"待合成：{plan.get('remaining', 0)} · "
+            f"失败待重试：{plan.get('failed', 0)}"
+        ),
+    ]
+    blockers = plan.get("blockers", []) or []
+    if blockers:
+        lines.append("\n**阻塞原因**")
+        lines.extend(
+            f"- {escape(str(item.get('message') or item.get('code') or '未就绪'))}"
+            for item in blockers[:6]
+            if isinstance(item, dict)
+        )
+    warnings = plan.get("warnings", []) or []
+    if warnings:
+        lines.append("\n**提示**")
+        lines.extend(
+            f"- {escape(str(item.get('message') or item.get('code') or ''))}"
+            for item in warnings[:3]
+            if isinstance(item, dict)
+        )
+    return "\n".join(lines)
+
+
+def render_scope_controls(ss):
+    """Restore scope controls, including legacy chapter-only selections."""
+    options, chapter_ids = _chapter_options(ss)
+    saved = _pm.get_synthesis_selections(ss.project) if ss and ss.project else {}
+    saved_chapters = _string_list(saved.get("chapters")) if isinstance(saved, dict) else []
+    saved_segments = _string_list(
+        saved.get("segment_ids") if isinstance(saved, dict) else []
+    )
+    mode = str(saved.get("mode") or "") if isinstance(saved, dict) else ""
+    if mode not in {"all", "chapters", "segments"}:
+        if saved_segments:
+            mode = "segments"
+        elif saved_chapters and set(saved_chapters) != set(chapter_ids):
+            mode = "chapters"
+        else:
+            mode = "all"
+    chapters_value = [item for item in saved_chapters if item in chapter_ids]
+    if mode == "chapters" and not chapters_value:
+        chapters_value = list(chapter_ids)
+    filter_value = str(saved.get("segment_chapter") or "") if isinstance(saved, dict) else ""
+    if filter_value not in chapter_ids:
+        filter_value = chapter_ids[0] if chapter_ids else "__all__"
+    segment_choices, visible_ids = _segment_choices(ss, filter_value)
+    segment_value = [item for item in saved_segments if item in visible_ids]
+    full_segment_value = [
+        item for item in saved_segments
+        if item in {record["id"] for record in _segment_records(ss, "__all__")}
+    ]
+    plan = ProductionJobService.plan(
+        ss.project if ss and ss.project else "",
+        _scope_from_ui(mode, chapters_value, full_segment_value),
+    )
+    return (
+        gr.update(value=mode),
+        gr.update(visible=mode == "chapters"),
+        gr.update(choices=options, value=chapters_value),
+        gr.update(visible=mode == "segments"),
+        gr.update(choices=[("全部章节", "__all__"), *options], value=filter_value),
+        gr.update(choices=segment_choices, value=segment_value),
+        full_segment_value,
+        df_style.style_dataframe(
+            _scope_preview_rows(ss, mode, chapters_value, full_segment_value),
+            synth_progress.SCOPE_PREVIEW_HEADERS,
+            status_col=5,
+            status_color_map=df_style.ICON_COLORS,
+        ),
+        _format_scope_plan(plan, mode),
+    )
+
+
+def refresh_scope_preview(ss, scope_mode, selected_chapters, _chapter_filter, selected_segment_ids):
+    """Plan the current UI scope without creating a task or locking roles."""
+    if not ss or not ss.project:
+        return [], "请先打开项目。"
+    mode = str(scope_mode or "all")
+    scope = _scope_from_ui(mode, selected_chapters, selected_segment_ids)
+    plan = ProductionJobService.plan(ss.project, scope)
+    return (
+        df_style.style_dataframe(
+            _scope_preview_rows(ss, mode, selected_chapters, selected_segment_ids),
+            synth_progress.SCOPE_PREVIEW_HEADERS,
+            status_col=5,
+            status_color_map=df_style.ICON_COLORS,
+        ),
+        _format_scope_plan(plan, mode),
+    )
+
+
+def update_scope_visibility(scope_mode):
+    mode = str(scope_mode or "all")
+    return (
+        gr.update(visible=mode == "chapters"),
+        gr.update(visible=mode == "segments"),
+    )
+
+
+def refresh_segment_filter(ss, chapter_filter, selected_segment_ids):
+    choices, visible_ids = _segment_choices(ss, chapter_filter)
+    selected = [item for item in _string_list(selected_segment_ids) if item in visible_ids]
+    return gr.update(choices=choices, value=selected)
+
+
+def merge_segment_selection(visible_selection, selected_segment_ids, chapter_filter, ss):
+    all_visible = _segment_choices(ss, chapter_filter)[1]
+    stored = _string_list(selected_segment_ids)
+    stored = [item for item in stored if item not in all_visible]
+    visible = [item for item in _string_list(visible_selection) if item in all_visible]
+    merged = stored + visible
+    return gr.update(value=visible), merged
+
+
+def apply_scope_segment_action(action, ss, chapter_filter, selected_segment_ids):
+    all_visible = _segment_choices(ss, chapter_filter)[1]
+    stored = [item for item in _string_list(selected_segment_ids) if item not in all_visible]
+    status_by_id = {
+        record["id"]: record["status"]
+        for record in _segment_records(ss, chapter_filter)
+    }
+    action = str(action or "").strip()
+    if action == "all":
+        target = list(all_visible)
+    elif action == "clear":
+        target = []
+    elif action == "pending":
+        target = [item for item in all_visible if status_by_id.get(item) != "done"]
+    else:  # failed
+        target = [item for item in all_visible if status_by_id.get(item) == "failed"]
+    merged = stored + target
+    return gr.update(value=target), merged
+
+
+def select_scope_segments(chapter_filter, selected_segment_ids, ss):
+    return apply_scope_segment_action("all", ss, chapter_filter, selected_segment_ids)
+
+
+def clear_scope_segments(chapter_filter, selected_segment_ids, ss):
+    return apply_scope_segment_action("clear", ss, chapter_filter, selected_segment_ids)
+
+
+def select_pending_scope_segments(chapter_filter, selected_segment_ids, ss):
+    return apply_scope_segment_action("pending", ss, chapter_filter, selected_segment_ids)
+
+
+def select_failed_scope_segments(chapter_filter, selected_segment_ids, ss):
+    return apply_scope_segment_action("failed", ss, chapter_filter, selected_segment_ids)
+
+
 def do_synthesis(ss, num_beams=2, progress=gr.Progress(),
                 emotion="(按剧本默认)", s_override=False, emo_alpha=1.0, speech_rate=1.0,
-                selected_chapters=None):
+                selected_chapters=None, scope_mode="all", selected_segment_ids=None):
     """Start production through the shared Web/MCP task kernel."""
     proj = ss.project
     if not proj:
@@ -549,10 +861,18 @@ def do_synthesis(ss, num_beams=2, progress=gr.Progress(),
         _pm.set_synthesis_overrides(proj, overrides)
     except Exception as exc:
         logger.warning("保存合成覆盖参数失败: %s", exc)
-    chapter_ids = [str(item) for item in (selected_chapters or []) if str(item).strip()]
-    scope = {"chapter_ids": chapter_ids} if chapter_ids else {"all": True}
+    chapter_ids = _string_list(selected_chapters)
+    segment_ids = _string_list(selected_segment_ids)
+    scope = _scope_from_ui(scope_mode, chapter_ids, segment_ids)
     try:
-        _pm.set_synthesis_selections(proj, {"chapters": selected_chapters or []})
+        _pm.set_synthesis_selections(
+            proj,
+            {
+                "mode": str(scope_mode or "all"),
+                "chapters": chapter_ids,
+                "segment_ids": segment_ids,
+            },
+        )
     except Exception as exc:
         logger.warning("保存合成勾选失败: %s", exc)
     try:
@@ -599,6 +919,7 @@ def do_synthesis(ss, num_beams=2, progress=gr.Progress(),
                 synth_progress.build_segment_states(
                     proj,
                     snapshot.get("scope", {}).get("chapter_ids") or None,
+                    snapshot.get("scope", {}).get("segment_ids") or None,
                 )
             )
         )
@@ -730,10 +1051,15 @@ def refresh_queue_list(ss):
             )
         scope = task.get("scope", {}) or {}
         selected = scope.get("chapter_ids") or None
+        selected_segments = scope.get("segment_ids") or None
         try:
             return df_style.style_dataframe(
                 synth_progress.to_queue_rows(
-                    synth_progress.build_segment_states(ss.project, selected)
+                    synth_progress.build_segment_states(
+                        ss.project,
+                        selected,
+                        selected_segments,
+                    )
                 ),
                 synth_progress.QUEUE_HEADERS,
                 status_col=0,
@@ -1851,7 +2177,6 @@ def render_preview(ss):
         str(ch.get("id")): chapter_identity.chapter_label(ch, index, len(chapters))
         for index, ch in enumerate(chapters)
     }
-    rows = synth_progress.build_preview_rows_from_script(snap.script)
     # 回填勾选：读 synthesis_selections.json
     sel = _pm.get_synthesis_selections(ss.project)
     saved = sel.get("chapters")
@@ -1859,7 +2184,17 @@ def render_preview(ss):
         chosen = [c for c in saved if c in chapter_options]
     else:
         chosen = list(chapter_options)
-    return df_style.style_dataframe(rows, synth_progress.PREVIEW_HEADERS, status_col=None), gr.update(
+    mode = str(sel.get("mode") or "all")
+    segment_ids = _string_list(sel.get("segment_ids"))
+    if mode not in {"all", "chapters", "segments"}:
+        mode = "segments" if segment_ids else ("chapters" if saved is not None and set(chosen) != set(chapter_options) else "all")
+    rows = _scope_preview_rows(ss, mode, chosen, segment_ids)
+    return df_style.style_dataframe(
+        rows,
+        synth_progress.SCOPE_PREVIEW_HEADERS,
+        status_col=5,
+        status_color_map=df_style.ICON_COLORS,
+    ), gr.update(
         choices=[(chapter_labels.get(c, c), c) for c in chapter_options],
         value=chosen,
     )
@@ -1974,13 +2309,34 @@ def refresh_production_check(ss):
             lines.append(f"⚠ 剧本需要检查（{len(errors)} 项提示），请先回到项目页确认书稿。")
         else:
             lines.append("✅ 剧本有效")
-        if missing:
+        try:
+            cast_status = VoiceCastResolver.get_voice_binding_status(ss.project)
+        except Exception:
+            # Snapshot-only callers (including older UI tests and an opening
+            # project that has not been persisted yet) still use the raw
+            # binding summary below.
+            cast_status = {"mode": "legacy_manual"}
+        if cast_status.get("mode") == "voice_cast":
+            total = int(cast_status.get("roles_total", 0) or 0)
+            bound = int(cast_status.get("bound", 0) or 0)
+            locked = int(cast_status.get("locked", 0) or 0)
+            cast_label = "已锁定" if cast_status.get("cast_locked") else "未完成"
             lines.append(
-                f"⚠ {len(missing)} 个角色未绑定声音：{', '.join(format_role_label(r, roles.get(r)) for r in missing)}。"
+                f"全书演员表：{cast_label} · 已绑定 {bound}/{total} · "
+                f"已锁定正式角色 {locked}"
             )
-            lines.append("建议先完成角色声音配置；这里不会阻断你查看队列或质检。")
+            if cast_status.get("unbound"):
+                lines.append("后续未绑定角色不会阻止当前 scope；请在开始生产前检查所选范围。")
+            else:
+                lines.append("✅ 全书角色均已绑定；合成中心仍会按当前 scope 显示局部 readiness。")
         else:
-            lines.append("✅ 所有角色已绑定声音，可以开始生产。")
+            if missing:
+                lines.append(
+                    f"⚠ {len(missing)} 个角色未绑定声音：{', '.join(format_role_label(r, roles.get(r)) for r in missing)}。"
+                )
+                lines.append("建议先完成角色声音配置；这里不会阻断你查看队列或质检。")
+            else:
+                lines.append("✅ 所有角色已绑定声音，可以开始生产。")
         return "\n".join(lines)
     except Exception as exc:
         logger.warning("刷新生产检查失败: %s", exc)
@@ -2136,6 +2492,21 @@ def _open_chain_rest(event):
     e = e.then(render_chapter_tree, [p_sel], [p_chapter_tree])
     e = e.then(refresh_project_storage, [ss], [p_storage])
     e = e.then(render_preview, [ss], [s_preview_df, s_chapters_sel])
+    e = e.then(
+        render_scope_controls,
+        [ss],
+        [
+            s_scope_mode,
+            s_chapter_scope_group,
+            s_chapters_sel,
+            s_segment_scope_group,
+            s_segment_chapter_filter,
+            s_segments_sel,
+            s_segment_selection_state,
+            s_preview_df,
+            s_scope_readiness,
+        ],
+    )
     e = e.then(refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
     e = e.then(refresh_categories, [], [v_bind_category, v_save_category])
     e = e.then(refresh_production_voice_choices, [], [e_voice, sup_voice])
@@ -2273,7 +2644,18 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             grp_synth = syn_page["group"]
             s_task_status = syn_page["s_task_status"]
             s_preview_df = syn_page["s_preview_df"]
+            s_scope_mode = syn_page["s_scope_mode"]
+            s_scope_readiness = syn_page["s_scope_readiness"]
+            s_chapter_scope_group = syn_page["s_chapter_scope_group"]
+            s_segment_scope_group = syn_page["s_segment_scope_group"]
             s_chapters_sel = syn_page["s_chapters_sel"]
+            s_segment_chapter_filter = syn_page["s_segment_chapter_filter"]
+            s_segments_sel = syn_page["s_segments_sel"]
+            s_select_scope_segments = syn_page["s_select_scope_segments"]
+            s_clear_scope_segments = syn_page["s_clear_scope_segments"]
+            s_select_pending_segments = syn_page["s_select_pending_segments"]
+            s_select_failed_segments = syn_page["s_select_failed_segments"]
+            s_segment_selection_state = syn_page["s_segment_selection_state"]
             s_log = syn_page["s_log"]
             s_emo = syn_page["s_emo"]
             s_override = syn_page["s_override"]
@@ -2624,7 +3006,54 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         [],
         [p_trash_confirm],
     )
-    s_start.click(do_synthesis, [ss, s_beam, s_emo, s_override, s_alpha, s_rate, s_chapters_sel], outputs=[s_log, s_queue_list]).then(
+    s_scope_mode.change(
+        update_scope_visibility,
+        [s_scope_mode],
+        [s_chapter_scope_group, s_segment_scope_group],
+    ).then(
+        refresh_scope_preview,
+        [ss, s_scope_mode, s_chapters_sel, s_segment_chapter_filter, s_segment_selection_state],
+        [s_preview_df, s_scope_readiness],
+    )
+    s_chapters_sel.change(
+        refresh_scope_preview,
+        [ss, s_scope_mode, s_chapters_sel, s_segment_chapter_filter, s_segment_selection_state],
+        [s_preview_df, s_scope_readiness],
+    )
+    s_segment_chapter_filter.change(
+        refresh_segment_filter,
+        [ss, s_segment_chapter_filter, s_segment_selection_state],
+        [s_segments_sel],
+    ).then(
+        refresh_scope_preview,
+        [ss, s_scope_mode, s_chapters_sel, s_segment_chapter_filter, s_segment_selection_state],
+        [s_preview_df, s_scope_readiness],
+    )
+    s_segments_sel.change(
+        merge_segment_selection,
+        [s_segments_sel, s_segment_selection_state, s_segment_chapter_filter, ss],
+        [s_segments_sel, s_segment_selection_state],
+    ).then(
+        refresh_scope_preview,
+        [ss, s_scope_mode, s_chapters_sel, s_segment_chapter_filter, s_segment_selection_state],
+        [s_preview_df, s_scope_readiness],
+    )
+    for button, handler in (
+        (s_select_scope_segments, select_scope_segments),
+        (s_clear_scope_segments, clear_scope_segments),
+        (s_select_pending_segments, select_pending_scope_segments),
+        (s_select_failed_segments, select_failed_scope_segments),
+    ):
+        button.click(
+            handler,
+            [s_segment_chapter_filter, s_segment_selection_state, ss],
+            [s_segments_sel, s_segment_selection_state],
+        ).then(
+            refresh_scope_preview,
+            [ss, s_scope_mode, s_chapters_sel, s_segment_chapter_filter, s_segment_selection_state],
+            [s_preview_df, s_scope_readiness],
+        )
+    s_start.click(do_synthesis, [ss, s_beam, s_emo, s_override, s_alpha, s_rate, s_chapters_sel, s_scope_mode, s_segment_selection_state], outputs=[s_log, s_queue_list]).then(
         refresh_production_task, [ss], [s_task_status]).then(
         refresh_top_status, [ss], [top_status])
     s_cancel.click(cancel, [ss], outputs=s_log).then(

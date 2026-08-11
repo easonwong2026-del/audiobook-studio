@@ -243,6 +243,30 @@ def _asset_for_role(project_name: str, role_id: str, binding: dict[str, Any]) ->
     return record
 
 
+def _project_voice_snapshot_path(
+    project_dir: str,
+    role_id: str,
+    binding: dict[str, Any],
+    bindings_document: dict[str, Any] | None = None,
+) -> str:
+    """Return the project-local voice snapshot path for one cast binding.
+
+    Voice Cast records created by older builds may not contain
+    ``project_voice_path`` even though the runtime bridge does.  Read that
+    bridge as a compatibility fallback, but never fall back to the global
+    library here: formal production must use a project-owned snapshot.
+    """
+    candidate = str(binding.get("project_voice_path") or "").strip()
+    if not candidate and isinstance(bindings_document, dict):
+        role_bindings = bindings_document.get("role_bindings", {})
+        runtime_binding = role_bindings.get(role_id) if isinstance(role_bindings, dict) else None
+        if isinstance(runtime_binding, dict):
+            candidate = str(runtime_binding.get("project_voice_path") or "").strip()
+    if not candidate:
+        return ""
+    return candidate if os.path.isabs(candidate) else os.path.join(project_dir, candidate)
+
+
 def _read_roster(project_name: str) -> dict[str, Any] | None:
     return VoiceCastRepository.load_roster(_project_dir(project_name))
 
@@ -681,6 +705,7 @@ class VoiceCastResolver:
                 "voice_asset_id": asset["voice_asset_id"],
                 "voice_sha256": asset["sha256"],
                 "project_voice_path": project_relative,
+                "locked": bool(binding.get("locked", False)),
                 "bound_at": now,
             }
             applied_roles.append(role_id)
@@ -861,6 +886,8 @@ class VoiceCastResolver:
                 "unbound": len(items) - bound,
                 "new_roles": 0,
                 "cast_locked": False,
+                "locked": 0,
+                "locked_roles": [],
                 "cast_ready": cast_ready,
                 "production_ready": cast_ready,
                 "runtime_status": runtime_state,
@@ -929,12 +956,21 @@ class VoiceCastResolver:
         runtime_status = read_runtime_engine_status()
         runtime_state = runtime_status["runtime_state"]
         engine_state = runtime_status["engine_state"]
+        locked_roles = [item for item in items if item.get("locked")]
         return {
             "project_name": project_name,
             "mode": "voice_cast",
             "roles_total": len(items),
             "bound": bound,
             "unbound": len(items) - bound,
+            "locked": len(locked_roles),
+            "locked_roles": [
+                {
+                    "role_id": item.get("role_id"),
+                    "name": item.get("name"),
+                }
+                for item in locked_roles
+            ],
             "new_roles": len(new_role_details),
             "new_role_details": list(new_role_details.values()),
             "cast_locked": cast.get("status") == "locked",
@@ -951,6 +987,289 @@ class VoiceCastResolver:
             "roles": items,
             "errors": validation["errors"],
             "warnings": validation["warnings"],
+        }
+
+    @classmethod
+    def check_production_scope(
+        cls,
+        project_name: str,
+        segment_ids: list[str] | tuple[str, ...] | set[str] | None,
+    ) -> dict[str, Any]:
+        """Check only the roles used by an exact production segment scope.
+
+        This is intentionally independent from ``cast.status``.  A draft
+        Voice Cast means that the whole-book cast has not been finalized; it
+        does not mean that a selected subset is unusable.  Callers must pass
+        the already-normalized segment IDs so a one-segment scope can never
+        accidentally widen to the containing chapter.
+        """
+        project_dir = _project_dir(project_name)
+        requested_ids: list[str] = []
+        seen: set[str] = set()
+        for value in segment_ids or []:
+            segment_id = str(value or "").strip()
+            if segment_id and segment_id not in seen:
+                requested_ids.append(segment_id)
+                seen.add(segment_id)
+
+        _meta, script, bindings_document = ProjectRepository.load_project(project_name)
+        _voices, chapters = script_loader.resolve_collections(script)
+        segments: dict[str, dict[str, Any]] = {}
+        for chapter in chapters:
+            if not isinstance(chapter, dict):
+                continue
+            for segment in chapter.get("segments", []):
+                if isinstance(segment, dict):
+                    segment_id = str(segment.get("id") or "").strip()
+                    if segment_id:
+                        segments[segment_id] = segment
+
+        errors: list[dict[str, Any]] = []
+        warnings: list[dict[str, Any]] = []
+        selected = [segments[item] for item in requested_ids if item in segments]
+        for segment_id in requested_ids:
+            if segment_id not in segments:
+                errors.append(_issue(
+                    "SEGMENT_NOT_FOUND",
+                    f"段落不存在: {segment_id}",
+                    segment_id=segment_id,
+                ))
+
+        roster_document = _read_roster(project_name)
+        roster = _roster_map(roster_document)
+        cast = _normalize_cast(project_name, _read_cast(project_name) or {}, roster)
+        required_roles: list[dict[str, Any]] = []
+        required_by_id: dict[str, dict[str, Any]] = {}
+        unbound_roles: list[str] = []
+        missing_roles: list[dict[str, Any]] = []
+
+        def _add_required(role_id: str | None, name: str, **fields: Any) -> dict[str, Any]:
+            key = str(role_id or name or "").strip()
+            if key in required_by_id:
+                return required_by_id[key]
+            item = {
+                "role_id": str(role_id).strip() if role_id else None,
+                "name": str(name or role_id or "").strip(),
+                "bound": False,
+                "locked": False,
+                **fields,
+            }
+            required_by_id[key] = item
+            required_roles.append(item)
+            return item
+
+        if not roster_document:
+            # Legacy/manual projects keep their existing name -> absolute path
+            # bridge.  Only names used by the selected segments participate in
+            # readiness; unrelated future roles are deliberately ignored.
+            runtime_bindings = (
+                bindings_document.get("bindings", {})
+                if isinstance(bindings_document, dict) else {}
+            )
+            runtime_bindings = runtime_bindings if isinstance(runtime_bindings, dict) else {}
+            for segment in selected:
+                name = str(segment.get("role") or segment.get("speaker") or "").strip()
+                role = _add_required(None, name)
+                path_value = runtime_bindings.get(name)
+                path = str(path_value or "").strip()
+                if path and not os.path.isabs(path):
+                    path = os.path.join(project_dir, path)
+                role["bound"] = bool(path and os.path.isfile(path))
+                if not role["bound"] and name and name not in unbound_roles:
+                    unbound_roles.append(name)
+                    errors.append(_issue(
+                        "ROLE_UNBOUND",
+                        f"角色尚未绑定声音: {name}",
+                        role=name,
+                    ))
+            return {
+                "ready": not errors,
+                "mode": "legacy_manual",
+                "cast_status": "draft",
+                "cast_locked": False,
+                "segment_count": len(requested_ids),
+                "selected_segment_ids": requested_ids,
+                "required_roles": required_roles,
+                "required_role_count": len(required_roles),
+                "bound_role_count": sum(1 for item in required_roles if item["bound"]),
+                "unbound_roles": unbound_roles,
+                "missing_roles": missing_roles,
+                "errors": errors,
+                "warnings": warnings,
+            }
+
+        role_bindings = (
+            bindings_document.get("role_bindings", {})
+            if isinstance(bindings_document, dict) else {}
+        )
+        role_bindings = role_bindings if isinstance(role_bindings, dict) else {}
+        for segment in selected:
+            name = str(segment.get("role") or segment.get("speaker") or "").strip()
+            requested_role_id = str(segment.get("role_id") or "").strip() or None
+            try:
+                resolved = cls.resolve_role(
+                    project_name,
+                    segment,
+                    roster=roster_document,
+                    allow_legacy=False,
+                )
+            except VoiceCastError as exc:
+                role = _add_required(requested_role_id, name)
+                missing = {
+                    "role_id": requested_role_id,
+                    "name": name,
+                }
+                if missing not in missing_roles:
+                    missing_roles.append(missing)
+                if not any(
+                    issue.get("code") == exc.code
+                    and issue.get("role_id") == requested_role_id
+                    and issue.get("name") == name
+                    for issue in errors
+                ):
+                    errors.append(exc.as_issue())
+                role["error"] = exc.code
+                continue
+
+            role_id = str(resolved.get("role_id") or "").strip()
+            role_name = str(resolved.get("name") or name).strip()
+            binding = cast["roles"].get(role_id, {})
+            binding = binding if isinstance(binding, dict) else {}
+            asset_id = str(binding.get("voice_asset_id") or "").strip()
+            role = _add_required(
+                role_id,
+                role_name,
+                voice_asset_id=asset_id or None,
+                locked=bool(binding.get("locked", False)),
+            )
+            role["locked"] = bool(binding.get("locked", False))
+            if not asset_id:
+                if role_id not in unbound_roles:
+                    unbound_roles.append(role_id)
+                errors.append(_issue(
+                    "ROLE_UNBOUND",
+                    f"角色尚未绑定声音: {role_name}",
+                    role_id=role_id,
+                    name=role_name,
+                ))
+                continue
+
+            try:
+                asset = _asset_for_role(project_name, role_id, binding)
+            except VoiceCastError as exc:
+                errors.append(exc.as_issue())
+                if role_id not in unbound_roles:
+                    unbound_roles.append(role_id)
+                continue
+
+            expected_sha = str(binding.get("voice_sha256") or asset.get("sha256") or "")
+            actual_sha = str(asset.get("sha256") or "")
+            if expected_sha and actual_sha and expected_sha != actual_sha:
+                errors.append(_issue(
+                    "VOICE_ASSET_SHA256_MISMATCH",
+                    "音色资产内容哈希与演员表记录不一致",
+                    role_id=role_id,
+                    voice_asset_id=asset_id,
+                ))
+                continue
+
+            snapshot_path = _project_voice_snapshot_path(
+                project_dir,
+                role_id,
+                binding,
+                bindings_document,
+            )
+            snapshot_sha = segment_cache.speaker_fingerprint_for_path(snapshot_path)
+            if not snapshot_sha or (actual_sha and snapshot_sha != actual_sha):
+                errors.append(_issue(
+                    "VOICE_SNAPSHOT_MISSING",
+                    f"角色声音快照不可用: {role_name}",
+                    role_id=role_id,
+                    voice_asset_id=asset_id,
+                    fix_hint="重新应用当前 Voice Cast 绑定，生成项目声音快照。",
+                ))
+                continue
+            role["bound"] = True
+
+        return {
+            "ready": not errors,
+            "mode": "voice_cast",
+            "cast_status": cast.get("status", "draft"),
+            "cast_locked": cast.get("status") == "locked",
+            "segment_count": len(requested_ids),
+            "selected_segment_ids": requested_ids,
+            "required_roles": required_roles,
+            "required_role_count": len(required_roles),
+            "bound_role_count": sum(1 for item in required_roles if item["bound"]),
+            "unbound_roles": unbound_roles,
+            "missing_roles": missing_roles,
+            "errors": errors,
+            "warnings": warnings,
+        }
+
+    @classmethod
+    def lock_production_scope(
+        cls,
+        project_name: str,
+        segment_ids: list[str] | tuple[str, ...] | set[str] | None,
+    ) -> dict[str, Any]:
+        """Lock only roles used by a claimed formal production task.
+
+        This method is called by the runtime after a task has become active.
+        It intentionally does not call ``_guard_mutation``: the active task is
+        the ownership guard, and normal cast mutations are rejected while it
+        exists.  It performs a fresh readiness check before writing, so a
+        stale plan can never lock or use a changed binding.
+        """
+        check = cls.check_production_scope(project_name, segment_ids)
+        if not check["ready"]:
+            first = next(
+                (item for item in check.get("errors", []) if isinstance(item, dict)),
+                {},
+            )
+            raise VoiceCastError(
+                "PRODUCTION_SCOPE_NOT_READY",
+                str(first.get("message") or "所选生产范围尚未就绪"),
+                errors=list(check.get("errors") or []),
+                segment_ids=list(check.get("selected_segment_ids") or []),
+            )
+        if check.get("mode") != "voice_cast":
+            return {
+                "locked_role_ids": [],
+                "required_roles": check.get("required_roles", []),
+                "cast_status": check.get("cast_status", "draft"),
+            }
+
+        project_dir = _project_dir(project_name)
+        roster = _roster_map(_read_roster(project_name))
+        cast = _normalize_cast(project_name, _read_cast(project_name) or {}, roster)
+        locked_role_ids: list[str] = []
+        for role in check.get("required_roles", []):
+            role_id = str(role.get("role_id") or "").strip() if isinstance(role, dict) else ""
+            if not role_id or role_id not in cast["roles"]:
+                continue
+            binding = cast["roles"][role_id]
+            if not binding.get("locked"):
+                binding["locked"] = True
+                locked_role_ids.append(role_id)
+        if locked_role_ids:
+            VoiceCastRepository.save_cast(project_dir, cast)
+            runtime_bindings = ProjectRepository.load_bindings(project_dir)
+            if not isinstance(runtime_bindings, dict):
+                runtime_bindings = {}
+            role_bindings = runtime_bindings.setdefault("role_bindings", {})
+            if not isinstance(role_bindings, dict):
+                role_bindings = {}
+                runtime_bindings["role_bindings"] = role_bindings
+            for role_id in locked_role_ids:
+                current = role_bindings.get(role_id)
+                if isinstance(current, dict):
+                    current["locked"] = True
+            ProjectRepository.save_bindings(project_dir, runtime_bindings)
+        return {
+            "locked_role_ids": locked_role_ids,
+            "required_roles": check.get("required_roles", []),
+            "cast_status": cast.get("status", "draft"),
         }
 
     @staticmethod

@@ -60,22 +60,34 @@ QUEUE_DATATYPES = ["str", "str", "str", "str", "str", "str"]
 PREVIEW_HEADERS = ["章节", "段落", "角色", "文本预览"]
 PREVIEW_DATATYPES = ["str", "str", "str", "str"]
 
+# Scope selection uses a real CheckboxGroup for input and a read-only table for
+# compact context.  The table deliberately contains short text/status fields;
+# it is not the source of truth for selection.
+SCOPE_PREVIEW_HEADERS = ["选择", "章节", "Segment ID", "角色", "文本摘要", "当前状态"]
+SCOPE_PREVIEW_DATATYPES = ["str", "str", "str", "str", "str", "str"]
+
 _PREVIEW_LEN = 40
 
 
-def build_segment_states(project: str, selected_chapters: Optional[list] = None) -> list[dict]:
+def build_segment_states(
+    project: str,
+    selected_chapters: Optional[list] = None,
+    selected_segment_ids: Optional[list] = None,
+) -> list[dict]:
     """从项目 ``meta.segments_status`` + 剧本初始化全部段态（按章节/段顺序）。
 
     状态与持久态对齐：``meta.segments_status`` 仅含 pending/done/failed；
     ``failed`` 映射为内存态 ``error``（O3 列表用 ❌ 展示），``done`` 进度 100%，其余 0%。
 
     O5：若传入 ``selected_chapters``（章节 id 字符串列表，None/空=全选），则未选中
-    章节的段在**内存列表**中标 ``skipped``（⏭）——仅内存展示，绝不反向写
-    ``meta.segments_status``（纪律同 O3 §9.4）。
+    章节的段在**内存列表**中标 ``skipped``（⏭）。若传入
+    ``selected_segment_ids``，则只返回这些精确段，不扩大到所属章节。两者均只影响
+    内存展示，绝不反向写 ``meta.segments_status``（纪律同 O3 §9.4）。
 
     Args:
         project: 项目名。
         selected_chapters: 选中章节 id 列表（字符串）；None/空表示全选。
+        selected_segment_ids: 精确选中段 id 列表；传入后只展示这些段。
 
     Returns:
         段态字典列表，每项含 ``seg_id`` / ``chapter`` / ``role`` / ``text`` /
@@ -85,6 +97,12 @@ def build_segment_states(project: str, selected_chapters: Optional[list] = None)
     selected_set = None
     if selected_chapters:
         selected_set = {str(c) for c in selected_chapters}
+    selected_segment_set = None
+    if selected_segment_ids is not None:
+        selected_segment_set = {
+            str(segment_id) for segment_id in selected_segment_ids
+            if str(segment_id).strip()
+        }
     states: list[dict] = []
     chapters = script_data.get("chapters", [])
     for chapter_index, ch in enumerate(chapters):
@@ -94,6 +112,8 @@ def build_segment_states(project: str, selected_chapters: Optional[list] = None)
         ch_selected = (selected_set is None) or (ch_id in selected_set)
         for seg in ch.get("segments", []):
             seg_id = seg.get("id")
+            if selected_segment_set is not None and str(seg_id) not in selected_segment_set:
+                continue
             # O5：未选中章的段 -> 内存态标 skipped（⏭），不写 meta
             if selected_set is not None and not ch_selected:
                 states.append({
@@ -221,6 +241,69 @@ def build_preview_rows_from_script(script: dict) -> list[list]:
                 str(seg.get("id", "")),
                 str(seg.get("role", "")),
                 preview,
+            ])
+    return rows
+
+
+def build_scope_preview_rows_from_script(
+    script: dict,
+    *,
+    selected_chapters: Optional[list] = None,
+    selected_segment_ids: Optional[list] = None,
+    status_by_id: Optional[dict] = None,
+    max_rows: int = 300,
+) -> list[list]:
+    """Build a bounded, scope-specific preview table.
+
+    ``selected_segment_ids`` is intentionally checked before chapter filters:
+    an exact segment scope must never expand to the containing chapter.
+    ``max_rows`` keeps very large books responsive while the CheckboxGroup
+    remains chapter-filtered for actual custom selection.
+    """
+    selected_segment_set = None
+    if selected_segment_ids is not None:
+        selected_segment_set = {
+            str(item) for item in selected_segment_ids if str(item).strip()
+        }
+    selected_chapter_set = None
+    if selected_segment_set is None and selected_chapters:
+        selected_chapter_set = {str(item) for item in selected_chapters}
+    status_map = status_by_id if isinstance(status_by_id, dict) else {}
+    status_labels = {
+        SEGMENT_STATUS_DONE: "✅ 已完成",
+        "failed": "❌ 失败",
+        SEGMENT_STATUS_RUNNING: "⏳ 合成中",
+        SEGMENT_STATUS_SKIPPED: "⏭ 跳过",
+        SEGMENT_STATUS_PENDING: "⬜ 待合成",
+    }
+    rows: list[list] = []
+    for chapter_index, chapter in enumerate(script.get("chapters", [])):
+        if not isinstance(chapter, dict):
+            continue
+        chapter_id = str(chapter.get("id") or "")
+        if selected_chapter_set is not None and chapter_id not in selected_chapter_set:
+            continue
+        chapter_title = chapter.get("title") or chapter_id
+        chapter_label = f"第{chapter_identity.chapter_number(chapter, chapter_index)}章 {chapter_title}"
+        for segment in chapter.get("segments", []):
+            if not isinstance(segment, dict):
+                continue
+            segment_id = str(segment.get("id") or "")
+            if selected_segment_set is not None and segment_id not in selected_segment_set:
+                continue
+            if len(rows) >= max(int(max_rows or 0), 1):
+                return rows
+            text = " ".join(str(segment.get("text") or "").split())
+            if len(text) > _PREVIEW_LEN:
+                text = text[:_PREVIEW_LEN] + "…"
+            status = str(status_map.get(segment_id, SEGMENT_STATUS_PENDING))
+            rows.append([
+                "☑" if selected_segment_set is None or segment_id in selected_segment_set else "☐",
+                chapter_label,
+                segment_id,
+                str(segment.get("role") or segment.get("speaker") or ""),
+                text,
+                status_labels.get(status, status),
             ])
     return rows
 

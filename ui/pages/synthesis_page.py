@@ -26,14 +26,61 @@ def create_synthesis_page() -> dict:
                         s_cancel = gr.Button("停止", variant="stop", size="sm")
 
             with gr.Accordion("生产范围", open=False):
-                s_chapters_sel = gr.CheckboxGroup(
-                    label="章节范围", choices=[], value=[], interactive=True,
+                s_scope_mode = gr.Radio(
+                    label="生产范围模式",
+                    choices=[
+                        ("整本", "all"),
+                        ("按章节", "chapters"),
+                        ("自定义段落", "segments"),
+                    ],
+                    value="all",
+                    interactive=True,
                 )
+                s_scope_readiness = gr.Markdown(
+                    "选择范围后，这里会显示当前 scope 的生产准备状态。",
+                    elem_classes=["production-scope-readiness"],
+                )
+                with gr.Group(visible=False) as s_chapter_scope_group:
+                    s_chapters_sel = gr.CheckboxGroup(
+                        label="章节范围", choices=[], value=[], interactive=True,
+                    )
+                with gr.Group(visible=False) as s_segment_scope_group:
+                    with gr.Row(equal_height=True):
+                        s_segment_chapter_filter = gr.Dropdown(
+                            label="先按章节筛选段落",
+                            choices=[],
+                            value=None,
+                            interactive=True,
+                            scale=3,
+                        )
+                        s_select_scope_segments = gr.Button(
+                            "全选当前范围", size="sm", scale=1,
+                        )
+                        s_clear_scope_segments = gr.Button(
+                            "清空选择", size="sm", scale=1,
+                        )
+                    with gr.Row(equal_height=True):
+                        s_select_pending_segments = gr.Button(
+                            "仅未完成", size="sm",
+                        )
+                        s_select_failed_segments = gr.Button(
+                            "仅失败", size="sm",
+                        )
+                    s_segments_sel = gr.CheckboxGroup(
+                        label="自定义段落（可跨章节累计选择）",
+                        choices=[],
+                        value=[],
+                        interactive=True,
+                    )
+                    gr.Markdown(
+                        "已完成段不会由普通生产重做；需要重新生成请使用试听质检中的修复/重生成。",
+                        elem_classes=["production-scope-note"],
+                    )
                 s_preview_df = gr.Dataframe(
-                    headers=synth_progress.PREVIEW_HEADERS,
-                    datatype=synth_progress.PREVIEW_DATATYPES,
+                    headers=synth_progress.SCOPE_PREVIEW_HEADERS,
+                    datatype=synth_progress.SCOPE_PREVIEW_DATATYPES,
                     interactive=False,
-                    label="待合成段落",
+                    label="当前生产范围预览",
                     wrap=True,
                 )
 
@@ -73,7 +120,18 @@ def create_synthesis_page() -> dict:
         "group": grp_synth,
         "s_task_status": s_task_status,
         "s_preview_df": s_preview_df,
+        "s_scope_mode": s_scope_mode,
+        "s_scope_readiness": s_scope_readiness,
+        "s_chapter_scope_group": s_chapter_scope_group,
+        "s_segment_scope_group": s_segment_scope_group,
         "s_chapters_sel": s_chapters_sel,
+        "s_segment_chapter_filter": s_segment_chapter_filter,
+        "s_segments_sel": s_segments_sel,
+        "s_select_scope_segments": s_select_scope_segments,
+        "s_clear_scope_segments": s_clear_scope_segments,
+        "s_select_pending_segments": s_select_pending_segments,
+        "s_select_failed_segments": s_select_failed_segments,
+        "s_segment_selection_state": gr.State([]),
         "s_log": s_log,
         "s_emo": s_emo,
         "s_override": s_override,

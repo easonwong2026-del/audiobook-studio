@@ -16,8 +16,8 @@ from lib import project_paths, script_loader, segment_cache
 from repositories.project_repo import ProjectRepository
 from repositories.task_repo import TaskRecord, TaskRepository
 
-from .synthesis import SynthesisState
 from .production_runtime import ProductionRuntimeClient
+from .synthesis import SynthesisState
 from .voice_cast import VoiceCastResolver
 
 logger = logging.getLogger(__name__)
@@ -228,9 +228,9 @@ class ProductionJobService:
     def _voice_cast_plan(
         cls,
         project_name: str,
-        selected_chapters: list[dict[str, Any]],
+        selected_segment_ids: list[str],
     ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
-        """Return public voice summary, blockers and warnings."""
+        """Return readiness for exactly the selected production segments."""
         blockers: list[dict[str, Any]] = []
         warnings: list[dict[str, Any]] = []
         try:
@@ -251,83 +251,29 @@ class ProductionJobService:
 
         selected_check: dict[str, Any] = {}
         try:
-            selected_check = VoiceCastResolver.check_chapter_roles(
-                project_name, selected_chapters
+            selected_check = VoiceCastResolver.check_production_scope(
+                project_name, selected_segment_ids
             )
         except Exception as exc:
             blockers.append({
                 "code": "VOICE_CAST_NOT_READY",
-                "message": f"无法解析选中章节角色: {exc}",
+                "message": f"无法解析选中范围角色: {exc}",
                 "fix_hint": "检查章节角色与 Character Roster 的映射。",
             })
 
         for issue in selected_check.get("errors", []) if isinstance(selected_check, dict) else []:
             if isinstance(issue, dict):
                 blockers.append(cls._issue_blocker(issue))
-        for role in selected_check.get("new_roles", []) if isinstance(selected_check, dict) else []:
-            role_name = role.get("name") if isinstance(role, dict) else str(role)
-            blockers.append({
-                "code": "ROLE_NOT_IN_ROSTER",
-                "message": f"角色未加入 Character Roster: {role_name}",
-                "role": role_name,
-                "fix_hint": "先新增角色并完成 Voice Cast 绑定。",
-            })
-        for role_id in selected_check.get("unbound_roles", []) if isinstance(selected_check, dict) else []:
-            blockers.append({
-                "code": "ROLE_UNBOUND",
-                "message": f"角色尚未绑定声音: {role_id}",
-                "role_id": role_id,
-                "fix_hint": "为该角色绑定 voice_asset_id 并重新锁定 Voice Cast。",
-            })
 
         mode = str(status.get("mode") or "legacy_manual")
         cast_locked = bool(status.get("cast_locked", False))
-        selected_ready = bool(
-            selected_check.get("synthesis_ready", status.get("synthesis_ready", False))
-        )
-        if mode == "legacy_manual":
-            # Legacy projects may contain roles outside the selected chapter
-            # scope.  Production readiness is about required roles in this
-            # job, not unrelated future chapters.
-            required_names = {
-                str(segment.get("role") or segment.get("speaker") or "").strip()
-                for chapter in selected_chapters
-                if isinstance(chapter, dict)
-                for segment in chapter.get("segments", [])
-                if isinstance(segment, dict)
-                and str(segment.get("role") or segment.get("speaker") or "").strip()
-            }
-            bound_names = {
-                str(item.get("name") or "").strip()
-                for item in status.get("roles", [])
-                if isinstance(item, dict) and item.get("bound")
-            }
-            missing_names = sorted(required_names - bound_names)
-            for name in missing_names:
-                if not any(
-                    item.get("code") == "ROLE_UNBOUND" and item.get("role") == name
-                    for item in blockers
-                ):
-                    blockers.append({
-                        "code": "ROLE_UNBOUND",
-                        "message": f"角色尚未绑定声音: {name}",
-                        "role": name,
-                        "fix_hint": "在角色与声音页面完成绑定。",
-                    })
-            selected_ready = not missing_names
-        if mode == "voice_cast" and not cast_locked:
+        selected_ready = bool(selected_check.get("ready", False))
+        if not selected_ready and not blockers:
             blockers.append({
                 "code": "VOICE_CAST_NOT_READY",
-                "message": "Voice Cast 尚未锁定，不能开始正式生产。",
-                "fix_hint": "完成所有角色绑定后调用 finalize_voice_cast。",
+                "message": "所选范围尚未达到合成就绪状态。",
+                "fix_hint": "完成当前范围所需角色的声音绑定并重新检查。",
             })
-        if not selected_ready:
-            if not any(item.get("code") in {"ROLE_UNBOUND", "ROLE_NOT_IN_ROSTER", "VOICE_CAST_NOT_READY"} for item in blockers):
-                blockers.append({
-                    "code": "VOICE_CAST_NOT_READY",
-                    "message": "所选范围尚未达到合成就绪状态。",
-                    "fix_hint": "完成所需角色的声音绑定并重新检查。",
-                })
         runtime_status = str(status.get("runtime_status") or "unknown")
         engine_state = str(status.get("engine_state") or "unknown")
         engine_ready = bool(status.get("engine_ready", False))
@@ -352,9 +298,18 @@ class ProductionJobService:
         )
         return {
             "locked": cast_locked,
+            "cast_locked": cast_locked,
             "bound": int(status.get("bound", 0) or 0),
             "unbound": int(status.get("unbound", 0) or 0),
             "mode": mode,
+            "full_book_ready": bool(status.get("cast_ready", False)),
+            "scope_ready": selected_ready,
+            "selected_segment_count": len(selected_segment_ids),
+            "required_roles": selected_check.get("required_roles", []),
+            "required_role_count": int(selected_check.get("required_role_count", 0) or 0),
+            "bound_role_count": int(selected_check.get("bound_role_count", 0) or 0),
+            "unbound_roles": list(selected_check.get("unbound_roles", [])),
+            "missing_roles": list(selected_check.get("missing_roles", [])),
             "cast_ready": production_ready,
             "runtime_status": runtime_status,
             "engine_state": engine_state,
@@ -427,11 +382,6 @@ class ProductionJobService:
             selected_chapter_ids = set(chapter_map)
         elif normalized_scope["chapter_ids"]:
             selected_chapter_ids = set(normalized_scope["chapter_ids"]) & set(chapter_map)
-        selected_chapters = [
-            chapter_map[chapter_id]
-            for chapter_id in chapter_map
-            if chapter_id in selected_chapter_ids
-        ]
         project_dir = ProjectRepository.get_project_dir(name)
         segments_dir = project_paths.project_dir(project_dir, "segments")
         completed = 0
@@ -448,7 +398,7 @@ class ProductionJobService:
                 remaining += 1
 
         voice_cast, voice_blockers, voice_warnings = cls._voice_cast_plan(
-            name, selected_chapters
+            name, selected_ids
         )
         blockers.extend(voice_blockers)
         warnings.extend(voice_warnings)
@@ -474,11 +424,18 @@ class ProductionJobService:
             "scope": normalized_scope,
             "chapters": len(selected_chapter_ids),
             "segments": len(selected_ids),
+            "selected_segment_count": len(selected_ids),
             "already_completed": completed,
+            "already_done": completed,
             "remaining": remaining,
+            "pending": remaining,
+            "to_synthesize": remaining + len(failed_ids),
             "failed": len(failed_ids),
             "failed_segment_ids": failed_ids,
             "voice_cast": voice_cast,
+            "required_roles": voice_cast.get("required_roles", []),
+            "unbound_roles": voice_cast.get("unbound_roles", []),
+            "missing_roles": voice_cast.get("missing_roles", []),
             "blockers": blockers,
             "warnings": warnings,
         }
@@ -606,8 +563,15 @@ class ProductionJobService:
             options=normalized_options,
             progress={
                 "total": plan["segments"],
+                "selected_total": plan["segments"],
                 "completed": plan["already_completed"],
+                "already_completed": plan["already_completed"],
                 "failed": plan["failed"],
+                "pending": plan.get("pending", plan.get("remaining", 0)),
+                "to_synthesize": plan.get(
+                    "to_synthesize",
+                    plan.get("remaining", 0) + plan.get("failed", 0),
+                ),
                 "percent": round(
                     (plan["already_completed"] / plan["segments"]) * 100, 1
                 ) if plan["segments"] else 0.0,

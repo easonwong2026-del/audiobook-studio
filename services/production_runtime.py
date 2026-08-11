@@ -6,7 +6,6 @@ processes communicate by writing transactional commands to ``TaskRepository``.
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import Future, ThreadPoolExecutor
 import logging
 import os
 import re
@@ -16,16 +15,17 @@ import threading
 import time
 import uuid
 import wave
+from concurrent.futures import Future, ThreadPoolExecutor
 from logging.handlers import RotatingFileHandler
 from typing import Any, Optional
 
 from lib import progress as synthesis_progress
+from lib.failures import RecoveryBudget, RecoveryHooks, SynthesisFailure
 from repositories.project_repo import ProjectRepository
 from repositories.task_repo import TaskRecord, TaskRepository
 
-from .runtime_lock import ProcessFileLock
 from .runtime_engine import EngineInitError, RuntimeEngineLifecycle
-from lib.failures import RecoveryBudget, RecoveryHooks, SynthesisFailure
+from .runtime_lock import ProcessFileLock
 from .synthesis import SynthesisService, SynthesisState
 
 logger = logging.getLogger(__name__)
@@ -376,19 +376,28 @@ class ProductionRuntime:
         state.selected_chapters = chapters or None
         state.selected_segment_ids = segments or None
         state.on_update = self._on_state_update
+        segment_to_chapter = self._segment_to_chapter(record.project)
+        scope_segment_ids = (
+            list(segments)
+            if segments
+            else [
+                segment_id
+                for segment_id, chapter_id in segment_to_chapter.items()
+                if not chapters or chapter_id in set(chapters)
+            ]
+        )
         try:
             state.segment_states = synthesis_progress.build_segment_states(
                 record.project,
                 chapters or None,
+                scope_segment_ids if segments else None,
             )
         except Exception:
             state.segment_states = []
         with self._state_lock:
             self._current_record = record
             self._current_state = state
-            self._current_segment_to_chapter = self._segment_to_chapter(
-                record.project
-            )
+            self._current_segment_to_chapter = segment_to_chapter
         # P0: engine preflight inside the runtime process.  A failed init is
         # fatal for the whole task: no segment loop, no per-segment errors.
         try:
@@ -397,6 +406,32 @@ class ProductionRuntime:
             self._fail_synthesis_engine_init(record, state, exc)
             return
         state.engine_generation = self._engine.snapshot()["engine_generation"]
+        # The task is now claimed by the singleton runtime.  Re-check the
+        # exact task scope and lock only roles that this task will actually
+        # use.  A draft whole-book cast is valid here; the lock is per role.
+        # ``selected_total`` is written by the current ProductionJobService;
+        # its absence identifies legacy/direct TaskRecord callers that predate
+        # scope readiness and must retain their old runtime behavior.
+        if isinstance(record.progress, dict) and "selected_total" in record.progress:
+            try:
+                from .voice_cast import VoiceCastError, VoiceCastResolver
+
+                VoiceCastResolver.lock_production_scope(
+                    record.project,
+                    scope_segment_ids,
+                )
+            except VoiceCastError as exc:
+                state.status = "error"
+                state.error = str(exc)
+                state.append_log(f"❌ 生产范围校验失败: {exc}")
+                state.notify()
+                return
+            except Exception as exc:  # pragma: no cover - defensive runtime boundary
+                state.status = "error"
+                state.error = str(exc)
+                state.append_log(f"❌ 生产范围校验异常: {exc}")
+                state.notify()
+                return
         options = record.options if isinstance(record.options, dict) else {}
         _runtime_event(
             "task_start",
@@ -617,17 +652,24 @@ class ProductionRuntime:
         """Persist one terminal engine-init failure and shut the runtime down."""
         state.status = "error"
         state.error = str(exc)
-        state.completed = 0
-        state.failed_segment_ids = []
-        progress = {
-            "total": max(int(state.total or 0), 0),
-            "completed": 0,
-            "failed": 0,
+        progress = dict(record.progress) if isinstance(record.progress, dict) else {}
+        progress.update({
+            "total": max(int(state.total or progress.get("total", 0) or 0), 0),
+            "completed": max(int(state.completed or 0), 0),
+            "failed": len(state.failed_segment_ids),
             "attempted": 0,
-            "percent": 0.0,
+            "percent": round(
+                (state.completed / state.total) * 100, 1
+            ) if state.total else 0.0,
             "current_chapter": None,
             "current_segment": None,
-        }
+        })
+        progress["selected_total"] = progress["total"]
+        progress["pending"] = max(
+            progress["total"] - progress["completed"] - progress["failed"],
+            0,
+        )
+        progress["to_synthesize"] = progress["pending"] + progress["failed"]
         state.append_log("❌ TTS 引擎初始化失败，任务未开始")
         state.append_log(f"错误: {exc.summary}")
         try:
@@ -1001,7 +1043,8 @@ class ProductionRuntime:
             chapter = self._current_segment_to_chapter.get(
                 str(state.current_segment or "")
             )
-        return {
+        progress = dict(record.progress) if isinstance(record.progress, dict) else {}
+        progress.update({
             "total": total,
             "completed": completed,
             "failed": len(failed_ids),
@@ -1011,7 +1054,11 @@ class ProductionRuntime:
             "engine_generation": int(state.engine_generation or 0),
             "recovery": state.recovery,
             "last_failure": state.last_failure,
-        }
+        })
+        progress["selected_total"] = total
+        progress["pending"] = max(total - completed - len(failed_ids), 0)
+        progress["to_synthesize"] = progress["pending"] + len(failed_ids)
+        return progress
 
     def _on_state_update(self, state: SynthesisState) -> None:
         with self._state_lock:
