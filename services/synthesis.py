@@ -18,12 +18,14 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Callable, ClassVar, Optional, Any
+from typing import Any, Callable, ClassVar, Optional
 
-from lib import project_manager as pm
-from lib import queue as synth_queue
 from lib import progress as _progress
-from repositories.task_repo import TaskRepository, TaskRecord
+from lib import project_manager as pm
+from lib import project_paths, segment_cache
+from lib import queue as synth_queue
+from repositories.project_repo import ProjectRepository
+from repositories.task_repo import TaskRecord, TaskRepository
 
 logger = logging.getLogger(__name__)
 
@@ -361,12 +363,18 @@ class SynthesisService:
                         selected_chapter_set is not None or selected_segment_set is not None
                     ) else max(meta.total_segments, 0)
                 # ProductionJobService seeds these counts.  The fallback keeps
-                # direct legacy callers correct for chapter/segment scopes.
+                # direct legacy callers correct for chapter/segment scopes and
+                # treats a stale ``done`` marker without its WAV as pending.
+                segments_dir = project_paths.project_dir(
+                    ProjectRepository.get_project_dir(project), "segments"
+                )
+                completed_ids = {
+                    segment_id for segment_id in scope_ids
+                    if meta.segments_status.get(segment_id) == "done"
+                    and segment_cache.has_segment_wav(segments_dir, segment_id)
+                }
                 if state.completed <= 0:
-                    state.completed = sum(
-                        1 for segment_id in scope_ids
-                        if meta.segments_status.get(segment_id) == "done"
-                    )
+                    state.completed = len(completed_ids)
                 state.failed_segment_ids = [
                     segment_id for segment_id in scope_ids
                     if meta.segments_status.get(segment_id) == "failed"

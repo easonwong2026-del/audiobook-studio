@@ -14,7 +14,35 @@ import sys
 from typing import Any, Callable
 
 from .models import API_VERSION, server_info
+from .tools.export import (
+    get_delivery_manifest,
+    get_export_task,
+    list_exports,
+    plan_export,
+    start_export,
+)
+from .tools.production import (
+    cancel_production,
+    get_production_task,
+    get_runtime_health,
+    list_production_tasks,
+    pause_production,
+    plan_production,
+    resume_production,
+    retry_failed_segments,
+    start_production,
+)
 from .tools.projects import get_project, list_projects
+from .tools.quality import (
+    get_quality_report,
+    get_repair_task,
+    get_segment_review,
+    list_repairs,
+    list_review_segments,
+    mark_segment_review,
+    regenerate_segments,
+    run_technical_qa,
+)
 from .tools.scripts import create_project, validate_structured_script
 from .tools.voice_assets import get_voice_asset, list_voice_assets
 from .tools.voice_cast import (
@@ -30,34 +58,6 @@ from .tools.voice_cast import (
     update_character_role,
     validate_character_roster,
     validate_voice_cast,
-)
-from .tools.production import (
-    cancel_production,
-    get_production_task,
-    get_runtime_health,
-    list_production_tasks,
-    pause_production,
-    plan_production,
-    resume_production,
-    retry_failed_segments,
-    start_production,
-)
-from .tools.export import (
-    get_delivery_manifest,
-    get_export_task,
-    list_exports,
-    plan_export,
-    start_export,
-)
-from .tools.quality import (
-    get_quality_report,
-    get_repair_task,
-    get_segment_review,
-    list_repairs,
-    list_review_segments,
-    mark_segment_review,
-    regenerate_segments,
-    run_technical_qa,
 )
 from .tools.workflow import get_workflow_state
 
@@ -262,7 +262,13 @@ _TOOLS: dict[str, dict[str, Any]] = {
     },
     "plan_production": {
         "name": "plan_production",
-        "description": "检查项目、章节、角色绑定和段落状态，返回可机器读取的生产计划。",
+        "description": (
+            "只读检查一个生产 scope，不创建任务、不锁定角色。scope 支持三种互斥用法："
+            "整本 {all:true}；章节 {all:false,chapter_ids:[\"1\",\"2\"]}；"
+            "精确段落 {all:false,segment_ids:[\"2-001\",\"3-005\"]}。"
+            "返回规范化 scope、selected_segment_count、required_roles、scope-specific readiness、"
+            "blockers 和 progress 统计。segment_ids 不会扩大为所属章节。"
+        ),
         "inputSchema": {
             "type": "object",
             "required": ["project_name"],
@@ -271,9 +277,23 @@ _TOOLS: dict[str, dict[str, Any]] = {
                 "scope": {
                     "type": "object",
                     "properties": {
-                        "all": {"type": "boolean", "default": True},
-                        "chapter_ids": {"type": "array", "items": {"type": "string"}},
-                        "segment_ids": {"type": "array", "items": {"type": "string"}},
+                        "all": {
+                            "type": "boolean",
+                            "default": True,
+                            "description": "整本生产；为 true 时不要同时提交 chapter_ids 或 segment_ids。",
+                        },
+                        "chapter_ids": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": {"type": "string"},
+                            "description": "按章节生产，例如 [\"1\",\"2\"]。与 all=true、segment_ids 互斥。",
+                        },
+                        "segment_ids": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": {"type": "string"},
+                            "description": "精确段落生产，例如 [\"2-001\",\"3-005\"]；不会检查同章其它段。",
+                        },
                     },
                     "additionalProperties": False,
                 },
@@ -283,7 +303,12 @@ _TOOLS: dict[str, dict[str, Any]] = {
     },
     "start_production": {
         "name": "start_production",
-        "description": "异步启动统一生产任务，立即返回稳定 task_id。",
+        "description": (
+            "异步启动统一生产任务并立即返回 task_id。scope 支持整本 {all:true}、"
+            "章节 {all:false,chapter_ids:[\"1\",\"2\"]} 或精确段落 "
+            "{all:false,segment_ids:[\"2-001\",\"3-005\"]}；segment scope 严格只处理这些段，"
+            "不要求整本 Voice Cast 已 locked。启动/claim 时会再次校验当前 scope 并锁定实际使用的角色。"
+        ),
         "inputSchema": {
             "type": "object",
             "required": ["project_name"],
@@ -292,9 +317,23 @@ _TOOLS: dict[str, dict[str, Any]] = {
                 "scope": {
                     "type": "object",
                     "properties": {
-                        "all": {"type": "boolean", "default": True},
-                        "chapter_ids": {"type": "array", "items": {"type": "string"}},
-                        "segment_ids": {"type": "array", "items": {"type": "string"}},
+                        "all": {
+                            "type": "boolean",
+                            "default": True,
+                            "description": "整本生产；为 true 时不要同时提交 chapter_ids 或 segment_ids。",
+                        },
+                        "chapter_ids": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": {"type": "string"},
+                            "description": "按章节生产，例如 [\"1\",\"2\"]。与 all=true、segment_ids 互斥。",
+                        },
+                        "segment_ids": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": {"type": "string"},
+                            "description": "精确段落生产，例如 [\"2-001\",\"3-005\"]；只处理这些段。",
+                        },
                     },
                     "additionalProperties": False,
                 },
