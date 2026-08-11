@@ -69,6 +69,9 @@ class WorkflowService:
                 "cast_locked": False,
                 "cast_ready": bool(roles) and bound == len(roles),
                 "synthesis_ready": bool(roles) and bound == len(roles),
+                "runtime_status": "unknown",
+                "engine_state": "unknown",
+                "engine_ready": False,
                 "mode": "legacy_manual",
             }
         unbound = int(cast.get("unbound", 0) or 0)
@@ -77,6 +80,7 @@ class WorkflowService:
         )
         engine_ready = bool(cast.get("engine_ready", False))
         runtime_status = str(cast.get("runtime_status") or "unknown")
+        engine_state = str(cast.get("engine_state") or "unknown")
 
         active_task = ProductionJobService.get_active_task(project)
         attention_tasks = TaskRepository.list_tasks(
@@ -341,6 +345,7 @@ class WorkflowService:
                 "roles_unbound": unbound,
                 "cast_ready": cast_ready,
                 "engine_ready": engine_ready,
+                "engine_state": engine_state,
                 "runtime_status": runtime_status,
                 "quality": quality_summary,
                 "active_production_task": (

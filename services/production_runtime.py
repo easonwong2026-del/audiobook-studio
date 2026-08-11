@@ -67,10 +67,22 @@ class ProductionRuntime:
         self._lock_release_deferred = False
         self._engine = RuntimeEngineLifecycle(owner_id=self.owner_id)
         self._engine_failure = False
+        self._shutdown_after_task = False
+        self._shutdown_complete = threading.Event()
+        self._shutdown_complete.set()
 
     @property
     def is_running(self) -> bool:
         return bool(self._thread and self._thread.is_alive())
+
+    @property
+    def requires_fresh_runtime(self) -> bool:
+        """Whether the next task must be claimed by a new runtime owner."""
+        return bool(self._shutdown_after_task)
+
+    def wait_until_stopped(self, timeout: float = 5.0) -> bool:
+        """Wait for a requested runtime handoff to release its ownership lock."""
+        return self._shutdown_complete.wait(timeout=max(float(timeout), 0.0))
 
     def get_runtime_state(self, task_id: str) -> Optional[SynthesisState]:
         with self._state_lock:
@@ -92,6 +104,8 @@ class ProductionRuntime:
         self._engine.reset()
 
     def start_background(self) -> bool:
+        if self.requires_fresh_runtime:
+            return False
         if self.is_running:
             return True
         with self._state_lock:
@@ -106,6 +120,7 @@ class ProductionRuntime:
         # task from a client process must never infer worker death.
         orphaned = TaskRepository.mark_orphaned_interrupted(self.owner_id)
         self._engine_failure = False
+        self._engine.set_runtime_state("starting")
         self._engine.reset()
         _runtime_event(
             "runtime_start",
@@ -115,6 +130,7 @@ class ProductionRuntime:
             orphan_takeover=len(orphaned) or None,
         )
         self._stop.clear()
+        self._shutdown_complete.clear()
         self._thread = threading.Thread(
             target=self._run_loop,
             name="audiobook-production-runtime",
@@ -124,10 +140,19 @@ class ProductionRuntime:
         return True
 
     def serve_forever(self) -> bool:
-        if not self.lock.acquire(blocking=False):
-            return False
+        # A recycle failure asks the current owner to persist needs_attention
+        # and retire.  A resume may launch the replacement process in the
+        # small handoff window before the old worker has released its lock, so
+        # the serve child waits briefly for ownership instead of exiting and
+        # leaving the resumed task pending.
+        deadline = time.monotonic() + 5.0
+        while not self.lock.acquire(blocking=False):
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(min(self.poll_interval, max(deadline - time.monotonic(), 0.0)))
         orphaned = TaskRepository.mark_orphaned_interrupted(self.owner_id)
         self._engine_failure = False
+        self._engine.set_runtime_state("starting")
         self._engine.reset()
         _runtime_event(
             "runtime_start",
@@ -137,6 +162,7 @@ class ProductionRuntime:
             orphan_takeover=len(orphaned) or None,
         )
         self._stop.clear()
+        self._shutdown_complete.clear()
         try:
             self._run_loop()
         finally:
@@ -213,6 +239,7 @@ class ProductionRuntime:
 
     def _run_loop(self) -> None:
         try:
+            self._engine.set_runtime_state("running")
             while not self._stop.is_set():
                 with self._state_lock:
                     state = self._current_state
@@ -235,10 +262,16 @@ class ProductionRuntime:
                     if state.status in {"cancelled", "done", "error", "needs_attention"} and (
                         future is None or future.done()
                     ):
+                        retire_after_task = self._shutdown_after_task
                         with self._state_lock:
                             self._current_state = None
                             self._current_record = None
                             self._current_segment_to_chapter = {}
+                        if retire_after_task:
+                            # The worker has already persisted its terminal
+                            # state.  Only now request loop exit so ownership
+                            # cannot be handed to a new runtime mid-task.
+                            self._stop.set()
                 if self._export_future is not None and self._export_future.done():
                     self._export_future = None
                     self._export_record = None
@@ -271,6 +304,7 @@ class ProductionRuntime:
                 now = time.monotonic()
                 if now - self._last_heartbeat >= 1.0:
                     TaskRepository.update_runtime_heartbeat(self.owner_id)
+                    self._engine.heartbeat()
                     self._last_heartbeat = now
                 self._stop.wait(self.poll_interval)
         except Exception:
@@ -282,6 +316,7 @@ class ProductionRuntime:
             if self._thread is threading.current_thread():
                 self._thread = None
             self._engine.mark_unknown()
+            self._shutdown_complete.set()
             _runtime_event(
                 "runtime_shutdown",
                 pid=os.getpid(),
@@ -418,6 +453,12 @@ class ProductionRuntime:
             payload = dict(event)
             event_name = str(payload.get("event") or "")
             previous = dict(state.recovery or {})
+            if event_name == "recovering":
+                self._engine.set_runtime_state("recovering")
+            elif event_name == "recovered":
+                self._engine.set_runtime_state("running")
+            elif event_name == "recycle_failed":
+                self._engine.set_runtime_state("error")
             state.engine_generation = int(
                 payload.get("engine_generation") or state.engine_generation or 0
             )
@@ -451,6 +492,44 @@ class ProductionRuntime:
                 "phase": str(
                     payload.get("phase") or previous.get("phase") or ""
                 ),
+                "message": str(
+                    payload.get("message") or previous.get("message") or ""
+                ),
+                "traceback_origin": str(
+                    payload.get("traceback_origin")
+                    or previous.get("traceback_origin")
+                    or ""
+                ),
+                "code": str(
+                    payload.get("code") or previous.get("code") or ""
+                ),
+                "recycle_exception_type": str(
+                    payload.get("recycle_exception_type")
+                    or previous.get("recycle_exception_type")
+                    or ""
+                ),
+                "recycle_errno": (
+                    payload.get("recycle_errno")
+                    if payload.get("recycle_errno") is not None
+                    else previous.get("recycle_errno")
+                ),
+                "recycle_message": str(
+                    payload.get("recycle_message")
+                    or previous.get("recycle_message")
+                    or ""
+                ),
+                "recycle_traceback_origin": str(
+                    payload.get("recycle_traceback_origin")
+                    or previous.get("recycle_traceback_origin")
+                    or ""
+                ),
+                "recycles_used": int(
+                    payload.get("recycles_used")
+                    or previous.get("recycles_used")
+                    or payload.get("attempt")
+                    or previous.get("attempt")
+                    or 0
+                ),
                 "recovered": event_name == "recovered",
                 "last_recovery_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             }
@@ -467,7 +546,17 @@ class ProductionRuntime:
                     f"✅ TTS 已恢复（generation {state.engine_generation}），继续生产"
                 )
             elif event_name == "recycle_failed":
-                state.append_log("❌ 引擎回收失败")
+                state.status = "needs_attention"
+                state.error = (
+                    "TTS_ENGINE_RECYCLE_FAILED: "
+                    f"{payload.get('recycle_message') or '引擎回收失败'}"
+                )
+                state.append_log("❌ 引擎回收失败，当前运行时将退出并交给新 Runtime 接管")
+                state.notify()
+                # Do not stop the loop until the synthesis future returns; the
+                # callback above must durably persist needs_attention first.
+                self._shutdown_after_task = True
+                self._engine_failure = True
             elif event_name == "exhausted":
                 state.status = "needs_attention"
                 state.append_log("❌ 自动恢复失败，需要处理")
@@ -917,6 +1006,7 @@ class ProductionRuntime:
             "current_segment": state.current_segment,
             "engine_generation": int(state.engine_generation or 0),
             "recovery": state.recovery,
+            "last_failure": state.last_failure,
         }
 
     def _on_state_update(self, state: SynthesisState) -> None:
@@ -1007,6 +1097,22 @@ class ProductionRuntimeClient:
             return
         if mode == "inline":
             global _INLINE_RUNTIME
+            retired: ProductionRuntime | None = None
+            with _INLINE_LOCK:
+                runtime = _INLINE_RUNTIME
+            if runtime is not None and runtime.requires_fresh_runtime:
+                runtime.wait_until_stopped(timeout=5.0)
+                if runtime.is_running:
+                    # The old owner has not completed its durable handoff
+                    # yet.  Leave the pending task for the next poke rather
+                    # than allowing two inline runtimes to race for the GPU.
+                    return
+                with _INLINE_LOCK:
+                    if _INLINE_RUNTIME is runtime:
+                        _INLINE_RUNTIME = None
+                        retired = runtime
+            if retired is not None:
+                retired.stop(timeout=0.0)
             with _INLINE_LOCK:
                 if _INLINE_RUNTIME is None:
                     _INLINE_RUNTIME = ProductionRuntime()

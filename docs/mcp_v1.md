@@ -65,18 +65,22 @@ Phase 2 增加全局音色资产目录和项目角色/演员表生命周期：
 | list_voice_assets / get_voice_asset | 返回稳定 voice_asset_id 和脱敏元数据 |
 | set/get/add/update/validate_character_roster | 管理 Character Roster |
 | set/get/bind/validate/finalize_voice_cast | 管理 Voice Cast、锁定和重绑定 |
-| get_voice_binding_status | 返回绑定、锁定、cast_ready、runtime_status/engine_ready 与 synthesis_ready（cast 与引擎就绪取交集） |
+| get_voice_binding_status | 返回绑定、锁定、cast_ready、runtime_status/runtime_state、engine_state/engine_ready 与 synthesis_ready |
 | check_chapter_roles | 检查章节中的已知、新增和未绑定角色 |
 
 所有 list_* 工具都把数组包在对象里返回（如 `{"projects": [...]}`、
 `{"tasks": [...]}`），保证 `structuredContent` 始终是 JSON object，避免
 MCP 客户端 `invalid_type structuredContent` 校验失败。
 
-`synthesis_ready` 拆分为三层：`cast_ready`（角色全部绑定并锁定）、
-`runtime_status`/`engine_ready`（独立 Runtime 进程声明的引擎状态，来自
-`logs/runtime_engine_status.json`，status 查询不加载 GPU 模型）、以及
-`synthesis_ready = cast_ready AND engine_ready`。Runtime 未启动时
-`runtime_status` 为 `unknown`，未加载引擎时为 `uninitialized`。
+`synthesis_ready` 拆分为四层：`cast_ready`（角色全部绑定并锁定）、
+`runtime_status`/`runtime_state`（Runtime ownership 状态）、
+`engine_state`/`engine_ready`（模型状态）以及最终的 `synthesis_ready`。两种
+状态都来自 `logs/runtime_engine_status.json`，查询不加载 GPU 模型；状态文件还会
+校验 owner PID 与 heartbeat，过期的 `ready` 会降级为 `unknown`，不会误报就绪。
+Runtime 未启动时 `runtime_state`/`runtime_status` 为 `unknown`，未加载引擎时
+`engine_state` 为 `uninitialized`。`unknown`/`uninitialized` 不阻塞首次启动，只有
+已声明的 runtime/engine `error` 阻塞；因此 `synthesis_ready` 表示 cast 已就绪且
+没有已确认的运行时错误，而不是要求模型已经提前加载。
 
 ## Phase 3 production jobs
 
@@ -126,7 +130,8 @@ running → recovering (1/2) → engine recycle（真实 reset + reload）→ �
 ```
 
 - 恢复预算（`lib/failures.RecoveryBudget`）：`segment_retry_limit=1`、
-  `engine_recycle_limit=2`、`systemic_failure_threshold=3`（同一 fingerprint
+  `engine_recycle_limit=2` 是**整个 production task 的总 recycle 预算**，不会在
+  每个 segment 重新计数；`systemic_failure_threshold=3`（同一 fingerprint
   出现在 3 个不同 segment 时停止拉取新段）。
 - `recovering` 是 active 状态；`needs_attention` 是 terminal-like 状态，允许
   `resume_production`（retry_task）、`cancel_production` 与 `get_runtime_health`
@@ -134,14 +139,22 @@ running → recovering (1/2) → engine recycle（真实 reset + reload）→ �
 - `get_production_task` 在恢复中/需处理时返回 `recovery` 对象：
   `reason_code`、`attempt`、`max_attempts`、`engine_generation`、
   `retry_segment`、`fingerprint`、`exception_type`、`errno`、`phase`、
-  `recovered`、`last_recovery_at`；`needs_attention` 额外返回 `error` 与
-  `next_actions`。
+  `message`、`traceback_origin`、`recovered`、`last_recovery_at`；其中
+  `exception_type`/`errno`/`traceback_origin` 保留原始异常信息，
+  `needs_attention` 额外返回 `error` 与 `next_actions`。
 - 引擎 recycle 调用 `tts_engine.reset_engine()`（真实 detach `_tts`、清空
   embedding/capability cache、`gc`、guarded `empty_cache`）后重新 `init_engine()`，
   generation +1。对象级 recycle 不保证清除 CUDA context/native handle；
   recycle 失败时 runtime 退出，下一次任务由新 runtime 进程接管（process 级恢复）。
-- 普通 segment failure（文本/资产/IO）与 engine failure 严格分离：
-  `errno=22` 来自 `atomic_publish`/`wav_validate` 时不会触发 engine recycle。
+- 只有已确认的 engine-infer fingerprint 才允许自动 recycle：当前是
+  `OSError(errno=22)` 与既有的 OOM exhaustion；其它 OSError 即使发生在
+  `engine_infer` 也不会自动回收。普通 segment failure（文本/资产/IO）与 engine
+  failure 严格分离：`errno=22` 来自 `atomic_publish`/`wav_validate` 时不会触发
+  engine recycle。
+- 重复的 systemic non-engine failure 达到阈值后停止 failure storm 并进入
+  `needs_attention`，但绝不 recycle TTS。若 engine recycle 本身失败，先持久化
+  `needs_attention`，再等待当前 worker 结束、释放 ownership 并退出当前 Runtime；
+  第一次 `resume_production` 由 fresh Runtime 接管。
 
 任务存放在项目 `01_项目配置/production_tasks.sqlite3`。同一项目同时只允许一个
 active production task。重复的 `project + task_type + idempotency_key` 且 payload

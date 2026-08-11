@@ -24,6 +24,9 @@ _INFER_HAS_VAR_KEYWORD = False
 # 调用自身，非重入锁会在同一线程第二次获取时死锁；RLock 允许同一线程重入。
 _ENGINE_LOCK = threading.RLock()
 
+TTS_ENGINE_RUNTIME_FAILURE = "TTS_ENGINE_RUNTIME_FAILURE"
+TTS_ENGINE_OOM_EXHAUSTED = "TTS_ENGINE_OOM_EXHAUSTED"
+
 
 class EngineRuntimeFailure(RuntimeError):
     """Stable typed failure raised from the engine adapter layer.
@@ -36,7 +39,7 @@ class EngineRuntimeFailure(RuntimeError):
     deliberately does not claim a specific cause.
     """
 
-    code = "TTS_ENGINE_RUNTIME_FAILURE"
+    code = TTS_ENGINE_RUNTIME_FAILURE
 
     def __init__(
         self,
@@ -45,12 +48,22 @@ class EngineRuntimeFailure(RuntimeError):
         *,
         errno: int | None = None,
         recoverable: bool = True,
+        code: str | None = None,
         original_exception: BaseException | None = None,
     ) -> None:
         self.phase = str(phase or PHASE_ENGINE_INFER)
         self.errno = errno
-        self.recoverable = bool(recoverable)
+        self.code = str(code or self.code)
         self.original_exception = original_exception
+        known_fingerprint = self.code == TTS_ENGINE_OOM_EXHAUSTED or (
+            self.phase == PHASE_ENGINE_INFER
+            and self.errno == 22
+            and isinstance(original_exception, OSError)
+        )
+        # ``recoverable=True`` is advisory only.  The adapter normalizes it
+        # against the confirmed fingerprint allow-list so an arbitrary OSError
+        # cannot enter the engine-recycle path.
+        self.recoverable = bool(recoverable) and known_fingerprint
         detail = f" (errno={errno})" if errno is not None else ""
         super().__init__(f"{self.code} phase={self.phase}{detail}: {message}")
 
@@ -191,6 +204,7 @@ def synthesize_segment(
         # 导致 num_beams 默认 2 未生效（引擎走内部默认 3）。这里额外判定签名是否含 VAR_KEYWORD，含则透传 num_beams。
         # 注意：speed / pinyin_hints 不是 GPT 生成参数，透传进 **generation_kwargs 会被 GPT.generate 拒绝（实测 ValueError），
         # 故这两项仅按显式形参判定，不随 has_var_keyword 放开。
+        last_oom: BaseException | None = None
         for attempt in range(MAX_RETRIES):
             try:
                 # 根据 IndexTTS2.infer 实际签名条件透传可选参数，
@@ -236,15 +250,14 @@ def synthesize_segment(
                 except oom_error:
                     raise
                 except OSError as exc:
-                    # OSError(errno=22) raised from the model call is the
-                    # observed recoverable engine-runtime failure candidate.
-                    # The exact underlying cause (IndexTTS2 internal state /
-                    # PyTorch / CUDA native runtime) is not asserted here.
+                    # Only the observed errno=22 engine-infer fingerprint is
+                    # currently approved for automatic engine recycle.  Other
+                    # OSErrors remain structured, non-recoverable failures.
                     raise EngineRuntimeFailure(
                         PHASE_ENGINE_INFER,
                         str(exc),
                         errno=getattr(exc, "errno", None),
-                        recoverable=True,
+                        recoverable=getattr(exc, "errno", None) == 22,
                         original_exception=exc,
                     ) from exc
                 except Exception as exc:
@@ -257,7 +270,8 @@ def synthesize_segment(
                 empty_cache()  # 2.4 M-3：段级碎片化显存清理（守卫式，无 CUDA 时 no-op）
                 return output_path
 
-            except oom_error:
+            except oom_error as oom_exc:
+                last_oom = oom_exc
                 empty_cache()
                 if attempt == 0:
                     logger.warning("OOM, retrying after cache clear...")
@@ -305,6 +319,8 @@ def synthesize_segment(
                         PHASE_ENGINE_INFER,
                         f"OOM after {MAX_RETRIES} retries: {text[:50]}...",
                         recoverable=True,
+                        code=TTS_ENGINE_OOM_EXHAUSTED,
+                        original_exception=last_oom,
                     )
 
         return output_path

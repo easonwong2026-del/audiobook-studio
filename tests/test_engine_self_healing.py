@@ -2,8 +2,8 @@
 
 Covers (spec section 35): D recycle resets the real adapter, E known
 recoverable engine failure, F errno22 from a non-engine phase, G ordinary
-segment failure, H systemic fingerprint, I recovery succeeds, J budget
-exhausted -> needs_attention, K cancel during recovery, L pause during
+segment failure, H systemic non-engine fingerprint, I recovery succeeds, J
+budget exhausted -> needs_attention, K cancel during recovery, L pause during
 recovery, M old-generation fencing, N readiness, O health never inits the
 engine, P MCP recovering/needs_attention schema, R no mass-failure storm,
 S resume preserves completed segments.
@@ -25,12 +25,18 @@ from lib.failures import (
     PHASE_ENGINE_INFER,
     RecoveryBudget,
     RecoveryHooks,
+    SynthesisFailure,
+    is_confirmed_engine_recovery,
 )
 from repositories.project_repo import ProjectRepository
 from repositories.task_repo import TaskRecord, TaskRepository
 from services import ProductionJobService, ProjectService, VoiceCastResolver
 from services.production_runtime import ProductionRuntime, ProductionRuntimeClient
-from services.runtime_engine import read_runtime_engine_status
+from services.runtime_engine import (
+    RuntimeEngineLifecycle,
+    read_runtime_engine_status,
+    runtime_engine_status_path,
+)
 from services.synthesis import SynthesisState
 
 
@@ -185,6 +191,7 @@ def test_e_known_recoverable_failure_recovers_same_segment(
                 "Invalid argument",
                 errno=22,
                 recoverable=True,
+                original_exception=OSError(22, "Invalid argument"),
             )
         return _write_wav(str(kwargs["output_path"]))
 
@@ -209,6 +216,165 @@ def test_e_known_recoverable_failure_recovers_same_segment(
     assert recovery["phase"] == PHASE_ENGINE_INFER
     assert recovery["recovered"] is True
     assert record.progress["engine_generation"] == 2
+
+
+def test_task_recycle_budget_is_not_reset_for_each_segment(healing_project, monkeypatch):
+    calls: list[str] = []
+    recycle_calls: list[int] = []
+
+    def flaky(**kwargs):
+        text = str(kwargs.get("text") or "")
+        calls.append(text)
+        if text == "第1段" and calls.count(text) == 1:
+            raise tts_engine.EngineRuntimeFailure(
+                PHASE_ENGINE_INFER,
+                "Invalid argument",
+                errno=22,
+                recoverable=True,
+                original_exception=OSError(22, "Invalid argument"),
+            )
+        if text == "第2段":
+            raise tts_engine.EngineRuntimeFailure(
+                PHASE_ENGINE_INFER,
+                "Invalid argument",
+                errno=22,
+                recoverable=True,
+                original_exception=OSError(22, "Invalid argument"),
+            )
+        return _write_wav(str(kwargs["output_path"]))
+
+    monkeypatch.setattr(tts_engine, "synthesize_segment", flaky)
+    events: list[dict] = []
+    hooks = RecoveryHooks(
+        recycle=lambda: (recycle_calls.append(1) or len(recycle_calls) + 1),
+        cancel_requested=lambda: False,
+        pause_gate=lambda: None,
+        on_recovery=events.append,
+    )
+    lines = list(queue_module.synthesize_project(
+        healing_project["project"],
+        {"旁白": healing_project["voice"]},
+        recovery=hooks,
+        budget=RecoveryBudget(
+            segment_retry_limit=1,
+            engine_recycle_limit=2,
+            systemic_failure_threshold=99,
+        ),
+    ))
+
+    # Segment 1 consumes one task-level recycle.  Segment 2 gets only the
+    # single remaining recycle and then stops; segment 3 is never pulled.
+    assert calls == ["第1段", "第1段", "第2段", "第2段"]
+    assert len(recycle_calls) == 2
+    recovering = [event for event in events if event.get("event") == "recovering"]
+    assert [event["attempt"] for event in recovering] == [1, 2]
+    exhausted = [event for event in events if event.get("event") == "exhausted"]
+    assert exhausted and exhausted[0]["attempt"] == 2
+    assert any(line.startswith("[re] stop") for line in lines)
+    assert "第3段" not in calls
+
+
+def test_unconfirmed_engine_oserror_cannot_recycle(healing_project, monkeypatch):
+    calls: list[str] = []
+    recycle_calls: list[int] = []
+    failures = []
+
+    def fake(**kwargs):
+        text = str(kwargs.get("text") or "")
+        calls.append(text)
+        if text == "第1段":
+            original = OSError(5, "access denied")
+            raise tts_engine.EngineRuntimeFailure(
+                PHASE_ENGINE_INFER,
+                str(original),
+                errno=5,
+                recoverable=True,
+                original_exception=original,
+            ) from original
+        return _write_wav(str(kwargs["output_path"]))
+
+    monkeypatch.setattr(tts_engine, "synthesize_segment", fake)
+    hooks = RecoveryHooks(
+        recycle=lambda: (recycle_calls.append(1) or 2),
+        cancel_requested=lambda: False,
+        pause_gate=lambda: None,
+        on_failure=failures.append,
+    )
+    lines = list(queue_module.synthesize_project(
+        healing_project["project"],
+        {"旁白": healing_project["voice"]},
+        recovery=hooks,
+        budget=RecoveryBudget(systemic_failure_threshold=99),
+    ))
+
+    assert recycle_calls == []
+    assert failures[0].exception_type == "OSError"
+    assert failures[0].errno == 5
+    assert failures[0].recoverable is False
+    assert failures[0].engine_related is True
+    assert any(line.startswith("[+] 001-002") for line in lines)
+
+
+def test_oom_exhaustion_is_an_explicit_confirmed_engine_fingerprint():
+    wrapped = tts_engine.EngineRuntimeFailure(
+        PHASE_ENGINE_INFER,
+        "OOM after retries",
+        recoverable=True,
+        code=tts_engine.TTS_ENGINE_OOM_EXHAUSTED,
+    )
+    failure = SynthesisFailure.from_exception(
+        segment_id="001-001",
+        chapter_id="001",
+        phase=PHASE_ENGINE_INFER,
+        exc=wrapped,
+        recoverable=wrapped.recoverable,
+        engine_related=True,
+        code=wrapped.code,
+    )
+    assert failure.recoverable is True
+    assert failure.code == tts_engine.TTS_ENGINE_OOM_EXHAUSTED
+    assert is_confirmed_engine_recovery(failure) is True
+
+
+def test_structured_failure_keeps_original_type_errno_and_traceback_origin(
+    healing_project,
+    monkeypatch,
+):
+    failures = []
+
+    def fake(**kwargs):
+        original = OSError(22, "Invalid argument")
+        try:
+            raise original
+        except OSError as exc:
+            raise tts_engine.EngineRuntimeFailure(
+                PHASE_ENGINE_INFER,
+                str(exc),
+                errno=22,
+                recoverable=True,
+                original_exception=exc,
+            ) from exc
+
+    monkeypatch.setattr(tts_engine, "synthesize_segment", fake)
+    hooks = RecoveryHooks(
+        recycle=lambda: 2,
+        cancel_requested=lambda: False,
+        pause_gate=lambda: None,
+        on_failure=failures.append,
+    )
+    list(queue_module.synthesize_project(
+        healing_project["project"],
+        {"旁白": healing_project["voice"]},
+        recovery=hooks,
+        budget=RecoveryBudget(engine_recycle_limit=0),
+    ))
+
+    failure = failures[0]
+    assert failure.exception_type == "OSError"
+    assert failure.errno == 22
+    assert failure.phase == PHASE_ENGINE_INFER
+    assert failure.traceback_origin.endswith(":fake")
+    assert failure.as_dict()["traceback_origin"] == failure.traceback_origin
 
 
 def test_f_errno22_from_publish_phase_is_not_engine_failure(
@@ -297,11 +463,7 @@ def test_h_repeated_systemic_fingerprint_stops_new_segments(healing_project, mon
 
     def fake(**kwargs):
         calls.append(str(kwargs.get("text") or ""))
-        raise tts_engine.EngineRuntimeFailure(
-            PHASE_ENGINE_INFER,
-            "native handle invalid",
-            recoverable=False,
-        )
+        raise ValueError("native handle invalid")
 
     monkeypatch.setattr(tts_engine, "synthesize_segment", fake)
     recycle_calls: list[int] = []
@@ -327,18 +489,19 @@ def test_h_repeated_systemic_fingerprint_stops_new_segments(healing_project, mon
 
     # Three distinct segments share one fingerprint -> systemic stop.
     assert [line for line in lines if line.startswith("[X]")] == [
-        "[X] 001-001 失败: TTS_ENGINE_RUNTIME_FAILURE phase=engine_infer: native handle invalid",
-        "[X] 001-002 失败: TTS_ENGINE_RUNTIME_FAILURE phase=engine_infer: native handle invalid",
-        "[X] 001-003 失败: TTS_ENGINE_RUNTIME_FAILURE phase=engine_infer: native handle invalid",
+        "[X] 001-001 失败: native handle invalid",
+        "[X] 001-002 失败: native handle invalid",
+        "[X] 001-003 失败: native handle invalid",
     ]
-    assert len(calls) == 5  # 3 initial + 2 recovery retries, then stop
-    assert len(recycle_calls) == 2
+    assert len(calls) == 3  # threshold reached without recycling the engine
+    assert recycle_calls == []
     assert "第4段" not in calls
     recovering_events = [e for e in events if e.get("event") == "recovering"]
-    assert len(recovering_events) == 2
+    assert recovering_events == []
     exhausted = [e for e in events if e.get("event") == "exhausted"]
     assert exhausted and exhausted[0]["reason"] == "systemic_fingerprint"
-    assert exhausted[0]["attempt"] == 2
+    assert exhausted[0]["reason_code"] == "SYSTEMIC_FAILURE_THRESHOLD"
+    assert exhausted[0]["attempt"] == 0
 
 
 def test_i_recovery_succeeds_and_completed_segments_are_not_redone(
@@ -356,6 +519,7 @@ def test_i_recovery_succeeds_and_completed_segments_are_not_redone(
                 "Invalid argument",
                 errno=22,
                 recoverable=True,
+                original_exception=OSError(22, "Invalid argument"),
             )
         return _write_wav(str(kwargs["output_path"]))
 
@@ -387,6 +551,7 @@ def test_j_recovery_budget_exhausted_becomes_needs_attention(
             "Invalid argument",
             errno=22,
             recoverable=True,
+            original_exception=OSError(22, "Invalid argument"),
         )
 
     monkeypatch.setattr(tts_engine, "synthesize_segment", always_fail)
@@ -410,6 +575,92 @@ def test_j_recovery_budget_exhausted_becomes_needs_attention(
     assert record.error_summary
 
 
+def test_recycle_failure_persists_attention_then_fresh_runtime_resumes(
+    healing_project,
+    monkeypatch,
+):
+    import services.production_runtime as production_runtime_module
+
+    init_calls: list[int] = []
+
+    def init_engine():
+        init_calls.append(1)
+        if len(init_calls) == 2:
+            raise RuntimeError("recycle init failed")
+
+    calls: list[str] = []
+
+    def synthesize(**kwargs):
+        text = str(kwargs.get("text") or "")
+        calls.append(text)
+        if len(calls) == 1:
+            raise tts_engine.EngineRuntimeFailure(
+                PHASE_ENGINE_INFER,
+                "Invalid argument",
+                errno=22,
+                recoverable=True,
+                original_exception=OSError(22, "Invalid argument"),
+            )
+        return _write_wav(str(kwargs["output_path"]))
+
+    monkeypatch.setattr(tts_engine, "init_engine", init_engine)
+    monkeypatch.setattr(tts_engine, "synthesize_segment", synthesize)
+    created = ProductionJobService.start(
+        healing_project["project"], {"all": True}, source="mcp"
+    )
+    first = _wait_terminal(created["task_id"])
+    assert first.status == "needs_attention"
+    assert first.progress["recovery"]["reason_code"] == "TTS_ENGINE_RECYCLE_FAILED"
+    assert first.progress["recovery"]["recycle_exception_type"] == "RuntimeError"
+    assert first.progress["recovery"]["recycle_message"] == "recycle init failed"
+
+    old_runtime = production_runtime_module._INLINE_RUNTIME
+    assert old_runtime is not None
+    assert old_runtime.requires_fresh_runtime is True
+    assert old_runtime.wait_until_stopped(timeout=5.0) is True
+    assert old_runtime.is_running is False
+    assert read_runtime_engine_status()["runtime_state"] == "unknown"
+
+    resumed = ProductionJobService.resume(created["task_id"])
+    new_runtime = production_runtime_module._INLINE_RUNTIME
+    assert new_runtime is not None
+    assert new_runtime is not old_runtime
+    resumed_record = _wait_terminal(resumed["task_id"])
+    assert resumed_record.status == "done"
+    assert resumed_record.progress["completed"] == 4
+    # initial preflight + failed recycle init + fresh-runtime preflight
+    assert len(init_calls) == 3
+
+
+def test_runtime_and_engine_states_are_separate_and_stale_ready_is_hidden(
+    healing_project,
+    monkeypatch,
+):
+    status_path = runtime_engine_status_path()
+    lifecycle = RuntimeEngineLifecycle(owner_id="runtime-state-test", status_path=status_path)
+    monkeypatch.setattr(tts_engine, "init_engine", lambda: None)
+    lifecycle.set_runtime_state("running")
+    lifecycle.ensure_ready()
+    live = read_runtime_engine_status()
+    assert live["runtime_state"] == "running"
+    assert live["engine_state"] == "ready"
+    assert live["state"] == "ready"
+    assert live["status_stale"] is False
+
+    with open(status_path, encoding="utf-8") as file:
+        payload = json.load(file)
+    payload["runtime_updated_at"] = "2000-01-01T00:00:00Z"
+    payload["updated_at"] = "2000-01-01T00:00:00Z"
+    with open(status_path, "w", encoding="utf-8") as file:
+        json.dump(payload, file)
+    stale = read_runtime_engine_status()
+    assert stale["runtime_state"] == "unknown"
+    assert stale["engine_state"] == "unknown"
+    assert stale["state"] == "unknown"
+    assert stale["status_stale"] is True
+    lifecycle.mark_unknown()
+
+
 def test_k_cancel_during_recovery_wins(healing_project, monkeypatch):
     calls: list[str] = []
     recycle_calls: list[int] = []
@@ -423,6 +674,7 @@ def test_k_cancel_during_recovery_wins(healing_project, monkeypatch):
             "Invalid argument",
             errno=22,
             recoverable=True,
+            original_exception=OSError(22, "Invalid argument"),
         )
 
     def recycle():
@@ -474,6 +726,7 @@ def test_l_pause_during_recovery_is_not_bypassed(healing_project, monkeypatch):
                 "Invalid argument",
                 errno=22,
                 recoverable=True,
+                original_exception=OSError(22, "Invalid argument"),
             )
         return _write_wav(str(kwargs["output_path"]))
 
@@ -758,6 +1011,7 @@ def test_r_no_mass_failure_storm(healing_project, monkeypatch):
             "Invalid argument",
             errno=22,
             recoverable=True,
+            original_exception=OSError(22, "Invalid argument"),
         )
 
     monkeypatch.setattr(tts_engine, "synthesize_segment", always_fail)
@@ -799,6 +1053,7 @@ def test_s_resume_preserves_completed_segments(healing_project, monkeypatch):
                 "Invalid argument",
                 errno=22,
                 recoverable=True,
+                original_exception=OSError(22, "Invalid argument"),
             )
         return _write_wav(str(kwargs["output_path"]))
 

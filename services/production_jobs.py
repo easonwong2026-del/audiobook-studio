@@ -329,8 +329,9 @@ class ProductionJobService:
                     "fix_hint": "完成所需角色的声音绑定并重新检查。",
                 })
         runtime_status = str(status.get("runtime_status") or "unknown")
+        engine_state = str(status.get("engine_state") or "unknown")
         engine_ready = bool(status.get("engine_ready", False))
-        if runtime_status == "error":
+        if runtime_status == "error" or engine_state == "error":
             warnings.append({
                 "code": "RUNTIME_ENGINE_ERROR",
                 "message": "TTS 引擎初始化失败，生产任务会立即失败。",
@@ -344,7 +345,11 @@ class ProductionJobService:
         # engine_state unknown/uninitialized is NOT a blocker: the runtime
         # preflights the engine when it claims the task.  Only a declared
         # engine error makes starting pointless (it would fail fast).
-        synthesis_ready = production_ready and runtime_status != "error"
+        synthesis_ready = (
+            production_ready
+            and runtime_status != "error"
+            and engine_state != "error"
+        )
         return {
             "locked": cast_locked,
             "bound": int(status.get("bound", 0) or 0),
@@ -352,6 +357,7 @@ class ProductionJobService:
             "mode": mode,
             "cast_ready": production_ready,
             "runtime_status": runtime_status,
+            "engine_state": engine_state,
             "engine_ready": engine_ready,
             "production_ready": production_ready,
             "synthesis_ready": synthesis_ready,
@@ -699,8 +705,11 @@ class ProductionJobService:
                 for key in (
                     "reason_code", "attempt", "max_attempts",
                     "engine_generation", "retry_segment", "fingerprint",
-                    "exception_type", "errno", "phase", "recovered",
-                    "last_recovery_at",
+                    "exception_type", "errno", "phase", "message",
+                    "traceback_origin", "code", "recycles_used",
+                    "recycle_exception_type", "recycle_errno",
+                    "recycle_message", "recycle_traceback_origin",
+                    "recovered", "last_recovery_at",
                 )
                 if key in recovery_payload
             }
@@ -711,7 +720,12 @@ class ProductionJobService:
                 "code": str(recovery_payload.get("reason_code") or record.error_summary.split(":")[0] if record.error_summary else "TTS_ENGINE_RUNTIME_FAILURE"),
             }
             if recovery_payload:
-                for key in ("exception_type", "errno", "phase", "fingerprint"):
+                for key in (
+                    "exception_type", "errno", "phase", "fingerprint",
+                    "message", "traceback_origin", "code",
+                    "recycle_exception_type", "recycle_errno",
+                    "recycle_message", "recycle_traceback_origin",
+                ):
                     if recovery_payload.get(key) not in (None, ""):
                         error_details[key] = recovery_payload[key]
             response["error"] = error_details
@@ -906,15 +920,17 @@ class ProductionJobService:
                 }
                 break
         return {
-            "runtime_state": status["state"],
+            "runtime_state": status["runtime_state"],
             "owner_id": status["owner_id"],
             "pid": status["pid"],
-            "engine_state": status["state"],
+            "engine_state": status["engine_state"],
             "engine_generation": status["engine_generation"],
             "recovery_count": status["recovery_count"],
             "last_error_code": status["last_error_code"],
             "last_recovery_at": status["last_recovery_at"],
             "updated_at": status["updated_at"],
+            "runtime_updated_at": status["runtime_updated_at"],
+            "status_stale": status["status_stale"],
             "active_task_id": active_task["task_id"] if active_task else None,
             "active_task": active_task,
         }

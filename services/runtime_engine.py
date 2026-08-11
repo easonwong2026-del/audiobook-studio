@@ -39,6 +39,13 @@ logger = logging.getLogger(__name__)
 #   error           init/recycle terminal failure
 ENGINE_STATES = ("unknown", "uninitialized", "loading", "ready", "recovering", "error")
 
+# Runtime ownership is a separate concern from the model state.  A status
+# file may outlive a crashed process, so ``engine_state=ready`` is only
+# trustworthy while the owning runtime is live and heartbeating.
+RUNTIME_STATES = ("unknown", "starting", "running", "recovering", "stopping", "error")
+_LIVE_RUNTIME_STATES = frozenset({"starting", "running", "recovering", "stopping", "error"})
+_STATUS_MAX_AGE_SECONDS = 10.0
+
 # Stable machine-readable error code for engine bootstrap failures.
 TTS_ENGINE_INIT_FAILED = "TTS_ENGINE_INIT_FAILED"
 
@@ -63,6 +70,46 @@ def runtime_engine_status_path() -> str:
     return os.path.join(config.get_data_dir(), "logs", "runtime_engine_status.json")
 
 
+def _empty_runtime_engine_status() -> dict[str, Any]:
+    return {
+        "state": "unknown",  # backwards-compatible alias for engine_state
+        "runtime_state": "unknown",
+        "engine_state": "unknown",
+        "pid": 0,
+        "owner_id": "",
+        "updated_at": "",
+        "runtime_updated_at": "",
+        "error_summary": "",
+        "engine_generation": 0,
+        "recovery_count": 0,
+        "last_error_code": "",
+        "last_recovery_at": "",
+        "status_stale": True,
+    }
+
+
+def _pid_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _timestamp_is_fresh(value: str) -> bool:
+    try:
+        timestamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - timestamp).total_seconds() <= _STATUS_MAX_AGE_SECONDS
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def read_runtime_engine_status() -> dict[str, Any]:
     """Return the last engine state declared by the runtime process.
 
@@ -70,37 +117,44 @@ def read_runtime_engine_status() -> dict[str, Any]:
     model, so status queries stay GPU-free.  When no runtime has declared a
     state yet the result is ``{"state": "unknown", ...}``.
     """
-    empty = {
-        "state": "unknown",
-        "pid": 0,
-        "owner_id": "",
-        "updated_at": "",
-        "error_summary": "",
-        "engine_generation": 0,
-        "recovery_count": 0,
-        "last_error_code": "",
-        "last_recovery_at": "",
-    }
+    empty = _empty_runtime_engine_status()
     path = runtime_engine_status_path()
     try:
         with open(path, encoding="utf-8") as file:
             data = json.load(file)
         if not isinstance(data, dict):
             return empty
-        state = str(data.get("state") or "unknown")
-        if state not in ENGINE_STATES:
-            state = "unknown"
-        return {
-            "state": state,
-            "pid": int(data.get("pid") or 0),
+        engine_state = str(data.get("engine_state") or data.get("state") or "unknown")
+        if engine_state not in ENGINE_STATES:
+            engine_state = "unknown"
+        runtime_state = str(data.get("runtime_state") or "unknown")
+        if runtime_state not in RUNTIME_STATES:
+            runtime_state = "unknown"
+        pid = int(data.get("pid") or 0)
+        runtime_updated_at = str(
+            data.get("runtime_updated_at") or data.get("updated_at") or ""
+        )
+        live = (
+            runtime_state in _LIVE_RUNTIME_STATES
+            and _pid_is_alive(pid)
+            and _timestamp_is_fresh(runtime_updated_at)
+        )
+        status = {
+            "state": engine_state if live else "unknown",
+            "runtime_state": runtime_state if live else "unknown",
+            "engine_state": engine_state if live else "unknown",
+            "pid": pid,
             "owner_id": str(data.get("owner_id") or ""),
             "updated_at": str(data.get("updated_at") or ""),
+            "runtime_updated_at": runtime_updated_at,
             "error_summary": sanitize_public_error(data.get("error_summary")),
             "engine_generation": int(data.get("engine_generation") or 0),
             "recovery_count": int(data.get("recovery_count") or 0),
             "last_error_code": str(data.get("last_error_code") or ""),
             "last_recovery_at": str(data.get("last_recovery_at") or ""),
+            "status_stale": not live,
         }
+        return status
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return empty
 
@@ -110,8 +164,14 @@ class EngineInitError(RuntimeError):
 
     code = TTS_ENGINE_INIT_FAILED
 
-    def __init__(self, summary: str = "") -> None:
+    def __init__(
+        self,
+        summary: str = "",
+        *,
+        original_exception: BaseException | None = None,
+    ) -> None:
         self.summary = sanitize_public_error(summary) or "TTS 引擎初始化失败"
+        self.original_exception = original_exception
         super().__init__(f"{self.code}: {self.summary}")
 
 
@@ -130,6 +190,8 @@ class RuntimeEngineLifecycle:
         self._state = "uninitialized"
         self._error_summary = ""
         self._pid = os.getpid()
+        self._runtime_state = "unknown"
+        self._runtime_updated_at = ""
         self._generation = 0
         self._recovery_count = 0
         self._last_error_code = ""
@@ -154,6 +216,8 @@ class RuntimeEngineLifecycle:
                 "owner_id": self._owner_id,
                 "pid": self._pid,
                 "updated_at": _now(),
+                "runtime_state": self._runtime_state,
+                "runtime_updated_at": self._runtime_updated_at,
                 "engine_generation": self._generation,
                 "recovery_count": self._recovery_count,
                 "last_error_code": self._last_error_code,
@@ -167,6 +231,29 @@ class RuntimeEngineLifecycle:
             self._error_summary = ""
             self._last_error_code = ""
             self._publish_unlocked("uninitialized", error_summary="")
+
+    @property
+    def runtime_state(self) -> str:
+        with self._condition:
+            return self._runtime_state
+
+    def set_runtime_state(self, state: str) -> None:
+        """Publish runtime ownership state without changing engine state."""
+        normalized = str(state or "unknown")
+        if normalized not in RUNTIME_STATES:
+            raise ValueError(f"invalid runtime state: {normalized}")
+        with self._condition:
+            self._runtime_state = normalized
+            self._runtime_updated_at = _now()
+            self._publish_unlocked(self._state, error_summary=self._error_summary)
+
+    def heartbeat(self) -> None:
+        """Refresh the liveness timestamp without loading or touching the model."""
+        with self._condition:
+            if self._runtime_state == "unknown":
+                return
+            self._runtime_updated_at = _now()
+            self._publish_unlocked(self._state, error_summary=self._error_summary)
 
     def ensure_ready(self) -> None:
         """Initialize the TTS engine exactly once per lifecycle.
@@ -201,7 +288,10 @@ class RuntimeEngineLifecycle:
                     self._owner_id,
                     summary,
                 )
-                raise EngineInitError(summary) from exc
+                raise EngineInitError(
+                    summary,
+                    original_exception=exc,
+                ) from exc
             self._generation += 1
             self._state = "ready"
             self._publish_unlocked("ready", error_summary="")
@@ -246,7 +336,10 @@ class RuntimeEngineLifecycle:
                     self._recovery_count,
                     summary,
                 )
-                raise EngineInitError(summary) from exc
+                raise EngineInitError(
+                    summary,
+                    original_exception=exc,
+                ) from exc
             self._generation += 1
             self._recovery_count += 1
             self._last_recovery_at = _now()
@@ -267,6 +360,8 @@ class RuntimeEngineLifecycle:
         """Declare the runtime no longer owns a live engine (shutdown)."""
         with self._condition:
             self._state = "unknown"
+            self._runtime_state = "unknown"
+            self._runtime_updated_at = _now()
             self._error_summary = ""
             self._publish_unlocked("unknown", error_summary="")
 
@@ -275,9 +370,12 @@ class RuntimeEngineLifecycle:
             os.makedirs(os.path.dirname(self._status_path), exist_ok=True)
             atomic_write(self._status_path, {
                 "state": state,
+                "engine_state": state,
+                "runtime_state": self._runtime_state,
                 "pid": self._pid,
                 "owner_id": self._owner_id,
                 "updated_at": _now(),
+                "runtime_updated_at": self._runtime_updated_at,
                 "error_summary": sanitize_public_error(error_summary),
                 "engine_generation": self._generation,
                 "recovery_count": self._recovery_count,
@@ -292,6 +390,7 @@ class RuntimeEngineLifecycle:
 
 __all__ = [
     "ENGINE_STATES",
+    "RUNTIME_STATES",
     "EngineInitError",
     "RuntimeEngineLifecycle",
     "TTS_ENGINE_INIT_FAILED",

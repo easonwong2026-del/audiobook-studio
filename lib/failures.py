@@ -66,6 +66,12 @@ PHASES = (
     PHASE_UNKNOWN,
 )
 
+# These are the only engine-runtime failure codes that are currently
+# confirmed safe to recover by detaching and reloading the engine.  Keep this
+# allow-list deliberately small: a generic ``recoverable`` flag must never be
+# enough to recycle a production TTS engine.
+RECOVERABLE_ENGINE_CODES = frozenset({"TTS_ENGINE_OOM_EXHAUSTED"})
+
 _PATH_PATTERN = re.compile(
     r"(?:[A-Za-z]:[\\/]|/(?:Users|home|private|tmp|var|opt)/)[^\s,;)]*"
 )
@@ -134,14 +140,22 @@ class SynthesisFailure:
         engine_related: bool = False,
         code: str = "",
     ) -> "SynthesisFailure":
-        message = sanitize_message(exc)
-        errno = getattr(exc, "errno", None)
+        # EngineRuntimeFailure is an adapter envelope.  Diagnostics must keep
+        # the exception that actually came from the model call, including its
+        # type and raise-site traceback origin.  The envelope remains in
+        # ``original_exception`` so callers can still inspect the wrapper.
+        original = getattr(exc, "original_exception", None)
+        source = original if isinstance(original, BaseException) else exc
+        message = sanitize_message(source) or sanitize_message(exc)
+        errno = getattr(source, "errno", None)
+        if errno is None:
+            errno = getattr(exc, "errno", None)
         try:
             errno = int(errno) if errno is not None else None
         except (TypeError, ValueError):
             errno = None
-        exception_type = type(exc).__name__
-        origin = traceback_origin(exc)
+        exception_type = type(source).__name__
+        origin = traceback_origin(source) or traceback_origin(exc)
         fingerprint = failure_fingerprint(
             exception_type=exception_type,
             errno=errno,
@@ -180,6 +194,27 @@ class SynthesisFailure:
         }
 
 
+def is_confirmed_engine_recovery(failure: SynthesisFailure) -> bool:
+    """Return whether ``failure`` matches the bounded engine-recycle allow-list.
+
+    The queue receives structured failures from several phases.  Only the
+    observed ``OSError(errno=22)`` from ``engine_infer`` and the explicit OOM
+    exhaustion code are currently confirmed engine-runtime fingerprints.  In
+    particular, an arbitrary OSError, a publish error, or a caller-provided
+    ``recoverable=True`` flag must not recycle the engine.
+    """
+    if not failure.recoverable or not failure.engine_related:
+        return False
+    if failure.phase != PHASE_ENGINE_INFER:
+        return False
+    if failure.code in RECOVERABLE_ENGINE_CODES:
+        return True
+    return (
+        failure.errno == 22
+        and failure.exception_type == "OSError"
+    )
+
+
 @dataclass
 class RecoveryHooks:
     """Runtime-injected callbacks that enable queue-level self-healing.
@@ -208,10 +243,12 @@ __all__ = [
     "PHASE_UNKNOWN",
     "PHASE_WAV_VALIDATE",
     "PHASES",
+    "RECOVERABLE_ENGINE_CODES",
     "RecoveryBudget",
     "RecoveryHooks",
     "SynthesisFailure",
     "failure_fingerprint",
+    "is_confirmed_engine_recovery",
     "sanitize_message",
     "traceback_origin",
 ]

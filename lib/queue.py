@@ -19,6 +19,9 @@ from .failures import (
     RecoveryBudget,
     RecoveryHooks,
     SynthesisFailure,
+    is_confirmed_engine_recovery,
+    sanitize_message,
+    traceback_origin,
 )
 from repositories.project_repo import ProjectRepository
 
@@ -262,6 +265,10 @@ def synthesize_project(
     hooks = recovery if isinstance(recovery, RecoveryHooks) else RecoveryHooks()
     limits = budget if isinstance(budget, RecoveryBudget) else DEFAULT_RECOVERY_BUDGET
     fingerprint_segments: dict[str, set[str]] = {}
+    # This counter intentionally lives outside the segment loop.  The
+    # engine_recycle_limit is a budget for the whole production task, not a
+    # fresh allowance for every segment.
+    engine_recycles_used = 0
     try:
         for ch in script.chapters:
             ch_label = str(ch.id)
@@ -353,7 +360,7 @@ def synthesize_project(
                     continue
 
                 # ---- bounded engine-recycle self-healing ----
-                attempt = 0
+                segment_recovery_attempt = 0
                 stop_run = False
                 stop_reason = "recovery_budget_exhausted"
                 final_failure: Optional[SynthesisFailure] = None
@@ -409,34 +416,45 @@ def synthesize_project(
                     logger.exception("合成失败 %s", seg.id)
                     systemic = _record_systemic(fingerprint_segments, failure, limits)
                     while failure is not None:
-                        want_recovery = (
-                            hooks.enabled
-                            and failure.recoverable
-                            and failure.engine_related
-                        ) or systemic
-                        if not want_recovery:
-                            final_failure = failure
-                            break
-                        if attempt >= max(int(limits.engine_recycle_limit), 0):
+                        confirmed_recovery = (
+                            hooks.enabled and is_confirmed_engine_recovery(failure)
+                        )
+                        if systemic and hooks.enabled and not confirmed_recovery:
+                            # A repeated non-engine (or otherwise unapproved)
+                            # fingerprint is a systemic failure storm.  Stop
+                            # pulling new segments, but never recycle TTS for
+                            # this path.
                             stop_run = True
-                            stop_reason = (
-                                "systemic_fingerprint"
-                                if systemic else "recovery_budget_exhausted"
-                            )
+                            stop_reason = "systemic_fingerprint"
                             final_failure = failure
                             break
-                        attempt += 1
+                        if not confirmed_recovery:
+                            final_failure = failure
+                            break
+                        if engine_recycles_used >= max(
+                            int(limits.engine_recycle_limit), 0
+                        ):
+                            stop_run = True
+                            stop_reason = "recovery_budget_exhausted"
+                            final_failure = failure
+                            break
+                        engine_recycles_used += 1
+                        segment_recovery_attempt += 1
                         _recovery_event(hooks, {
                             "event": "recovering",
                             "segment_id": str(seg.id),
                             "chapter_id": str(ch.id),
-                            "attempt": attempt,
+                            "attempt": engine_recycles_used,
+                            "segment_attempt": segment_recovery_attempt,
                             "max_attempts": int(limits.engine_recycle_limit),
                             "reason_code": failure.code or "TTS_ENGINE_RUNTIME_FAILURE",
                             "fingerprint": failure.fingerprint,
                             "exception_type": failure.exception_type,
                             "errno": failure.errno,
                             "phase": failure.phase,
+                            "message": failure.message,
+                            "traceback_origin": failure.traceback_origin,
+                            "code": failure.code,
                         })
                         if hooks.enabled and hooks.cancel_requested():
                             yield "[re] cancelled"
@@ -445,8 +463,38 @@ def synthesize_project(
                             hooks.pause_gate()
                         try:
                             generation = hooks.recycle()
-                        except Exception:
+                        except Exception as recycle_exc:
                             logger.exception("引擎回收失败 %s", seg.id)
+                            recycle_original = getattr(
+                                recycle_exc, "original_exception", None
+                            )
+                            if not isinstance(recycle_original, BaseException):
+                                recycle_original = recycle_exc.__cause__
+                            if not isinstance(recycle_original, BaseException):
+                                recycle_original = recycle_exc
+                            _recovery_event(hooks, {
+                                "event": "recycle_failed",
+                                "segment_id": str(seg.id),
+                                "chapter_id": str(ch.id),
+                                "attempt": engine_recycles_used,
+                                "max_attempts": int(limits.engine_recycle_limit),
+                                "reason_code": "TTS_ENGINE_RECYCLE_FAILED",
+                                "fingerprint": failure.fingerprint,
+                                "exception_type": failure.exception_type,
+                                "errno": failure.errno,
+                                "phase": failure.phase,
+                                "message": failure.message,
+                                "traceback_origin": failure.traceback_origin,
+                                "code": "TTS_ENGINE_RECYCLE_FAILED",
+                                "recycle_exception_type": type(recycle_original).__name__,
+                                "recycle_errno": getattr(
+                                    recycle_original, "errno", None
+                                ),
+                                "recycle_message": sanitize_message(recycle_original),
+                                "recycle_traceback_origin": traceback_origin(
+                                    recycle_original
+                                ),
+                            })
                             stop_run = True
                             stop_reason = "engine_recycle_failed"
                             final_failure = failure
@@ -456,7 +504,9 @@ def synthesize_project(
                             "segment_id": str(seg.id),
                             "chapter_id": str(ch.id),
                             "engine_generation": generation,
-                            "attempt": attempt,
+                            "attempt": engine_recycles_used,
+                            "segment_attempt": segment_recovery_attempt,
+                            "recycles_used": engine_recycles_used,
                         })
                         # Retry the SAME segment after a real engine recycle.
                         retried_ok = False
@@ -509,9 +559,15 @@ def synthesize_project(
                                     pass
                                 failure = _classify_failure(seg, str(ch.id), retry_exc)
                                 _deliver_failure(hooks, failure)
-                                if not (
-                                    failure.recoverable and failure.engine_related
-                                ):
+                                systemic = _record_systemic(
+                                    fingerprint_segments, failure, limits
+                                )
+                                if systemic and hooks.enabled and not is_confirmed_engine_recovery(failure):
+                                    stop_run = True
+                                    stop_reason = "systemic_fingerprint"
+                                    retried_ok = False
+                                    break
+                                if not is_confirmed_engine_recovery(failure):
                                     # Recovery no longer applies (phase changed
                                     # or failure became non-recoverable).
                                     retried_ok = False
@@ -521,8 +577,10 @@ def synthesize_project(
                                 "event": "recovered",
                                 "segment_id": str(seg.id),
                                 "chapter_id": str(ch.id),
-                                "attempt": attempt,
+                                "attempt": engine_recycles_used,
+                                "segment_attempt": segment_recovery_attempt,
                                 "engine_generation": generation,
+                                "recycles_used": engine_recycles_used,
                             })
                             final_failure = None
                             break
@@ -547,14 +605,26 @@ def synthesize_project(
                             "event": "exhausted",
                             "segment_id": str(seg.id),
                             "chapter_id": str(ch.id),
-                            "attempt": attempt,
+                            "attempt": engine_recycles_used,
                             "max_attempts": int(limits.engine_recycle_limit),
-                            "reason_code": final_failure.code
-                            or "TTS_ENGINE_RUNTIME_FAILURE",
+                            "reason_code": (
+                                "TTS_ENGINE_RECYCLE_FAILED"
+                                if stop_reason == "engine_recycle_failed"
+                                else (
+                                    "SYSTEMIC_FAILURE_THRESHOLD"
+                                    if stop_reason == "systemic_fingerprint"
+                                    else final_failure.code
+                                    or "TTS_ENGINE_RUNTIME_FAILURE"
+                                )
+                            ),
                             "fingerprint": final_failure.fingerprint,
                             "exception_type": final_failure.exception_type,
                             "errno": final_failure.errno,
                             "phase": final_failure.phase,
+                            "message": final_failure.message,
+                            "traceback_origin": final_failure.traceback_origin,
+                            "code": final_failure.code,
+                            "recycles_used": engine_recycles_used,
                             "reason": stop_reason,
                         })
                         # Engine-related budget exhaustion stops the run.
