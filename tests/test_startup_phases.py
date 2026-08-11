@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -376,6 +377,14 @@ class TestRuntimeStartup:
             ProcessFileLock, "acquire", lambda self, blocking=False: True
         )
         monkeypatch.setattr(ProcessFileLock, "release", lambda self: None)
+        # 固定为默认启动命令，避免 uv stub 解析干扰本断言
+        monkeypatch.setattr(
+            ProductionRuntimeClient,
+            "_resolve_runtime_launch",
+            staticmethod(lambda: (
+                [sys.executable, "-m", "services.production_runtime", "--serve"], {},
+            )),
+        )
         calls: list[tuple] = []
 
         def fake_popen(command, **_kwargs):
@@ -395,6 +404,62 @@ class TestRuntimeStartup:
         # bootstrap 日志不可用时回退 DEVNULL（无日志 ≠ 无控制台，stderr 不丢到窗口）
         assert kwargs["stderr"] is subprocess.DEVNULL
         assert kwargs["stdin"] is subprocess.DEVNULL
+
+    def test_resolve_runtime_launch_falls_back_without_pyvenv_cfg(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("services.production_runtime.os.name", "nt")
+        fake_stub = tmp_path / "python.exe"
+        fake_stub.write_bytes(b"x" * 40960)  # 45KB stub 尺寸
+        monkeypatch.setattr(
+            "services.production_runtime.sys.executable",
+            str(fake_stub),
+        )
+        command, env = ProductionRuntimeClient._resolve_runtime_launch()
+        assert command[0] == str(fake_stub)
+        assert command[1:] == ["-m", "services.production_runtime", "--serve"]
+        assert env == {}
+
+    def test_resolve_runtime_launch_uses_real_interpreter_for_stub(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("services.production_runtime.os.name", "nt")
+        venv_dir = tmp_path / "venv"
+        scripts = venv_dir / "Scripts"
+        scripts.mkdir(parents=True)
+        site_pkgs = venv_dir / "Lib" / "site-packages"
+        site_pkgs.mkdir(parents=True)
+        stub = scripts / "python.exe"
+        stub.write_bytes(b"x" * 40960)  # <=100KB → 判定为 uv stub
+        base_dir = tmp_path / "base_python"
+        base_dir.mkdir()
+        base_py = base_dir / "python.exe"
+        base_py.write_bytes(b"x" * 200000)
+        (venv_dir / "pyvenv.cfg").write_text(
+            "home = %s\nimplementation = CPython\nuv = 0.11.25\n" % str(base_dir),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "services.production_runtime.sys.executable",
+            str(stub),
+        )
+        command, env = ProductionRuntimeClient._resolve_runtime_launch()
+        assert command[0] == str(base_py)
+        assert command[1] == "-c"
+        assert "runpy.run_module('services.production_runtime'" in command[2]
+        assert "site-packages" in command[2]
+        assert env == {}
+
+    def test_resolve_runtime_launch_keeps_venv_python_for_real_interpreter(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("services.production_runtime.os.name", "nt")
+        venv_dir = tmp_path / "venv"
+        scripts = venv_dir / "Scripts"
+        scripts.mkdir(parents=True)
+        real_py = scripts / "python.exe"
+        real_py.write_bytes(b"x" * 200000)  # >100KB → 真实解释器
+        monkeypatch.setattr(
+            "services.production_runtime.sys.executable",
+            str(real_py),
+        )
+        command, _env = ProductionRuntimeClient._resolve_runtime_launch()
+        assert command[0] == str(real_py)
+        assert command[1:] == ["-m", "services.production_runtime", "--serve"]
 
     def test_open_bootstrap_log_on_windows(self, tmp_path, monkeypatch):
         monkeypatch.setattr(

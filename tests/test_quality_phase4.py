@@ -257,3 +257,53 @@ def test_technical_qa_batch_rewrites_quality_state_once(quality_project, monkeyp
     assert len(results) == 2
     assert {item["revision_id"] for item in results}
     assert writes == [QualityRepository.state_path(quality_project)]
+
+
+SCRIPT_THREE = {
+    "meta": {"title": "质量测试-三段", "author": "测试作者"},
+    "voices": {"旁白": {}},
+    "chapters": [{
+        "id": "001",
+        "title": "第一章",
+        "segments": [
+            {"id": "001-001", "role": "旁白", "text": "一段。"},
+            {"id": "001-002", "role": "旁白", "text": "二段。"},
+            {"id": "001-003", "role": "旁白", "text": "三段（从未生产）。"},
+        ],
+    }],
+}
+
+
+def test_never_produced_segment_is_not_started(quality_project):
+    """从未生产的段落 → not_started，而不是 technical_warning。"""
+    ProjectRepository.create_project_from_data("never3", SCRIPT_THREE)
+    item = QualityService.get_segment_quality("never3", "001-003")
+    assert item["quality_status"] == "not_started"
+    assert item["technical_outcome"] == "none"
+    assert item["review_status"] == "not_started"
+    assert item["technical_qa"] is None
+
+
+def test_never_produced_project_report_shows_not_started(quality_project):
+    """0 WAV 且从未执行生产的项目 → production_status=not_started / not_available。"""
+    ProjectRepository.create_project_from_data("never3", SCRIPT_THREE)
+    report = QualityService.get_quality_report("never3")
+    assert report["production_status"] == "not_started"
+    assert report["quality_status"] == "not_available"
+    assert report["summary"]["not_started"] == 3
+    assert report["summary"]["technical_warning"] == 0
+    for item in report["segments"]:
+        assert item["quality_status"] == "not_started"
+
+
+def test_failed_segment_keeps_technical_warning(quality_project):
+    """真实失败（meta.segments_status=failed）→ 仍为 technical_warning。"""
+    ProjectRepository.create_project_from_data("never3", SCRIPT_THREE)
+    meta, _, _ = ProjectRepository.load_project("never3")
+    meta.segments_status["001-003"] = "failed"
+    ProjectRepository._save_meta(
+        ProjectRepository.get_project_dir("never3"), meta
+    )
+    item = QualityService.get_segment_quality("never3", "001-003")
+    assert item["quality_status"] == "technical_warning"
+    assert item["technical_outcome"] == "fail"

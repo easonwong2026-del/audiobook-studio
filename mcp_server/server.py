@@ -464,7 +464,7 @@ _TOOLS.update({
                 "status": {
                     "type": "string",
                     "enum": [
-                        "unreviewed", "needs_review", "needs_fix", "passed",
+                        "not_started", "unreviewed", "needs_review", "needs_fix", "passed",
                         "technical_warning", "regenerating", "pass", "warning", "fail",
                     ],
                 },

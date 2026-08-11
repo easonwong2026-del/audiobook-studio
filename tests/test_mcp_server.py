@@ -167,12 +167,28 @@ def test_phase4_workflow_smoke_and_schema_errors_are_structured(isolated_project
             "name": "list_review_segments",
             "arguments": {
                 "project_name": "MCP 工作流",
-                "status": "technical_warning",
+                "status": "not_started",
             },
         },
     })["result"]
     assert filtered["isError"] is False
+    # 从未生产的段落属于 not_started，不再是 technical_warning
     assert len(filtered["structuredContent"]["segments"]) == 2
+    # 而 technical_warning 筛选不应误报未生产段落
+    no_warning = handle_request({
+        "jsonrpc": "2.0",
+        "id": 12,
+        "method": "tools/call",
+        "params": {
+            "name": "list_review_segments",
+            "arguments": {
+                "project_name": "MCP 工作流",
+                "status": "technical_warning",
+            },
+        },
+    })["result"]
+    assert no_warning["isError"] is False
+    assert len(no_warning["structuredContent"]["segments"]) == 0
 
     invalid = handle_request({
         "jsonrpc": "2.0",

@@ -34,6 +34,7 @@ def create_review_page() -> dict:
                 label="状态筛选",
                 choices=[
                     ("全部", "all"),
+                    ("未生产", "not_started"),
                     ("待检查", "needs_review"),
                     ("需修复", "needs_fix"),
                     ("技术警告", "technical_warning"),

@@ -1302,6 +1302,67 @@ class ProductionRuntimeClient:
         return "process"
 
     @classmethod
+    def _resolve_runtime_launch(cls) -> tuple[list[str], dict[str, str]]:
+        """Resolve a console-less launch for the runtime subprocess (Windows).
+
+        Root cause: on uv-managed venvs, ``<venv>/Scripts/python.exe`` is a
+        small launcher stub.  When spawned with ``DETACHED_PROCESS`` it
+        re-spawns the real interpreter as a NEW child **without propagating
+        the creation flags**, so the actual runtime process ends up with its
+        own visible console (the black box) — verified by process-tree tracing
+        (a conhost.exe appears under the runtime during engine bootstrap).
+
+        Fix: resolve the real interpreter from ``pyvenv.cfg`` ``home`` and
+        bootstrap the venv site-packages via ``site.addsitedir`` (processes
+        ``.pth`` files, including PEP-660 editable installs) before running
+        the runtime module.  Spawned with ``DETACHED_PROCESS`` this yields a
+        genuinely console-less runtime (no conhost in the tree).
+
+        Applies only on Windows for a stub-sized venv python (<=100 KB).
+        Any resolution failure falls back to the default ``python -m ...``.
+        """
+        if os.name != "nt":
+            return [sys.executable, "-m", "services.production_runtime", "--serve"], {}
+        try:
+            venv_dir = os.path.dirname(os.path.dirname(os.path.abspath(sys.executable)))
+            cfg_path = os.path.join(venv_dir, "pyvenv.cfg")
+            if not os.path.isfile(cfg_path):
+                return [sys.executable, "-m", "services.production_runtime", "--serve"], {}
+            try:
+                stub_size = os.path.getsize(sys.executable)
+            except OSError:
+                stub_size = 0
+            if stub_size and stub_size > 100 * 1024:
+                # 真实解释器（非 uv stub）：DETACHED 直接生效，无需绕行。
+                return [sys.executable, "-m", "services.production_runtime", "--serve"], {}
+            home = ""
+            with open(cfg_path, encoding="utf-8", errors="ignore") as fh:
+                for line in fh:
+                    key, _, value = line.partition("=")
+                    if key.strip() == "home":
+                        home = value.strip().strip('"')
+                        break
+            base_python = os.path.join(home, "python.exe")
+            venv_site = os.path.join(venv_dir, "Lib", "site-packages")
+            if not home or not os.path.isfile(base_python) or not os.path.isdir(venv_site):
+                return [sys.executable, "-m", "services.production_runtime", "--serve"], {}
+            bootstrap = (
+                "import site, runpy, sys; "
+                "site.addsitedir(%r); "
+                "sys.argv=['services.production_runtime','--serve']; "
+                "runpy.run_module('services.production_runtime', run_name='__main__')"
+            ) % venv_site
+            logger.info(
+                "runtime_event=runtime_launch_resolved interpreter=%s venv_site=%s",
+                base_python,
+                venv_site,
+            )
+            return [base_python, "-c", bootstrap], {}
+        except Exception:  # pragma: no cover - fallback must never break spawn
+            logger.exception("解析 runtime 真实解释器失败，回退默认启动")
+            return [sys.executable, "-m", "services.production_runtime", "--serve"], {}
+
+    @classmethod
     def ensure_running(cls) -> Optional[int]:
         """Ensure the singleton runtime subprocess is running.
 
@@ -1345,7 +1406,8 @@ class ProductionRuntimeClient:
         probe.release()
         environment = dict(os.environ)
         environment["AUDIOBOOK_STUDIO_RUNTIME_MODE"] = "serve"
-        command = [sys.executable, "-m", "services.production_runtime", "--serve"]
+        command, extra_env = cls._resolve_runtime_launch()
+        environment.update(extra_env)
         bootstrap = _open_bootstrap_log()
         kwargs: dict[str, Any] = {
             "cwd": os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

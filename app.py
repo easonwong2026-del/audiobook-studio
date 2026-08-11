@@ -1320,13 +1320,42 @@ def _audio_update(path: str | None):
     return gr.update(value=path, visible=True)
 
 
-def _quality_summary_markdown(report):
+_STARTUP_PREP_PHASES = frozenset({
+    "task_submitted", "runtime_starting", "runtime_available",
+    "task_claimed", "engine_loading",
+})
+
+
+def _active_startup_phase(project_name):
+    """Return the active production task's startup phase ('' if none)."""
+    if not project_name:
+        return ""
+    try:
+        task = ProductionJobService.get_active_task(project_name)
+        startup = task.get("startup") if isinstance(task, dict) else None
+        return str(startup.get("startup_phase") or "") if isinstance(startup, dict) else ""
+    except Exception:
+        return ""
+
+
+def _quality_summary_markdown(report, project_name=None):
     summary = report.get("summary", {}) if isinstance(report, dict) else {}
+    production_status = str(summary.get("production_status") or "")
+    phase = _active_startup_phase(project_name)
+    if production_status == "not_started" or summary.get("not_started", 0) == summary.get("segments", 0):
+        preparing = " · 生产准备中…" if phase in _STARTUP_PREP_PHASES else ""
+        return (
+            "#### 质量状态\n"
+            f"🟡 **尚未开始生产**{preparing}\n"
+            "- 当前项目尚未产出可用的音频，质量检查暂不可用（`quality_status=not_available`）。\n"
+            "- 点击「开始合成」后，此处会随生产进度自动更新。"
+        )
     return (
         "#### 质量状态\n"
         f"通过 **{summary.get('passed', 0)}** · "
         f"待检查 **{summary.get('needs_review', 0)}** · "
         f"需修复 **{summary.get('needs_fix', 0)}** · "
+        f"未生产 **{summary.get('not_started', 0)}** · "
         f"技术警告 **{summary.get('technical_warning', 0)}** · "
         f"重合成中 **{summary.get('regenerating', 0)}**"
     )
@@ -1401,7 +1430,7 @@ def refresh_quality_workspace(status_filter, chapter_id, ss):
         selected = choices[0][1] if choices else None
         item = quality_by_id.get(str(selected)) if selected else None
         return (
-            _quality_summary_markdown(report),
+            _quality_summary_markdown(report, ss.project),
             gr.update(choices=choices, value=selected),
             gr.update(choices=choices, value=[]),
             _segment_quality_markdown(item),
@@ -1432,7 +1461,7 @@ def run_selected_technical_qa(choice, ss):
         QualityService.run_technical_qa(ss.project, segment_id)
         item = QualityService.get_segment_quality(ss.project, segment_id)
         report = QualityService.get_quality_report(ss.project)
-        return _segment_quality_markdown(item), _quality_summary_markdown(report)
+        return _segment_quality_markdown(item), _quality_summary_markdown(report, ss.project)
     except Exception as exc:
         return f"❌ 技术 QA 失败：{exc}", "#### 质量状态"
 
@@ -1480,7 +1509,7 @@ def mark_selected_review(
         )
         return (
             _segment_quality_markdown(current),
-            _quality_summary_markdown(report),
+            _quality_summary_markdown(report, ss.project),
             gr.update(choices=choices, value=next_value),
         )
     except Exception as exc:
@@ -1544,7 +1573,7 @@ def bulk_pass_technical_qa(chapter_id, status_filter, ss):
         return (
             f"✅ 已批量通过 **{result['passed']}** 段；"
             f"跳过 **{result['skipped']}** 段（技术 QA 未 pass 或已通过）。",
-            _quality_summary_markdown(report),
+            _quality_summary_markdown(report, ss.project),
             gr.update(choices=choices, value=selected),
         )
     except Exception as exc:

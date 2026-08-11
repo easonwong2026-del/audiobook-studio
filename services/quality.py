@@ -802,12 +802,14 @@ class QualityService:
             candidate = state["revisions"].get(revision_id)
             revision = candidate if isinstance(candidate, dict) else None
         if not revision:
+            failed = cls._segment_failed(project_name, str(segment_id))
+            status = "technical_warning" if failed else "not_started"
             return {
                 "segment_id": str(segment_id),
                 "audio_revision": None,
-                "review_status": "unreviewed",
-                "technical_outcome": "fail",
-                "quality_status": "technical_warning",
+                "review_status": "not_started" if not failed else "unreviewed",
+                "technical_outcome": "fail" if failed else "none",
+                "quality_status": status,
                 "technical_qa": None,
                 "human_review": None,
             }
@@ -876,6 +878,20 @@ class QualityService:
             "technical_qa": technical,
             "human_review": human,
         }
+
+    @staticmethod
+    def _segment_failed(project_name: str, segment_id: str) -> bool:
+        """True only when the segment has a REAL production failure recorded.
+
+        “从未生产 / 待生产”（包括 partial scope 之外的段落）不算失败——
+        只有 meta.segments_status 标记为 failed（合成失败/引擎失败）才算。
+        """
+        try:
+            meta, _script, _bindings = ProjectRepository.load_project(project_name)
+        except Exception:
+            return False
+        statuses = getattr(meta, "segments_status", None) or {}
+        return statuses.get(str(segment_id)) == "failed"
 
     @classmethod
     def get_quality_report(cls, project_name: str) -> dict[str, Any]:
@@ -958,10 +974,30 @@ class QualityService:
         for item in items:
             status = str(item.get("quality_status") or "needs_review")
             counts[status] = counts.get(status, 0) + 1
+        not_started = counts.get("not_started", 0)
+        produced = len(items) - not_started
+        if items and not_started == len(items):
+            production_status = "not_started"
+            quality_status = "not_available"
+        else:
+            production_status = "started"
+            if counts.get("technical_warning", 0):
+                quality_status = "technical_warning"
+            elif counts.get("needs_fix", 0):
+                quality_status = "needs_fix"
+            elif counts.get("needs_review", 0) or counts.get("regenerating", 0):
+                quality_status = "needs_review"
+            else:
+                quality_status = "passed"
         return {
             "project": project_name,
+            "production_status": production_status,
+            "quality_status": quality_status,
             "summary": {
                 "segments": len(items),
+                "production_status": production_status,
+                "quality_status": quality_status,
+                "not_started": not_started,
                 "passed": counts.get("passed", 0),
                 "needs_review": counts.get("needs_review", 0),
                 "needs_fix": counts.get("needs_fix", 0),
