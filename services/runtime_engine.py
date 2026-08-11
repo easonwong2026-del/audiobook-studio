@@ -88,10 +88,20 @@ def _empty_runtime_engine_status() -> dict[str, Any]:
     }
 
 
+def _is_windows() -> bool:
+    """Windows platform probe.
+
+    独立函数而非直接读 ``os.name``：测试通过 monkeypatch 本函数切换平台
+    分支，避免污染全局 ``os.name``（全局改动会波及 pytest 自身的 pathlib
+    行为，例如 Linux 上 ``Path()`` 被错误实例化为 ``WindowsPath`` 崩溃）。
+    """
+    return os.name == "nt"
+
+
 def _pid_is_alive(pid: int) -> bool:
     if pid <= 0:
         return False
-    if os.name == "nt":
+    if _is_windows():
         return _windows_pid_is_alive(pid)
     try:
         os.kill(pid, 0)

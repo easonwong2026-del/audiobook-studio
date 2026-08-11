@@ -695,7 +695,7 @@ def test_windows_pid_probe_never_calls_os_kill(monkeypatch):
                 lambda handle: calls.append(("CloseHandle", handle)) or 1
             )
 
-    monkeypatch.setattr(runtime_engine_module.os, "name", "nt")
+    monkeypatch.setattr(runtime_engine_module, "_is_windows", lambda: True)
     monkeypatch.setattr(
         runtime_engine_module.os,
         "kill",

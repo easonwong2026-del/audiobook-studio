@@ -17,12 +17,22 @@ import subprocess
 from typing import Any
 
 
+def _is_windows() -> bool:
+    """Windows platform probe.
+
+    独立函数而非直接读 ``os.name``：测试通过 monkeypatch 本函数切换平台
+    分支，避免污染全局 ``os.name``（全局改动会波及 pytest 自身的 pathlib
+    行为，例如 Linux 上 ``Path()`` 被错误实例化为 ``WindowsPath`` 崩溃）。
+    """
+    return os.name == "nt"
+
+
 def no_window_kwargs(**kwargs: Any) -> dict[str, Any]:
     """Return ``kwargs`` with Windows ``CREATE_NO_WINDOW`` merged in.
 
     非 Windows 平台原样返回，不改变任何行为。
     """
-    if os.name != "nt":
+    if not _is_windows():
         return kwargs
     flags = int(kwargs.get("creationflags", 0) or 0)
     flags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
