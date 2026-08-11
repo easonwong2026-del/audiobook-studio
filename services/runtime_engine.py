@@ -91,6 +91,8 @@ def _empty_runtime_engine_status() -> dict[str, Any]:
 def _pid_is_alive(pid: int) -> bool:
     if pid <= 0:
         return False
+    if os.name == "nt":
+        return _windows_pid_is_alive(pid)
     try:
         os.kill(pid, 0)
     except PermissionError:
@@ -98,6 +100,59 @@ def _pid_is_alive(pid: int) -> bool:
     except OSError:
         return False
     return True
+
+
+def _windows_pid_is_alive(pid: int) -> bool:
+    """Probe a Windows PID without sending it a signal or control event.
+
+    ``os.kill(pid, 0)`` is intentionally POSIX-only here.  On Windows the
+    documented ``os.kill`` implementation is signal/control-process based,
+    so use the read-only Win32 process query APIs instead.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        win_dll = getattr(ctypes, "WinDLL", None)
+        if win_dll is None:
+            return False
+        kernel32 = win_dll("kernel32", use_last_error=True)
+        process_query_limited_information = 0x1000
+        still_active = 259
+
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = (
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD,
+        )
+        open_process.restype = wintypes.HANDLE
+        get_exit_code = kernel32.GetExitCodeProcess
+        get_exit_code.argtypes = (
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.DWORD),
+        )
+        get_exit_code.restype = wintypes.BOOL
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+
+        handle = open_process(
+            process_query_limited_information,
+            False,
+            wintypes.DWORD(pid),
+        )
+        if not handle:
+            return False
+        try:
+            exit_code = wintypes.DWORD()
+            if not get_exit_code(handle, ctypes.byref(exit_code)):
+                return False
+            return exit_code.value == still_active
+        finally:
+            close_handle(handle)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
 
 
 def _timestamp_is_fresh(value: str) -> bool:

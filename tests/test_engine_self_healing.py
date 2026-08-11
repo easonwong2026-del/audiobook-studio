@@ -31,6 +31,7 @@ from lib.failures import (
 from repositories.project_repo import ProjectRepository
 from repositories.task_repo import TaskRecord, TaskRepository
 from services import ProductionJobService, ProjectService, VoiceCastResolver
+import services.runtime_engine as runtime_engine_module
 from services.production_runtime import ProductionRuntime, ProductionRuntimeClient
 from services.runtime_engine import (
     RuntimeEngineLifecycle,
@@ -661,6 +662,82 @@ def test_runtime_and_engine_states_are_separate_and_stale_ready_is_hidden(
     lifecycle.mark_unknown()
 
 
+def test_pid_probe_current_and_invalid_pid():
+    assert runtime_engine_module._pid_is_alive(os.getpid()) is True
+    assert runtime_engine_module._pid_is_alive(2**31 - 1) is False
+
+
+def test_windows_pid_probe_never_calls_os_kill(monkeypatch):
+    import ctypes
+
+    calls: list[tuple] = []
+
+    class FakeFunction:
+        def __init__(self, function):
+            self.function = function
+
+        def __call__(self, *args):
+            return self.function(*args)
+
+    class FakeKernel:
+        def __init__(self):
+            self.OpenProcess = FakeFunction(
+                lambda access, inherit, pid: calls.append(
+                    ("OpenProcess", access, inherit, pid)
+                ) or 1234
+            )
+            self.GetExitCodeProcess = FakeFunction(
+                lambda handle, pointer: calls.append(
+                    ("GetExitCodeProcess", handle)
+                ) or setattr(pointer._obj, "value", 259) or 1
+            )
+            self.CloseHandle = FakeFunction(
+                lambda handle: calls.append(("CloseHandle", handle)) or 1
+            )
+
+    monkeypatch.setattr(runtime_engine_module.os, "name", "nt")
+    monkeypatch.setattr(
+        runtime_engine_module.os,
+        "kill",
+        lambda *_args: pytest.fail("Windows PID probe must not call os.kill"),
+    )
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *_args, **_kwargs: FakeKernel(), raising=False)
+
+    assert runtime_engine_module._pid_is_alive(1234) is True
+    assert [item[0] for item in calls] == [
+        "OpenProcess",
+        "GetExitCodeProcess",
+        "CloseHandle",
+    ]
+
+
+def test_runtime_status_read_does_not_change_target_process_state(
+    healing_project,
+    monkeypatch,
+):
+    lifecycle = RuntimeEngineLifecycle(
+        owner_id="readonly-status-test",
+        status_path=runtime_engine_status_path(),
+    )
+    monkeypatch.setattr(tts_engine, "init_engine", lambda: None)
+    lifecycle.set_runtime_state("running")
+    lifecycle.ensure_ready()
+    before = runtime_engine_module._pid_is_alive(os.getpid())
+
+    monkeypatch.setattr(
+        tts_engine,
+        "init_engine",
+        lambda: pytest.fail("status read must not initialize the engine"),
+    )
+    status = read_runtime_engine_status()
+    after = runtime_engine_module._pid_is_alive(os.getpid())
+    assert before is True
+    assert after is True
+    assert status["runtime_state"] == "running"
+    assert status["engine_state"] == "ready"
+    lifecycle.mark_unknown()
+
+
 def test_k_cancel_during_recovery_wins(healing_project, monkeypatch):
     calls: list[str] = []
     recycle_calls: list[int] = []
@@ -857,6 +934,7 @@ def test_o_runtime_health_query_never_initializes_engine(
     assert "engine_generation" in health
     assert "pid" in health
     assert "active_task_id" in health
+    assert health["status_stale"] is True
     assert init_calls == []
     VoiceCastResolver.get_voice_binding_status(healing_project["project"])
     assert init_calls == []
