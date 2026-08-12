@@ -393,37 +393,42 @@ def test_export_cancel_fence_finishes_cancelled_not_error(
 def test_start_export_returns_before_slow_worker_finishes(delivery_project, monkeypatch):
     _finish_and_review(delivery_project)
     export_started = threading.Event()
+    export_release = threading.Event()
+    export_finished = threading.Event()
 
     def slow_export(_project_dir, _fmt, _bitrate, output_dir="", **_kwargs):
         export_started.set()
-        time.sleep(0.5)
-        output = os.path.join(output_dir, "slow.wav")
-        wavfile.write(output, 22050, np.ones(2205, dtype=np.int16))
-        return output
+        assert export_release.wait(timeout=5.0), "slow export worker was not released"
+        try:
+            output = os.path.join(output_dir, "slow.wav")
+            wavfile.write(output, 22050, np.ones(2205, dtype=np.int16))
+            return output
+        finally:
+            export_finished.set()
 
     monkeypatch.setattr(ExportService, "export", staticmethod(slow_export))
-    # Runtime startup and Windows SQLite/file-lock scheduling are independent
-    # of the API's async contract.  Suppress startup just for the submission
-    # measurement, then launch the real inline runtime and await the job.
-    with monkeypatch.context() as context:
-        context.setattr(
-            ProductionRuntimeClient,
-            "ensure_running",
-            staticmethod(lambda: None),
-        )
-        started = time.monotonic()
+    # Start the inline runtime before submission so the test observes the real
+    # worker lifecycle.  poke() makes the post-commit wake-up deterministic;
+    # the contract under test is the durable worker state, not wall-clock time.
+    try:
+        ProductionRuntimeClient.ensure_running()
         submitted = ExportService.start_export(delivery_project, "wav")
-        elapsed = time.monotonic() - started
-    assert elapsed < 0.30
-    assert not export_started.is_set()
-    ProductionRuntimeClient.ensure_running()
-    assert submitted["status"] in {"pending", "running"}
-    finished = submitted
-    deadline = time.monotonic() + 5.0
-    while finished["status"] not in {"done", "error", "interrupted"} and time.monotonic() < deadline:
-        time.sleep(0.05)
-        finished = ExportService.get_export_task(
-            delivery_project, submitted["export_id"]
+        ProductionRuntimeClient.poke()
+        assert submitted["status"] in {"pending", "running"}
+        assert export_started.wait(timeout=5.0), "export worker did not start"
+        assert not export_finished.is_set(), (
+            "start_export must return while the slow worker is still blocked"
         )
-    assert finished["status"] == "done"
-    ProductionRuntimeClient.reset_inline()
+        export_release.set()
+        assert export_finished.wait(timeout=5.0), "export worker did not finish"
+        finished = submitted
+        deadline = time.monotonic() + 5.0
+        while finished["status"] not in {"done", "error", "interrupted"} and time.monotonic() < deadline:
+            time.sleep(0.05)
+            finished = ExportService.get_export_task(
+                delivery_project, submitted["export_id"]
+            )
+        assert finished["status"] == "done"
+    finally:
+        export_release.set()
+        ProductionRuntimeClient.reset_inline()
