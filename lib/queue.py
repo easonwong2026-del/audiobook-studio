@@ -37,7 +37,14 @@ class _PhaseFailure(Exception):
         self.original = original
 
 
-def _publish_segment(temp_path: str, final_path: str) -> None:
+def _publish_segment(
+    temp_path: str,
+    final_path: str,
+    *,
+    performance_trace=None,
+    segment_id: str | None = None,
+    chapter_id: str | None = None,
+) -> None:
     """Validate a completed WAV and atomically publish it into the cache.
 
     Failure phases are distinguished: an empty/invalid WAV is a
@@ -45,6 +52,7 @@ def _publish_segment(temp_path: str, final_path: str) -> None:
     OSError(errno=22) raised here is a file-system/publish problem and must
     never be classified as an engine-runtime failure.
     """
+    validate_started = time.perf_counter()
     try:
         if not os.path.isfile(temp_path) or os.path.getsize(temp_path) <= 0:
             raise RuntimeError("合成结果为空")
@@ -52,21 +60,82 @@ def _publish_segment(temp_path: str, final_path: str) -> None:
             if audio.getnframes() <= 0 or audio.getframerate() <= 0:
                 raise RuntimeError("合成结果不是有效 WAV")
     except Exception as exc:
+        if performance_trace is not None:
+            performance_trace.record_failure(
+                PHASE_WAV_VALIDATE,
+                segment_id=segment_id,
+                chapter_id=chapter_id,
+                error=exc,
+            )
         try:
             if os.path.isfile(temp_path):
                 os.remove(temp_path)
         except OSError:
             pass
         raise _PhaseFailure(PHASE_WAV_VALIDATE, exc) from exc
+    finally:
+        if performance_trace is not None:
+            performance_trace.add_timing(
+                "wav_validate",
+                time.perf_counter() - validate_started,
+                scope="segment",
+                segment_id=segment_id,
+                chapter_id=chapter_id,
+            )
+    publish_started = time.perf_counter()
+    publish_succeeded = False
+    publish_error: BaseException | None = None
     try:
         os.replace(temp_path, final_path)
+        publish_succeeded = True
     except Exception as exc:
+        publish_error = exc
         try:
             if os.path.isfile(temp_path):
                 os.remove(temp_path)
         except OSError:
             pass
         raise _PhaseFailure(PHASE_ATOMIC_PUBLISH, exc) from exc
+    finally:
+        if performance_trace is not None:
+            performance_trace.record_publish(
+                time.perf_counter() - publish_started,
+                segment_id=segment_id,
+                chapter_id=chapter_id,
+                success=publish_succeeded,
+                error=publish_error,
+            )
+
+
+def _status_update(
+    status_writer,
+    segment_id: str,
+    status: str,
+    *,
+    performance_trace=None,
+    chapter_id: str | None = None,
+) -> None:
+    started = time.perf_counter()
+    try:
+        status_writer.update(segment_id, status)
+    except Exception as exc:
+        if performance_trace is not None:
+            performance_trace.record_status(
+                time.perf_counter() - started,
+                status=status,
+                segment_id=segment_id,
+                chapter_id=chapter_id,
+                success=False,
+                error=exc,
+            )
+        raise
+    if performance_trace is not None:
+        performance_trace.record_status(
+            time.perf_counter() - started,
+            status=status,
+            segment_id=segment_id,
+            chapter_id=chapter_id,
+        )
 
 
 def _classify_failure(
@@ -194,6 +263,7 @@ def synthesize_project(
     cb_failure=None,
     recovery: Optional[RecoveryHooks] = None,
     budget: Optional[RecoveryBudget] = None,
+    performance_trace=None,
 ) -> Generator[str, None, None]:
     # NumPy / SciPy 随 TTS 适配层按需加载，不进入应用启动热路径。
     from . import tts_engine
@@ -269,9 +339,16 @@ def synthesize_project(
     # engine_recycle_limit is a budget for the whole production task, not a
     # fresh allowance for every segment.
     engine_recycles_used = 0
+    active_chapter_trace = None
+    active_segment_trace = None
     try:
         for ch in script.chapters:
             ch_label = str(ch.id)
+            chapter_trace = (
+                performance_trace.start_chapter(ch_label)
+                if performance_trace is not None else None
+            )
+            active_chapter_trace = chapter_trace
             ch_unselected = selected_set is not None and ch_label not in selected_set
             for seg in ch.segments:
                 if selected_segment_set is not None and str(seg.id) not in selected_segment_set:
@@ -279,10 +356,25 @@ def synthesize_project(
                 # O5：未选中章节 -> 标 skipped 并跳过（不合成、不写 wav）
                 if ch_unselected:
                     if seg.id in remaining_set:
-                        status_writer.update(seg.id, "skipped")
+                        _status_update(
+                            status_writer,
+                            seg.id,
+                            "skipped",
+                            performance_trace=performance_trace,
+                            chapter_id=ch_label,
+                        )
                     continue
                 if seg.id not in remaining_set:
                     continue
+
+                segment_trace = (
+                    performance_trace.start_segment(
+                        str(seg.id), chapter_id=ch_label
+                    )
+                    if performance_trace is not None else None
+                )
+                active_segment_trace = segment_trace
+                speaker_started = time.perf_counter()
 
                 speaker = per_segment_voice.get(str(seg.id)) or voice_bindings.get(seg.role)
                 if not speaker and cast_active and getattr(seg, "role_id", None):
@@ -298,7 +390,15 @@ def synthesize_project(
                         code="VOICE_BINDING_MISSING",
                     ))
                     yield f"[X] {seg.id} 角色'{seg.role}'未绑定音频"
-                    status_writer.update(seg.id, "failed")
+                    _status_update(
+                        status_writer,
+                        seg.id,
+                        "failed",
+                        performance_trace=performance_trace,
+                        chapter_id=ch_label,
+                    )
+                    if segment_trace is not None:
+                        segment_trace.close()
                     continue
 
                 if not os.path.isabs(str(speaker)):
@@ -312,34 +412,84 @@ def synthesize_project(
                         code="SPEAKER_AUDIO_MISSING",
                     ))
                     yield f"[X] {seg.id} 音频文件不存在"
-                    status_writer.update(seg.id, "failed")
+                    _status_update(
+                        status_writer,
+                        seg.id,
+                        "failed",
+                        performance_trace=performance_trace,
+                        chapter_id=ch_label,
+                    )
+                    if segment_trace is not None:
+                        segment_trace.close()
                     continue
+
+                if performance_trace is not None:
+                    performance_trace.add_timing(
+                        "speaker_resolution",
+                        time.perf_counter() - speaker_started,
+                        scope="segment",
+                        chapter_id=ch_label,
+                        segment_id=str(seg.id),
+                    )
 
                 speaker_fingerprint = None
                 if cast_active or str(seg.id) in per_segment_voice:
                     resolved_speaker = speaker
                     if resolved_speaker not in speaker_fingerprints:
+                        fingerprint_started = time.perf_counter()
                         speaker_fingerprints[resolved_speaker] = (
                             segment_cache.speaker_fingerprint_for_path(resolved_speaker)
                         )
+                        if performance_trace is not None:
+                            performance_trace.add_timing(
+                                "speaker_fingerprint",
+                                time.perf_counter() - fingerprint_started,
+                                scope="segment",
+                                chapter_id=ch_label,
+                                segment_id=str(seg.id),
+                            )
                     speaker_fingerprint = speaker_fingerprints[resolved_speaker]
 
                 seg_start = time.time()
                 # 2.3 O2：用有效合成参数（全局覆盖 + 段落默认）派生缓存键与调用参数，
                 # 保证「覆盖变化 → 文件名变化 → 重合成命中一致」（一致性根因修复）。
-                emotion_eff, emo_alpha_eff, speech_rate_eff = (
-                    segment_cache.effective_params(seg, overrides)
+                effective_started = time.perf_counter()
+                emotion_eff, emo_alpha_eff, speech_rate_eff = segment_cache.effective_params(
+                    seg, overrides
                 )
+                if performance_trace is not None:
+                    performance_trace.add_timing(
+                        "effective_params",
+                        time.perf_counter() - effective_started,
+                        scope="segment",
+                        chapter_id=ch_label,
+                        segment_id=str(seg.id),
+                    )
                 # B7：缓存键 = 段标识 + 合成参数内容哈希。
                 seg_path = os.path.join(
                     segments_dir,
                     f"{_seg_cache_key(seg, emotion_eff, emo_alpha_eff, speech_rate_eff, speaker_fingerprint)}.wav",
                 )
 
-                if os.path.isfile(seg_path):
+                cache_started = time.perf_counter()
+                cache_hit = os.path.isfile(seg_path)
+                if performance_trace is not None:
+                    performance_trace.record_cache(
+                        str(seg.id),
+                        hit=cache_hit,
+                        lookup_elapsed=time.perf_counter() - cache_started,
+                        chapter_id=ch_label,
+                    )
+                if cache_hit:
                     # Cache hit: mark done without invoking the engine.
                     try:
-                        status_writer.update(seg.id, "done")
+                        _status_update(
+                            status_writer,
+                            seg.id,
+                            "done",
+                            performance_trace=performance_trace,
+                            chapter_id=ch_label,
+                        )
                     except Exception as exc:
                         _deliver_failure(hooks, SynthesisFailure.from_exception(
                             segment_id=str(seg.id),
@@ -357,6 +507,8 @@ def synthesize_project(
                         cb_audio(seg.id, seg_path)
                     if cb_progress:
                         cb_progress(done / total)
+                    if segment_trace is not None:
+                        segment_trace.close()
                     continue
 
                 # ---- bounded engine-recycle self-healing ----
@@ -385,17 +537,31 @@ def synthesize_project(
                             output_path=temp_path,
                             num_beams=num_beams,
                             engine=tts_engine,
+                            trace=performance_trace,
+                            trace_chapter_id=ch_label,
                         )
                     except tts_engine.EngineRuntimeFailure:
                         raise
                     except Exception as exc:
                         raise _PhaseFailure(PHASE_DIRECTED_SYNTHESIS, exc) from exc
-                    _publish_segment(temp_path, seg_path)
+                    _publish_segment(
+                        temp_path,
+                        seg_path,
+                        performance_trace=performance_trace,
+                        segment_id=str(seg.id),
+                        chapter_id=ch_label,
+                    )
                     yield "[/] vram_clean"
 
                     elapsed = time.time() - seg_start
                     try:
-                        status_writer.update(seg.id, "done")
+                        _status_update(
+                            status_writer,
+                            seg.id,
+                            "done",
+                            performance_trace=performance_trace,
+                            chapter_id=ch_label,
+                        )
                     except Exception as exc:
                         raise _PhaseFailure(PHASE_STATUS_PERSIST, exc) from exc
                     done += 1
@@ -457,6 +623,8 @@ def synthesize_project(
                             "code": failure.code,
                         })
                         if hooks.enabled and hooks.cancel_requested():
+                            if performance_trace is not None:
+                                performance_trace.record_boundary("recovery_cancel")
                             yield "[re] cancelled"
                             return
                         if hooks.enabled:
@@ -512,6 +680,8 @@ def synthesize_project(
                         retried_ok = False
                         for _retry in range(max(int(limits.segment_retry_limit), 1)):
                             if hooks.enabled and hooks.cancel_requested():
+                                if performance_trace is not None:
+                                    performance_trace.record_boundary("recovery_cancel")
                                 yield "[re] cancelled"
                                 return
                             if hooks.enabled:
@@ -534,9 +704,23 @@ def synthesize_project(
                                     output_path=retry_temp,
                                     num_beams=num_beams,
                                     engine=tts_engine,
+                                    trace=performance_trace,
+                                    trace_chapter_id=ch_label,
                                 )
-                                _publish_segment(retry_temp, seg_path)
-                                status_writer.update(seg.id, "done")
+                                _publish_segment(
+                                    retry_temp,
+                                    seg_path,
+                                    performance_trace=performance_trace,
+                                    segment_id=str(seg.id),
+                                    chapter_id=ch_label,
+                                )
+                                _status_update(
+                                    status_writer,
+                                    seg.id,
+                                    "done",
+                                    performance_trace=performance_trace,
+                                    chapter_id=ch_label,
+                                )
                                 done += 1
                                 if cb_seg_state:
                                     cb_seg_state(seg.id, "done", 1.0)
@@ -589,7 +773,13 @@ def synthesize_project(
 
                 if final_failure is not None:
                     try:
-                        status_writer.update(seg.id, "failed")
+                        _status_update(
+                            status_writer,
+                            seg.id,
+                            "failed",
+                            performance_trace=performance_trace,
+                            chapter_id=ch_label,
+                        )
                     except Exception as persist_exc:
                         _deliver_failure(hooks, SynthesisFailure.from_exception(
                             segment_id=str(seg.id),
@@ -629,17 +819,30 @@ def synthesize_project(
                         })
                         # Engine-related budget exhaustion stops the run.
                         yield f"[re] stop|{seg.id}|{final_failure.code or 'recovery_exhausted'}"
+                        if segment_trace is not None:
+                            segment_trace.close()
                         return
 
+                if segment_trace is not None:
+                    segment_trace.close()
+                    active_segment_trace = None
                 if cb_progress:
                     cb_progress(done / total)
 
             # Chapter boundary fsyncs the O(1) recovery journal.  The task
             # boundary consolidates project.json once, avoiding O(N²) rewrites.
             status_writer.checkpoint()
+            if chapter_trace is not None:
+                chapter_trace.close()
+                active_chapter_trace = None
+                performance_trace.checkpoint()
             yield f"[=] ch{ch.id}|{ch.title}"
 
         elapsed_total = time.time() - start_time
         yield f"[0] done|{total}|{elapsed_total:.0f}s"
     finally:
+        if active_segment_trace is not None:
+            active_segment_trace.close()
+        if active_chapter_trace is not None:
+            active_chapter_trace.close()
         status_writer.close()

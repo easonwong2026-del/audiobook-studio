@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import time
 import uuid
 from pathlib import Path
 
@@ -51,6 +52,8 @@ def synthesize(
     pinyin_hints=None,
     num_beams: int = 2,
     engine=None,
+    trace=None,
+    trace_chapter_id: str | None = None,
 ) -> str:
     """合成一个 segment；v3 停顿存在时拆段合成并拼回单个 WAV。"""
     if engine is None:
@@ -65,42 +68,87 @@ def synthesize(
         or any(duration > 0 for _, duration in parts)
     )
     if not has_directing and len(parts) == 1:
-        return engine.synthesize_segment(
-            text=parts[0][0],
-            speaker_audio=speaker_audio,
-            emotion=emotion,
-            emo_alpha=emo_alpha,
-            speech_rate=speech_rate,
-            pinyin_hints=pinyin_hints,
-            output_path=output_path,
-            num_beams=num_beams,
-        )
+        engine_kwargs = {
+            "text": parts[0][0],
+            "speaker_audio": speaker_audio,
+            "emotion": emotion,
+            "emo_alpha": emo_alpha,
+            "speech_rate": speech_rate,
+            "pinyin_hints": pinyin_hints,
+            "output_path": output_path,
+            "num_beams": num_beams,
+        }
+        if trace is not None:
+            engine_kwargs.update({
+                "trace": trace,
+                "trace_segment_id": _value(segment, "id", ""),
+                "trace_chapter_id": trace_chapter_id,
+                "trace_part_index": 0,
+            })
+        started = time.perf_counter() if trace is not None else None
+        try:
+            return engine.synthesize_segment(**engine_kwargs)
+        finally:
+            if trace is not None:
+                try:
+                    trace.add_timing(
+                        "directed_synthesis_total",
+                        time.perf_counter() - (started or time.perf_counter()),
+                        scope="segment",
+                        chapter_id=trace_chapter_id,
+                        segment_id=_value(segment, "id", ""),
+                    )
+                except Exception as exc:  # noqa: BLE001  # diagnostics must not alter TTS
+                    del exc
 
     target = Path(output_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     task_dir = target.parent / f".{target.stem}_parts_{uuid.uuid4().hex}"
     task_dir.mkdir(parents=True, exist_ok=True)
     wav_parts = []
+    directed_started = time.perf_counter() if trace is not None else None
     try:
         for index, (text, internal_pause) in enumerate(parts):
             part_path = task_dir / f"{index:03d}.wav"
-            engine.synthesize_segment(
-                text=text,
-                speaker_audio=speaker_audio,
-                emotion=emotion,
-                emo_alpha=emo_alpha,
-                speech_rate=speech_rate,
-                pinyin_hints=pinyin_hints,
-                output_path=str(part_path),
-                num_beams=num_beams,
-            )
+            engine_kwargs = {
+                "text": text,
+                "speaker_audio": speaker_audio,
+                "emotion": emotion,
+                "emo_alpha": emo_alpha,
+                "speech_rate": speech_rate,
+                "pinyin_hints": pinyin_hints,
+                "output_path": str(part_path),
+                "num_beams": num_beams,
+            }
+            if trace is not None:
+                engine_kwargs.update({
+                    "trace": trace,
+                    "trace_segment_id": _value(segment, "id", ""),
+                    "trace_chapter_id": trace_chapter_id,
+                    "trace_part_index": index,
+                })
+            engine.synthesize_segment(**engine_kwargs)
             wav_parts.append((str(part_path), internal_pause))
-        compose(
-            wav_parts,
-            pause_before=pause_before,
-            pause_after=pause_after,
-            output_path=output_path,
-        )
+        compose_started = time.perf_counter() if trace is not None else None
+        try:
+            compose(
+                wav_parts,
+                pause_before=pause_before,
+                pause_after=pause_after,
+                output_path=output_path,
+            )
+        finally:
+            if trace is not None:
+                try:
+                    trace.add_timing(
+                        "wav_compose",
+                        time.perf_counter() - (compose_started or time.perf_counter()),
+                        scope="segment",
+                        chapter_id=trace_chapter_id,
+                        segment_id=_value(segment, "id", ""),
+                    )
+                except Exception as exc:  # noqa: BLE001  # diagnostics must not alter TTS
+                    del exc
     finally:
         for part_path, _ in wav_parts:
             try:
@@ -111,6 +159,17 @@ def synthesize(
             task_dir.rmdir()
         except OSError:
             pass
+        if trace is not None:
+            try:
+                trace.add_timing(
+                    "directed_synthesis_total",
+                    time.perf_counter() - (directed_started or time.perf_counter()),
+                    scope="segment",
+                    chapter_id=trace_chapter_id,
+                    segment_id=_value(segment, "id", ""),
+                )
+            except Exception as exc:  # noqa: BLE001  # diagnostics must not alter TTS
+                del exc
     return output_path
 
 

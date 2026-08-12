@@ -11,7 +11,8 @@ import json
 import logging
 import re
 import sys
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from .models import API_VERSION, server_info
 from .tools.export import (
@@ -32,7 +33,13 @@ from .tools.production import (
     retry_failed_segments,
     start_production,
 )
-from .tools.projects import get_project, list_projects
+from .tools.performance import get_production_performance
+from .tools.projects import (
+    get_project,
+    get_project_outline,
+    list_projects,
+    list_segments,
+)
 from .tools.quality import (
     get_quality_report,
     get_repair_task,
@@ -106,6 +113,106 @@ _TOOLS: dict[str, dict[str, Any]] = {
             "type": "object",
             "required": ["project_name"],
             "properties": {"project_name": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
+    "get_production_performance": {
+        "name": "get_production_performance",
+        "description": "读取已批量持久化的整书性能 trace 明细；尚无 checkpoint 时返回不可用状态。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["task_id"],
+            "properties": {"task_id": {"type": "string"}},
+            "additionalProperties": False,
+        },
+        "outputSchema": {"type": "object"},
+    },
+    "get_project_outline": {
+        "name": "get_project_outline",
+        "description": "读取轻量、无绝对路径的章节与段落进度目录；chapter_id 可直接用于生产 scope。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name"],
+            "properties": {"project_name": {"type": "string"}},
+            "additionalProperties": False,
+        },
+        "outputSchema": {
+            "type": "object",
+            "required": ["project_name", "title", "chapter_count", "segment_count", "chapters"],
+            "properties": {
+                "project_name": {"type": "string"},
+                "title": {"type": "string"},
+                "chapter_count": {"type": "integer"},
+                "segment_count": {"type": "integer"},
+                "chapters": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": [
+                            "chapter_id", "title", "segment_count", "completed",
+                            "failed", "pending", "progress", "required_roles",
+                        ],
+                        "properties": {
+                            "chapter_id": {"type": "string"},
+                            "title": {"type": "string"},
+                            "segment_count": {"type": "integer"},
+                            "completed": {"type": "integer"},
+                            "failed": {"type": "integer"},
+                            "pending": {"type": "integer"},
+                            "progress": {"type": "number"},
+                            "required_roles": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+    "list_segments": {
+        "name": "list_segments",
+        "description": "按稳定 structured_script 顺序分页读取段落摘要，可按章节或 synthesis/quality 状态过滤。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name"],
+            "properties": {
+                "project_name": {"type": "string"},
+                "chapter_id": {"type": "string"},
+                "status": {"type": "string"},
+                "offset": {"type": "integer", "minimum": 0, "default": 0},
+                "limit": {"type": "integer", "minimum": 0, "maximum": 1000, "default": 100},
+            },
+            "additionalProperties": False,
+        },
+        "outputSchema": {
+            "type": "object",
+            "required": ["project_name", "total", "offset", "limit", "segments"],
+            "properties": {
+                "project_name": {"type": "string"},
+                "total": {"type": "integer"},
+                "offset": {"type": "integer"},
+                "limit": {"type": "integer"},
+                "segments": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": [
+                            "segment_id", "chapter_id", "role", "role_id", "text_preview",
+                            "synthesis_status", "quality_status",
+                        ],
+                        "properties": {
+                            "segment_id": {"type": "string"},
+                            "chapter_id": {"type": "string"},
+                            "role": {"type": "string"},
+                            "role_id": {"type": ["string", "null"]},
+                            "text_preview": {"type": "string"},
+                            "synthesis_status": {"type": "string"},
+                            "quality_status": {"type": "string"},
+                        },
+                        "additionalProperties": False,
+                    },
+                },
+            },
             "additionalProperties": False,
         },
     },
@@ -645,12 +752,124 @@ _TOOLS.update({
     },
 })
 
+# MCP annotations are additive metadata.  They do not change handler inputs or
+# result payloads, so older clients can continue to ignore them safely.
+_READ_ONLY_TOOLS = {
+    "get_project_outline",
+    "list_segments",
+    "get_workflow_state",
+    "get_runtime_health",
+    "plan_production",
+    "get_production_task",
+    "list_production_tasks",
+    "get_quality_report",
+    "get_project",
+    "get_production_performance",
+    "list_projects",
+    "get_segment_review",
+    "get_repair_task",
+    "list_repairs",
+    "plan_export",
+    "get_export_task",
+    "list_exports",
+    "get_delivery_manifest",
+}
+_MUTATION_TOOLS = {
+    "create_project",
+    "set_character_roster",
+    "add_character_roles",
+    "update_character_role",
+    "set_voice_cast",
+    "bind_cast_role",
+    "finalize_voice_cast",
+    "start_production",
+    "pause_production",
+    "resume_production",
+    "cancel_production",
+    "retry_failed_segments",
+    "mark_segment_review",
+    "run_technical_qa",
+    "regenerate_segments",
+    "start_export",
+}
+for _tool_name in _READ_ONLY_TOOLS:
+    if _tool_name in _TOOLS:
+        _TOOLS[_tool_name]["annotations"] = {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        }
+for _tool_name in _MUTATION_TOOLS:
+    if _tool_name in _TOOLS:
+        _TOOLS[_tool_name]["annotations"] = {
+            "readOnlyHint": False,
+            "destructiveHint": _tool_name in {
+                "cancel_production", "regenerate_segments",
+            },
+            "idempotentHint": _tool_name in {
+                "pause_production", "resume_production", "cancel_production",
+                "mark_segment_review", "run_technical_qa",
+            },
+            "openWorldHint": False,
+        }
+
+_OBJECT_OUTPUT_SCHEMA = {"type": "object"}
+_WORKFLOW_OUTPUT_SCHEMA = {
+    "type": "object",
+    "required": ["project", "stage", "summary", "blockers", "next_actions"],
+    "properties": {
+        "project": {"type": "string"},
+        "stage": {"type": "string"},
+        "summary": {"type": "object"},
+        "blockers": {"type": "array", "items": {"type": "object"}},
+        "next_actions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "action", "tool", "arguments", "reason", "count",
+                    "action_type", "requires_confirmation", "retryable",
+                    "recommended_poll_seconds", "terminal",
+                ],
+                "properties": {
+                    "action": {"type": "string"},
+                    "tool": {"type": "string"},
+                    "arguments": {"type": "object"},
+                    "reason": {"type": "string"},
+                    "count": {"type": "integer"},
+                    "action_type": {"type": "string", "enum": ["observe", "auto", "human"]},
+                    "requires_confirmation": {"type": "boolean"},
+                    "retryable": {"type": "boolean"},
+                    "recommended_poll_seconds": {"type": "integer", "minimum": 0},
+                    "terminal": {"type": "boolean"},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    "additionalProperties": False,
+}
+for _tool_name in (
+    "get_workflow_state",
+    "get_runtime_health",
+    "plan_production",
+    "get_production_task",
+    "get_quality_report",
+):
+    if _tool_name in _TOOLS:
+        _TOOLS[_tool_name].setdefault("outputSchema", _OBJECT_OUTPUT_SCHEMA)
+_TOOLS["get_workflow_state"]["outputSchema"] = _WORKFLOW_OUTPUT_SCHEMA
+
 _HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "server_info": lambda _arguments: server_info(),
     "validate_structured_script": validate_structured_script,
     "create_project": create_project,
     "list_projects": list_projects,
     "get_project": get_project,
+    "get_production_performance": get_production_performance,
+    "get_project_outline": get_project_outline,
+    "list_segments": list_segments,
     "list_voice_assets": list_voice_assets,
     "get_voice_asset": get_voice_asset,
     "set_character_roster": set_character_roster,
