@@ -20,12 +20,14 @@ from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from typing import Any, Optional
 
+from lib import project_paths
 from lib import progress as synthesis_progress
 from lib.failures import RecoveryBudget, RecoveryHooks, SynthesisFailure
 from repositories.project_repo import ProjectRepository
 from repositories.task_repo import RuntimePendingSignal, TaskRecord, TaskRepository
 
 from .runtime_engine import EngineInitError, RuntimeEngineLifecycle
+from .performance_trace import PerformanceTrace
 from .runtime_lock import ProcessFileLock
 from .synthesis import SynthesisService, SynthesisState
 
@@ -617,6 +619,17 @@ class ProductionRuntime:
                 state.notify()
                 return
         options = record.options if isinstance(record.options, dict) else {}
+        from lib import config
+
+        performance_trace = PerformanceTrace(
+            task_id=record.task_id,
+            project=record.project,
+            persist_path=os.path.join(
+                project_paths.project_dir(config.get_data_dir(), "logs", create=True),
+                "performance",
+                f"{record.task_id}.json",
+            ),
+        )
         self._note_startup(record, "preparing_first_segment")
         _runtime_event(
             "task_start",
@@ -657,6 +670,7 @@ class ProductionRuntime:
                 ),
                 recovery=self._build_recovery_hooks(state, record),
                 budget=RecoveryBudget(),
+                performance_trace=performance_trace,
             )
         except Exception as exc:
             state.status = "error"
@@ -690,6 +704,17 @@ class ProductionRuntime:
         def _on_recovery(event: dict) -> None:
             payload = dict(event)
             event_name = str(payload.get("event") or "")
+            if state.performance_trace is not None:
+                try:
+                    state.performance_trace.record_event(
+                        f"recovery:{event_name}",
+                        data=payload,
+                    )
+                    state.performance_trace.record_boundary(
+                        f"recovery:{event_name}"
+                    )
+                except Exception:  # noqa: BLE001  # diagnostics must not alter recovery
+                    logger.debug("记录 recovery trace 失败", exc_info=True)
             previous = dict(state.recovery or {})
             if event_name == "recovering":
                 self._engine.set_runtime_state("recovering")
@@ -1279,6 +1304,14 @@ class ProductionRuntime:
         progress["selected_total"] = total
         progress["pending"] = max(total - completed - len(failed_ids), 0)
         progress["to_synthesize"] = progress["pending"] + len(failed_ids)
+        if (
+            state.performance_trace is not None
+            and state.status in {"cancelled", "done", "error", "needs_attention"}
+        ):
+            try:
+                progress["performance"] = state.performance_trace.summary()
+            except Exception:  # noqa: BLE001  # diagnostics must not alter persistence
+                logger.debug("读取 performance summary 失败", exc_info=True)
         return progress
 
     def _on_state_update(self, state: SynthesisState) -> None:

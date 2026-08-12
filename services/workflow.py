@@ -1,37 +1,189 @@
 """Derived book workflow state for Web and Agent control planes."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 from repositories.project_repo import ProjectRepository
 from repositories.quality_repo import QualityRepository
 from repositories.task_repo import TaskRepository
+from services.delivery import compute_delivery_input_snapshot
 from services.production_jobs import ProductionJobService
 from services.quality import QualityService
-from services.delivery import compute_delivery_input_snapshot
 from services.voice_cast import VoiceCastResolver
 
 
 class WorkflowService:
     """Derive workflow stage from durable facts instead of persisting a second stage."""
 
-    @staticmethod
+    _ACTION_CONTRACTS: ClassVar[dict[str, dict[str, Any]]] = {
+        "complete_voice_cast": {
+            "action_type": "human",
+            "requires_confirmation": True,
+            "retryable": False,
+            "recommended_poll_seconds": 0,
+            "terminal": False,
+        },
+        "wait_for_recovery": {
+            "action_type": "observe",
+            "requires_confirmation": False,
+            "retryable": True,
+            "recommended_poll_seconds": 10,
+            "terminal": False,
+        },
+        "check_production": {
+            "action_type": "observe",
+            "requires_confirmation": False,
+            "retryable": True,
+            "recommended_poll_seconds": 10,
+            "terminal": False,
+        },
+        "retry_task": {
+            "action_type": "auto",
+            "requires_confirmation": False,
+            "retryable": True,
+            "recommended_poll_seconds": 10,
+            "terminal": False,
+        },
+        "inspect_runtime_health": {
+            "action_type": "observe",
+            "requires_confirmation": False,
+            "retryable": True,
+            "recommended_poll_seconds": 0,
+            "terminal": False,
+        },
+        "cancel_task": {
+            "action_type": "human",
+            "requires_confirmation": True,
+            "retryable": False,
+            "recommended_poll_seconds": 0,
+            "terminal": False,
+        },
+        "check_repair": {
+            "action_type": "observe",
+            "requires_confirmation": False,
+            "retryable": True,
+            "recommended_poll_seconds": 10,
+            "terminal": False,
+        },
+        "retry_failed_segments": {
+            "action_type": "auto",
+            "requires_confirmation": False,
+            "retryable": True,
+            "recommended_poll_seconds": 10,
+            "terminal": False,
+        },
+        "resolve_failed_task": {
+            "action_type": "observe",
+            "requires_confirmation": False,
+            "retryable": True,
+            "recommended_poll_seconds": 0,
+            "terminal": False,
+        },
+        "repair_segments": {
+            "action_type": "human",
+            "requires_confirmation": True,
+            "retryable": False,
+            "recommended_poll_seconds": 0,
+            "terminal": False,
+        },
+        "produce_remaining": {
+            "action_type": "auto",
+            "requires_confirmation": False,
+            "retryable": True,
+            "recommended_poll_seconds": 10,
+            "terminal": False,
+        },
+        "check_export": {
+            "action_type": "observe",
+            "requires_confirmation": False,
+            "retryable": True,
+            "recommended_poll_seconds": 10,
+            "terminal": False,
+        },
+        "inspect_delivery": {
+            "action_type": "observe",
+            "requires_confirmation": False,
+            "retryable": False,
+            "recommended_poll_seconds": 0,
+            "terminal": True,
+        },
+        "plan_export": {
+            "action_type": "observe",
+            "requires_confirmation": False,
+            "retryable": True,
+            "recommended_poll_seconds": 0,
+            "terminal": False,
+        },
+        "review_segments": {
+            "action_type": "human",
+            "requires_confirmation": True,
+            "retryable": False,
+            "recommended_poll_seconds": 0,
+            "terminal": False,
+        },
+    }
+
+    @classmethod
     def _action(
+        cls,
         action: str,
         tool: str,
         project_name: str,
         reason: str,
         *,
         count: int = 0,
+        include_project_name: bool = True,
         **arguments: Any,
     ) -> dict[str, Any]:
+        contract = dict(cls._ACTION_CONTRACTS.get(action, {
+            "action_type": "observe",
+            "requires_confirmation": False,
+            "retryable": True,
+            "recommended_poll_seconds": 0,
+            "terminal": False,
+        }))
+        tool_arguments = dict(arguments)
+        if include_project_name:
+            tool_arguments = {"project_name": project_name, **tool_arguments}
         return {
             "action": action,
             "tool": tool,
-            "arguments": {"project_name": project_name, **arguments},
+            "arguments": tool_arguments,
             "reason": reason,
             "count": int(count or 0),
+            **contract,
         }
+
+    @staticmethod
+    def _unique_failed_task_id(
+        project_name: str,
+        failed_segment_ids: set[str],
+    ) -> str | None:
+        """Resolve a retry source only from explicit durable failed IDs.
+
+        A project can have several historical synthesis attempts.  Scope or
+        recency alone is not enough to infer which task owns a failure, so an
+        action is directly executable only when exactly one non-active task
+        explicitly records an overlapping ``failed_segment_ids`` set.
+        """
+        if not failed_segment_ids:
+            return None
+        candidates: list[str] = []
+        for record in TaskRepository.list_tasks(
+            project=project_name,
+            task_type="synthesis",
+        ):
+            if record.status in {"pending", "running", "pausing", "paused", "recovering", "cancelling"}:
+                continue
+            recorded = {
+                str(item).strip()
+                for item in (record.failed_segment_ids or [])
+                if str(item).strip()
+            }
+            if recorded & failed_segment_ids:
+                candidates.append(str(record.task_id))
+        unique = sorted({item for item in candidates if item})
+        return unique[0] if len(unique) == 1 else None
 
     @classmethod
     def get_state(cls, project_name: str) -> dict[str, Any]:
@@ -57,7 +209,7 @@ class WorkflowService:
 
         try:
             cast = VoiceCastResolver.get_voice_binding_status(project)
-        except Exception:
+        except Exception:  # noqa: BLE001  # legacy projects must remain queryable
             legacy_bindings = (
                 bindings.get("bindings", {}) if isinstance(bindings, dict) else {}
             )
@@ -139,7 +291,7 @@ class WorkflowService:
             current_delivery_hash = str(
                 delivery_snapshot.get("delivery_input_hash") or ""
             )
-        except Exception:
+        except Exception:  # noqa: BLE001  # delivery is best-effort derived state
             # Workflow state should remain queryable for a partially-created or
             # legacy project.  An unavailable snapshot can never make an old
             # manifest current, so it is safe to treat delivery as stale.
@@ -198,6 +350,7 @@ class WorkflowService:
                     project,
                     "TTS 引擎正在自动恢复，等待 recovery 完成，不要重复提交任务。",
                     task_id=active_task.get("task_id"),
+                    include_project_name=False,
                 ))
             else:
                 stage = "producing"
@@ -207,6 +360,7 @@ class WorkflowService:
                     project,
                     "生产任务正在运行。",
                     task_id=active_task.get("task_id"),
+                    include_project_name=False,
                 ))
         elif attention_task:
             stage = "needs_attention"
@@ -216,12 +370,14 @@ class WorkflowService:
                 project,
                 "自动恢复已耗尽，重试剩余段落。",
                 task_id=attention_task.task_id,
+                include_project_name=False,
             ))
             actions.append(cls._action(
                 "inspect_runtime_health",
                 "get_runtime_health",
                 project,
                 "检查 TTS 运行时与引擎健康状态。",
+                include_project_name=False,
             ))
             actions.append(cls._action(
                 "cancel_task",
@@ -229,6 +385,7 @@ class WorkflowService:
                 project,
                 "放弃当前任务。",
                 task_id=attention_task.task_id,
+                include_project_name=False,
             ))
         elif active_repairs:
             stage = "needs_fix"
@@ -242,19 +399,38 @@ class WorkflowService:
         elif failed or technical_failures or quality_summary.get("needs_fix", 0):
             stage = "needs_fix"
             if failed:
+                failed_segment_ids = {
+                    str(segment.get("id") or "")
+                    for segment in segments
+                    if statuses.get(str(segment.get("id"))) == "failed"
+                }
+                retry_task_id = cls._unique_failed_task_id(
+                    project, failed_segment_ids
+                )
                 blockers.append({
                     "code": "SYNTHESIS_FAILED",
                     "message": f"有 {failed} 个段落生产失败。",
                     "count": failed,
                 })
-                actions.append(cls._action(
-                    "retry_failed_segments",
-                    "list_production_tasks",
-                    project,
-                    "查找最近任务并重试失败段落。",
-                    count=failed,
-                    status="error",
-                ))
+                if retry_task_id:
+                    actions.append(cls._action(
+                        "retry_failed_segments",
+                        "retry_failed_segments",
+                        project,
+                        "直接重试唯一记录该失败段的生产任务。",
+                        count=failed,
+                        task_id=retry_task_id,
+                        include_project_name=False,
+                    ))
+                else:
+                    actions.append(cls._action(
+                        "resolve_failed_task",
+                        "list_production_tasks",
+                        project,
+                        "无法唯一关联失败段落所属的 synthesis task；先观察错误任务列表，再将明确 task_id 传给 retry_failed_segments。",
+                        count=failed,
+                        status="error",
+                    ))
             quality_fix = int(quality_summary.get("needs_fix", 0) or 0) + technical_failures
             if quality_fix:
                 blockers.append({
@@ -297,7 +473,6 @@ class WorkflowService:
                     "get_delivery_manifest",
                     project,
                     "当前项目输入与最近一次可交付成品一致。",
-                    manifest_id=delivered.get("manifest_id"),
                 ))
             else:
                 stage = "quality_passed"

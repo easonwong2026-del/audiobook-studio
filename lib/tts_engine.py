@@ -5,6 +5,7 @@ import inspect
 import os
 import logging
 import threading
+import time
 from . import config as _cfg
 from . import audio_format as af
 from .segment_cache import SpeakerEmbeddingLRU
@@ -161,6 +162,10 @@ def synthesize_segment(
     # num_beams 控制 GPT beam search 宽度（默认 2=质量/速度平衡）。
     # 3=质量优先但更慢；1=最快但需听测质量；2=默认折中，用户仍可显式传值覆盖。
     num_beams: int = 2,
+    trace=None,
+    trace_segment_id: str | None = None,
+    trace_chapter_id: str | None = None,
+    trace_part_index: int | str | None = None,
 ) -> str:
     # 引擎互斥（RLock）：保证合成与模型加载串行化；OOM 递归调用自身时同一线程
     # 可重入，不会死锁。调用方无需再加锁。
@@ -243,13 +248,22 @@ def synthesize_segment(
                 generation_kwargs = {}
                 if "num_beams" in param_names or has_var_keyword:
                     generation_kwargs["num_beams"] = num_beams
+                infer_started = None
+                if trace is not None:
+                    infer_started = time.perf_counter()
+                infer_success = False
+                infer_error: BaseException | None = None
                 try:
                     _tts.infer(**infer_kwargs, **generation_kwargs)
-                except EngineRuntimeFailure:
+                    infer_success = True
+                except EngineRuntimeFailure as exc:
+                    infer_error = exc
                     raise
-                except oom_error:
+                except oom_error as exc:
+                    infer_error = exc
                     raise
                 except OSError as exc:
+                    infer_error = exc
                     # Only the observed errno=22 engine-infer fingerprint is
                     # currently approved for automatic engine recycle.  Other
                     # OSErrors remain structured, non-recoverable failures.
@@ -261,17 +275,40 @@ def synthesize_segment(
                         original_exception=exc,
                     ) from exc
                 except Exception as exc:
+                    infer_error = exc
                     raise EngineRuntimeFailure(
                         PHASE_ENGINE_INFER,
                         str(exc),
                         recoverable=False,
                         original_exception=exc,
                     ) from exc
+                finally:
+                    if trace is not None and infer_started is not None:
+                        try:
+                            trace.record_infer(
+                                trace_segment_id or output_path,
+                                time.perf_counter() - infer_started,
+                                part_index=trace_part_index,
+                                chapter_id=trace_chapter_id,
+                                success=infer_success,
+                                error=infer_error,
+                            )
+                        except Exception:  # noqa: BLE001  # diagnostics must not alter TTS
+                            logger.debug("记录 engine_infer trace 失败", exc_info=True)
                 empty_cache()  # 2.4 M-3：段级碎片化显存清理（守卫式，无 CUDA 时 no-op）
                 return output_path
 
             except oom_error as oom_exc:
                 last_oom = oom_exc
+                if trace is not None:
+                    try:
+                        trace.record_boundary("oom")
+                        trace.record_event(
+                            "oom",
+                            data={"segment_id": trace_segment_id or output_path},
+                        )
+                    except Exception:  # noqa: BLE001  # diagnostics must not alter TTS
+                        logger.debug("记录 OOM trace 失败", exc_info=True)
                 empty_cache()
                 if attempt == 0:
                     logger.warning("OOM, retrying after cache clear...")
@@ -294,6 +331,10 @@ def synthesize_segment(
                         max_tokens=max_tokens,
                         pinyin_hints=pinyin_hints,
                         num_beams=num_beams,
+                        trace=trace,
+                        trace_segment_id=trace_segment_id,
+                        trace_chapter_id=trace_chapter_id,
+                        trace_part_index=trace_part_index,
                     )
                     synthesize_segment(
                         text=text[mid:],
@@ -305,6 +346,10 @@ def synthesize_segment(
                         max_tokens=max_tokens,
                         pinyin_hints=pinyin_hints,
                         num_beams=num_beams,
+                        trace=trace,
+                        trace_segment_id=trace_segment_id,
+                        trace_chapter_id=trace_chapter_id,
+                        trace_part_index=trace_part_index,
                     )
                     # 将两段拼接回原 output_path 并清理临时文件
                     _concat_wavs([path_a, path_b], output_path)

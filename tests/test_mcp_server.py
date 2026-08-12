@@ -8,8 +8,13 @@ import os
 import pytest
 
 from lib import project_manager as pm
-from mcp_server.server import handle_request
-from mcp_server.tools.projects import get_project, list_projects
+from mcp_server.server import _TOOLS, handle_request
+from mcp_server.tools.projects import (
+    get_project,
+    get_project_outline,
+    list_projects,
+    list_segments,
+)
 from mcp_server.tools.scripts import create_project, validate_structured_script
 from repositories.project_repo import ProjectRepository
 
@@ -106,6 +111,62 @@ def test_create_duplicate_list_and_get_summary(isolated_projects):
     assert detail["integrity"]["ok"] is True
 
 
+def test_project_outline_and_segment_listing_are_compact_and_stable(isolated_projects):
+    create_project({"project_name": "目录书", "script": _script()})
+
+    outline = get_project_outline({"project_name": "目录书"})
+    assert outline["chapter_count"] == 1
+    assert outline["title"] == "MCP 测试书"
+    assert outline["segment_count"] == 2
+    assert outline["chapters"][0]["chapter_id"] == "100"
+    assert outline["chapters"][0]["pending"] == 2
+    assert outline["chapters"][0]["required_roles"] == ["旁白", "小雨"]
+
+    first = list_segments({
+        "project_name": "目录书",
+        "chapter_id": "100",
+        "offset": 0,
+        "limit": 1,
+    })
+    second = list_segments({
+        "project_name": "目录书",
+        "chapter_id": "100",
+        "offset": 1,
+        "limit": 1,
+    })
+    assert first["total"] == 2
+    assert first["segments"][0]["segment_id"] == "100-001"
+    assert second["segments"][0]["segment_id"] == "100-002"
+    assert first["segments"][0]["synthesis_status"] == "pending"
+    assert first["segments"][0]["quality_status"] == "not_started"
+    assert len(first["segments"][0]["text_preview"]) <= 160
+    assert all("/" not in str(item) for item in first["segments"][0].values())
+
+
+def test_mcp_metadata_declares_query_and_mutation_semantics():
+    for tool_name in (
+        "get_project_outline",
+        "list_segments",
+        "get_workflow_state",
+        "get_runtime_health",
+        "plan_production",
+        "get_production_task",
+        "get_quality_report",
+    ):
+        metadata = _TOOLS[tool_name]
+        assert metadata["annotations"]["readOnlyHint"] is True
+        assert metadata["outputSchema"]["type"] == "object"
+    assert "next_actions" in _TOOLS["get_workflow_state"]["outputSchema"]["required"]
+
+    assert _TOOLS["start_production"]["annotations"] == {
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    }
+    assert _TOOLS["retry_failed_segments"]["annotations"]["idempotentHint"] is False
+
+
 def test_stdio_methods_and_no_gradio_import():
     initialize = handle_request({
         "jsonrpc": "2.0",
@@ -117,6 +178,7 @@ def test_stdio_methods_and_no_gradio_import():
     tools = handle_request({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
     assert {item["name"] for item in tools["result"]["tools"]} >= {
         "server_info", "validate_structured_script", "create_project", "list_projects", "get_project",
+        "get_project_outline", "list_segments", "get_production_performance",
         "list_voice_assets", "get_voice_asset",
         "set_character_roster", "get_character_roster", "add_character_roles",
         "update_character_role", "validate_character_roster",

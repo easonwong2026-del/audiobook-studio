@@ -118,6 +118,29 @@ def test_workflow_moves_from_ready_to_quality_passed(delivery_project):
     assert passed["next_actions"][0]["tool"] == "plan_export"
 
 
+def test_workflow_failed_segment_exposes_direct_retry_when_task_is_unambiguous(
+    delivery_project,
+):
+    now = "2026-08-11T00:00:00Z"
+    ProjectRepository.update_segment_status(delivery_project, "001-001", "failed")
+    TaskRepository.save_task(TaskRecord(
+        task_id="failed-source",
+        task_type="synthesis",
+        project=delivery_project,
+        status="error",
+        failed_segment_ids=["001-001"],
+        created_at=now,
+        updated_at=now,
+    ))
+
+    state = WorkflowService.get_state(delivery_project)
+    retry = next(item for item in state["next_actions"] if item["action"] == "retry_failed_segments")
+    assert retry["tool"] == "retry_failed_segments"
+    assert retry["arguments"] == {"task_id": "failed-source"}
+    assert retry["action_type"] == "auto"
+    assert retry["requires_confirmation"] is False
+
+
 def test_legacy_export_history_without_task_is_not_live(delivery_project):
     _finish_and_review(delivery_project)
     QualityRepository.create_history_record(

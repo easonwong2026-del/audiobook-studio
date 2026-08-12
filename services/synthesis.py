@@ -94,6 +94,7 @@ class SynthesisState:
     recovery: Optional[dict] = field(default=None, repr=False, compare=False)
     engine_generation: int = 0
     last_failure: Optional[dict] = field(default=None, repr=False, compare=False)
+    performance_trace: Any = field(default=None, repr=False, compare=False)
 
     def append_log(self, line: str) -> None:
         """追加一行日志并保留末 50 行（D5）。"""
@@ -139,7 +140,7 @@ class SynthesisService:
               selected_segment_ids: Optional[list] = None,
               persist_task: bool = True,
               voice_overrides: Optional[dict[str, str]] = None,
-              recovery=None, budget=None) -> str:
+              recovery=None, budget=None, performance_trace=None) -> str:
         """提交后台合成，立即返回 task_id；重活在 worker 线程执行。
 
         阶段四：在提交 worker 前写入 TaskRecord（running 态）。
@@ -180,6 +181,7 @@ class SynthesisService:
             num_beams, emotion, emo_alpha, speech_rate, cb_seg_state,
             selected_chapters, selected_segment_ids, persist_task,
             voice_overrides, recovery, budget,
+            performance_trace,
         )
         # 写入任务状态记录（running）
         if persist_task:
@@ -221,6 +223,11 @@ class SynthesisService:
         state.cancel = True
         state.cancel_requested = True
         state.status = "cancelling"
+        if state.performance_trace is not None:
+            try:
+                state.performance_trace.record_event("cancel_requested")
+            except Exception:  # noqa: BLE001  # diagnostics must not alter control
+                logger.debug("记录 cancel trace 失败", exc_info=True)
         state.notify()
 
     @staticmethod
@@ -233,6 +240,11 @@ class SynthesisService:
         state.paused = True
         if state.status in {"pending", "running"}:
             state.status = "pausing"
+        if state.performance_trace is not None:
+            try:
+                state.performance_trace.record_event("pause_requested")
+            except Exception:  # noqa: BLE001  # diagnostics must not alter control
+                logger.debug("记录 pause trace 失败", exc_info=True)
         state.notify()
 
     @staticmethod
@@ -241,6 +253,11 @@ class SynthesisService:
         state.paused = False
         if state.status in {"paused", "pausing"}:
             state.status = "running"
+        if state.performance_trace is not None:
+            try:
+                state.performance_trace.record_event("resume_requested")
+            except Exception:  # noqa: BLE001  # diagnostics must not alter control
+                logger.debug("记录 resume trace 失败", exc_info=True)
         state.notify()
 
     @staticmethod
@@ -292,7 +309,7 @@ class SynthesisService:
              selected_segment_ids: Optional[list] = None,
              persist_task: bool = True,
              voice_overrides: Optional[dict[str, str]] = None,
-             recovery=None, budget=None) -> None:
+             recovery=None, budget=None, performance_trace=None) -> None:
         """worker 主体：驱动 ``lib.queue.synthesize_project``，逐 yield 写回 ``state``。
 
         段边界检查 ``state.cancel`` -> 协作取消（置 ``cancelled`` 终态）；检查
@@ -314,6 +331,12 @@ class SynthesisService:
             selected_segment_ids: 可选的精确段范围。
             persist_task: 是否写入兼容版 TaskRecord。
         """
+        state.performance_trace = performance_trace
+        if performance_trace is not None:
+            try:
+                performance_trace.start_task(state.task_id, project)
+            except Exception:  # noqa: BLE001  # diagnostics must not alter TTS
+                logger.debug("启动 performance trace 失败", exc_info=True)
         if state.cancel:
             state.status = "cancelling"
         elif state.paused:
@@ -395,6 +418,7 @@ class SynthesisService:
                 voice_overrides=voice_overrides,
                 recovery=recovery,
                 budget=budget,
+                performance_trace=performance_trace,
             )
             # 手动驱动生成器：在「段边界」检查暂停/取消，并控制是否向下拉取（暂停时
             # 不调 next，从而不提交新段）。等价于原 ``for raw in gen``，但支持协作暂停。
@@ -505,4 +529,10 @@ class SynthesisService:
                 )
             state.notify()
         finally:
-            pass  # empty_cache 移出 finally，避免后台线程中 torch CUDA 访问 segfault
+            if performance_trace is not None:
+                try:
+                    performance_trace.end_task()
+                    performance_trace.persist()
+                except Exception:  # noqa: BLE001  # diagnostics must not alter TTS
+                    logger.debug("结束 performance trace 失败", exc_info=True)
+                state.notify()
