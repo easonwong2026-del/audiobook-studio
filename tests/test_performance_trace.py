@@ -1,11 +1,62 @@
 """Regression tests for the independent production performance trace API."""
 from __future__ import annotations
 
+import ast
 import json
+from pathlib import Path
 
 import pytest
 
 from services.performance_trace import PerformanceTrace, TraceSession
+
+
+_PYTHON_310_PRODUCTION_FILES = (
+    "lib/directed_synthesis.py",
+    "lib/queue.py",
+    "lib/tts_engine.py",
+    "mcp_server/models.py",
+    "mcp_server/server.py",
+    "mcp_server/tools/performance.py",
+    "mcp_server/tools/projects.py",
+    "services/engine_capabilities.py",
+    "services/performance_trace.py",
+    "services/production_runtime.py",
+    "services/synthesis.py",
+    "services/workflow.py",
+)
+_PYTHON_311_ONLY_TYPING_NAMES = {
+    "Self",
+    "NotRequired",
+    "Required",
+    "LiteralString",
+    "Never",
+}
+
+
+def test_changed_production_modules_use_python310_typing_apis():
+    root = Path(__file__).parents[1]
+    for relative_path in _PYTHON_310_PRODUCTION_FILES:
+        tree = ast.parse((root / relative_path).read_text(encoding="utf-8"))
+        imported_names = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module == "typing"
+            for alias in node.names
+        }
+        assert not imported_names & _PYTHON_311_ONLY_TYPING_NAMES, relative_path
+
+
+def test_trace_lifecycle_accepts_zero_as_a_valid_start_time():
+    ticks = iter([0.0, 0.0, 0.25, 0.25, 1.0])
+    trace = PerformanceTrace(clock=lambda: next(ticks), gpu_sampler=None)
+
+    trace.start_task()
+    trace.start_segment("1-001")
+    trace.end_segment("1-001")
+    trace.end_task()
+
+    assert trace.summary()["timings"]["segment_total"] == pytest.approx(0.25)
+    assert trace.summary()["timings"]["task_total"] == pytest.approx(1.0)
 
 
 def test_trace_accumulates_task_chapter_segment_and_phase_timings(tmp_path):

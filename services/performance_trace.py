@@ -20,7 +20,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Self
+from typing import Any
 
 from .engine_capabilities import gpu_snapshot as default_gpu_snapshot
 
@@ -275,7 +275,9 @@ class PerformanceTrace:
             for chapter_id, chapter in list(self._chapters.items()):
                 if chapter["active"]:
                     self.end_chapter(chapter_id)
-            elapsed = max(0.0, self._now() - (self._task_started_at or self._now()))
+            finished_at = self._now()
+            started_at = self._task_started_at
+            elapsed = max(0.0, finished_at - started_at) if started_at is not None else 0.0
             self.add_timing("task_total", elapsed, scope="task")
             self._task_active = False
             self._capture_gpu("task_end")
@@ -304,7 +306,9 @@ class PerformanceTrace:
             chapter = self._chapter(chapter_id)
             if chapter is None or not chapter["active"]:
                 return
-            elapsed = max(0.0, self._now() - (chapter["started_at"] or self._now()))
+            finished_at = self._now()
+            started_at = chapter["started_at"]
+            elapsed = max(0.0, finished_at - started_at) if started_at is not None else 0.0
             self.add_timing("chapter_total", elapsed, scope="chapter", chapter_id=chapter_id)
             chapter["active"] = False
             self._capture_gpu(f"chapter:{chapter_id}:end")
@@ -351,7 +355,9 @@ class PerformanceTrace:
             record = self._segment(segment_id, chapter_id)
             if record is None or not record.active:
                 return
-            elapsed = max(0.0, self._now() - (record.started_at or self._now()))
+            finished_at = self._now()
+            started_at = record.started_at
+            elapsed = max(0.0, finished_at - started_at) if started_at is not None else 0.0
             self.add_timing(
                 "segment_total",
                 elapsed,
@@ -811,7 +817,7 @@ class TraceSession:
         self.segment_id = segment_id
         self.active = bool(active)
 
-    def __enter__(self) -> Self:
+    def __enter__(self) -> "TraceSession":
         if not self.active:
             if self.scope == "task":
                 started = self.trace.start_task(self.task_id)

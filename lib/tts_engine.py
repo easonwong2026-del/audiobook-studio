@@ -248,7 +248,9 @@ def synthesize_segment(
                 generation_kwargs = {}
                 if "num_beams" in param_names or has_var_keyword:
                     generation_kwargs["num_beams"] = num_beams
-                infer_started = time.perf_counter() if trace is not None else None
+                infer_started = None
+                if trace is not None:
+                    infer_started = time.perf_counter()
                 infer_success = False
                 infer_error: BaseException | None = None
                 try:
@@ -281,11 +283,11 @@ def synthesize_segment(
                         original_exception=exc,
                     ) from exc
                 finally:
-                    if trace is not None:
+                    if trace is not None and infer_started is not None:
                         try:
                             trace.record_infer(
                                 trace_segment_id or output_path,
-                                time.perf_counter() - (infer_started or time.perf_counter()),
+                                time.perf_counter() - infer_started,
                                 part_index=trace_part_index,
                                 chapter_id=trace_chapter_id,
                                 success=infer_success,

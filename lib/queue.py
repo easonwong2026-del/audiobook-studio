@@ -28,6 +28,17 @@ from repositories.project_repo import ProjectRepository
 logger = logging.getLogger(__name__)
 
 
+def _trace_call(trace, method: str, *args, **kwargs):
+    """Invoke an optional diagnostic hook without changing queue behavior."""
+    if trace is None:
+        return None
+    try:
+        return getattr(trace, method)(*args, **kwargs)
+    except Exception:  # noqa: BLE001  # diagnostics must not escape production
+        logger.debug("performance trace %s failed", method, exc_info=True)
+        return None
+
+
 class _PhaseFailure(Exception):
     """Internal phase-tagged failure raised by lib layers below the engine."""
 
@@ -60,13 +71,14 @@ def _publish_segment(
             if audio.getnframes() <= 0 or audio.getframerate() <= 0:
                 raise RuntimeError("合成结果不是有效 WAV")
     except Exception as exc:
-        if performance_trace is not None:
-            performance_trace.record_failure(
-                PHASE_WAV_VALIDATE,
-                segment_id=segment_id,
-                chapter_id=chapter_id,
-                error=exc,
-            )
+        _trace_call(
+            performance_trace,
+            "record_failure",
+            PHASE_WAV_VALIDATE,
+            segment_id=segment_id,
+            chapter_id=chapter_id,
+            error=exc,
+        )
         try:
             if os.path.isfile(temp_path):
                 os.remove(temp_path)
@@ -74,14 +86,15 @@ def _publish_segment(
             pass
         raise _PhaseFailure(PHASE_WAV_VALIDATE, exc) from exc
     finally:
-        if performance_trace is not None:
-            performance_trace.add_timing(
-                "wav_validate",
-                time.perf_counter() - validate_started,
-                scope="segment",
-                segment_id=segment_id,
-                chapter_id=chapter_id,
-            )
+        _trace_call(
+            performance_trace,
+            "add_timing",
+            "wav_validate",
+            time.perf_counter() - validate_started,
+            scope="segment",
+            segment_id=segment_id,
+            chapter_id=chapter_id,
+        )
     publish_started = time.perf_counter()
     publish_succeeded = False
     publish_error: BaseException | None = None
@@ -97,14 +110,15 @@ def _publish_segment(
             pass
         raise _PhaseFailure(PHASE_ATOMIC_PUBLISH, exc) from exc
     finally:
-        if performance_trace is not None:
-            performance_trace.record_publish(
-                time.perf_counter() - publish_started,
-                segment_id=segment_id,
-                chapter_id=chapter_id,
-                success=publish_succeeded,
-                error=publish_error,
-            )
+        _trace_call(
+            performance_trace,
+            "record_publish",
+            time.perf_counter() - publish_started,
+            segment_id=segment_id,
+            chapter_id=chapter_id,
+            success=publish_succeeded,
+            error=publish_error,
+        )
 
 
 def _status_update(
@@ -119,23 +133,25 @@ def _status_update(
     try:
         status_writer.update(segment_id, status)
     except Exception as exc:
-        if performance_trace is not None:
-            performance_trace.record_status(
-                time.perf_counter() - started,
-                status=status,
-                segment_id=segment_id,
-                chapter_id=chapter_id,
-                success=False,
-                error=exc,
-            )
-        raise
-    if performance_trace is not None:
-        performance_trace.record_status(
+        _trace_call(
+            performance_trace,
+            "record_status",
             time.perf_counter() - started,
             status=status,
             segment_id=segment_id,
             chapter_id=chapter_id,
+            success=False,
+            error=exc,
         )
+        raise
+    _trace_call(
+        performance_trace,
+        "record_status",
+        time.perf_counter() - started,
+        status=status,
+        segment_id=segment_id,
+        chapter_id=chapter_id,
+    )
 
 
 def _classify_failure(
@@ -344,9 +360,10 @@ def synthesize_project(
     try:
         for ch in script.chapters:
             ch_label = str(ch.id)
-            chapter_trace = (
-                performance_trace.start_chapter(ch_label)
-                if performance_trace is not None else None
+            chapter_trace = _trace_call(
+                performance_trace,
+                "start_chapter",
+                ch_label,
             )
             active_chapter_trace = chapter_trace
             ch_unselected = selected_set is not None and ch_label not in selected_set
@@ -367,11 +384,11 @@ def synthesize_project(
                 if seg.id not in remaining_set:
                     continue
 
-                segment_trace = (
-                    performance_trace.start_segment(
-                        str(seg.id), chapter_id=ch_label
-                    )
-                    if performance_trace is not None else None
+                segment_trace = _trace_call(
+                    performance_trace,
+                    "start_segment",
+                    str(seg.id),
+                    chapter_id=ch_label,
                 )
                 active_segment_trace = segment_trace
                 speaker_started = time.perf_counter()
@@ -397,8 +414,7 @@ def synthesize_project(
                         performance_trace=performance_trace,
                         chapter_id=ch_label,
                     )
-                    if segment_trace is not None:
-                        segment_trace.close()
+                    _trace_call(segment_trace, "close")
                     continue
 
                 if not os.path.isabs(str(speaker)):
@@ -419,18 +435,18 @@ def synthesize_project(
                         performance_trace=performance_trace,
                         chapter_id=ch_label,
                     )
-                    if segment_trace is not None:
-                        segment_trace.close()
+                    _trace_call(segment_trace, "close")
                     continue
 
-                if performance_trace is not None:
-                    performance_trace.add_timing(
-                        "speaker_resolution",
-                        time.perf_counter() - speaker_started,
-                        scope="segment",
-                        chapter_id=ch_label,
-                        segment_id=str(seg.id),
-                    )
+                _trace_call(
+                    performance_trace,
+                    "add_timing",
+                    "speaker_resolution",
+                    time.perf_counter() - speaker_started,
+                    scope="segment",
+                    chapter_id=ch_label,
+                    segment_id=str(seg.id),
+                )
 
                 speaker_fingerprint = None
                 if cast_active or str(seg.id) in per_segment_voice:
@@ -440,14 +456,15 @@ def synthesize_project(
                         speaker_fingerprints[resolved_speaker] = (
                             segment_cache.speaker_fingerprint_for_path(resolved_speaker)
                         )
-                        if performance_trace is not None:
-                            performance_trace.add_timing(
-                                "speaker_fingerprint",
-                                time.perf_counter() - fingerprint_started,
-                                scope="segment",
-                                chapter_id=ch_label,
-                                segment_id=str(seg.id),
-                            )
+                        _trace_call(
+                            performance_trace,
+                            "add_timing",
+                            "speaker_fingerprint",
+                            time.perf_counter() - fingerprint_started,
+                            scope="segment",
+                            chapter_id=ch_label,
+                            segment_id=str(seg.id),
+                        )
                     speaker_fingerprint = speaker_fingerprints[resolved_speaker]
 
                 seg_start = time.time()
@@ -457,14 +474,15 @@ def synthesize_project(
                 emotion_eff, emo_alpha_eff, speech_rate_eff = segment_cache.effective_params(
                     seg, overrides
                 )
-                if performance_trace is not None:
-                    performance_trace.add_timing(
-                        "effective_params",
-                        time.perf_counter() - effective_started,
-                        scope="segment",
-                        chapter_id=ch_label,
-                        segment_id=str(seg.id),
-                    )
+                _trace_call(
+                    performance_trace,
+                    "add_timing",
+                    "effective_params",
+                    time.perf_counter() - effective_started,
+                    scope="segment",
+                    chapter_id=ch_label,
+                    segment_id=str(seg.id),
+                )
                 # B7：缓存键 = 段标识 + 合成参数内容哈希。
                 seg_path = os.path.join(
                     segments_dir,
@@ -473,13 +491,14 @@ def synthesize_project(
 
                 cache_started = time.perf_counter()
                 cache_hit = os.path.isfile(seg_path)
-                if performance_trace is not None:
-                    performance_trace.record_cache(
-                        str(seg.id),
-                        hit=cache_hit,
-                        lookup_elapsed=time.perf_counter() - cache_started,
-                        chapter_id=ch_label,
-                    )
+                _trace_call(
+                    performance_trace,
+                    "record_cache",
+                    str(seg.id),
+                    hit=cache_hit,
+                    lookup_elapsed=time.perf_counter() - cache_started,
+                    chapter_id=ch_label,
+                )
                 if cache_hit:
                     # Cache hit: mark done without invoking the engine.
                     try:
@@ -507,8 +526,7 @@ def synthesize_project(
                         cb_audio(seg.id, seg_path)
                     if cb_progress:
                         cb_progress(done / total)
-                    if segment_trace is not None:
-                        segment_trace.close()
+                    _trace_call(segment_trace, "close")
                     continue
 
                 # ---- bounded engine-recycle self-healing ----
@@ -623,8 +641,11 @@ def synthesize_project(
                             "code": failure.code,
                         })
                         if hooks.enabled and hooks.cancel_requested():
-                            if performance_trace is not None:
-                                performance_trace.record_boundary("recovery_cancel")
+                            _trace_call(
+                                performance_trace,
+                                "record_boundary",
+                                "recovery_cancel",
+                            )
                             yield "[re] cancelled"
                             return
                         if hooks.enabled:
@@ -680,8 +701,11 @@ def synthesize_project(
                         retried_ok = False
                         for _retry in range(max(int(limits.segment_retry_limit), 1)):
                             if hooks.enabled and hooks.cancel_requested():
-                                if performance_trace is not None:
-                                    performance_trace.record_boundary("recovery_cancel")
+                                _trace_call(
+                                    performance_trace,
+                                    "record_boundary",
+                                    "recovery_cancel",
+                                )
                                 yield "[re] cancelled"
                                 return
                             if hooks.enabled:
@@ -819,30 +843,25 @@ def synthesize_project(
                         })
                         # Engine-related budget exhaustion stops the run.
                         yield f"[re] stop|{seg.id}|{final_failure.code or 'recovery_exhausted'}"
-                        if segment_trace is not None:
-                            segment_trace.close()
+                        _trace_call(segment_trace, "close")
                         return
 
-                if segment_trace is not None:
-                    segment_trace.close()
-                    active_segment_trace = None
+                _trace_call(segment_trace, "close")
+                active_segment_trace = None
                 if cb_progress:
                     cb_progress(done / total)
 
             # Chapter boundary fsyncs the O(1) recovery journal.  The task
             # boundary consolidates project.json once, avoiding O(N²) rewrites.
             status_writer.checkpoint()
-            if chapter_trace is not None:
-                chapter_trace.close()
-                active_chapter_trace = None
-                performance_trace.checkpoint()
+            _trace_call(chapter_trace, "close")
+            active_chapter_trace = None
+            _trace_call(performance_trace, "checkpoint")
             yield f"[=] ch{ch.id}|{ch.title}"
 
         elapsed_total = time.time() - start_time
         yield f"[0] done|{total}|{elapsed_total:.0f}s"
     finally:
-        if active_segment_trace is not None:
-            active_segment_trace.close()
-        if active_chapter_trace is not None:
-            active_chapter_trace.close()
+        _trace_call(active_segment_trace, "close")
+        _trace_call(active_chapter_trace, "close")
         status_writer.close()

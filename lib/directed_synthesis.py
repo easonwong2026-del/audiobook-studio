@@ -85,15 +85,17 @@ def synthesize(
                 "trace_chapter_id": trace_chapter_id,
                 "trace_part_index": 0,
             })
-        started = time.perf_counter() if trace is not None else None
+        started = None
+        if trace is not None:
+            started = time.perf_counter()
         try:
             return engine.synthesize_segment(**engine_kwargs)
         finally:
-            if trace is not None:
+            if trace is not None and started is not None:
                 try:
                     trace.add_timing(
                         "directed_synthesis_total",
-                        time.perf_counter() - (started or time.perf_counter()),
+                        time.perf_counter() - started,
                         scope="segment",
                         chapter_id=trace_chapter_id,
                         segment_id=_value(segment, "id", ""),
@@ -106,7 +108,9 @@ def synthesize(
     task_dir = target.parent / f".{target.stem}_parts_{uuid.uuid4().hex}"
     task_dir.mkdir(parents=True, exist_ok=True)
     wav_parts = []
-    directed_started = time.perf_counter() if trace is not None else None
+    directed_started = None
+    if trace is not None:
+        directed_started = time.perf_counter()
     try:
         for index, (text, internal_pause) in enumerate(parts):
             part_path = task_dir / f"{index:03d}.wav"
@@ -129,7 +133,9 @@ def synthesize(
                 })
             engine.synthesize_segment(**engine_kwargs)
             wav_parts.append((str(part_path), internal_pause))
-        compose_started = time.perf_counter() if trace is not None else None
+        compose_started = None
+        if trace is not None:
+            compose_started = time.perf_counter()
         try:
             compose(
                 wav_parts,
@@ -138,11 +144,11 @@ def synthesize(
                 output_path=output_path,
             )
         finally:
-            if trace is not None:
+            if trace is not None and compose_started is not None:
                 try:
                     trace.add_timing(
                         "wav_compose",
-                        time.perf_counter() - (compose_started or time.perf_counter()),
+                        time.perf_counter() - compose_started,
                         scope="segment",
                         chapter_id=trace_chapter_id,
                         segment_id=_value(segment, "id", ""),
@@ -159,11 +165,11 @@ def synthesize(
             task_dir.rmdir()
         except OSError:
             pass
-        if trace is not None:
+        if trace is not None and directed_started is not None:
             try:
                 trace.add_timing(
                     "directed_synthesis_total",
-                    time.perf_counter() - (directed_started or time.perf_counter()),
+                    time.perf_counter() - directed_started,
                     scope="segment",
                     chapter_id=trace_chapter_id,
                     segment_id=_value(segment, "id", ""),
