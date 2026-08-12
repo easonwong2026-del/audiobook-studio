@@ -119,19 +119,46 @@ def normalize_loudness_streaming(
     executable = _ffmpeg_path(ffmpeg_executable)
     if not executable:
         return _chunked_gain(wav_path, target_lufs, tp)
-    measure = run_no_window(
-        [
-            executable, "-hide_banner", "-nostats", "-i", wav_path,
-            "-af", f"loudnorm=I={target_lufs}:TP={tp}:LRA={lra}:print_format=json",
-            "-f", "null", "-",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    match = re.findall(r"\{\s*\"input_i\".*?\}", measure.stderr, flags=re.S)
+    try:
+        measure = run_no_window(
+            [
+                executable, "-hide_banner", "-nostats", "-i", wav_path,
+                "-af", f"loudnorm=I={target_lufs}:TP={tp}:LRA={lra}:print_format=json",
+                "-f", "null", "-",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        # ffmpeg binary disappeared between _ffmpeg_path() check and run;
+        # fall back to bounded RMS gain instead of crashing export.
+        logger.warning("FFmpeg 二进制消失，使用 bounded fallback")
+        return _chunked_gain(wav_path, target_lufs, tp)
+
+    # measure.stderr is a str under subprocess.run(capture_output=True, text=True)
+    # but Windows + CREATE_NO_WINDOW + detached runtime has been observed to
+    # surface ``None`` for the stderr pipe (re.findall then raises TypeError
+    # and the entire export aborts).  Coerce to "" defensively and treat any
+    # TypeError on the regex as a measurement failure that falls back.
+    raw_stderr = measure.stderr if isinstance(measure.stderr, str) else ""
+    try:
+        match = re.findall(r"\{\s*\"input_i\".*?\}", raw_stderr, flags=re.S)
+    except TypeError:
+        logger.warning(
+            "FFmpeg loudnorm measurement regex 解析失败 (stderr=%d chars)，使用 bounded fallback",
+            len(raw_stderr),
+        )
+        return _chunked_gain(wav_path, target_lufs, tp)
     if measure.returncode != 0 or not match:
-        logger.warning("FFmpeg loudnorm pass 1 失败，使用 bounded fallback")
+        # Log the tail of stderr so we can diagnose future regressions
+        # without re-running the failing export.
+        logger.warning(
+            "FFmpeg loudnorm pass 1 失败 (rc=%s, stderr_len=%d)，使用 bounded fallback: %s",
+            measure.returncode,
+            len(raw_stderr),
+            raw_stderr[-200:] if raw_stderr else "<empty>",
+        )
         return _chunked_gain(wav_path, target_lufs, tp)
     try:
         measured = json.loads(match[-1])

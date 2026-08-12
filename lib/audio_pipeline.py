@@ -79,8 +79,11 @@ def export_book(project_dir: str, format: str = "mp3", bitrate: str = "192k",
     out_dir = output_dir if output_dir else project_paths.project_dir(project_dir, "exports", create=True)
     os.makedirs(out_dir, exist_ok=True)
 
-    title = script.get("meta", {}).get("title", "audiobook")
-    safe_title = chapter_identity.safe_filename(title, "audiobook")
+    # 导出文件名使用「项目名」（导入项目时的名称+章节范围，如 补乔欣-121-130），
+    # 而不是书题 title：同一本书不同章节批次（补乔欣-001-100 / 补乔欣-121-130）
+    # 导出互不冲突，且交付物文件名自带批次语义。历史产物不受影响。
+    project_name = os.path.basename(os.path.normpath(project_dir))
+    safe_title = chapter_identity.safe_filename(project_name, "audiobook")
     # 收集 (章索引, 文件路径)，不把音频数组留在内存。真正的读取和格式统一
     # 在下方逐段写入目标 WAV，峰值内存与单个 segment 大小相关，而非整书时长。
     entries: list[tuple[int, str]] = []
