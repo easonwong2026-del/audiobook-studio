@@ -15,7 +15,6 @@ from __future__ import annotations
 import os
 import re
 import wave
-from unittest import mock
 
 import pytest
 
