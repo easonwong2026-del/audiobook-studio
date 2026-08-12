@@ -3,6 +3,7 @@
 ## 当前开发线：V3.3.3 JSON 工作台
 
 - 以 V3.3.3 基线继续维护本地有声书生产能力。
+- Runtime/TaskRepository 热路径优化：`load_project_task` project-local O(1) 读取；pending claim 信号门控（`runtime_pending.signal` 原子写 + mtime 变化检测 + 每类型 claim 去重）；schema-once（每个 path+进程只执行一次建表/迁移/legacy 导入，探针自愈）；heartbeat 局部化（仅扫 owned 项目 + 30s 全扫兜底）；adaptive idle polling（active 0.1s / idle 1s，`poke()`/`stop()` 立即唤醒）。5 段 warm-engine 基准：`_connect` 8,577 → ~379 inline / ~476 process（约 -95.6%），schema/PRAGMA 重路径约 -99.7%，claim 全库扫描 ~197 → ~3，任务列表/快照/暂停/恢复/取消/导出行为无回归。
 - 新建项目统一导入外部 Agent 生成的 `structured_script.json`。
 - 增加离线 JSON 检查、作品预览、角色/旁白/统计摘要和一致性 warning/error 展示。
 - 项目名称按显式项目字段、`meta.title`、文件名顺序自动填写；手工输入不会被覆盖。

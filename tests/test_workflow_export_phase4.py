@@ -365,7 +365,7 @@ def test_export_cancel_fence_finishes_cancelled_not_error(
     monkeypatch.setattr(
         ProductionRuntime,
         "_export_cancel_requested",
-        staticmethod(lambda _task_id: False),
+        staticmethod(lambda _task_id, _project: False),
     )
     try:
         runtime._run_export_task(running)

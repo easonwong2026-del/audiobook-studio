@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -36,6 +37,88 @@ _RUNTIME_TASK_TYPES = frozenset({
 })
 _ACTIVE_STATES = ("pending", "running", "pausing", "paused", "recovering", "cancelling")
 _TERMINAL_STATES = ("cancelled", "done", "error", "interrupted", "needs_attention")
+
+# P1-1: schema-once。同一 path + 进程内只执行一次重 schema ensure / legacy
+# 迁移；缓存值 (schema_version, legacy_done)。失效条件见 `_ensure_schema_once`：
+# 探针（sqlite_master + repository_meta + 必需列 LIMIT 0）失败时自动走重路径，
+# 因此外部 DROP TABLE / DB 重建 / 测试换根都能自愈。
+_SCHEMA_VERSION = 1
+_SCHEMA_CACHE: dict[str, tuple[int, bool]] = {}
+_SCHEMA_LOCK = threading.Lock()
+
+
+class RuntimePendingSignal:
+    """跨进程“可能有 pending 任务”信号：一个原子写的时间戳文件。
+
+    语义：信号 = “MAYBE pending”，不是权威状态；claim 扫描仍是权威。
+    写方在 SQLite 提交成功后才更新文件（写后置），读方用 mtime_ns 变化检测，
+    天然避免 lost-wakeup。信号文件被清理/删除时由 Runtime 的周期兜底扫描覆盖。
+    """
+
+    SIGNAL_FILENAME = "runtime_pending.signal"
+
+    @staticmethod
+    def default_path() -> str:
+        from lib import config as _cfg
+
+        return os.path.join(_cfg.get_data_dir(), RuntimePendingSignal.SIGNAL_FILENAME)
+
+    def __init__(self, path: str | None = None) -> None:
+        self._path = path or self.default_path()
+        self._last_seen_ns = 0
+
+    def may_have_pending(self) -> bool:
+        """O(1) stat：文件存在且 mtime_ns 比上次所见新 → 需要扫描。
+
+        消费语义：返回 True 时记录“已见”（``_last_seen_ns`` 前移），后续
+        ``peek()`` 将返回 False，直到写方再次 notify() 更新 mtime。
+        """
+        try:
+            stamp = os.stat(self._path).st_mtime_ns
+        except OSError:
+            return False
+        if stamp > self._last_seen_ns:
+            self._last_seen_ns = stamp  # 记录所见（不删除文件，避免删-写竞态）
+            return True
+        return False
+
+    def peek(self) -> bool:
+        """非消费式 fresh 检查：不推进 ``_last_seen_ns``。
+
+        通用只读探针（诊断/测试可用）；需要“消费”语义时用
+        ``may_have_pending()``，需要“已扫描到哪个戳”时用 ``stamp_ns()``。
+        """
+        try:
+            stamp = os.stat(self._path).st_mtime_ns
+        except OSError:
+            return False
+        return stamp > self._last_seen_ns
+
+    def stamp_ns(self) -> int:
+        """当前信号文件 mtime_ns（不存在返回 -1）。用于 tick 级“本 tick 无新写入”判断。"""
+        try:
+            return os.stat(self._path).st_mtime_ns
+        except OSError:
+            return -1
+
+    def mark_seen(self) -> None:
+        try:
+            self._last_seen_ns = os.stat(self._path).st_mtime_ns
+        except OSError:
+            self._last_seen_ns = 0
+
+    @staticmethod
+    def notify() -> None:
+        """写方（提交成功后）调用：原子写时间戳，使所有进程的下一次 stat 判定为 fresh。"""
+        try:
+            path = RuntimePendingSignal.default_path()
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = f"{path}.{os.getpid()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(datetime.now(timezone.utc).isoformat(timespec="microseconds"))
+            os.replace(tmp, path)  # 原子：不会出现半写文件
+        except OSError:
+            pass  # best-effort；周期兜底扫描兜底
 
 
 def _default_progress() -> dict[str, Any]:
@@ -296,7 +379,12 @@ class TaskRepository:
         return os.path.join(config_dir, _DB_FILENAME)
 
     @staticmethod
-    def _connect(project: str, *, create: bool = True) -> sqlite3.Connection | None:
+    def _connect(
+        project: str,
+        *,
+        create: bool = True,
+        skip_schema: bool = False,
+    ) -> sqlite3.Connection | None:
         path = TaskRepository.get_database_path(project, create=create)
         if path is None or (not create and not os.path.isfile(path)):
             return None
@@ -304,10 +392,69 @@ class TaskRepository:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout=10000")
         connection.execute("PRAGMA foreign_keys=ON")
-        if create:
-            TaskRepository._ensure_schema(connection)
-            TaskRepository._migrate_legacy_json(project, connection)
+        if create and not skip_schema:
+            TaskRepository._ensure_schema_once(connection, project, path)
         return connection
+
+    @staticmethod
+    def _probe_schema(connection: sqlite3.Connection) -> tuple[bool, bool]:
+        """廉价探针：确认 production_tasks 存在且 schema 版本就绪。
+
+        仅轻量查询（不做 executescript / PRAGMA table_info）：
+        1. sqlite_master 中 production_tasks 是否存在；
+        2. repository_meta.schema_version 是否 == _SCHEMA_VERSION；
+        3. 当前 schema 的必需列 startup_json 是否可查询（LIMIT 0 不扫描行）。
+
+        第 3 步是必要兜底：外部 DROP TABLE 后以旧 schema 重建（迁移测试模拟）
+        时，表存在且 version 标记仍在，但列集合已过期 —— 只有列探针能发现。
+        """
+        row = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='production_tasks'"
+        ).fetchone()
+        if row is None:
+            return False, False
+        try:
+            meta = connection.execute(
+                "SELECT value FROM repository_meta WHERE key='schema_version'"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            # repository_meta 缺失（极旧 DB）→ 需要重路径创建。
+            return True, False
+        if meta is None or meta["value"] != str(_SCHEMA_VERSION):
+            return True, False
+        try:
+            connection.execute("SELECT startup_json FROM production_tasks LIMIT 0")
+        except sqlite3.OperationalError:
+            return True, False
+        return True, True
+
+    @staticmethod
+    def _ensure_schema_once(
+        connection: sqlite3.Connection,
+        project: str,
+        path: str,
+    ) -> None:
+        """每个 path + 进程只执行一次重操作；探针失败时自动重跑（自愈）。"""
+        key = os.path.normcase(os.path.abspath(path))
+        with _SCHEMA_LOCK:
+            cached = _SCHEMA_CACHE.get(key)
+        if cached is not None and cached[0] == _SCHEMA_VERSION:
+            exists, version_ok = TaskRepository._probe_schema(connection)
+            if exists and version_ok:
+                return
+        # 重路径：executescript + commit + PRAGMA table_info + 可能 ALTER（保留现有实现）
+        TaskRepository._ensure_schema(connection)
+        # legacy 迁移：仅在缓存未标记完成时执行（内部由 repository_meta 标记保证幂等）
+        if cached is None or not cached[1]:
+            TaskRepository._migrate_legacy_json(project, connection)
+        with _SCHEMA_LOCK:
+            _SCHEMA_CACHE[key] = (_SCHEMA_VERSION, True)
+
+    @staticmethod
+    def reset_schema_cache() -> None:
+        """测试/换根用：清空 per-process schema 缓存。"""
+        with _SCHEMA_LOCK:
+            _SCHEMA_CACHE.clear()
 
     @staticmethod
     def _ensure_schema(connection: sqlite3.Connection) -> None:
@@ -366,6 +513,12 @@ class TaskRepository:
                 "ADD COLUMN startup_json TEXT NOT NULL DEFAULT '{}'"
             )
             connection.commit()
+        # schema 版本标记：重路径执行（且表结构已就绪）后写入。
+        connection.execute(
+            "INSERT OR REPLACE INTO repository_meta(key,value) VALUES('schema_version',?)",
+            (str(_SCHEMA_VERSION),),
+        )
+        connection.commit()
 
     @staticmethod
     def _migrate_legacy_json(project: str, connection: sqlite3.Connection) -> None:
@@ -543,8 +696,10 @@ class TaskRepository:
                     "SELECT task_id FROM production_tasks WHERE task_id=?", (record.task_id,)
                 ).fetchone()
                 if existing is None:
+                    inserted = True
                     TaskRepository._insert_record(connection, record)
                 else:
+                    inserted = False
                     connection.execute(
                         """
                         UPDATE production_tasks SET
@@ -574,6 +729,9 @@ class TaskRepository:
                             values["version"], values["task_id"],
                         ),
                     )
+            # 提交成功后才发信号：新插入的 pending 行是 claim 的候选。
+            if inserted and record.status == "pending":
+                RuntimePendingSignal.notify()
         finally:
             connection.close()
 
@@ -621,6 +779,7 @@ class TaskRepository:
                 return "active", TaskRepository._row_to_record(row)
             TaskRepository._insert_record(connection, record)
             connection.commit()
+            RuntimePendingSignal.notify()
             return "created", record
         except Exception:
             connection.rollback()
@@ -670,12 +829,45 @@ class TaskRepository:
                 return "active", TaskRepository._row_to_record(row)
             TaskRepository._insert_record(connection, record)
             connection.commit()
+            RuntimePendingSignal.notify()
             return "created", record
         except Exception:
             connection.rollback()
             raise
         finally:
             connection.close()
+
+    @staticmethod
+    def load_project_task(project: str, task_id: str) -> Optional[TaskRecord]:
+        """Project-local O(1) load。
+
+        - 不扫描其它项目；project 无 DB（create=False）→ 直接返回 None，不产生副作用。
+        - 不做 legacy JSON 兜底（生产任务必有项目 DB；未知调用方继续用 load_task）。
+        - schema-once（P1-1）保证即使 DB 刚重建，也能在首次访问时自愈。
+        - 若 DB 存在但 schema 过期（如恢复旧备份），首次 SELECT 抛
+          OperationalError → 回退 create=True（触发 _ensure_schema_once 自愈）
+          后重查一次，避免从 Runtime 主循环一路炸出。
+        """
+        connection = TaskRepository._connect(str(project), create=False)
+        if connection is None:
+            return None
+        try:
+            try:
+                row = connection.execute(
+                    "SELECT * FROM production_tasks WHERE task_id=?", (str(task_id),)
+                ).fetchone()
+            except sqlite3.OperationalError:
+                connection.close()
+                connection = TaskRepository._connect(str(project), create=True)
+                if connection is None:
+                    return None
+                row = connection.execute(
+                    "SELECT * FROM production_tasks WHERE task_id=?", (str(task_id),)
+                ).fetchone()
+            return TaskRepository._row_to_record(row) if row is not None else None
+        finally:
+            if connection is not None:
+                connection.close()
 
     @staticmethod
     def load_task(task_id: str) -> Optional[TaskRecord]:
@@ -835,6 +1027,9 @@ class TaskRepository:
                 (new_status, intent, now, finished_at, current.task_id),
             )
             connection.commit()
+            # 状态变为 pending（未持有者 resume）→ 通知 runtime 可能有可 claim 任务。
+            if new_status == "pending":
+                RuntimePendingSignal.notify()
             row = connection.execute(
                 "SELECT * FROM production_tasks WHERE task_id=?", (current.task_id,)
             ).fetchone()
@@ -849,12 +1044,27 @@ class TaskRepository:
     def claim_next_pending(
         owner_id: str,
         task_types: set[str] | frozenset[str] | None = None,
+        *,
+        signal: RuntimePendingSignal | None = None,
+        force: bool = False,
     ) -> Optional[TaskRecord]:
         """Claim the oldest pending task for the singleton runtime.
 
         ``task_types`` lets the runtime keep the GPU synthesis lane separate
         from CPU/IO export work while retaining one SQLite ownership protocol.
+
+        ``signal`` gates the authoritative full scan: when a signal is supplied
+        and it reports no fresh pending marker (and ``force`` is false), the
+        method returns ``None`` immediately without scanning any project DB.
+        Without a signal (tests / unknown callers) behavior is unchanged.
+
+        Note: the Runtime main loop no longer passes ``signal`` here — it uses
+        per-claim-type scan stamps (``_claim_pending`` in production_runtime)
+        for dedup and calls this with ``force=True``.  The ``signal``/``force``
+        parameters remain part of the public API for direct callers and tests.
         """
+        if signal is not None and not force and not signal.may_have_pending():
+            return None
         pending = [
             record
             for record in TaskRepository.list_tasks(status="pending")
@@ -889,9 +1099,20 @@ class TaskRepository:
         return None
 
     @staticmethod
-    def update_runtime_heartbeat(owner_id: str) -> None:
+    def update_runtime_heartbeat(
+        owner_id: str,
+        projects: list[str] | None = None,
+    ) -> None:
+        """Update heartbeat for rows owned by ``owner_id``.
+
+        ``projects`` given → only those project DBs are touched (Runtime knows
+        which projects it currently owns).  ``projects`` None → full scan of
+        every project (default; used by unknown callers and the periodic
+        fallback that preserves orphan-takeover observability).
+        """
         now = _utc_now()
-        for project in TaskRepository._project_names():
+        names = projects if projects is not None else TaskRepository._project_names()
+        for project in names:
             connection = TaskRepository._connect(project, create=True)
             if connection is None:
                 continue
@@ -912,6 +1133,8 @@ class TaskRepository:
     def update_startup(
         task_id: str,
         owner_id: str = "",
+        *,
+        project: str | None = None,
         **fields: Any,
     ) -> Optional[TaskRecord]:
         """Merge startup phase fields into a task row (durable, guarded).
@@ -922,10 +1145,16 @@ class TaskRepository:
         - ``owner_id`` empty → only allowed while the row is still unclaimed
           (client-side pre-claim writes such as ``task_submitted``).
 
-        Returns the refreshed record, or ``None`` when the row is missing /
-        ownership was lost (the caller should treat it as a no-op).
+        ``project`` given → project-local O(1) lookup instead of the full
+        ``load_task`` scan (Runtime hot path).  Returns the refreshed record,
+        or ``None`` when the row is missing / ownership was lost (the caller
+        should treat it as a no-op).
         """
-        record = TaskRepository.load_task(task_id)
+        record = (
+            TaskRepository.load_project_task(project, task_id)
+            if project
+            else TaskRepository.load_task(task_id)
+        )
         if record is None:
             return None
         connection = TaskRepository._connect(record.project, create=True)
@@ -972,12 +1201,15 @@ class TaskRepository:
         task_id: str,
         phase: str,
         owner_id: str = "",
+        *,
+        project: str | None = None,
         **extra: Any,
     ) -> Optional[TaskRecord]:
         """Advance the durable startup phase with a fresh phase timestamp."""
         return TaskRepository.update_startup(
             task_id,
             owner_id,
+            project=project,
             phase=phase,
             phase_started_at=_utc_now(),
             **extra,
@@ -1036,9 +1268,18 @@ class TaskRepository:
         failed_segment_ids: list[str],
         error_summary: str,
         log_lines: list[str],
+        project: str | None = None,
     ) -> Optional[TaskRecord]:
-        """Persist a worker snapshot without erasing a stronger control request."""
-        record = TaskRepository.load_task(task_id)
+        """Persist a worker snapshot without erasing a stronger control request.
+
+        ``project`` given → project-local O(1) lookup instead of the full
+        ``load_task`` scan (Runtime hot path).
+        """
+        record = (
+            TaskRepository.load_project_task(project, task_id)
+            if project
+            else TaskRepository.load_task(task_id)
+        )
         if record is None:
             return None
         connection = TaskRepository._connect(record.project, create=True)
@@ -1285,4 +1526,4 @@ class TaskRepository:
         return changed
 
 
-__all__ = ["TaskRecord", "TaskRepository"]
+__all__ = ["TaskRecord", "TaskRepository", "RuntimePendingSignal"]
