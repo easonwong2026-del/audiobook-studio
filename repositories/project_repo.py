@@ -15,7 +15,6 @@ import os
 import shutil
 import time
 import uuid
-import time as _time
 from dataclasses import dataclass, field
 from typing import ClassVar, Optional, TextIO
 
@@ -606,7 +605,7 @@ class ProjectRepository:
         removed = 0
         if not root or not os.path.isdir(root):
             return 0
-        now = _time.time()
+        now = time.time()
         for name in os.listdir(root):
             if not name.startswith(".tmp_"):
                 continue

@@ -23,7 +23,7 @@ from typing import Any, Optional
 from lib import progress as synthesis_progress
 from lib.failures import RecoveryBudget, RecoveryHooks, SynthesisFailure
 from repositories.project_repo import ProjectRepository
-from repositories.task_repo import TaskRecord, TaskRepository
+from repositories.task_repo import RuntimePendingSignal, TaskRecord, TaskRepository
 
 from .runtime_engine import EngineInitError, RuntimeEngineLifecycle
 from .runtime_lock import ProcessFileLock
@@ -103,13 +103,23 @@ class ProductionRuntime:
         self.owner_id = owner_id or f"runtime_{uuid.uuid4().hex}"
         self.lock = ProcessFileLock(lock_path)
         self.poll_interval = max(float(poll_interval), 0.02)
+        self._idle_poll_interval = 1.0
         self._stop = threading.Event()
+        self._wake = threading.Event()
         self._thread: threading.Thread | None = None
         self._current_state: SynthesisState | None = None
         self._current_record: TaskRecord | None = None
         self._current_segment_to_chapter: dict[str, str] = {}
         self._state_lock = threading.RLock()
         self._last_heartbeat = 0.0
+        self._last_full_claim = 0.0
+        self._last_full_heartbeat = 0.0
+        self._pending_signal = RuntimePendingSignal()
+        # P1 修复：每 claim 类型最后一次全扫的信号 stamp（key: synthesis/export/utility）。
+        # 合成活跃期间他项目 notify → 该类型扫一次记 stamp → 后续 tick 同 stamp 跳过，
+        # 避免 export claim 每 0.1s tick 全库扫描；任务 retire 后类型 stamp 仍是旧值 →
+        # 新 stamp ≠ 旧值 → 立即全扫，无 30s 兜底延迟。
+        self._claim_scan_stamps: dict[str, int] = {}
         # task_ids 对哪些任务已写入 first_audio_ready（避免重复落库）
         self._first_audio_ready_tasks: set[str] = set()
         self._export_executor = ThreadPoolExecutor(
@@ -229,6 +239,7 @@ class ProductionRuntime:
 
     def stop(self, timeout: float = 2.0) -> None:
         self._stop.set()
+        self._wake.set()
         with self._state_lock:
             state = self._current_state
             export_future = self._export_future
@@ -290,6 +301,7 @@ class ProductionRuntime:
 
     def poke(self) -> None:
         """Apply a just-written command promptly in inline/test mode."""
+        self._wake.set()
         with self._state_lock:
             state = self._current_state
         if state is not None:
@@ -307,6 +319,7 @@ class ProductionRuntime:
                 record.task_id,
                 "task_claimed",
                 owner_id=self.owner_id,
+                project=record.project,
                 runtime_available_at=now,
                 claimed_at=now,
             )
@@ -344,25 +357,43 @@ class ProductionRuntime:
                 record.task_id,
                 phase,
                 owner_id=self.owner_id,
+                project=record.project,
                 **{key: value for key, value in fields.items() if key != "phase"},
             )
         except Exception:  # pragma: no cover - defensive persistence boundary
             logger.exception("记录启动阶段 %s 失败: %s", phase, record.task_id)
 
+    def _claim_pending(
+        self,
+        key: str,
+        task_types: set[str] | frozenset[str],
+        force: bool,
+    ) -> Optional[TaskRecord]:
+        """Per-claim-type signal stamp 去重的权威全扫。
+
+        每次只读一次信号戳：若该类型在本戳上已全扫过（且非 force），直接跳过，
+        避免“合成活跃期间他项目 notify → export claim 每 tick 全扫”退化回基线。
+        force=True（30s 兜底 / 首轮）忽略戳去重，无条件执行权威全扫。
+        """
+        stamp = self._pending_signal.stamp_ns()
+        if not force and (stamp == -1 or stamp == self._claim_scan_stamps.get(key, -1)):
+            return None
+        record = TaskRepository.claim_next_pending(self.owner_id, task_types, force=True)
+        self._claim_scan_stamps[key] = stamp
+        return record
+
     def _run_loop(self) -> None:
         try:
             self._engine.set_runtime_state("running")
             while not self._stop.is_set():
+                now0 = time.monotonic()
+                # 周期兜底：每 30s 强制一次权威全扫，防止信号文件被清理/漏发。
+                force_claim = (now0 - self._last_full_claim >= 30.0)
+                if force_claim:
+                    self._last_full_claim = now0
                 with self._state_lock:
                     state = self._current_state
-                if state is None:
-                    record = TaskRepository.claim_next_pending(
-                        self.owner_id, {"synthesis"}
-                    )
-                    if record is not None:
-                        self._note_task_claim(record)
-                        self._launch(record)
-                else:
+                if state is not None:
                     self._apply_control(state)
                     future = state.future
                     if state.status in {"cancelled", "done", "error", "needs_attention"} and (
@@ -378,29 +409,60 @@ class ProductionRuntime:
                             # state.  Only now request loop exit so ownership
                             # cannot be handed to a new runtime mid-task.
                             self._stop.set()
+                        state = None
+                # 合成 claim 放在 retire 之后：若本 tick 刚 retire 上一个任务，
+                # synthesis 类型的 stamp 仍是旧值 → 新 notify 戳 ≠ 旧值 → 立即
+                # 全扫 claim 他项目 pending 任务（无 30s 兜底延迟）。
+                if state is None:
+                    record = self._claim_pending("synthesis", {"synthesis"}, force_claim)
+                    if record is not None:
+                        self._note_task_claim(record)
+                        self._launch(record)
                 if self._export_future is not None and self._export_future.done():
                     self._export_future = None
                     self._export_record = None
+                    # 排队导出由 per-type stamp 机制覆盖：export claim 在 worker
+                    # 运行期间被跳过 → 其 stamp 未更新 → worker 结束后立即全扫。
                 if self._export_future is None:
-                    export_record = TaskRepository.claim_next_pending(
-                        self.owner_id, {"export"}
-                    )
+                    export_record = self._claim_pending("export", {"export"}, force_claim)
                     if export_record is not None:
                         self._note_task_claim(export_record)
                         self._launch_export(export_record)
                 if self._current_state is None and self._export_future is None:
-                    utility_record = TaskRepository.claim_next_pending(
-                        self.owner_id, {"supplement", "voice_preview"}
+                    utility_record = self._claim_pending(
+                        "utility", {"supplement", "voice_preview"}, force_claim
                     )
                     if utility_record is not None:
                         self._note_task_claim(utility_record)
                         self._launch(utility_record)
                 now = time.monotonic()
                 if now - self._last_heartbeat >= 1.0:
-                    TaskRepository.update_runtime_heartbeat(self.owner_id)
+                    # heartbeat 局部化：只更新 Runtime 当前持有的项目 DB，
+                    # 30s 全扫兜底保持 orphan 可观测语义（频率 30× 降低）。
+                    with self._state_lock:
+                        owned_projects = []
+                        if self._current_record is not None:
+                            owned_projects.append(self._current_record.project)
+                        if self._export_record is not None:
+                            owned_projects.append(self._export_record.project)
+                    if owned_projects:
+                        TaskRepository.update_runtime_heartbeat(
+                            self.owner_id, projects=owned_projects
+                        )
+                    if now - self._last_full_heartbeat >= 30.0:
+                        TaskRepository.update_runtime_heartbeat(self.owner_id)
+                        self._last_full_heartbeat = now
                     self._engine.heartbeat()
                     self._last_heartbeat = now
-                self._stop.wait(self.poll_interval)
+                # active 保持 poll_interval（0.1s，pause/cancel 响应 ≤100ms），
+                # idle 降频到 _idle_poll_interval（1s）；poke()/stop() 立即唤醒。
+                active = (
+                    self._current_state is not None
+                    or self._export_future is not None
+                )
+                delay = self.poll_interval if active else self._idle_poll_interval
+                self._wake.wait(delay)
+                self._wake.clear()
         except Exception:
             logger.exception("生产运行时主循环异常退出")
             raise
@@ -814,6 +876,7 @@ class ProductionRuntime:
                 record.task_id,
                 "engine_failed",
                 owner_id=self.owner_id,
+                project=record.project,
                 engine_error_code="TTS_ENGINE_INIT_FAILED",
                 engine_error_summary=str(exc.summary),
             )
@@ -828,6 +891,7 @@ class ProductionRuntime:
                 failed_segment_ids=[],
                 error_summary=str(exc),
                 log_lines=list(state.log_lines),
+                project=record.project,
             )
         except Exception:
             logger.exception("持久化引擎初始化失败状态失败: %s", record.task_id)
@@ -865,12 +929,15 @@ class ProductionRuntime:
             failed_segment_ids=[],
             error_summary="",
             log_lines=["运行时开始执行正式导出"],
+            project=record.project,
         )
         current = running or record
         try:
             result = ExportService.execute_export_job(
                 current,
-                is_cancelled=lambda: self._export_cancel_requested(record.task_id),
+                is_cancelled=lambda: self._export_cancel_requested(
+                    record.task_id, record.project
+                ),
                 owner_id=self.owner_id,
             )
             progress = {
@@ -889,6 +956,7 @@ class ProductionRuntime:
                 failed_segment_ids=[],
                 error_summary="",
                 log_lines=["运行时完成正式导出"],
+                project=record.project,
             )
             _runtime_event(
                 "task_terminal",
@@ -908,6 +976,7 @@ class ProductionRuntime:
                 # cannot misclassify a successful cancel as a failure.
                 error_summary="",
                 log_lines=["正式导出已取消"],
+                project=record.project,
             )
             _runtime_event(
                 "task_terminal",
@@ -926,6 +995,7 @@ class ProductionRuntime:
                 failed_segment_ids=[],
                 error_summary=f"{code}: {exc}",
                 log_lines=[f"正式导出任务失败: {code}"],
+                project=record.project,
             )
             _runtime_event(
                 "task_terminal",
@@ -935,8 +1005,8 @@ class ProductionRuntime:
             )
 
     @staticmethod
-    def _export_cancel_requested(task_id: str) -> bool:
-        record = TaskRepository.load_task(task_id)
+    def _export_cancel_requested(task_id: str, project: str) -> bool:
+        record = TaskRepository.load_project_task(project, task_id)
         return bool(record and record.control_intent == "cancel")
 
     @staticmethod
@@ -1101,6 +1171,7 @@ class ProductionRuntime:
                 failed_segment_ids=[],
                 error_summary=str(exc),
                 log_lines=[str(exc)],
+                project=record.project,
             )
             return
         running = TaskRepository.persist_runtime_state(
@@ -1111,6 +1182,7 @@ class ProductionRuntime:
             failed_segment_ids=[],
             error_summary="",
             log_lines=[f"运行时开始执行 {record.task_type}"],
+            project=record.project,
         )
         current = running or record
         try:
@@ -1127,7 +1199,7 @@ class ProductionRuntime:
                     record.options,
                     artifact_dir,
                     heartbeat=lambda: TaskRepository.update_runtime_heartbeat(
-                        self.owner_id
+                        self.owner_id, projects=[record.project]
                     ),
                     initialize=True,
                     validate_output=True,
@@ -1160,6 +1232,7 @@ class ProductionRuntime:
                 failed_segment_ids=[],
                 error_summary="",
                 log_lines=[f"运行时完成 {record.task_type}"],
+                project=record.project,
             )
         except Exception as exc:
             logger.exception("运行时任务失败: %s", record.task_id)
@@ -1171,6 +1244,7 @@ class ProductionRuntime:
                 failed_segment_ids=[],
                 error_summary=str(exc),
                 log_lines=[f"运行时任务失败: {exc}"],
+                project=record.project,
             )
             if isinstance(exc, EngineInitError):
                 self._engine_failure = True
@@ -1252,6 +1326,7 @@ class ProductionRuntime:
                     state.task_id,
                     "running",
                     owner_id=self.owner_id,
+                    project=record.project,
                     first_audio_ready_at=first_audio_at,
                 )
             except Exception:
@@ -1275,6 +1350,7 @@ class ProductionRuntime:
                     "存在失败段落" if state.failed_segment_ids else ""
                 ),
                 log_lines=list(state.log_lines),
+                project=record.project,
             )
             if updated is not None:
                 with self._state_lock:
@@ -1283,7 +1359,8 @@ class ProductionRuntime:
             logger.exception("持久化生产运行时状态失败: %s", state.task_id)
 
     def _apply_control(self, state: SynthesisState) -> None:
-        record = TaskRepository.load_task(state.task_id)
+        # P0-1: Runtime 已知 state.project，project-local O(1) 读取，避免全库扫描。
+        record = TaskRepository.load_project_task(state.project, state.task_id)
         if record is None or record.owner_id != self.owner_id:
             return
         if record.control_intent == "cancel" and not state.cancel:

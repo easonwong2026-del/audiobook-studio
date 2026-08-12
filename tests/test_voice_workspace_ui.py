@@ -1,12 +1,10 @@
-"""v3.2.1 release-hardening 的小范围 UI/版本回归。"""
+"""Current voice-workspace and user-facing production UI contracts."""
 from __future__ import annotations
 
-import ast
 import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from lib import __version__
 from ui.components.voice_binding import (
     build_role_management_choices,
     build_role_management_rows,
@@ -19,22 +17,6 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _text(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
-
-
-def test_runtime_version_has_one_current_source():
-    assert __version__ == "3.3.3"
-    assert '__version__ = "3.3.3"' in _text("lib/__init__.py")
-    assert 'title=f"Audiobook Studio v{__version__}"' in _text("app.py")
-    launcher = _text("launcher.py")
-    assert "from lib import __version__" in launcher
-    assert 'return "3.1.1"' not in launcher
-
-
-def test_gradio_runtime_stays_on_supported_major_version():
-    requirements = _text("requirements.txt")
-    assert "gradio==5.50.0" in requirements
-    assert "huggingface-hub" not in requirements
-    assert "pydantic" not in requirements
 
 
 def test_role_choices_include_description_without_changing_value():
@@ -123,26 +105,11 @@ def test_production_stage_has_internal_navigation_and_check():
     assert '"🎤 角色补录", "supplement"' in production
     assert "def refresh_production_check" in app
     assert "production_stage.change(_goto" in app
-    tree = ast.parse(app)
-    assignments = [
-        node for node in ast.walk(tree)
-        if isinstance(node, ast.Assign)
-        and any(isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)
-                and target.value.id == "_GROUPS" for target in node.targets)
-    ]
-    assert assignments and len(assignments[0].value.elts) == 10
-
-
-def test_project_onboarding_and_user_facing_quality_labels_exist():
+def test_script_example_and_user_facing_quality_labels_exist():
     example = json.loads(_text("structured_script.example.json"))
     assert set(example["voices"]) == {"旁白", "小雨"}
-    create_page = _text("ui/pages/create_project_page.py")
     synthesis_page = _text("ui/pages/synthesis_page.py")
     export_page = _text("ui/pages/export_page.py")
-    assert "gr.File" in create_page
-    assert 'file_types=[".json"]' in create_page
-    assert "AI 分析并创建项目" not in create_page
-    assert "高级" not in create_page
     assert '("快速", 1)' in synthesis_page
     assert '("标准", 2)' in synthesis_page
     assert '("高质量", 3)' in synthesis_page

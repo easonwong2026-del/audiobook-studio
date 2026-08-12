@@ -48,6 +48,7 @@ import lib.project_manager as pm  # noqa: E402
 import lib.queue as synth_queue  # noqa: E402
 import lib.tts_engine as tts_engine  # noqa: E402
 import lib.audio_pipeline as audio_pipeline  # noqa: E402
+from lib import project_paths  # noqa: E402
 
 
 def _dummy_wav(path, n=800):
@@ -89,7 +90,7 @@ def project(tmp_path, monkeypatch):
     sp.write_text(json.dumps(SCRIPT, ensure_ascii=False), encoding="utf-8")
     pm.create_project("b7", str(sp))
     d = pm.get_project_dir("b7")
-    vo = os.path.join(d, "voices", "ref.wav")
+    vo = os.path.join(project_paths.project_dir(d, "voices", create=True), "ref.wav")
     _dummy_wav(vo)
     bp = os.path.join(d, "voice_bindings.json")
     with open(bp, encoding="utf-8") as f:
@@ -109,8 +110,8 @@ def test_b7_emotion_change_retriggers_synthesis(project, monkeypatch):
     monkeypatch.setattr(tts_engine, "_tts", eng)
 
     d = pm.get_project_dir(project)
-    vo = os.path.join(d, "voices", "ref.wav")
-    seg_dir = os.path.join(d, "segments")
+    vo = os.path.join(project_paths.project_dir(d, "voices", create=True), "ref.wav")
+    seg_dir = project_paths.project_dir(d, "segments", create=True)
 
     # 第 1 次：neutral 情感合成
     list(synth_queue.synthesize_project(project, {"旁白": vo}))
@@ -149,7 +150,7 @@ def test_b7_same_params_cache_hit(project, monkeypatch):
     monkeypatch.setattr(tts_engine, "_tts", eng)
 
     d = pm.get_project_dir(project)
-    vo = os.path.join(d, "voices", "ref.wav")
+    vo = os.path.join(project_paths.project_dir(d, "voices", create=True), "ref.wav")
 
     list(synth_queue.synthesize_project(project, {"旁白": vo}))
     assert eng.calls == 1
@@ -189,7 +190,7 @@ def test_b7_export_no_drop_for_default_pinyin_hints(project, monkeypatch):
     monkeypatch.setattr(audio_pipeline, "_write_tags", lambda *a, **k: None)
 
     d = pm.get_project_dir(project)
-    vo = os.path.join(d, "voices", "ref.wav")
+    vo = os.path.join(project_paths.project_dir(d, "voices", create=True), "ref.wav")
 
     # 1) 合成：SCRIPT 段落无 pinyin_hints 字段 → script_loader 默认给 {}
     list(synth_queue.synthesize_project(project, {"旁白": vo}))
