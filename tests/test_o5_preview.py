@@ -37,6 +37,7 @@ sys.modules.setdefault("torch", _fake_torch)
 
 import lib.project_manager as pm  # noqa: E402
 from lib import progress as prog  # noqa: E402
+from lib import project_paths  # noqa: E402
 import lib.queue as synth_queue  # noqa: E402
 import lib.tts_engine as tts_engine  # noqa: E402
 
@@ -81,7 +82,7 @@ def project(tmp_path, monkeypatch):
     sp.write_text(json.dumps(SCRIPT, ensure_ascii=False), encoding="utf-8")
     pm.create_project("o5", str(sp))
     d = pm.get_project_dir("o5")
-    vo = os.path.join(d, "voices", "ref.wav")
+    vo = os.path.join(project_paths.project_dir(d, "voices", create=True), "ref.wav")
     _dummy_wav(vo)
     bp = os.path.join(d, "voice_bindings.json")
     with open(bp, encoding="utf-8") as f:
@@ -137,7 +138,7 @@ def test_synthesize_project_skips_unselected(project, monkeypatch):
     eng = _FakeEngine()
     monkeypatch.setattr(tts_engine, "_tts", eng)
     d = pm.get_project_dir(project)
-    vo = os.path.join(d, "voices", "ref.wav")
+    vo = os.path.join(project_paths.project_dir(d, "voices", create=True), "ref.wav")
 
     list(synth_queue.synthesize_project(
         project, {"旁白": vo}, cb_seg_state=None, selected_chapters=["1"]))
@@ -162,7 +163,7 @@ def test_synthesize_project_does_not_downgrade_done_segment(project, monkeypatch
     eng1 = _FakeEngine()
     monkeypatch.setattr(tts_engine, "_tts", eng1)
     d = pm.get_project_dir(project)
-    vo = os.path.join(d, "voices", "ref.wav")
+    vo = os.path.join(project_paths.project_dir(d, "voices", create=True), "ref.wav")
     # 第1轮：全量合成（selected_chapters 默认 None=全选）
     list(synth_queue.synthesize_project(project, {"旁白": vo}, cb_seg_state=None))
     meta, _, _ = pm.open_project(project)

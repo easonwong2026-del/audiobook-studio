@@ -103,3 +103,27 @@ def test_do_synthesis_first_arg_is_ss():
     assert fn is not None, "未定义 do_synthesis"
     names = _arg_ids_with_vararg(fn)
     assert names[0] == "ss", f"do_synthesis 首参应为 ss（实际：{names}）"
+
+
+def test_main_groups_follow_navigation_order():
+    group_assign = next(
+        node
+        for node in ast.walk(TREE)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Subscript)
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "_GROUPS"
+            for target in node.targets
+        )
+    )
+    names = [
+        element.id
+        for element in group_assign.value.elts
+        if isinstance(element, ast.Name)
+    ]
+    assert names == [
+        "grp_overview", "grp_create_project", "grp_project", "grp_voices",
+        "grp_production_nav", "grp_synth", "grp_review", "grp_export",
+        "grp_supplement", "grp_settings",
+    ]

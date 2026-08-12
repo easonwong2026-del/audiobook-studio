@@ -22,6 +22,7 @@ if PROJECT_ROOT not in sys.path:
 
 import lib.project_manager as pm  # noqa: E402
 import lib.segment_cache as segment_cache  # noqa: E402
+from lib import project_paths  # noqa: E402
 
 
 # ── 假音频生成 ────────────────────────────────────────────────────────────────
@@ -74,9 +75,10 @@ def synth_project(tmp_path, monkeypatch):
 
     # 创建一个参考音频并写入 bindings
     proj_dir = pm.get_project_dir("synth_book")
-    ref_wav = os.path.join(proj_dir, "voices", "ref_旁白.wav")
+    voices_dir = project_paths.project_dir(proj_dir, "voices", create=True)
+    ref_wav = os.path.join(voices_dir, "ref_旁白.wav")
     _make_fake_wav(ref_wav)
-    ref_wav2 = os.path.join(proj_dir, "voices", "ref_小明.wav")
+    ref_wav2 = os.path.join(voices_dir, "ref_小明.wav")
     _make_fake_wav(ref_wav2)
 
     bp = os.path.join(proj_dir, "voice_bindings.json")
@@ -95,7 +97,7 @@ def synth_project(tmp_path, monkeypatch):
 def _fake_synthesize(project: str, seg_id: str, duration: float = 0.3):
     """模拟合成一段：写 WAV + 更新 project.json 状态为 done。"""
     proj_dir = pm.get_project_dir(project)
-    seg_dir = os.path.join(proj_dir, "segments")
+    seg_dir = project_paths.project_dir(proj_dir, "segments", create=True)
 
     # 用参数感知的缓存键名写 WAV（与真实合成路径一致）
     cache_key = segment_cache.segment_cache_key(seg_id, "neutral", 1.0, 1.0, None)
@@ -131,7 +133,7 @@ class TestSynthesisLifecycle:
 
         # 验证 WAV 文件存在
         proj_dir = pm.get_project_dir(synth_project)
-        seg_dir = os.path.join(proj_dir, "segments")
+        seg_dir = project_paths.project_dir(proj_dir, "segments", create=True)
         for seg_id in seg_ids:
             cache_key = segment_cache.segment_cache_key(seg_id, "neutral", 1.0, 1.0, None)
             wav_path = os.path.join(seg_dir, f"{cache_key}.wav")
@@ -146,7 +148,7 @@ class TestSynthesisLifecycle:
             _fake_synthesize(synth_project, seg_id, duration=0.3)
 
         proj_dir = pm.get_project_dir(synth_project)
-        seg_dir = os.path.join(proj_dir, "segments")
+        seg_dir = project_paths.project_dir(proj_dir, "segments", create=True)
         cache_key = segment_cache.segment_cache_key("s1", "neutral", 1.0, 1.0, None)
         wav_path = os.path.join(seg_dir, f"{cache_key}.wav")
 

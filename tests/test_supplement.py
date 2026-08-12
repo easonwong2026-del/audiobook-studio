@@ -314,6 +314,29 @@ def test_parse_small_json_raises_on_bad():
         SupplementService.parse_small_json(bad, _project_script())
 
 
+def test_supplement_handlers_without_open_project_are_safe():
+    """The supplement UI remains inert and diagnostic before a project opens."""
+    import app
+
+    empty_session = type(
+        "Session", (), {"project": None, "script": None, "bindings": {}}
+    )()
+    role_update = app.refresh_supplement_roles(empty_session)
+    assert role_update["interactive"] is False
+    assert role_update["choices"] == []
+
+    synthesized = app.do_supplement_synth(
+        "旁白", "paste", "你好。世界。", "", [],
+        "(按默认)", 1.0, 1.0, 2, True, None, None,
+    )
+    assert synthesized[0] == []
+    assert "请先打开项目" in synthesized[1]
+
+    parsed = app.do_supplement_parse_json(None, None)
+    assert len(parsed) == 4
+    assert "请先打开项目" in parsed[3]
+
+
 def test_build_output_path(tmp_path):
     p = SupplementService.build_output_path(str(tmp_path), "旁白", "mp3")
     assert p.endswith(".mp3") and "supplement_旁白_" in p and os.path.isdir(os.path.join(str(tmp_path), "output"))

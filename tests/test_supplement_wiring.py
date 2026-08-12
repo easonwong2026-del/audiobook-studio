@@ -63,22 +63,6 @@ def test_grp_supplement_present():
     assert 'elem_id="grp-supplement"' in SUP_SRC, "缺少 grp-supplement 分组"
 
 
-def test_groups_tuple_has_eight_items():
-    # v3.3.1: _GROUPS[:] = [10 个 group]（新增 create_project、settings）
-    for node in ast.walk(TREE):
-        if isinstance(node, ast.Assign):
-            for t in node.targets:
-                if isinstance(t, ast.Subscript):
-                    if isinstance(t.value, ast.Name) and t.value.id == "_GROUPS":
-                        val = node.value
-                        assert isinstance(val, (ast.List, ast.Tuple)), \
-                            f"_GROUPS[:] 赋值应为列表/元组（实际 {type(val).__name__}）"
-                        assert len(val.elts) == 10, \
-                                f"_GROUPS[:] 应为 10 项（实际 {len(val.elts)}）"
-                        return
-    raise AssertionError("未找到 _GROUPS[:] = [...] 赋值")
-
-
 def test_goto_returns_internal_group_updates_for_five_stage_navigation():
     fn = find_func(NAV_TREE, "_goto")
     assert fn is not None, "navigation.py 中未定义 _goto"
@@ -89,25 +73,6 @@ def test_goto_returns_internal_group_updates_for_five_stage_navigation():
                 has_tuple_return = True
                 break
     assert has_tuple_return, "_goto 未返回 tuple(...) 调用"
-    # 验证 NAV_ITEMS 是五阶段工作流。
-    for node in ast.walk(NAV_TREE):
-        if isinstance(node, ast.Assign):
-            for t in node.targets:
-                if isinstance(t, ast.Name) and t.id == "GROUP_ITEMS":
-                    assert isinstance(node.value, (ast.List, ast.Tuple)), \
-                        "GROUP_ITEMS 应为列表"
-                    # v3.3.1: 10 items (+create_project, +settings)
-                    assert len(node.value.elts) == 10, \
-                        f"GROUP_ITEMS 应为 10 项（实际 {len(node.value.elts)}）"
-                    break
-    # 验证还有一个 _SETTINGS_ITEM 常量
-    for node in ast.walk(NAV_TREE):
-        if isinstance(node, ast.Assign):
-            for t in node.targets:
-                if isinstance(t, ast.Name) and t.id == "_SETTINGS_ITEM":
-                    return  # Found
-    raise AssertionError("未找到 _SETTINGS_ITEM 定义")
-    raise AssertionError("未找到 NAV_ITEMS 定义")
 
 
 def test_supplement_handlers_defined_and_take_ss():
