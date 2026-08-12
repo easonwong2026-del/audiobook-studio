@@ -1648,11 +1648,6 @@ def initialize_review_page(ss):
     )
 
 
-def _legacy_preview_chapters(ss):
-    """Compatibility alias kept for integrations that imported the old name."""
-    return initialize_review_page(ss)
-
-
 def preview_chapters(ss):
     """Use the unified initializer for every review-page entry point."""
     return initialize_review_page(ss)
