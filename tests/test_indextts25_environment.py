@@ -116,7 +116,12 @@ def test_v2_config_resolution_and_checkpoint_behavior_are_unchanged(tmp_path):
     assert resolve_model_config_path("2", model_dir).name == "config.yml"
     state = environment.model_checkpoint_state("v2", model_dir)
     assert "config.yaml" not in state["missing_required"]
-    assert "dvae.pth" in state["missing_required"]
+    # Legacy 1.x filenames are no longer required: the native v2 adapter does
+    # not load dvae.pth, and campplus comes from hf_cache/campplus_cn_common.bin.
+    assert "dvae.pth" not in state["missing_required"]
+    assert "campplus.onnx" not in state["missing_required"]
+    # The config-driven gpt/s2mel/w2v entries are still required and missing.
+    assert "gpt checkpoint (config)" in state["missing_required"]
 
 
 def test_official_v25_bundle_is_ready_in_environment_diagnostics(monkeypatch, tmp_path):
