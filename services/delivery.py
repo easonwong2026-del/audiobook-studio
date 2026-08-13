@@ -24,6 +24,7 @@ from typing import Any
 from repositories.project_repo import ProjectRepository
 from repositories.quality_repo import QualityRepository
 from repositories.voice_cast_repo import VoiceCastRepository
+from lib.tts_profile import public_profile, resolve_profile
 
 
 SNAPSHOT_VERSION = 1
@@ -128,6 +129,32 @@ def _absolute_project_path(project_dir: str, relative_path: str) -> str:
     return path
 
 
+def _public_engine_snapshot(value: Any) -> dict[str, Any]:
+    """Normalize revision provenance without persisting a local model path."""
+    if not isinstance(value, dict) or not value:
+        return {}
+    try:
+        return public_profile(resolve_profile(value))
+    except (OSError, TypeError, ValueError, RuntimeError):
+        return {}
+
+
+def _engine_provenance(revisions: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize the actual engine identities present in active revisions."""
+    profiles: dict[str, dict[str, Any]] = {}
+    for revision in revisions:
+        profile = revision.get("engine_snapshot") if isinstance(revision, dict) else None
+        identity = str(profile.get("cache_identity") or "") if isinstance(profile, dict) else ""
+        if identity and isinstance(profile, dict):
+            profiles.setdefault(identity, profile)
+    ordered = [profiles[key] for key in sorted(profiles)]
+    if len(ordered) == 1:
+        return {"status": "uniform", "engine_snapshot": ordered[0], "engines": ordered}
+    if len(ordered) > 1:
+        return {"status": "mixed", "engine_snapshot": {}, "engines": ordered}
+    return {"status": "unknown", "engine_snapshot": {}, "engines": []}
+
+
 def _segment_order(script: dict[str, Any]) -> list[dict[str, Any]]:
     ordered: list[dict[str, Any]] = []
     ordinal = 0
@@ -190,6 +217,10 @@ def _active_revisions(
             "checksum": checksum,
             "cache_identity": str(revision.get("cache_identity") or ""),
             "voice_fingerprint": str(revision.get("voice_fingerprint") or ""),
+            "engine_snapshot": _public_engine_snapshot(
+                (revision.get("params") or {}).get("engine_snapshot")
+                if isinstance(revision.get("params"), dict) else None
+            ),
         })
     return result
 
@@ -357,12 +388,14 @@ def compute_delivery_input_snapshot(project_name: str) -> dict[str, Any]:
     active_revisions = _active_revisions(project, project_dir, segment_order)
     voice_cast = _voice_cast_snapshot(project, project_dir, bindings)
     metadata = script.get("meta") if isinstance(script.get("meta"), dict) else {}
+    engine_provenance = _engine_provenance(active_revisions)
     payload: dict[str, Any] = {
         "snapshot_version": SNAPSHOT_VERSION,
         "project": project,
         "structured_script_identity": structured_script_identity,
         "segment_order": segment_order,
         "active_revisions": active_revisions,
+        "engine_provenance": engine_provenance,
         "voice_cast": voice_cast,
         "metadata": _sorted_json(metadata),
     }

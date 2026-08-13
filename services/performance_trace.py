@@ -157,9 +157,11 @@ class PerformanceTrace:
         gpu_sampler: Callable[[], Mapping[str, Any]] | None = default_gpu_snapshot,
         persist_path: str | os.PathLike[str] | None = None,
         max_failures: int = 100,
+        engine: Mapping[str, Any] | None = None,
     ) -> None:
         self.task_id = str(task_id) if task_id is not None else None
         self.project = str(project) if project is not None else None
+        self.engine = _public_value(dict(engine or {}))
         self.enabled = bool(enabled)
         self._clock = clock or time.perf_counter
         self._gpu_sampler = gpu_sampler
@@ -666,6 +668,7 @@ class PerformanceTrace:
                 "trace_available": False,
                 "task_id": self.task_id,
                 "project": self.project,
+                "engine": dict(self.engine),
                 "segments": 0,
                 "cache_hits": 0,
                 "cache_misses": 0,
@@ -706,6 +709,7 @@ class PerformanceTrace:
                 "trace_available": True,
                 "task_id": self.task_id,
                 "project": self.project,
+                "engine": dict(self.engine),
                 "segments": len(self._segments),
                 "segments_profiled": len(self._segments),
                 "cache_hits": self._cache_hits,
@@ -746,6 +750,7 @@ class PerformanceTrace:
                 "trace_available": True,
                 "task_id": self.task_id,
                 "project": self.project,
+                "engine": dict(self.engine),
                 "segments": 0,
                 "cache_hits": 0,
                 "cache_misses": 0,

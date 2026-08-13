@@ -20,7 +20,7 @@ StructuredScriptImportService
        │
        ├─ ProjectSnapshot / voice_bindings.json
        ├─ 本地角色声音绑定
-       ├─ SynthesisService → lib.queue → IndexTTS2
+       ├─ SynthesisService → lib.queue → TTS Adapter → IndexTTS 2 / 2.5
        ├─ 试听与质检
        └─ ExportService → WAV / MP3 / M4B / 字幕
 ```
@@ -33,8 +33,9 @@ lib/
   types.py                     Script / Chapter / Segment / ProjectMeta
   script_loader.py             V3 JSON 解析、兼容别名和结构校验
   project_manager.py           既有项目生产兼容包装
-  queue.py                     段级合成、断点续跑和缓存
-  tts_engine.py                IndexTTS2 适配
+  queue.py                     段级合成、断点续跑和按 engine identity 隔离的缓存
+  tts_profile.py               双引擎 profile、冻结 identity 与 cache identity
+  tts_engine.py                IndexTTS 2 / 2.5 Backend Adapter
   directed_synthesis.py        片段内、片段前后停顿处理
   audio_pipeline.py            章节拼接、字幕和导出准备
 repositories/

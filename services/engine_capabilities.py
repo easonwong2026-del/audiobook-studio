@@ -1,4 +1,4 @@
-"""Pure-Python capability and GPU diagnostics for future engine experiments.
+"""Pure-Python capability and GPU diagnostics for the native TTS runtimes.
 
 This module deliberately does not import IndexTTS2 or torch.  Callers may pass
 already-loaded objects when they are available, but merely asking what a
@@ -20,7 +20,7 @@ class Capability:
     """A conservative four-state capability record.
 
     ``verified`` is intentionally never inferred from importability or a
-    signature.  It is evidence supplied by a future real-machine benchmark.
+    signature.  It is evidence supplied by a real-machine benchmark.
     """
 
     supported: bool = False
@@ -123,7 +123,7 @@ def detect_engine_capabilities(
     """Inspect public engine signatures and package presence conservatively.
 
     ``engine`` is an already-created engine object, useful for tests or for a
-    future runtime that has already initialized its model.  ``constructor``
+    native runtime that has already initialized its model.  ``constructor``
     can be supplied as ``IndexTTS2`` after import to inspect constructor
     options without constructing it.  Neither argument is imported here.
 

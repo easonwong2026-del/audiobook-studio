@@ -2,8 +2,8 @@
 
 This module implements the small JSON-RPC surface needed by MCP clients so
 the base application does not need an additional runtime dependency.  The
-transport can later be replaced or supplemented by Streamable HTTP without
-changing the service adapters.
+The transport is local stdio; TTS execution remains inside the local native
+runtime described by the production services.
 """
 from __future__ import annotations
 
@@ -451,6 +451,17 @@ _TOOLS: dict[str, dict[str, Any]] = {
                         "emotion": {"type": ["string", "null"]},
                         "emo_alpha": {"type": ["number", "null"]},
                         "speech_rate": {"type": ["number", "null"]},
+                        "engine_snapshot": {
+                            "type": "object",
+                            "properties": {
+                                "engine_backend": {"type": "string"},
+                                "engine_version": {"type": "string", "enum": ["2", "2.5", "v2", "v2.5"]},
+                                "engine_identity": {"type": "string"},
+                                "model_dir": {"type": "string"},
+                                "precision": {"type": "string", "enum": ["FP16", "BF16", "FP32"]},
+                            },
+                            "additionalProperties": False,
+                        },
                     },
                     "additionalProperties": False,
                 },

@@ -85,7 +85,7 @@ StructuredScriptImportService.create()
 - V3 项目扫描、打开、删除和目录管理；
 - `project.json`、`structured_script.json`、`voice_bindings.json`；
 - 角色列表、音色筛选、参考音频上传/录制、绑定和保存；
-- 本地 IndexTTS2 合成、暂停、恢复、断点续跑和段级缓存；
+- 本地 IndexTTS 2 Legacy / IndexTTS 2.5 双引擎合成、暂停、恢复、断点续跑和引擎隔离的段级缓存；
 - 章节试听、段落试听、重合成、角色补录和章节拼接；
 - WAV、MP3、M4B 章节标签及字幕导出；
 - 数据目录、TTS/FFmpeg 诊断、异常项目回收站。
@@ -112,8 +112,11 @@ tools/validate_structured_script.py
 | --- | --- |
 | `AUDIOBOOK_STUDIO_DATA_DIR` | 项目、音色库和产物根目录 |
 | `AUDIOBOOK_STUDIO_LEGACY_DIR` | 旧版项目只读兼容目录 |
-| `AUDIOBOOK_STUDIO_MODEL_DIR` | IndexTTS2 模型目录 |
-| `AUDIOBOOK_STUDIO_PYTHON` | IndexTTS2 Python 解释器 |
+| `AUDIOBOOK_STUDIO_ENGINE_VERSION` | 选择 `2` 或 `2.5`（旧别名 `AUDIOBOOK_STUDIO_VERSION`） |
+| `AUDIOBOOK_STUDIO_MODEL_DIR_V2` | IndexTTS 2 Legacy 模型目录 |
+| `AUDIOBOOK_STUDIO_MODEL_DIR_V25` | IndexTTS 2.5 模型目录 |
+| `AUDIOBOOK_STUDIO_MODEL_DIR` | Legacy `model_dir` 兼容别名 |
+| `AUDIOBOOK_STUDIO_PYTHON` | IndexTTS Python 解释器 |
 | `AUDIOBOOK_STUDIO_FFMPEG` | FFmpeg 可执行文件 |
 
 用户数据目录不会被本仓库的启动、导入或诊断流程批量迁移、转换或清理。

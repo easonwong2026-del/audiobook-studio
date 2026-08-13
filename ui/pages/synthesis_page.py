@@ -9,6 +9,10 @@ from lib import progress as synth_progress
 def create_synthesis_page() -> dict:
     """创建以生产状态和队列追踪为中心的合成界面。"""
     with gr.Group(visible=False, elem_id="grp-synth") as grp_synth:
+        s_engine_status = gr.Markdown(
+            "生产引擎：读取 runtime 实际状态中…",
+            elem_classes=["production-engine-status"],
+        )
         s_task_status = gr.Markdown(
             "当前没有运行中的生产任务。",
             elem_classes=["production-task-status"],
@@ -119,6 +123,7 @@ def create_synthesis_page() -> dict:
     return {
         "group": grp_synth,
         "s_task_status": s_task_status,
+        "s_engine_status": s_engine_status,
         "s_preview_df": s_preview_df,
         "s_scope_mode": s_scope_mode,
         "s_scope_readiness": s_scope_readiness,

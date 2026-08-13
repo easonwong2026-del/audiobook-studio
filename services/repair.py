@@ -16,6 +16,7 @@ from repositories.quality_repo import QualityRepository
 from services.production_jobs import ProductionJobError, ProductionJobService
 from services.quality import QualityService
 from services.voice_assets import VoiceAssetService
+from lib.tts_profile import resolve_profile
 
 
 ACTIVE_TASK_STATES = frozenset({
@@ -120,6 +121,7 @@ class RepairService:
                 options["speech_rate"] = float(speech_rate)
             except (TypeError, ValueError) as exc:
                 raise RepairError("INVALID_OPTIONS", "speech_rate 必须是数字") from exc
+        options["engine_snapshot"] = resolve_profile({})
         return options
 
     @classmethod
@@ -180,6 +182,7 @@ class RepairService:
             "emotion": options.get("emotion"),
             "emo_alpha": options.get("emo_alpha"),
             "speech_rate": options.get("speech_rate"),
+            "engine_snapshot": options.get("engine_snapshot"),
         }
         override_path = ""
         override_relative = ""

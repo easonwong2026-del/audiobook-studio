@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 
 from lib import project_paths, segment_cache
+from lib.tts_profile import public_profile, resolve_profile
 from repositories.project_repo import ProjectRepository
 from repositories.quality_repo import QualityRepository
 
@@ -46,7 +47,7 @@ def _script_index(script: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 class QualityService:
-    """Public quality façade shared by future Web and MCP adapters."""
+    """Public quality façade shared by the Web and MCP adapters."""
 
     @staticmethod
     def _project_relative(project_name: str, path: str) -> str:
@@ -137,9 +138,15 @@ class QualityService:
             "pinyin_hints": segment.get("pinyin_hints"),
             "director_metadata": segment_cache.director_metadata_for(segment),
         }
+        supplied_engine = (params or {}).get("engine_snapshot") if isinstance(params, dict) else None
+        if supplied_engine:
+            effective["engine_snapshot"] = public_profile(resolve_profile(supplied_engine))
         for key, value in (params or {}).items():
             if value is not None and key in effective:
-                effective[key] = value
+                if key == "engine_snapshot":
+                    effective[key] = public_profile(resolve_profile(value))
+                else:
+                    effective[key] = value
         speaker = str(speaker_override or "") or cls._speaker_path(
             project_name, segment, bindings
         )
@@ -155,6 +162,8 @@ class QualityService:
             effective["pinyin_hints"],
             effective["director_metadata"],
             fingerprint if cast_active or speaker_override else None,
+            (effective.get("engine_snapshot") or {}).get("cache_identity")
+            or (effective.get("engine_snapshot") or {}).get("engine_identity"),
         )
         return cache_identity, fingerprint, effective
 
@@ -204,6 +213,9 @@ class QualityService:
             effective["pinyin_hints"],
             effective["director_metadata"],
             fingerprint if os.path.isfile(os.path.join(project_dir, "voice_cast.json")) else None,
+            None,
+            (effective.get("engine_snapshot") or {}).get("cache_identity")
+            or (effective.get("engine_snapshot") or {}).get("engine_identity"),
         )
         return legacy, cache_identity, fingerprint, effective
 
@@ -212,16 +224,67 @@ class QualityService:
         cls,
         project_name: str,
         segment_id: str,
+        *,
+        engine_snapshot: dict[str, Any] | None = None,
+        source_path: str | None = None,
+        params: dict[str, Any] | None = None,
+        speaker_override: str | None = None,
     ) -> dict[str, Any] | None:
         active = QualityRepository.get_active_revision(project_name, segment_id)
         if active:
             try:
-                if os.path.isfile(cls._absolute(project_name, active.get("relative_path", ""))):
+                active_path = cls._absolute(project_name, active.get("relative_path", ""))
+                active_engine = (
+                    active.get("params", {}).get("engine_snapshot")
+                    if isinstance(active.get("params"), dict) else None
+                )
+                requested_identity = (
+                    public_profile(resolve_profile(engine_snapshot)).get("cache_identity")
+                    if engine_snapshot else None
+                )
+                active_identity = (
+                    public_profile(resolve_profile(active_engine)).get("cache_identity")
+                    if active_engine else None
+                )
+                source_matches = True
+                if source_path:
+                    source_matches = os.path.realpath(active_path) == os.path.realpath(
+                        os.path.abspath(str(source_path))
+                    )
+                if os.path.isfile(active_path) and source_matches and (
+                    not requested_identity or active_identity == requested_identity
+                ):
                     return active
             except ValueError:
                 pass
         _meta, _script, segment = cls._segment(project_name, segment_id)
-        path, identity, fingerprint, params = cls._find_script_audio(project_name, segment)
+        if source_path:
+            path = os.path.abspath(str(source_path))
+            project_dir = ProjectRepository.get_project_dir(project_name)
+            try:
+                if os.path.commonpath((os.path.realpath(path), os.path.realpath(project_dir))) != os.path.realpath(project_dir):
+                    return None
+            except (OSError, ValueError):
+                return None
+            identity, fingerprint, effective = cls._identity(
+                project_name,
+                segment,
+                params=params or ({"engine_snapshot": engine_snapshot} if engine_snapshot else None),
+                speaker_override=speaker_override,
+            )
+            params = effective
+        elif engine_snapshot:
+            path, identity, fingerprint, effective = cls.expected_audio_path(
+                project_name,
+                segment_id,
+                params=params or {"engine_snapshot": engine_snapshot},
+                speaker_override=speaker_override,
+            )
+            if not os.path.isfile(path):
+                return None
+        else:
+            path, identity, fingerprint, effective = cls._find_script_audio(project_name, segment)
+            params = effective
         if not path or not os.path.isfile(path):
             return None
         return QualityRepository.create_revision(
@@ -230,7 +293,7 @@ class QualityService:
             relative_path=cls._project_relative(project_name, path),
             cache_identity=identity,
             voice_fingerprint=fingerprint,
-            params=params,
+            params=effective,
             status="ready",
             activate=True,
             metadata={"sha256": _sha256(path), "origin": "legacy_or_production"},
@@ -921,6 +984,10 @@ class QualityService:
                 "pinyin_hints": segment.get("pinyin_hints"),
                 "director_metadata": segment_cache.director_metadata_for(segment),
             }
+            if isinstance(active, dict) and isinstance(active.get("params"), dict):
+                active_engine = active["params"].get("engine_snapshot")
+                if active_engine:
+                    effective["engine_snapshot"] = public_profile(resolve_profile(active_engine))
             speaker = cls._speaker_path(project_name, segment, bindings)
             if speaker not in fingerprint_cache:
                 fingerprint_cache[speaker] = (
@@ -935,6 +1002,8 @@ class QualityService:
                 effective["pinyin_hints"],
                 effective["director_metadata"],
                 fingerprint if cast_active else None,
+                (effective.get("engine_snapshot") or {}).get("cache_identity")
+                or (effective.get("engine_snapshot") or {}).get("engine_identity"),
             )
             path = os.path.join(segments_dir, f"{identity}.wav")
             if not os.path.isfile(path):
@@ -949,6 +1018,9 @@ class QualityService:
                     effective["pinyin_hints"],
                     effective["director_metadata"],
                     fingerprint if cast_active else None,
+                    None,
+                    (effective.get("engine_snapshot") or {}).get("cache_identity")
+                    or (effective.get("engine_snapshot") or {}).get("engine_identity"),
                 )
             if path and os.path.isfile(path):
                 candidates.append({

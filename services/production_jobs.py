@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from lib import project_paths, script_loader, segment_cache
+from lib.tts_profile import public_profile, resolve_profile
 from lib.startup import enrich as enrich_startup
 from repositories.project_repo import ProjectRepository
 from repositories.task_repo import TaskRecord, TaskRepository
@@ -320,7 +321,7 @@ class ProductionJobService:
         }, blockers, warnings
 
     @classmethod
-    def plan(cls, project_name: str, scope: Any = None) -> dict[str, Any]:
+    def plan(cls, project_name: str, scope: Any = None, options: Any = None) -> dict[str, Any]:
         """Validate a production scope without creating a task."""
         name = str(project_name or "").strip()
         if not name:
@@ -385,12 +386,18 @@ class ProductionJobService:
             selected_chapter_ids = set(normalized_scope["chapter_ids"]) & set(chapter_map)
         project_dir = ProjectRepository.get_project_dir(name)
         segments_dir = project_paths.project_dir(project_dir, "segments")
+        engine_snapshot = resolve_profile(
+            (options or {}).get("engine_snapshot") if isinstance(options, dict) else None
+        ) if options is not None else {}
+        engine_identity = engine_snapshot.get("cache_identity") if engine_snapshot else None
         completed = 0
         failed_ids: list[str] = []
         remaining = 0
         for segment_id in selected_ids:
             persisted = str(getattr(meta, "segments_status", {}).get(segment_id, "pending"))
-            has_audio = segment_cache.has_segment_wav(segments_dir, segment_id)
+            has_audio = segment_cache.has_segment_wav(
+                segments_dir, segment_id, engine_identity=engine_identity
+            )
             if persisted == "done" and has_audio:
                 completed += 1
             elif persisted == "failed":
@@ -477,6 +484,10 @@ class ProductionJobService:
                 for segment_id, path in raw.get("voice_overrides", {}).items()
                 if str(segment_id).strip() and str(path).strip()
             } if isinstance(raw.get("voice_overrides"), dict) else {},
+            # Keep the private model_dir inside the durable task row so a
+            # resumed task can load exactly the model it was created with.
+            # Public task snapshots redact it at the boundary.
+            "engine_snapshot": resolve_profile(raw.get("engine_snapshot") or raw),
         }
         return TaskRepository.canonical_options(result)
 
@@ -546,7 +557,7 @@ class ProductionJobService:
                 task_id=active.task_id,
                 status=active.status,
             )
-        plan = cls.plan(name, scope)
+        plan = cls.plan(name, scope, normalized_options)
         if not plan["ready"]:
             raise ProductionJobError(
                 "PRODUCTION_BLOCKED", "生产前检查未通过",
@@ -664,6 +675,9 @@ class ProductionJobService:
         recovery = base_progress.get("recovery")
         recovery_payload = recovery if isinstance(recovery, dict) else None
         engine_generation = int(base_progress.get("engine_generation") or 0)
+        public_options = dict(record.options) if isinstance(record.options, dict) else {}
+        if isinstance(public_options.get("engine_snapshot"), dict):
+            public_options["engine_snapshot"] = public_profile(public_options["engine_snapshot"])
         response = {
             "task_id": record.task_id,
             "task_type": record.task_type,
@@ -675,7 +689,8 @@ class ProductionJobService:
                 "chapter_ids": _unique_strings(record.scope.get("chapter_ids")) if isinstance(record.scope, dict) else [],
                 "segment_ids": _unique_strings(record.scope.get("segment_ids")) if isinstance(record.scope, dict) else [],
             },
-            "options": dict(record.options) if isinstance(record.options, dict) else {},
+            "options": public_options,
+            "engine_snapshot": public_options.get("engine_snapshot", {}),
             "progress": base_progress,
             "failed_segment_ids": failed_ids,
             "attempt": int(record.attempt or 1),
@@ -858,7 +873,16 @@ class ProductionJobService:
         return [
             segment_id for segment_id in selected
             if meta.segments_status.get(segment_id) == "failed"
-            or not segment_cache.has_segment_wav(segments_dir, segment_id)
+            or not segment_cache.has_segment_wav(
+                segments_dir,
+                segment_id,
+                engine_identity=(
+                    record.options.get("engine_snapshot", {}).get("cache_identity")
+                    if isinstance(record.options, dict)
+                    and isinstance(record.options.get("engine_snapshot"), dict)
+                    else None
+                ),
+            )
         ]
 
     @classmethod
@@ -898,6 +922,7 @@ class ProductionJobService:
     def get_runtime_health(cls) -> dict[str, Any]:
         """GPU-free runtime health snapshot for Agent inspection."""
         from services.runtime_engine import read_runtime_engine_status
+        from lib.tts_profile import public_profile, resolve_profile
 
         status = read_runtime_engine_status()
         active_task: Optional[dict[str, Any]] = None
@@ -910,6 +935,8 @@ class ProductionJobService:
                 }
                 startup = record.startup if isinstance(record.startup, dict) else {}
                 active_task["startup"] = enrich_startup(startup)
+                if isinstance(record.options, dict) and isinstance(record.options.get("engine_snapshot"), dict):
+                    active_task["engine_snapshot"] = public_profile(record.options["engine_snapshot"])
                 break
         result = {
             "runtime_state": status["runtime_state"],
@@ -925,6 +952,18 @@ class ProductionJobService:
             "status_stale": status["status_stale"],
             "active_task_id": active_task["task_id"] if active_task else None,
             "active_task": active_task,
+            "engine_backend": status.get("engine_backend", ""),
+            "engine_version": status.get("engine_version", ""),
+            "engine_identity": status.get("engine_identity", ""),
+            "model_identity": status.get("model_identity", ""),
+            "precision": status.get("precision", ""),
+            "device": status.get("device", ""),
+            "cache_identity": status.get("cache_identity", ""),
+            # This is deliberately separate from the runtime-owned fields
+            # above.  A client may show the configured default while the
+            # actual runtime remains old/stale; it must never overwrite the
+            # runtime identity with configuration data.
+            "global_default_engine": public_profile(resolve_profile({})),
         }
         if active_task:
             startup = active_task.get("startup") or {}

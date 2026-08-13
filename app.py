@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 from html import escape
+from typing import Any
 
 import gradio as gr
 
@@ -201,10 +202,23 @@ def refresh_top_status(ss):
         done = getattr(meta, "completed_count", 0)
         total = getattr(meta, "total_segments", 0)
         title = script.get("meta", {}).get("title", ss.project)
-        engine_module = sys.modules.get("lib.tts_engine")
-        engine_state = "已加载" if getattr(engine_module, "_tts", None) is not None else "未加载"
+        health = ProductionJobService.get_runtime_health()
+        engine_state = str(health.get("engine_state") or "unknown")
+        actual_engine = health if health.get("engine_identity") else {}
+        default_engine = health.get("global_default_engine") or _global_default_engine()
+        selected_engine = actual_engine or default_engine
+        engine_version = str(selected_engine.get("engine_version") or "")
+        engine_identity = str(selected_engine.get("engine_identity") or "")
+        precision = str(selected_engine.get("precision") or "")
+        runtime_label = {
+            "ready": "Ready", "loading": "Loading", "recovering": "Recovering",
+            "error": "Error", "unknown": "Unknown",
+        }.get(engine_state, engine_state)
+        engine_state = " · ".join(item for item in (_engine_name(engine_identity) or engine_version, precision, runtime_label) if item)
+        if not engine_state:
+            engine_state = "Unknown"
         return (f"📖 **{title}** · {chapters} 章 · {done}/{total} 段 · "
-                f"引擎: {engine_state}")
+                f"生产引擎: {engine_state}")
     except Exception as exc:
         return f"📖 {ss.project}（状态读取失败：{exc}）"
 
@@ -289,6 +303,32 @@ def _review_status_label(status) -> str:
     return _REVIEW_STATUS_LABELS.get(key, key or "待确认")
 
 
+def _engine_name(value: Any) -> str:
+    return {
+        "indextts:2": "IndexTTS 2",
+        "indextts:2.5": "IndexTTS 2.5",
+    }.get(str(value or ""), str(value or ""))
+
+
+def _global_default_engine() -> dict[str, Any]:
+    try:
+        profile = config.get_public_tts_profile()
+        return profile if isinstance(profile, dict) else {}
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return {}
+
+
+def _engine_label(profile: Any) -> str:
+    if not isinstance(profile, dict):
+        return ""
+    return " · ".join(
+        item for item in (
+            _engine_name(profile.get("engine_identity")),
+            str(profile.get("precision") or ""),
+        ) if item
+    )
+
+
 
 def _production_task_markdown(task: dict | None) -> str:
     """Render a task snapshot without exposing private filesystem paths."""
@@ -308,6 +348,12 @@ def _production_task_markdown(task: dict | None) -> str:
         scope_text = "指定段落（" + str(len(scope["segment_ids"])) + " 段）"
     else:
         scope_text = "未指定"
+    engine = task.get("engine_snapshot") or task.get("options", {}).get("engine_snapshot", {})
+    runtime = ProductionJobService.get_runtime_health()
+    engine_label = _engine_label(engine)
+    global_label = _engine_label(
+        runtime.get("global_default_engine") or _global_default_engine()
+    )
     lines = [
         "### 当前生产任务",
         f"- **任务 ID**：`{task.get('task_id', '')}`",
@@ -316,6 +362,14 @@ def _production_task_markdown(task: dict | None) -> str:
         f"- **状态**：{_production_status_label(str(task.get('status') or ''))}",
         f"- **进度**：{completed} / {total}（{percent:.1f}%）",
     ]
+    if engine_label:
+        lines.append(f"本任务引擎：**{engine_label}**")
+    if global_label:
+        lines.append(f"全局默认：**{global_label}**")
+    runtime_state = str(runtime.get("engine_state") or "unknown")
+    runtime_label = _engine_label(runtime)
+    if runtime_label:
+        lines.append(f"实际 runtime：**{runtime_label} · {runtime_state}**")
     startup = task.get("startup") if isinstance(task.get("startup"), dict) else {}
     phase = str(startup.get("startup_phase") or "")
     if phase:
@@ -402,6 +456,20 @@ def refresh_production_task(ss):
     except Exception as exc:
         logger.warning("刷新生产任务状态失败: %s", exc)
         return f"当前生产任务状态读取失败：{exc}"
+
+
+def refresh_production_engine_status(_ss=None):
+    """Render only the runtime-owned engine identity for the production header."""
+    health = ProductionJobService.get_runtime_health()
+    state = str(health.get("engine_state") or "unknown")
+    actual_engine = health if health.get("engine_identity") else {}
+    selected_engine = actual_engine or health.get("global_default_engine") or _global_default_engine()
+    identity = _engine_name(
+        selected_engine.get("engine_identity") or selected_engine.get("engine_version") or "unknown"
+    )
+    precision = str(selected_engine.get("precision") or "")
+    state_label = {"ready": "Ready", "loading": "Loading", "recovering": "Recovering", "error": "Error", "unknown": "Unknown"}.get(state, state)
+    return f"生产引擎\n{identity} · {precision or '—'} · {state_label}"
 
 
 def refresh_production_task_tick(ss):
@@ -2764,6 +2832,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             syn_page = create_synthesis_page()
             grp_synth = syn_page["group"]
             s_task_status = syn_page["s_task_status"]
+            s_engine_status = syn_page["s_engine_status"]
             s_preview_df = syn_page["s_preview_df"]
             s_scope_mode = syn_page["s_scope_mode"]
             s_scope_readiness = syn_page["s_scope_readiness"]
@@ -2799,6 +2868,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
                 [ss],
                 [s_task_status, s_start_timer],
             )
+            s_start_timer.tick(refresh_production_engine_status, [ss], [s_engine_status])
 
             # ───────── 试听与质检 ─────────
             review_page = create_review_page()
@@ -2912,6 +2982,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     ).then(
         refresh_queue_list, [ss], [s_queue_list]
     )
+    s_task_timer.tick(refresh_production_engine_status, [ss], [s_engine_status])
 
     # 旧的全量刷新契约（22 元组）已移除（阶段三：open_project 首步 + _open_chain_rest 打开链）
 
@@ -2949,6 +3020,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         [e_quality_summary, e_seg_preview_sel, e_seg_regen_sel, e_segment_quality]).then(
         refresh_queue_list, [ss], [s_queue_list]).then(
         refresh_production_task, [ss], [s_task_status]).then(
+        refresh_production_engine_status, [ss], [s_engine_status]).then(
         refresh_supplement_roles, [ss], [sup_role])
     nav_export.click(
         lambda: _goto("export"), None, _GROUPS,
