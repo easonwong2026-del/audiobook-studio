@@ -10,6 +10,7 @@ from scipy.io import wavfile
 from lib import project_paths
 from repositories.project_repo import ProjectRepository
 from repositories.quality_repo import QualityRepository
+from repositories.task_repo import TaskRecord, TaskRepository
 from services.production_jobs import ProductionJobService
 from services.quality import QualityService
 from services.repair import RepairService
@@ -172,3 +173,108 @@ def test_repair_copies_temporary_voice_and_routes_it_per_segment(
     relative = captured["voice_overrides"]["001-001"]
     assert not os.path.isabs(relative)
     assert relative.startswith("08_质检记录/")
+
+
+@pytest.mark.parametrize("task_status", ["recovering", "needs_attention", "interrupted"])
+def test_repair_refresh_preserves_prepared_revision_until_recovery_finishes(
+    repair_project, monkeypatch, task_status
+):
+    old = QualityService.ensure_active_revision(repair_project, "001-001")
+    repair = QualityRepository.create_history_record(
+        repair_project,
+        "repair_history",
+        "repair",
+        {
+            "project": repair_project,
+            "segment_ids": ["001-001"],
+            "revision_ids": [],
+            "task_id": f"repair-{task_status}",
+            "status": "submitting",
+            "prepared": [],
+            "result": {},
+        },
+    )
+    monkeypatch.setattr(
+        ProductionJobService,
+        "get_task_snapshot",
+        staticmethod(lambda _task_id: {
+            "task_id": f"repair-{task_status}",
+            "status": task_status,
+            "progress": {"total": 1, "completed": 0},
+        }),
+    )
+
+    result = RepairService.refresh(repair_project, repair["repair_id"])
+
+    assert result["status"] == task_status
+    assert QualityRepository.get_active_revision(
+        repair_project, "001-001"
+    )["revision_id"] == old["revision_id"]
+    assert not result.get("result", {}).get("finalized", False)
+
+
+def test_repair_refresh_follows_recovery_child_and_finalizes_after_done(
+    repair_project, monkeypatch
+):
+    old = QualityService.ensure_active_revision(repair_project, "001-001")
+    target = os.path.join(
+        ProjectRepository.get_project_dir(repair_project),
+        "segments",
+        "repair-recovery.wav",
+    )
+    wavfile.write(target, 22050, np.full(22050, 1200, dtype=np.int16))
+    pending = QualityRepository.create_revision(
+        repair_project,
+        "001-001",
+        status="regenerating",
+        activate=False,
+        metadata={"repair_id": "pending"},
+    )
+    repair = QualityRepository.create_history_record(
+        repair_project,
+        "repair_history",
+        "repair",
+        {
+            "project": repair_project,
+            "segment_ids": ["001-001"],
+            "revision_ids": [pending["revision_id"]],
+            "task_id": "repair-parent",
+            "status": "interrupted",
+            "prepared": [{
+                "segment_id": "001-001",
+                "revision_id": pending["revision_id"],
+                "target_relative_path": QualityService._project_relative(
+                    repair_project, target
+                ),
+                "preserved_relative_path": "",
+            }],
+            "result": {},
+        },
+    )
+    child = TaskRecord(
+        task_id="repair-child",
+        task_type="synthesis",
+        project=repair_project,
+        status="done",
+        recovery_of="repair-parent",
+    )
+    TaskRepository.save_task(child)
+    monkeypatch.setattr(
+        ProductionJobService,
+        "get_task_snapshot",
+        staticmethod(lambda task_id: {
+            "task_id": task_id,
+            "status": "done",
+            "progress": {"total": 1, "completed": 1},
+            "finished_at": "2026-08-13T00:00:00Z",
+        }),
+    )
+
+    result = RepairService.refresh(repair_project, repair["repair_id"])
+
+    assert result["task_id"] == "repair-child"
+    assert result["status"] == "done"
+    assert result["result"]["finalized"] is True
+    assert QualityRepository.get_active_revision(
+        repair_project, "001-001"
+    )["revision_id"] != old["revision_id"]

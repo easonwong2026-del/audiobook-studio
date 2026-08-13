@@ -225,6 +225,7 @@ class RecoveryHooks:
 
     recycle: Optional[Callable[[], int]] = None
     cancel_requested: Optional[Callable[[], bool]] = None
+    shutdown_requested: Optional[Callable[[], bool]] = None
     pause_gate: Optional[Callable[[], None]] = None
     on_recovery: Optional[Callable[[dict[str, Any]], None]] = None
     on_failure: Optional[Callable[[SynthesisFailure], None]] = None

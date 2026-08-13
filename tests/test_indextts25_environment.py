@@ -72,6 +72,60 @@ def test_environment_diagnostics_defaults_to_recommended_when_no_legacy_config(m
     assert selected.version_source == "default"
 
 
+def test_engine_selection_matrix_uses_one_profile_resolver(monkeypatch, tmp_path):
+    from lib.tts_profile import resolve_profile
+
+    monkeypatch.setattr(environment, "_read_environment_config", lambda: {})
+    monkeypatch.setattr(
+        environment,
+        "_auto_model_dir",
+        lambda version: (
+            tmp_path / ("2" if version == "v2" else "2.5")
+            if (tmp_path / ("2" if version == "v2" else "2.5")).is_dir()
+            else None
+        ),
+    )
+    env = {
+        "AUDIOBOOK_STUDIO_ENGINE": "",
+        "AUDIOBOOK_STUDIO_TTS_BACKEND": "",
+        "AUDIOBOOK_STUDIO_ENGINE_VERSION": "",
+        "AUDIOBOOK_STUDIO_TTS_VERSION": "",
+        "AUDIOBOOK_STUDIO_VERSION": "",
+        "AUDIOBOOK_STUDIO_MODEL_DIR": "",
+        "AUDIOBOOK_STUDIO_MODEL_DIR_V2": "",
+        "AUDIOBOOK_STUDIO_MODEL_DIR_V25": "",
+    }
+    monkeypatch.setattr(environment.os, "environ", env)
+
+    def selected_version() -> str:
+        selected = environment.resolve_engine_selection()
+        profile = resolve_profile(
+            config_data={},
+            environ=env,
+            auto_model_dirs={
+                "2": str(tmp_path / "2") if (tmp_path / "2").is_dir() else "",
+                "2.5": str(tmp_path / "2.5") if (tmp_path / "2.5").is_dir() else "",
+            },
+        )
+        expected = "v2" if profile["engine_version"] == "2" else "v2.5"
+        assert selected.version == expected
+        return selected.version
+
+    assert selected_version() == "v2.5"
+    env["AUDIOBOOK_STUDIO_TTS_VERSION"] = "v2"
+    assert selected_version() == "v2"
+
+    env["AUDIOBOOK_STUDIO_TTS_VERSION"] = ""
+    env["AUDIOBOOK_STUDIO_MODEL_DIR"] = str(tmp_path / "legacy")
+    assert selected_version() == "v2"
+
+    env["AUDIOBOOK_STUDIO_MODEL_DIR"] = ""
+    (tmp_path / "2").mkdir()
+    assert selected_version() == "v2"
+    (tmp_path / "2.5").mkdir()
+    assert selected_version() == "v2.5"
+
+
 def test_checkpoint_check_is_local_and_reports_missing_files(tmp_path):
     model_dir = tmp_path / "checkpoints-v2.5"
     model_dir.mkdir()

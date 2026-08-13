@@ -94,6 +94,37 @@ def test_plan_chapter_scope_and_completed_count(production_project):
     assert plan["remaining"] == 2
 
 
+def test_plan_fails_closed_when_script_validator_raises(production_project, monkeypatch):
+    def broken_validator(_script):
+        raise RuntimeError("validator unavailable")
+
+    monkeypatch.setattr(
+        "services.production_jobs.script_loader.validate_script_issues",
+        broken_validator,
+    )
+    plan = ProductionJobService.plan(production_project, {"all": True})
+    assert plan["ready"] is False
+    blocker = next(
+        item for item in plan["blockers"]
+        if item["code"] == "SCRIPT_VALIDATION_FAILED"
+    )
+    assert blocker["exception_type"] == "RuntimeError"
+    assert "validator unavailable" not in blocker["message"]
+
+    before = {
+        record.task_id
+        for record in TaskRepository.list_tasks(project=production_project)
+    }
+    with pytest.raises(ProductionJobError) as error:
+        ProductionJobService.start(production_project, {"all": True}, source="mcp")
+    assert error.value.code == "PRODUCTION_BLOCKED"
+    after = {
+        record.task_id
+        for record in TaskRepository.list_tasks(project=production_project)
+    }
+    assert after == before
+
+
 def test_start_idempotency_and_active_project_constraint(production_project, monkeypatch):
     monkeypatch.setattr(SynthesisService, "start", staticmethod(_fake_start))
     first = ProductionJobService.start(

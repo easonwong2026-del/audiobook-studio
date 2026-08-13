@@ -14,6 +14,11 @@ from __future__ import annotations
 
 from lib.snapshot import ProjectSnapshot
 
+from .application_lifecycle import (
+    ApplicationLifecycleError,
+    ApplicationLifecycleService,
+    get_application_lifecycle,
+)
 from .export import ExportPlanError, ExportService
 from .project import ProjectService
 from .project_backup import ProjectBackupService
@@ -44,6 +49,9 @@ __all__ = [
     "PRODUCTION_STATES",
     "ExportService",
     "ExportPlanError",
+    "ApplicationLifecycleError",
+    "ApplicationLifecycleService",
+    "get_application_lifecycle",
     "ProjectService",
     "ProjectBackupService",
     "ProjectStorageService",

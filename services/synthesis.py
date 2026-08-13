@@ -26,6 +26,7 @@ from lib import project_paths, segment_cache
 from lib import queue as synth_queue
 from repositories.project_repo import ProjectRepository
 from repositories.task_repo import TaskRecord, TaskRepository
+from lib.task_state import TASK_STATES
 
 logger = logging.getLogger(__name__)
 
@@ -33,12 +34,7 @@ logger = logging.getLogger(__name__)
 _MAX_LOG_LINES = 50
 
 # 合法状���集合（供 UI / 守卫校验）
-SYNTHESIS_STATES = (
-    "pending", "running", "pausing", "paused",
-    "recovering",
-    "cancelling", "cancelled", "done", "error", "interrupted",
-    "needs_attention",
-)
+SYNTHESIS_STATES = TASK_STATES
 
 
 @dataclass
@@ -75,6 +71,7 @@ class SynthesisState:
     log_lines: list[str] = field(default_factory=list)
     cancel: bool = False
     cancel_requested: bool = False
+    shutdown_requested: bool = False
     future: Any = None
     error: Optional[str] = None
     paused: bool = False
@@ -168,6 +165,7 @@ class SynthesisService:
         state.status = "pending"
         state.cancel = False
         state.cancel_requested = False
+        state.shutdown_requested = False
         state.paused = False
         state.error = None
         state.selected_chapters = (
@@ -231,6 +229,13 @@ class SynthesisService:
                 state.performance_trace.record_event("cancel_requested")
             except Exception:  # noqa: BLE001  # diagnostics must not alter control
                 logger.debug("记录 cancel trace 失败", exc_info=True)
+        state.notify()
+
+    @staticmethod
+    def request_shutdown(state: SynthesisState) -> None:
+        """Request application shutdown without changing the task to cancel."""
+        state.shutdown_requested = True
+        state.paused = False
         state.notify()
 
     @staticmethod
@@ -298,7 +303,7 @@ class SynthesisService:
             record.failed_segment_ids = list(state.failed_segment_ids)
             record.error_summary = error_summary
             record.updated_at = now
-            if status in {"done", "cancelled", "error"}:
+            if status in {"done", "cancelled", "error", "interrupted", "needs_attention"}:
                 record.finished_at = now
             TaskRepository.save_task(record)
         except Exception as exc:
@@ -436,7 +441,7 @@ class SynthesisService:
             _paused_logged = False
             while True:
                 # 段边界协作暂停：暂停且未取消时不向下拉取（不提交新段），worker 存活挂起
-                while state.paused and not state.cancel:
+                while state.paused and not state.cancel and not state.shutdown_requested:
                     if state.status != "paused":
                         state.status = "paused"
                         state.notify()
@@ -453,6 +458,17 @@ class SynthesisService:
                     if persist_task:
                         SynthesisService._persist_legacy_task(
                             state, project, "cancelled"
+                        )
+                    state.notify()
+                    return
+                if state.shutdown_requested:
+                    state.status = "interrupted"
+                    state.cancel = False
+                    state.cancel_requested = False
+                    state.append_log("应用正在关闭，任务已安全中断，可在下次启动后继续。")
+                    if persist_task:
+                        SynthesisService._persist_legacy_task(
+                            state, project, "interrupted"
                         )
                     state.notify()
                     return
@@ -510,11 +526,20 @@ class SynthesisService:
                     # pulling more segments.
                     state.notify()
                     continue
+                elif raw.startswith("[re] shutdown"):
+                    state.status = "interrupted"
+                    state.append_log("应用正在关闭，任务已安全中断，可在下次启动后继续。")
+                    if persist_task:
+                        SynthesisService._persist_legacy_task(
+                            state, project, "interrupted"
+                        )
+                    state.notify()
+                    return
                 else:
                     state.append_log(raw)
                 state.notify()
 
-            if state.status != "needs_attention":
+            if state.status not in {"needs_attention", "interrupted"}:
                 state.status = "error" if state.failed_segment_ids else "done"
                 state.progress = min(1.0, state.completed / max(state.total, 1))
                 state.append_log(

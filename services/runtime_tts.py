@@ -16,11 +16,12 @@ from lib import project_paths
 from repositories.project_repo import ProjectRepository
 from repositories.task_repo import TaskRecord, TaskRepository
 from lib.tts_profile import resolve_profile
+from lib.task_state import ENDED_TASK_STATES
+from .application_lifecycle import get_application_lifecycle
 
 from .production_runtime import ProductionRuntime, ProductionRuntimeClient
 
 
-_TERMINAL = frozenset({"done", "error", "cancelled", "interrupted"})
 
 
 def _now() -> str:
@@ -68,7 +69,7 @@ class RuntimeTTSService:
         deadline = time.monotonic() + max(float(timeout), 1.0)
         while time.monotonic() < deadline:
             record = TaskRepository.load_task(task_id)
-            if record is not None and record.status in _TERMINAL:
+            if record is not None and record.status in ENDED_TASK_STATES:
                 if record.status == "done":
                     return record
                 raise RuntimeTTSError(record)
@@ -90,6 +91,7 @@ class RuntimeTTSService:
         total: int,
         timeout: float,
     ) -> TaskRecord:
+        get_application_lifecycle().ensure_accepting_tasks()
         task_id = f"task_{uuid.uuid4().hex[:20]}"
         now = _now()
         options = dict(options or {})
@@ -133,6 +135,7 @@ class RuntimeTTSService:
     ) -> str:
         """Create a complete three-sentence voice preview in the singleton runtime."""
         project = str(project_name or "").strip()
+        get_application_lifecycle().ensure_accepting_tasks()
         if not project or not TaskRepository.get_database_path(project, create=True):
             # Compatibility for isolated service tests without a real project.
             return ProductionRuntime().run_voice_preview_direct(
@@ -174,6 +177,7 @@ class RuntimeTTSService:
     ) -> list[dict[str, Any]]:
         """Synthesize isolated supplement lines through the singleton runtime."""
         project = str(project_name or "").strip()
+        get_application_lifecycle().ensure_accepting_tasks()
         payload = {
             "role": str(role or ""),
             "lines": [str(item) for item in lines],

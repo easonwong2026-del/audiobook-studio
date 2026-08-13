@@ -119,3 +119,28 @@ def test_synthesis_cancel_at_segment_boundary(project, monkeypatch):
     assert state.completed >= 1
     # 取消只在段边界生效：未完成全部段
     assert state.completed < state.total
+
+
+def test_synthesis_shutdown_at_segment_boundary_becomes_interrupted(project, monkeypatch):
+    monkeypatch.setattr(tts_engine, "synthesize_segment", _fake_segment_slow)
+    SynthesisService.reset_executor()
+
+    state = SynthesisState(task_id="t-shutdown", project=project)
+    SynthesisService.start(state, project, _bindings(pm.get_project_dir(project)))
+
+    deadline = time.time() + 15
+    while (
+        state.completed < 1
+        and state.status not in ("done", "cancelled", "error")
+        and time.time() < deadline
+    ):
+        time.sleep(0.01)
+    SynthesisService.request_shutdown(state)
+
+    while state.status not in ("done", "interrupted", "error") and time.time() < deadline:
+        time.sleep(0.02)
+
+    assert state.status == "interrupted", state.log_lines
+    assert state.cancel is False
+    assert state.completed >= 1
+    assert state.completed < state.total

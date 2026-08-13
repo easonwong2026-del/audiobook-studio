@@ -3,7 +3,7 @@ import sys
 from types import SimpleNamespace
 
 import launcher
-from lib import environment
+from lib import config, environment
 from services import environment_diagnostics as diagnostics
 
 
@@ -57,6 +57,15 @@ def test_diagnostics_have_no_external_provider_check():
     assert "API Provider" not in rendered
     assert "OPENAI" not in rendered
     assert "DEEPSEEK" not in rendered
+
+
+def test_web_host_defaults_to_localhost_and_allows_explicit_lan(monkeypatch):
+    monkeypatch.delenv("AUDIOBOOK_STUDIO_HOST", raising=False)
+    monkeypatch.setattr(config, "_read_config", lambda: {})
+    assert config.get_host() == "127.0.0.1"
+
+    monkeypatch.setenv("AUDIOBOOK_STUDIO_HOST", "0.0.0.0")
+    assert config.get_host() == "0.0.0.0"
 
 
 def test_single_check_exception_isolated(monkeypatch):

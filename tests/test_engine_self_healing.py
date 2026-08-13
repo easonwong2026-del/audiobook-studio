@@ -947,6 +947,10 @@ def test_p_mcp_task_status_schema_for_recovery_states(
 ):
     from mcp_server.server import handle_request
 
+    # ``recovering`` is an active state.  Keep it in its own project so this
+    # schema fixture does not violate the repository's one-active-task rule.
+    ProjectService.create_project_from_data("book-recovering", _script())
+
     now = "2026-08-11T00:00:00Z"
     base = {
         "task_type": "synthesis",
@@ -978,7 +982,7 @@ def test_p_mcp_task_status_schema_for_recovery_states(
                 "recovered": False,
             },
         },
-        **base,
+        **{**base, "project": "book-recovering"},
     )
     attention = TaskRecord(
         task_id="task_attention",

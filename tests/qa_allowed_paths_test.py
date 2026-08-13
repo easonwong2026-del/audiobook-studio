@@ -8,9 +8,9 @@
 - 使用临时隔离数据目录（AUDIOBOOK_STUDIO_DATA_DIR），不触碰用户真实文件。
 - 不启动 Gradio 服务（不依赖 gradio_client），避免端口 / 模型依赖。
 
-安全规则验证（对应 allowed_paths = [config.get_data_dir()] 白名单）
+安全规则验证（对应 projects / voice_library / preview 白名单）
 ------------------------------------------------------------------
-  ✅  data_dir 子树内路径 -> 原样返回（放行）
+  ✅  UI 实际目录子树内路径 -> 原样返回（放行）
   ✅  外部路径 -> 复制到 tempdir 临时副本，不修改原文件
   ✅  None 输入 -> 安全返回 None
   ✅  路径穿越（../../）-> 视为外部路径，复制到 tempdir
@@ -89,8 +89,9 @@ def safe_path_func(isolated_data_dir: str) -> callable:
 
 
 def test_internal_path_returned_as_is(safe_path_func, isolated_data_dir):
-    """内部路径（data_dir 子树内）应原样返回。"""
-    internal = os.path.join(isolated_data_dir, "chapter.wav")
+    """UI-served roots should be returned as-is."""
+    internal = os.path.join(isolated_data_dir, "projects", "book", "chapter.wav")
+    os.makedirs(os.path.dirname(internal), exist_ok=True)
     with open(internal, "wb") as f:
         f.write(b"RIFF....WAVE")
     result = safe_path_func(internal)

@@ -21,6 +21,8 @@ from repositories.project_repo import ProjectRepository
 from repositories.quality_repo import QualityRepository
 from lib.procutil import run_no_window
 from repositories.task_repo import TaskRecord, TaskRepository
+from lib.task_state import ACTIVE_TASK_STATES
+from .application_lifecycle import get_application_lifecycle
 from services.delivery import compute_delivery_input_snapshot
 from services.quality import QualityService
 from lib.tts_profile import public_profile, resolve_profile
@@ -150,6 +152,9 @@ class ExportService:
         Returns:
             生成的字幕文件路径列表（按请求格式）。
         """
+        # Subtitle generation is a direct Web submission rather than part of
+        # an already-claimed formal export job.
+        get_application_lifecycle().ensure_accepting_tasks()
         from lib import audio_pipeline
 
         return audio_pipeline.generate_subtitles(
@@ -187,9 +192,7 @@ class ExportService:
         for record in TaskRepository.list_tasks(project=project):
             if record.task_id == exclude_task_id:
                 continue
-            if record.status not in {
-                "pending", "running", "pausing", "paused", "cancelling",
-            }:
+            if record.status not in ACTIVE_TASK_STATES:
                 continue
             if record.task_type == "export":
                 blockers.append({
@@ -207,10 +210,7 @@ class ExportService:
                 })
         repairs = QualityRepository.list_history(project, "repair_history")
         for repair in repairs:
-            if repair.get("status") not in {
-                "preparing", "submitting", "pending", "running",
-                "pausing", "paused", "cancelling",
-            }:
+            if repair.get("status") not in ACTIVE_TASK_STATES | {"preparing", "submitting"}:
                 continue
             task_id = str(repair.get("task_id") or "")
             if task_id and task_id == exclude_task_id:
@@ -966,6 +966,7 @@ class ExportService:
         idempotency_key: str = "",
     ) -> dict[str, Any]:
         """Create a durable export job and return without waiting for the book."""
+        get_application_lifecycle().ensure_accepting_tasks()
         project = str(project_name or "").strip()
         key = str(idempotency_key or "").strip()
         existing = (

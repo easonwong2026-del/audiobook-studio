@@ -13,20 +13,13 @@ from typing import Any
 
 from repositories.project_repo import ProjectRepository
 from repositories.quality_repo import QualityRepository
+from repositories.task_repo import TaskRepository
 from services.production_jobs import ProductionJobError, ProductionJobService
 from services.quality import QualityService
 from services.voice_assets import VoiceAssetService
 from lib.tts_profile import resolve_profile
-
-
-ACTIVE_TASK_STATES = frozenset({
-    "pending",
-    "running",
-    "pausing",
-    "paused",
-    "cancelling",
-})
-TERMINAL_TASK_STATES = frozenset({"done", "error", "cancelled", "interrupted"})
+from lib.task_state import ACTIVE_TASK_STATES, ENDED_TASK_STATES, is_attention_status
+from services.application_lifecycle import get_application_lifecycle
 
 
 class RepairError(ValueError):
@@ -140,9 +133,13 @@ class RepairService:
         note: str = "",
         idempotency_key: str = "",
     ) -> dict[str, Any]:
+        get_application_lifecycle().ensure_accepting_tasks()
         project = str(project_name or "").strip()
         if not project:
             raise RepairError("PROJECT_REQUIRED", "project_name 不能为空")
+        from services.project import ensure_project_mutation_allowed
+
+        ensure_project_mutation_allowed(project, "repair_start")
         ids = cls._normalize_segment_ids(project, segment_ids)
         options = cls._options(emotion, emo_alpha, speech_rate, num_beams)
         key = str(idempotency_key or "").strip()
@@ -288,7 +285,7 @@ class RepairService:
                 status=str(started.get("status") or "pending"),
             )
             result = {"created": True, **cls._public(repair)}
-            if result.get("status") in TERMINAL_TASK_STATES:
+            if result.get("status") in ENDED_TASK_STATES:
                 return {"created": True, **cls.refresh(project, repair_id)}
             return result
         except Exception as exc:
@@ -330,9 +327,28 @@ class RepairService:
         task_id = str(repair.get("task_id") or "")
         if not task_id:
             return cls._public(repair)
+        # ``resume_production`` creates a new recovery attempt instead of
+        # mutating the interrupted/attention row.  Follow that child so a
+        # Repair history record remains resumable and can finalize normally.
+        children = [
+            record for record in TaskRepository.list_tasks(
+                project=project, task_type="synthesis"
+            )
+            if record.recovery_of == task_id or record.parent_task_id == task_id
+        ]
+        if children:
+            child = children[0]
+            task_id = child.task_id
+            repair = QualityRepository.update_history_record(
+                project,
+                "repair_history",
+                repair_id,
+                task_id=task_id,
+                status=child.status,
+            )
         snapshot = ProductionJobService.get_task_snapshot(task_id)
         task_status = str(snapshot.get("status") or "")
-        if task_status in ACTIVE_TASK_STATES:
+        if task_status in ACTIVE_TASK_STATES or is_attention_status(task_status):
             repair = QualityRepository.update_history_record(
                 project,
                 "repair_history",
@@ -347,6 +363,19 @@ class RepairService:
         completed: list[str] = []
         failed: list[str] = []
         qa_results: list[dict[str, Any]] = []
+        # A task that ended because the application stopped is an attempt
+        # boundary, not permission to settle prepared revisions.  The next
+        # recovery task continues to own this repair data.
+        if task_status == "interrupted":
+            repair = QualityRepository.update_history_record(
+                project,
+                "repair_history",
+                repair_id,
+                status="interrupted",
+                result={"progress": snapshot.get("progress", {})},
+            )
+            return cls._public(repair)
+
         for item in repair.get("prepared", []):
             segment_id = str(item.get("segment_id") or "")
             revision_id = str(item.get("revision_id") or "")
@@ -376,7 +405,7 @@ class RepairService:
             final_status = "done"
         elif completed:
             final_status = "partial"
-        elif task_status in {"cancelled", "interrupted"}:
+        elif task_status == "cancelled":
             final_status = "cancelled"
         else:
             final_status = "error"

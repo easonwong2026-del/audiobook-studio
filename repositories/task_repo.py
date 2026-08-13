@@ -21,6 +21,11 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from lib import project_paths
+from lib.task_state import (
+    ACTIVE_TASK_STATES,
+    ENDED_TASK_STATES,
+    FINAL_TASK_STATES,
+)
 
 from ._atomic import atomic_write as _atomic_write
 from .project_repo import ProjectRepository
@@ -35,14 +40,15 @@ _RUNTIME_TASK_TYPES = frozenset({
     "voice_preview",
     "export",
 })
-_ACTIVE_STATES = ("pending", "running", "pausing", "paused", "recovering", "cancelling")
-_TERMINAL_STATES = ("cancelled", "done", "error", "interrupted", "needs_attention")
+_ACTIVE_STATES = tuple(ACTIVE_TASK_STATES)
+_ENDED_STATES = tuple(ENDED_TASK_STATES)
+_FINAL_STATES = tuple(FINAL_TASK_STATES)
 
 # P1-1: schema-once。同一 path + 进程内只执行一次重 schema ensure / legacy
 # 迁移；缓存值 (schema_version, legacy_done)。失效条件见 `_ensure_schema_once`：
 # 探针（sqlite_master + repository_meta + 必需列 LIMIT 0）失败时自动走重路径，
 # 因此外部 DROP TABLE / DB 重建 / 测试换根都能自愈。
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _SCHEMA_CACHE: dict[str, tuple[int, bool]] = {}
 _SCHEMA_LOCK = threading.Lock()
 
@@ -501,9 +507,10 @@ class TaskRepository:
                 startup_json TEXT NOT NULL DEFAULT '{}',
                 version INTEGER NOT NULL DEFAULT 0
             );
+            DROP INDEX IF EXISTS uq_production_active_project;
             CREATE UNIQUE INDEX IF NOT EXISTS uq_production_active_project
             ON production_tasks(project)
-            WHERE status IN ('pending','running','pausing','paused','cancelling');
+            WHERE status IN ('pending','running','pausing','paused','recovering','cancelling');
             CREATE UNIQUE INDEX IF NOT EXISTS uq_production_idempotency
             ON production_tasks(project, task_type, idempotency_key)
             WHERE idempotency_key <> '';
@@ -1144,7 +1151,7 @@ class TaskRepository:
                         """
                         UPDATE production_tasks SET heartbeat_at=?
                         WHERE owner_id=? AND status IN
-                          ('pending','running','pausing','paused','cancelling')
+                          ('pending','running','pausing','paused','recovering','cancelling')
                         """,
                         (now, owner_id),
                     )
@@ -1251,7 +1258,7 @@ class TaskRepository:
                 rows = connection.execute(
                     """
                     SELECT task_id FROM production_tasks
-                    WHERE status IN ('pending','running','pausing','paused','cancelling')
+                    WHERE status IN ('pending','running','pausing','paused','recovering','cancelling')
                       AND owner_id<>'' AND owner_id<>?
                     """,
                     (new_owner_id,),
@@ -1325,19 +1332,19 @@ class TaskRepository:
                 return current
             effective_status = status
             intent = current.control_intent
-            if intent == "cancel" and status not in _TERMINAL_STATES:
+            if intent == "cancel" and status not in _ENDED_STATES:
                 effective_status = "cancelling"
             elif intent == "pause" and status == "running":
                 effective_status = "pausing"
             if status == "running" and intent == "resume":
                 intent = ""
-            if effective_status in _TERMINAL_STATES:
+            if effective_status in _ENDED_STATES:
                 intent = ""
             started_at = current.started_at
             if status == "running" and not started_at:
                 started_at = now
             finished_at = current.finished_at
-            if effective_status in _TERMINAL_STATES:
+            if effective_status in _ENDED_STATES:
                 finished_at = now
             connection.execute(
                 """
@@ -1393,7 +1400,7 @@ class TaskRepository:
         cutoff = time.time() - max_age_days * 86400
         cleaned = 0
         for record in TaskRepository.list_tasks():
-            if record.status not in _TERMINAL_STATES:
+            if record.status not in _FINAL_STATES:
                 continue
             timestamp = record.finished_at or record.created_at
             try:
@@ -1425,17 +1432,18 @@ class TaskRepository:
         changed = 0
         connection.execute("BEGIN IMMEDIATE")
         try:
+            placeholders = ",".join("?" for _ in _ACTIVE_STATES)
             rows = connection.execute(
-                """
+                f"""
                 SELECT task_id FROM production_tasks
-                WHERE project=? AND status IN ('pending','running','pausing','paused','cancelling')
+                WHERE project=? AND status IN ({placeholders})
                 """,
-                (project,),
+                (project, *_ACTIVE_STATES),
             ).fetchall()
             if rows:
                 ids = [str(row["task_id"]) for row in rows]
                 connection.execute(
-                    """
+                    f"""
                     UPDATE production_tasks
                     SET status='interrupted', owner_id='', heartbeat_at='',
                         control_intent='', finished_at=?, updated_at=?,
@@ -1443,10 +1451,9 @@ class TaskRepository:
                           WHEN error_summary='' THEN '从项目备份恢复后需重新启动任务'
                           ELSE error_summary END,
                         version=version+1
-                    WHERE project=? AND status IN
-                      ('pending','running','pausing','paused','cancelling')
+                        WHERE project=? AND status IN ({placeholders})
                     """,
-                    (now, now, project),
+                    (now, now, project, *_ACTIVE_STATES),
                 )
                 changed = len(ids)
             connection.commit()

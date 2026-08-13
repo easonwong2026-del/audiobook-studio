@@ -12,8 +12,6 @@ from __future__ import annotations
 import os
 import sys
 
-import pytest
-
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
@@ -59,10 +57,25 @@ class TestCancelSetsCancelling:
         st = _state("running")
         SynthesisService.cancel(st)
         assert st.status == "cancelling"
-        # 再次 cancel
         SynthesisService.cancel(st)
         assert st.status == "cancelling"
         assert st.cancel is True
+
+
+class TestShutdownSignal:
+    def test_shutdown_does_not_become_cancel(self):
+        st = _state("running")
+        SynthesisService.request_shutdown(st)
+        assert st.shutdown_requested is True
+        assert st.cancel is False
+        assert st.status == "running"
+
+    def test_shutdown_releases_pause_gate(self):
+        st = _state("paused")
+        st.paused = True
+        SynthesisService.request_shutdown(st)
+        assert st.shutdown_requested is True
+        assert st.paused is False
 
 
 class TestCancelFlagInitialState:

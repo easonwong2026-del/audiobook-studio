@@ -90,3 +90,18 @@ def wire_settings_page(page: dict) -> None:
             page["s_diagnostics_report"],
         ],
     )
+    page["s_shutdown"].click(
+        settings_handlers.show_shutdown_confirmation,
+        [],
+        [page["s_shutdown_confirm_message"], page["s_shutdown_cancel"], page["s_shutdown_confirm"], page["s_shutdown"]],
+    )
+    page["s_shutdown_cancel"].click(
+        settings_handlers.cancel_shutdown,
+        [],
+        [page["s_shutdown_confirm_message"], page["s_shutdown_cancel"], page["s_shutdown_confirm"], page["s_shutdown"]],
+    )
+    page["s_shutdown_confirm"].click(
+        settings_handlers.request_application_shutdown,
+        [],
+        [page["s_shutdown_confirm_message"], page["s_shutdown_status"], page["s_shutdown_cancel"], page["s_shutdown_confirm"], page["s_shutdown"]],
+    )

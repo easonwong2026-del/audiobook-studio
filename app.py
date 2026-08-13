@@ -1270,11 +1270,19 @@ def _safe_path_for_file_component(path):
     """
     if not path or not os.path.isfile(path):
         return path
-    data_dir = config.get_data_dir()
-    if data_dir:
+    allowed_roots = [
+        config.get_projects_root(),
+        config.get_voice_library(),
+        config.get_preview_dir(),
+    ]
+    if allowed_roots:
         try:
-            if os.path.commonpath([os.path.abspath(path), os.path.abspath(data_dir)]) == os.path.abspath(data_dir):
-                return path  # 已在白名单内，原样返回
+            path_real = os.path.realpath(path)
+            if any(
+                os.path.commonpath([path_real, os.path.realpath(root)]) == os.path.realpath(root)
+                for root in allowed_roots
+            ):
+                return path
         except ValueError:
             pass
     # 落到 tempdir（Gradio 默认允许 serve），复制一份副本供下载
@@ -1286,8 +1294,17 @@ def _safe_path_for_file_component(path):
     try:
         shutil.copy2(path, dst)
     except Exception:
-        return path  # 复制失败就退回原路径，不阻断导出结果
+        return None
     return dst
+
+
+def get_gradio_allowed_paths() -> list[str]:
+    """Roots needed by UI audio/file components, excluding private data roots."""
+    return [
+        config.get_projects_root(),
+        config.get_voice_library(),
+        config.get_preview_dir(),
+    ]
 
 
 def do_export(fmt, bitrate, output_dir, *args):
@@ -3386,9 +3403,16 @@ if __name__ == "__main__":
     setup_logging(log_dir=os.path.join(BASE, "logs"))
     # 数据目录外置后，首次启动把程序目录内的旧克隆音色迁移到外置 voice_library（一次性、安全拷贝）。
     config.migrate_legacy_voice_library()
-    # Gradio 默认只允许 serve 当前 cwd 与 tempdir 下的文件。数据目录（音色库、预览、
-    # 合成产物、导出）已全部外置到 config.get_data_dir()（如 D:\AudiobookStudio），
-    # 不在 cwd 内，返回其下音频路径给 Audio/File 组件会在序列化阶段触发 InvalidPathError
-    # 导致前端显示「错误」。将其加入 allowed_paths 白名单，递归放行其下所有子目录。
-    app.queue().launch(server_name="0.0.0.0", server_port=7862, share=False, inbrowser=True,
-                       allowed_paths=[config.get_data_dir()])
+    # Gradio 默认只允许 serve 当前 cwd 与 tempdir 下的文件。仅把 UI 实际需要
+    # 读取/下载的 projects、voice_library、preview 根目录加入白名单；logs、backup、
+    # runtime control 与数据库等私有数据不通过 Gradio 静态文件机制暴露。
+    from services.application_lifecycle import get_application_lifecycle
+
+    get_application_lifecycle().bind_app(app)
+    app.queue().launch(
+        server_name=config.get_host(),
+        server_port=7862,
+        share=False,
+        inbrowser=True,
+        allowed_paths=get_gradio_allowed_paths(),
+    )

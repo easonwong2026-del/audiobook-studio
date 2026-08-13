@@ -650,7 +650,11 @@ def synthesize_project(
                             "traceback_origin": failure.traceback_origin,
                             "code": failure.code,
                         })
-                        if hooks.enabled and hooks.cancel_requested():
+                        if hooks.enabled and hooks.shutdown_requested and hooks.shutdown_requested():
+                            _trace_call(performance_trace, "record_boundary", "recovery_shutdown")
+                            yield "[re] shutdown"
+                            return
+                        if hooks.enabled and hooks.cancel_requested and hooks.cancel_requested():
                             _trace_call(
                                 performance_trace,
                                 "record_boundary",
@@ -660,6 +664,18 @@ def synthesize_project(
                             return
                         if hooks.enabled:
                             hooks.pause_gate()
+                        if hooks.enabled and hooks.shutdown_requested and hooks.shutdown_requested():
+                            _trace_call(performance_trace, "record_boundary", "recovery_shutdown")
+                            yield "[re] shutdown"
+                            return
+                        if hooks.enabled and hooks.cancel_requested and hooks.cancel_requested():
+                            _trace_call(
+                                performance_trace,
+                                "record_boundary",
+                                "recovery_cancel",
+                            )
+                            yield "[re] cancelled"
+                            return
                         try:
                             generation = hooks.recycle()
                         except Exception as recycle_exc:
@@ -710,7 +726,11 @@ def synthesize_project(
                         # Retry the SAME segment after a real engine recycle.
                         retried_ok = False
                         for _retry in range(max(int(limits.segment_retry_limit), 1)):
-                            if hooks.enabled and hooks.cancel_requested():
+                            if hooks.enabled and hooks.shutdown_requested and hooks.shutdown_requested():
+                                _trace_call(performance_trace, "record_boundary", "recovery_shutdown")
+                                yield "[re] shutdown"
+                                return
+                            if hooks.enabled and hooks.cancel_requested and hooks.cancel_requested():
                                 _trace_call(
                                     performance_trace,
                                     "record_boundary",
@@ -720,6 +740,18 @@ def synthesize_project(
                                 return
                             if hooks.enabled:
                                 hooks.pause_gate()
+                            if hooks.enabled and hooks.shutdown_requested and hooks.shutdown_requested():
+                                _trace_call(performance_trace, "record_boundary", "recovery_shutdown")
+                                yield "[re] shutdown"
+                                return
+                            if hooks.enabled and hooks.cancel_requested and hooks.cancel_requested():
+                                _trace_call(
+                                    performance_trace,
+                                    "record_boundary",
+                                    "recovery_cancel",
+                                )
+                                yield "[re] cancelled"
+                                return
                             retry_temp = os.path.join(
                                 segments_dir,
                                 f".{os.path.basename(seg_path)}.{uuid.uuid4().hex}.part.wav",

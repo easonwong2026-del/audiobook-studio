@@ -130,6 +130,16 @@ def create_settings_page() -> dict:
                         interactive=False,
                         elem_classes=["diagnostics-report"],
                     )
+                    gr.Markdown("##### 危险操作")
+                    s_shutdown_confirm_message = gr.Markdown(visible=False)
+                    s_shutdown_cancel = gr.Button("取消", visible=False)
+                    s_shutdown_confirm = gr.Button("确认关闭", variant="stop", visible=False)
+                    s_shutdown = gr.Button("关闭 Audiobook Studio", variant="stop")
+                    s_shutdown_status = gr.Markdown("")
+                    s_service_status = gr.Markdown(
+                        settings_handlers.get_service_status_markdown(),
+                        elem_classes=["service-status"],
+                    )
 
     return {
         "group": grp,
@@ -161,4 +171,10 @@ def create_settings_page() -> dict:
         "s_diagnostics_status": s_diagnostics_status,
         "s_diagnostics_table": s_diagnostics_table,
         "s_diagnostics_report": s_diagnostics_report,
+        "s_shutdown_confirm_message": s_shutdown_confirm_message,
+        "s_shutdown_confirm": s_shutdown_confirm,
+        "s_shutdown_cancel": s_shutdown_cancel,
+        "s_shutdown": s_shutdown,
+        "s_shutdown_status": s_shutdown_status,
+        "s_service_status": s_service_status,
     }

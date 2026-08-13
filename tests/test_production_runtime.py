@@ -9,6 +9,7 @@ import time
 import pytest
 
 from lib import project_manager as pm
+from lib import tts_engine
 from repositories.project_repo import ProjectRepository
 from repositories.task_repo import TaskRecord, TaskRepository
 from services.production_runtime import ProductionRuntime
@@ -126,6 +127,26 @@ def test_sqlite_transaction_enforces_cross_process_idempotency(runtime_project):
     assert len({item[2] for item in results}) == 1
     database = TaskRepository.get_database_path("book")
     assert database and os.path.isfile(database)
+
+
+def test_idle_runtime_shutdown_unloads_engine_and_releases_lock(tmp_path, monkeypatch):
+    reset_calls: list[str] = []
+    monkeypatch.setattr(tts_engine, "reset_engine", lambda: reset_calls.append("reset"))
+    runtime = ProductionRuntime(
+        lock_path=str(tmp_path / "runtime.lock"),
+        status_path=str(tmp_path / "runtime-status.json"),
+        poll_interval=0.02,
+    )
+    try:
+        runtime.start_background()
+        assert runtime.is_running
+        runtime.request_shutdown(reason="test")
+        runtime.poke()
+        assert runtime.wait_until_stopped(timeout=5.0)
+        assert not runtime.lock.acquired
+        assert reset_calls == ["reset"]
+    finally:
+        runtime.stop(timeout=1.0)
 
 
 def test_sqlite_idempotency_conflict_is_race_safe(runtime_project):

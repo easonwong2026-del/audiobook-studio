@@ -15,6 +15,7 @@ from repositories.config_repo import ConfigRepository
 from repositories.project_repo import ProjectRepository
 from repositories.task_repo import TaskRepository
 from services import ProjectService
+from lib.task_state import ACTIVE_TASK_STATES
 
 logger = logging.getLogger(__name__)
 _CONFIG_PATH_AT_IMPORT = str(getattr(ConfigRepository, "CONFIG_PATH", "") or "")
@@ -40,10 +41,7 @@ _ENGINE_ALIASES = {
         "index_tts25", "index_tts_2_5", "index_tts_25",
     },
 }
-_ACTIVE_TTS_STATES = frozenset({
-    "active", "pending", "queued", "starting", "preparing", "submitting",
-    "running", "pausing", "paused", "recovering", "cancelling",
-})
+_ACTIVE_TTS_STATES = ACTIVE_TASK_STATES | {"active", "queued", "starting", "preparing", "submitting"}
 _TASK_TYPE_LABELS = {
     "synthesis": "合成",
     "voice_preview": "试听",
@@ -138,58 +136,17 @@ def _resolved_model_dirs() -> tuple[str, str]:
 
 def get_tts_engine_settings() -> dict[str, Any]:
     """Read the selected engine and both model directories without loading TTS."""
+    from lib.tts_profile import resolve_model_dir, resolve_profile
+
     raw = _read_raw_config()
-    profile = _profile()
-    profile_version = _first(profile.get("engine_version"), profile.get("version"))
-    raw_version = _first(
-        os.environ.get("AUDIOBOOK_STUDIO_ENGINE_VERSION"),
-        os.environ.get("AUDIOBOOK_STUDIO_VERSION"),
-        raw.get("engine_version"),
-        raw.get("tts_version"),
+    profile = resolve_profile({}, config_data=raw)
+    selected = (
+        TTS_ENGINE_25
+        if profile.get("engine_version") == "2.5"
+        else TTS_ENGINE_LEGACY
     )
-    explicit_engine = _first(
-        os.environ.get("AUDIOBOOK_STUDIO_ENGINE"),
-        raw.get("tts_engine"),
-        raw.get("active_tts_engine"),
-    )
-    legacy_configured = _first(
-        raw.get("model_dir_v2"),
-        raw.get("legacy_model_dir"),
-        raw.get("model_dir_2"),
-        os.environ.get("AUDIOBOOK_STUDIO_MODEL_DIR_V2"),
-        os.environ.get("AUDIOBOOK_STUDIO_MODEL_DIR_LEGACY"),
-        os.environ.get("AUDIOBOOK_STUDIO_MODEL_DIR"),
-        raw.get("model_dir"),
-    )
-
-    selected = _engine_from_version(raw_version)
-    if selected is None:
-        selected = _normalize_engine(explicit_engine)
-    if selected is None and not raw_version and not explicit_engine and legacy_configured:
-        selected = TTS_ENGINE_LEGACY
-    if selected is None:
-        selected = _engine_from_version(profile_version) or TTS_ENGINE_25
-
-    resolved_v2, resolved_v25 = _resolved_model_dirs()
-    legacy_dir = _clean_path(_first(
-        legacy_configured,
-        raw.get("legacy_model_dir"),
-        profile.get("model_dir") if _engine_from_version(profile_version) == TTS_ENGINE_LEGACY else None,
-        os.environ.get("AUDIOBOOK_STUDIO_MODEL_DIR_LEGACY"),
-        resolved_v2,
-        config.get_model_dir(),
-    ))
-    engine_25_dir = _clean_path(_first(
-        raw.get("indextts25_model_dir"),
-        raw.get("model_dir_v25"),
-        raw.get("model_dir_v2_5"),
-        raw.get("model_dir_2_5"),
-        profile.get("model_dir") if _engine_from_version(profile_version) == TTS_ENGINE_25 else None,
-        os.environ.get("AUDIOBOOK_STUDIO_MODEL_DIR_V25"),
-        os.environ.get("AUDIOBOOK_STUDIO_MODEL_DIR_2_5"),
-        resolved_v25,
-        os.path.join(os.path.dirname(legacy_dir), "checkpoints-v2.5") if legacy_dir else None,
-    ))
+    legacy_dir = _clean_path(resolve_model_dir("2", config_data=raw)["path"])
+    engine_25_dir = _clean_path(resolve_model_dir("2.5", config_data=raw)["path"])
     return {
         "engine": selected,
         "legacy_model_dir": legacy_dir,
@@ -344,22 +301,12 @@ def _persist_tts_engine_settings(
     profile = {
         "engine_backend": "indextts",
         "engine_version": version,
-        "model_dir": legacy_model_dir if engine_id == TTS_ENGINE_LEGACY else engine_25_model_dir,
+        # ``model_dir`` is the legacy v2 alias by contract.  Keep the selected
+        # v2.5 directory only in its version-specific field.
+        "model_dir": legacy_model_dir,
         "model_dir_v2": legacy_model_dir,
         "model_dir_v25": engine_25_model_dir,
     }
-    for name in ("set_tts_profile", "set_tts_engine_config", "set_tts_config"):
-        setter = getattr(config, name, None)
-        if callable(setter):
-            try:
-                setter(profile)
-            except TypeError:
-                setter(engine=engine_id, model_dirs={
-                    TTS_ENGINE_LEGACY: legacy_model_dir,
-                    TTS_ENGINE_25: engine_25_model_dir,
-                })
-            break
-
     data = _read_raw_config()
     data.update({
         "tts_engine": engine_id,
@@ -440,6 +387,72 @@ def refresh_tts_engine_ui(
         _clean_path(legacy_model_dir),
         _clean_path(engine_25_model_dir),
     )
+
+
+def show_shutdown_confirmation() -> tuple[Any, Any, Any, Any]:
+    import gradio as gr
+
+    return (
+        gr.update(visible=True, value="### 确认关闭 Audiobook Studio？\n\n关闭后将停止接收新任务，安全停止当前生产、Runtime、后台任务与 TTS Engine，然后关闭 Web UI。"),
+        gr.update(visible=True),
+        gr.update(visible=True),
+        gr.update(visible=False),
+    )
+
+
+def cancel_shutdown() -> tuple[Any, Any, Any, Any]:
+    import gradio as gr
+
+    return (
+        gr.update(visible=False, value=""),
+        gr.update(visible=False),
+        gr.update(visible=False),
+        gr.update(visible=True),
+    )
+
+
+def request_application_shutdown() -> tuple[Any, Any, Any, Any, Any]:
+    import gradio as gr
+
+    from services.application_lifecycle import get_application_lifecycle
+
+    lifecycle = get_application_lifecycle()
+    started = lifecycle.request_shutdown(reason="web_ui_shutdown")
+    return (
+        gr.update(visible=False),
+        gr.update(value="正在安全关闭 Audiobook Studio……", visible=True),
+        gr.update(visible=False),
+        gr.update(visible=False),
+        gr.update(visible=False),
+    ) if started else (
+        gr.update(visible=False),
+        gr.update(value="Audiobook Studio 已在关闭中。", visible=True),
+        gr.update(visible=False),
+        gr.update(visible=False),
+        gr.update(visible=False),
+    )
+
+
+def get_service_status_markdown() -> str:
+    """Render the existing runtime/engine snapshots as a compact status list."""
+    try:
+        from services.production_jobs import ProductionJobService
+        from services.runtime_engine import read_runtime_engine_status
+
+        health = ProductionJobService.get_runtime_health()
+        engine = read_runtime_engine_status()
+        runtime_state = str(health.get("runtime_state") or "unknown")
+        engine_state = str(engine.get("engine_state") or "unknown")
+        engine_version = str(health.get("engine_version") or "")
+        precision = str(health.get("precision") or "")
+        return (
+            "**服务状态**\n"
+            f"- Web UI：Running\n"
+            f"- Production Runtime：{runtime_state}\n"
+            f"- TTS Engine：{engine_version or 'IndexTTS'} · {precision or 'unknown'} · {engine_state}"
+        )
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError):
+        return "**服务状态**\n- Web UI：Running\n- Production Runtime：Unknown\n- TTS Engine：Unknown"
 
 
 def apply_tts_engine(

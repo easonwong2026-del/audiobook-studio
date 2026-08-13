@@ -13,6 +13,11 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from lib import project_paths, script_loader, segment_cache
+from lib.task_state import (
+    ACTIVE_TASK_STATES,
+    TASK_STATES,
+)
+from .application_lifecycle import get_application_lifecycle
 from lib.tts_profile import public_profile, resolve_profile
 from lib.startup import enrich as enrich_startup
 from repositories.project_repo import ProjectRepository
@@ -26,16 +31,8 @@ logger = logging.getLogger(__name__)
 
 
 PRODUCTION_TASK_TYPE = "synthesis"
-PRODUCTION_STATES = (
-    "pending", "running", "pausing", "paused", "recovering", "cancelling",
-    "cancelled", "done", "error", "interrupted", "needs_attention",
-)
-ACTIVE_PRODUCTION_STATES = frozenset({
-    "pending", "running", "pausing", "paused", "recovering", "cancelling",
-})
-TERMINAL_PRODUCTION_STATES = frozenset({
-    "cancelled", "done", "error", "needs_attention",
-})
+PRODUCTION_STATES = TASK_STATES
+ACTIVE_PRODUCTION_STATES = ACTIVE_TASK_STATES
 VALID_SOURCES = frozenset({"mcp", "web", "system", "recovery"})
 
 
@@ -93,6 +90,7 @@ class ProductionJobService:
     def reset_runtime(cls) -> None:
         """Stop the optional inline runtime used by unit tests."""
         ProductionRuntimeClient.reset_inline()
+        get_application_lifecycle().reset_for_tests()
 
     @staticmethod
     def _project_data(project_name: str) -> tuple[Any, dict[str, Any], dict[str, Any]]:
@@ -364,7 +362,13 @@ class ProductionJobService:
         raw_script = script if isinstance(script, dict) else {}
         try:
             script_issues = script_loader.validate_script_issues(raw_script)
-        except Exception:
+        except Exception as exc:
+            blockers.append({
+                "code": "SCRIPT_VALIDATION_FAILED",
+                "message": "structured script 校验器执行失败，已阻止生产。",
+                "exception_type": type(exc).__name__,
+                "fix_hint": "修复 structured script 校验环境后重新检查。",
+            })
             script_issues = []
         for issue in script_issues:
             if isinstance(issue, dict) and issue.get("severity", "error") == "error":
@@ -521,6 +525,7 @@ class ProductionJobService:
         attempt: int = 1,
     ) -> dict[str, Any]:
         """Plan, create and asynchronously launch one production task."""
+        get_application_lifecycle().ensure_accepting_tasks()
         name = str(project_name or "").strip()
         origin = str(source or "system").strip().lower()
         if origin not in VALID_SOURCES:

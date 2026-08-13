@@ -8,6 +8,7 @@ from repositories.quality_repo import QualityRepository
 from repositories.task_repo import TaskRepository
 from services.delivery import compute_delivery_input_snapshot
 from services.production_jobs import ProductionJobService
+from lib.task_state import ACTIVE_TASK_STATES
 from services.quality import QualityService
 from services.voice_cast import VoiceCastResolver
 
@@ -173,7 +174,7 @@ class WorkflowService:
             project=project_name,
             task_type="synthesis",
         ):
-            if record.status in {"pending", "running", "pausing", "paused", "recovering", "cancelling"}:
+            if record.status in ACTIVE_TASK_STATES:
                 continue
             recorded = {
                 str(item).strip()
@@ -245,8 +246,7 @@ class WorkflowService:
         active_repairs = [
             item for item in repairs
             if item.get("status") in {
-                "preparing", "submitting", "pending", "running",
-                "pausing", "paused", "cancelling",
+                "preparing", "submitting", *ACTIVE_TASK_STATES,
             }
         ]
         quality = QualityService.get_quality_report(project)
@@ -260,7 +260,7 @@ class WorkflowService:
         exports = QualityRepository.list_history(project, "export_jobs")
         active_exports = []
         for item in exports:
-            if item.get("status") not in {"pending", "running"}:
+            if item.get("status") not in ACTIVE_TASK_STATES:
                 continue
             task_id = str(item.get("task_id") or "")
             # Since #31, SQLite TaskRepository is the only source of truth for
@@ -270,16 +270,14 @@ class WorkflowService:
             if not task_id:
                 continue
             task = TaskRepository.load_task(task_id)
-            if task is None or task.status not in {
-                "pending", "running", "cancelling",
-            }:
+            if task is None or task.status not in ACTIVE_TASK_STATES:
                 continue
             active_exports.append(item)
         history_task_ids = {
             str(item.get("task_id") or "") for item in active_exports
         }
         for task in TaskRepository.list_tasks(project=project, task_type="export"):
-            if task.status in {"pending", "running", "cancelling"} and task.task_id not in history_task_ids:
+            if task.status in ACTIVE_TASK_STATES and task.task_id not in history_task_ids:
                 active_exports.append({
                     "export_id": task.task_id,
                     "task_id": task.task_id,

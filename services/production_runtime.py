@@ -33,8 +33,17 @@ from lib.tts_profile import public_profile
 from .performance_trace import PerformanceTrace
 from .runtime_lock import ProcessFileLock
 from .synthesis import SynthesisService, SynthesisState
+from lib.task_state import ACTIVE_TASK_STATES
 
 logger = logging.getLogger(__name__)
+
+
+class _RuntimeShutdownRequested(RuntimeError):
+    """Internal boundary signal for a utility task during app shutdown."""
+
+    def __init__(self, results: list[dict[str, Any]]) -> None:
+        super().__init__("runtime shutdown requested")
+        self.results = results
 
 
 def _runtime_event(event: str, **fields: Any) -> None:
@@ -135,12 +144,15 @@ class ProductionRuntime:
         self._export_record: TaskRecord | None = None
         self._ownership_lock = threading.RLock()
         self._lock_release_deferred = False
+        self._worker_complete = threading.Event()
+        self._worker_complete.set()
         self._engine = RuntimeEngineLifecycle(
             owner_id=self.owner_id,
             status_path=status_path,
         )
         self._engine_failure = False
         self._shutdown_after_task = False
+        self._shutdown_requested = threading.Event()
         self._shutdown_complete = threading.Event()
         self._shutdown_complete.set()
 
@@ -192,8 +204,10 @@ class ProductionRuntime:
             raise RuntimeError("当前有生产任务正在运行，不能切换 TTS 引擎")
         from lib.tts_profile import resolve_profile
 
+        from lib.tts_profile import normalize_version
+
         raw = str(engine_id or "").lower()
-        version = "2.5" if ("25" in raw or "2.5" in raw) else "2"
+        version = normalize_version(raw, default="2") or "2"
         self._engine.recycle(resolve_profile({"engine_version": version}))
         return True
 
@@ -232,9 +246,8 @@ class ProductionRuntime:
 
     @staticmethod
     def _durable_tts_task_active() -> bool:
-        active_states = {
-            "active", "pending", "queued", "starting", "preparing", "submitting",
-            "running", "pausing", "paused", "recovering", "cancelling",
+        active_states = ACTIVE_TASK_STATES | {
+            "active", "queued", "starting", "preparing", "submitting",
         }
         task_types = {"synthesis", "voice_preview", "preview", "supplement", "export"}
         try:
@@ -265,6 +278,8 @@ class ProductionRuntime:
         self._engine_failure = False
         self._engine.set_runtime_state("starting")
         self._engine.reset()
+        self._shutdown_requested.clear()
+        self._shutdown_after_task = False
         _runtime_event(
             "runtime_start",
             mode="inline",
@@ -274,6 +289,7 @@ class ProductionRuntime:
         )
         self._stop.clear()
         self._shutdown_complete.clear()
+        self._worker_complete.clear()
         self._thread = threading.Thread(
             target=self._run_loop,
             name="audiobook-production-runtime",
@@ -297,6 +313,8 @@ class ProductionRuntime:
         self._engine_failure = False
         self._engine.set_runtime_state("starting")
         self._engine.reset()
+        self._shutdown_requested.clear()
+        self._shutdown_after_task = False
         _runtime_event(
             "runtime_start",
             mode="serve",
@@ -306,6 +324,7 @@ class ProductionRuntime:
         )
         self._stop.clear()
         self._shutdown_complete.clear()
+        self._worker_complete.clear()
         try:
             self._run_loop()
         finally:
@@ -313,63 +332,139 @@ class ProductionRuntime:
         return not self._engine_failure
 
     def stop(self, timeout: float = 2.0) -> None:
-        self._stop.set()
+        """Stop this owner without turning application shutdown into cancel.
+
+        The runtime loop owns the durable ``interrupted`` transition.  The
+        synthesis worker is allowed to finish its current GPU call and exits at
+        the next segment boundary; export keeps its existing cooperative
+        cancellation and ownership fence.
+        """
+        self.request_shutdown(reason="runtime_stop")
         self._wake.set()
+        deadline = time.monotonic() + max(float(timeout), 0.0)
+        thread = self._thread
+        if thread and thread is not threading.current_thread():
+            thread.join(timeout=max(deadline - time.monotonic(), 0.0))
+        if thread is None or not thread.is_alive():
+            self._thread = None
         with self._state_lock:
             state = self._current_state
             export_future = self._export_future
             export_record = self._export_record
-        if state is not None:
-            # Release a worker that is blocked in a pause gate (normal
-            # segment boundary or engine-recovery gate).  Persistence is
-            # detached first so the durable task keeps its last active
-            # state (paused/recovering/running) and is repaired by the
-            # normal orphan-interrupt path on the next runtime takeover,
-            # instead of being misclassified as a user cancel.
-            state.on_update = None
-            state.paused = False
-            state.cancel = True
         if export_future is not None and not export_future.done() and export_record:
             try:
                 TaskRepository.request_control(export_record.task_id, "cancel")
             except (KeyError, ValueError):
-                # The worker may already have reached a terminal state.
                 pass
-        thread = self._thread
-        if thread and thread is not threading.current_thread():
-            thread.join(timeout=max(timeout, 0.0))
-        self._thread = None
-        # Inline/test callers may replace the project roots immediately after
-        # reset.  Drain an in-flight export while the caller's project context
-        # is still valid, but retain the timeout guarantee for a genuinely
-        # long-running worker.
-        remaining = max(float(timeout), 0.0)
+        remaining = max(deadline - time.monotonic(), 0.0)
         if export_future is not None and not export_future.done() and remaining:
             try:
                 export_future.result(timeout=remaining)
             except Exception:
-                # The runtime already persists task failures; stopping should
-                # not re-raise a worker exception into a client cleanup path.
                 pass
-        self._export_executor.shutdown(
-            wait=bool(export_future is None or export_future.done()),
-            cancel_futures=True,
-        )
-        # If the timeout expires, the export thread remains alive and the OS
-        # singleton lock must remain held. The completion callback below
-        # releases it only after the worker can no longer publish.
+        if state is not None and state.future is not None and not state.future.done():
+            remaining = max(deadline - time.monotonic(), 0.0)
+            if remaining:
+                try:
+                    state.future.result(timeout=remaining)
+                except Exception:
+                    pass
+        if thread is None or not thread.is_alive():
+            self._export_executor.shutdown(
+                wait=bool(export_future is None or export_future.done()),
+                cancel_futures=True,
+            )
         self._release_lock_when_export_safe()
 
+    def request_shutdown(self, reason: str = "runtime_stop") -> bool:
+        """Request a single-flight graceful stop of this runtime owner."""
+        if self._shutdown_requested.is_set():
+            return False
+        self._shutdown_requested.set()
+        self._shutdown_after_task = True
+        self._wake.set()
+        _runtime_event("runtime_shutdown_requested", owner=self.owner_id, reason=reason)
+        return True
+
+    def _request_shutdown_for_current_task(self) -> None:
+        with self._state_lock:
+            state = self._current_state
+            export_record = self._export_record
+            export_future = self._export_future
+        if export_record is not None and export_future is not None and not export_future.done():
+            try:
+                TaskRepository.request_control(export_record.task_id, "cancel")
+            except (KeyError, ValueError):
+                pass
+        if state is None:
+            return
+        if state.status == "needs_attention":
+            # Attention is an explicit human/action boundary, not an
+            # application-shutdown interruption.  Preserve it even when the
+            # in-memory worker has already ended.
+            return
+        # A runtime-owned state without a worker future has no in-flight GPU
+        # call to drain.  This is defensive for compatibility adapters and
+        # test doubles; close it at once so ownership is not stranded behind
+        # an impossible-to-complete worker.
+        if state.future is None:
+            state.shutdown_requested = True
+            state.status = "interrupted"
+            try:
+                TaskRepository.persist_runtime_state(
+                    state.task_id,
+                    self.owner_id,
+                    status="interrupted",
+                    progress={
+                        "total": state.total,
+                        "completed": state.completed,
+                        "failed": len(state.failed_segment_ids),
+                    },
+                    failed_segment_ids=list(state.failed_segment_ids),
+                    error_summary="",
+                    log_lines=list(state.log_lines),
+                    project=state.project,
+                )
+            except Exception:  # pragma: no cover - defensive shutdown boundary
+                logger.exception("持久化无 worker 任务的中断状态失败: %s", state.task_id)
+            state.notify()
+            return
+        SynthesisService.request_shutdown(state)
+
+    @staticmethod
+    def _runtime_shutdown_command_path() -> str:
+        from lib import config
+
+        return os.path.join(config.get_data_dir(), "logs", "runtime_shutdown_command.json")
+
+    def _consume_shutdown_command(self) -> None:
+        path = self._runtime_shutdown_command_path()
+        try:
+            with open(path, encoding="utf-8") as file:
+                command = json.load(file)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return
+        if not isinstance(command, dict) or command.get("command") != "shutdown":
+            return
+        try:
+            self.request_shutdown(str(command.get("reason") or "web_ui_shutdown"))
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
     def _release_lock_when_export_safe(self) -> None:
-        """Release singleton ownership only after an export worker settles."""
+        """Release ownership only after all runtime workers have settled."""
         with self._ownership_lock:
             future = self._export_future
-            if future is not None and not future.done():
+            if not self._worker_complete.is_set() or (future is not None and not future.done()):
                 if not self._lock_release_deferred:
                     self._lock_release_deferred = True
-                    future.add_done_callback(
-                        lambda _future: self._release_lock_when_export_safe()
-                    )
+                    if future is not None:
+                        future.add_done_callback(
+                            lambda _future: self._release_lock_when_export_safe()
+                        )
                 return
             self._lock_release_deferred = False
             self.lock.release()
@@ -450,6 +545,9 @@ class ProductionRuntime:
         避免“合成活跃期间他项目 notify → export claim 每 tick 全扫”退化回基线。
         force=True（30s 兜底 / 首轮）忽略戳去重，无条件执行权威全扫。
         """
+        self._consume_shutdown_command()
+        if self._shutdown_requested.is_set():
+            return None
         stamp = self._pending_signal.stamp_ns()
         if not force and (stamp == -1 or stamp == self._claim_scan_stamps.get(key, -1)):
             return None
@@ -461,6 +559,9 @@ class ProductionRuntime:
         try:
             self._engine.set_runtime_state("running")
             while not self._stop.is_set():
+                self._consume_shutdown_command()
+                if self._shutdown_requested.is_set():
+                    self._request_shutdown_for_current_task()
                 now0 = time.monotonic()
                 # 周期兜底：每 30s 强制一次权威全扫，防止信号文件被清理/漏发。
                 force_claim = (now0 - self._last_full_claim >= 30.0)
@@ -471,7 +572,7 @@ class ProductionRuntime:
                 if state is not None:
                     self._apply_control(state)
                     future = state.future
-                    if state.status in {"cancelled", "done", "error", "needs_attention"} and (
+                    if state.status in {"cancelled", "done", "error", "needs_attention", "interrupted"} and (
                         future is None or future.done()
                     ):
                         retire_after_task = self._shutdown_after_task
@@ -488,7 +589,7 @@ class ProductionRuntime:
                 # 合成 claim 放在 retire 之后：若本 tick 刚 retire 上一个任务，
                 # synthesis 类型的 stamp 仍是旧值 → 新 notify 戳 ≠ 旧值 → 立即
                 # 全扫 claim 他项目 pending 任务（无 30s 兜底延迟）。
-                if state is None:
+                if state is None and not self._shutdown_requested.is_set():
                     self._consume_engine_command()
                     record = self._claim_pending("synthesis", {"synthesis"}, force_claim)
                     if record is not None:
@@ -499,18 +600,28 @@ class ProductionRuntime:
                     self._export_record = None
                     # 排队导出由 per-type stamp 机制覆盖：export claim 在 worker
                     # 运行期间被跳过 → 其 stamp 未更新 → worker 结束后立即全扫。
-                if self._export_future is None:
+                if self._export_future is None and not self._shutdown_requested.is_set():
                     export_record = self._claim_pending("export", {"export"}, force_claim)
                     if export_record is not None:
                         self._note_task_claim(export_record)
                         self._launch_export(export_record)
-                if self._current_state is None and self._export_future is None:
+                if (
+                    self._current_state is None
+                    and self._export_future is None
+                    and not self._shutdown_requested.is_set()
+                ):
                     utility_record = self._claim_pending(
                         "utility", {"supplement", "voice_preview"}, force_claim
                     )
                     if utility_record is not None:
                         self._note_task_claim(utility_record)
                         self._launch(utility_record)
+                if (
+                    self._shutdown_requested.is_set()
+                    and self._current_state is None
+                    and self._export_future is None
+                ):
+                    self._stop.set()
                 now = time.monotonic()
                 if now - self._last_heartbeat >= 1.0:
                     # heartbeat 局部化：只更新 Runtime 当前持有的项目 DB，
@@ -547,7 +658,19 @@ class ProductionRuntime:
             # by acquiring the OS lock before it can repair interrupted tasks.
             if self._thread is threading.current_thread():
                 self._thread = None
+            try:
+                from lib import tts_engine
+
+                tts_engine.reset_engine()
+            except Exception:
+                logger.exception("runtime shutdown engine unload failed")
             self._engine.mark_unknown()
+            self._worker_complete.set()
+            # A completion event may wake a lock-release attempt even when no
+            # export future exists (synthesis/utility-only shutdown).
+            self._release_lock_when_export_safe()
+            # Publish completion only after ownership is actually released;
+            # callers use this event as the handoff barrier for a new runtime.
             self._shutdown_complete.set()
             _runtime_event(
                 "runtime_shutdown",
@@ -555,7 +678,6 @@ class ProductionRuntime:
                 owner=self.owner_id,
                 reason="engine_init_failure" if self._engine_failure else "stop",
             )
-            self._release_lock_when_export_safe()
 
     @staticmethod
     def _bindings(record: TaskRecord) -> dict[str, Any]:
@@ -649,7 +771,17 @@ class ProductionRuntime:
 
     def _launch(self, record: TaskRecord) -> None:
         if record.task_type != "synthesis":
-            self._run_utility_task(record)
+            with self._state_lock:
+                self._current_record = record
+            try:
+                self._run_utility_task(record)
+            finally:
+                with self._state_lock:
+                    if (
+                        self._current_record is not None
+                        and self._current_record.task_id == record.task_id
+                    ):
+                        self._current_record = None
             return
         scope = record.scope if isinstance(record.scope, dict) else {}
         chapters = [
@@ -841,12 +973,15 @@ class ProductionRuntime:
         def _cancel_requested() -> bool:
             return bool(state.cancel)
 
+        def _shutdown_requested() -> bool:
+            return bool(state.shutdown_requested or self._shutdown_requested.is_set())
+
         def _pause_gate() -> None:
-            while state.paused and not state.cancel:
+            while state.paused and not state.cancel and not _shutdown_requested():
                 if state.status != "paused":
                     state.status = "paused"
                     state.append_log("⏸ 恢复前已暂停，等待人工恢复")
-                    state.notify()
+                state.notify()
                 time.sleep(0.1)
 
         def _on_recovery(event: dict) -> None:
@@ -1013,6 +1148,7 @@ class ProductionRuntime:
             pause_gate=_pause_gate,
             on_recovery=_on_recovery,
             on_failure=_on_failure,
+            shutdown_requested=_shutdown_requested,
         )
 
     def _fail_synthesis_engine_init(
@@ -1215,7 +1351,11 @@ class ProductionRuntime:
         os.makedirs(destination, exist_ok=True)
         from lib import tts_engine
 
+        if self._shutdown_requested.is_set():
+            raise _RuntimeShutdownRequested([])
         parts = tts_engine.test_voice(speaker_audio)
+        if self._shutdown_requested.is_set():
+            raise _RuntimeShutdownRequested([])
         if not parts:
             raise RuntimeError("声音试听未生成音频")
         for path in parts:
@@ -1242,6 +1382,7 @@ class ProductionRuntime:
         initialize: bool = False,
         validate_output: bool = False,
         engine_profile: dict[str, Any] | None = None,
+        shutdown_requested: Any = None,
     ) -> list[dict[str, Any]]:
         """Runtime-owned isolated supplement worker."""
         from lib import config
@@ -1272,6 +1413,8 @@ class ProductionRuntime:
 
         results: list[dict[str, Any]] = []
         for index, raw_text in enumerate(payload.get("lines", [])):
+            if callable(shutdown_requested) and shutdown_requested():
+                raise _RuntimeShutdownRequested(results)
             if callable(heartbeat):
                 heartbeat()
             text = str(raw_text or "").strip()
@@ -1330,6 +1473,7 @@ class ProductionRuntime:
 
     def _run_utility_task(self, record: TaskRecord) -> None:
         """Execute one preview/supplement command synchronously under the OS lock."""
+        self._consume_shutdown_command()
         project_dir = ProjectRepository.get_project_dir(record.project)
         artifact_dir = os.path.abspath(record.artifact_dir)
         try:
@@ -1380,6 +1524,10 @@ class ProductionRuntime:
                     initialize=True,
                     validate_output=True,
                     engine_profile=record.options.get("engine_snapshot") if isinstance(record.options, dict) else None,
+                    shutdown_requested=lambda: (
+                        self._consume_shutdown_command()
+                        or self._shutdown_requested.is_set()
+                    ),
                 )
                 result = {"items": items}
                 completed = sum(item.get("status") == "ok" for item in items)
@@ -1410,6 +1558,35 @@ class ProductionRuntime:
                 error_summary="",
                 log_lines=[f"运行时完成 {record.task_type}"],
                 project=record.project,
+            )
+        except _RuntimeShutdownRequested as exc:
+            items = list(exc.results)
+            completed = sum(item.get("status") == "ok" for item in items)
+            failed = sum(item.get("status") == "failed" for item in items)
+            total = max(int(current.progress.get("total", 0) or 0), completed + failed)
+            progress = {
+                **dict(current.progress or {}),
+                "total": total,
+                "completed": completed,
+                "failed": failed,
+                "percent": round((completed / total) * 100, 1) if total else 0.0,
+                "result": {"items": items},
+            }
+            TaskRepository.persist_runtime_state(
+                record.task_id,
+                self.owner_id,
+                status="interrupted",
+                progress=progress,
+                failed_segment_ids=[],
+                error_summary="",
+                log_lines=["应用正在关闭，补录任务已安全中断，可在下次启动后继续。"],
+                project=record.project,
+            )
+            _runtime_event(
+                "task_terminal",
+                task_id=record.task_id,
+                task_type=record.task_type,
+                status="interrupted",
             )
         except Exception as exc:
             logger.exception("运行时任务失败: %s", record.task_id)
@@ -1458,7 +1635,7 @@ class ProductionRuntime:
         progress["to_synthesize"] = progress["pending"] + len(failed_ids)
         if (
             state.performance_trace is not None
-            and state.status in {"cancelled", "done", "error", "needs_attention"}
+            and state.status in {"cancelled", "done", "error", "needs_attention", "interrupted"}
         ):
             try:
                 progress["performance"] = state.performance_trace.summary()
@@ -1490,7 +1667,7 @@ class ProductionRuntime:
         if state.status == "done" and state.failed_segment_ids:
             state.status = "error"
             state.error = "存在失败段落"
-        if state.status in {"cancelled", "done", "error", "needs_attention"}:
+        if state.status in {"cancelled", "done", "error", "needs_attention", "interrupted"}:
             _runtime_event(
                 "task_terminal",
                 task_id=state.task_id,
@@ -1598,6 +1775,51 @@ class ProductionRuntimeClient:
         })
         cls.ensure_running()
         return True
+
+    @classmethod
+    def request_shutdown(
+        cls,
+        reason: str = "web_ui_shutdown",
+        timeout: float = 30.0,
+    ) -> bool:
+        """Gracefully stop the existing Runtime without spawning one."""
+        mode = cls.mode()
+        if mode in {"off", "disabled"}:
+            return True
+        deadline = time.monotonic() + max(float(timeout), 0.0)
+        if mode == "inline":
+            with _INLINE_LOCK:
+                runtime = _INLINE_RUNTIME
+            if runtime is None:
+                return True
+            runtime.request_shutdown(reason=reason)
+            runtime.poke()
+            remaining = max(deadline - time.monotonic(), 0.0)
+            if not runtime.wait_until_stopped(timeout=remaining):
+                runtime.stop(timeout=max(deadline - time.monotonic(), 0.0))
+            return runtime.wait_until_stopped(timeout=0.0) and not runtime.lock.acquired
+
+        # Probe ownership first.  A shutdown request must never call
+        # ensure_running(), because an idle/nonexistent Runtime is already
+        # successfully shut down.
+        probe = ProcessFileLock()
+        if probe.acquire(blocking=False):
+            probe.release()
+            return True
+        path = ProductionRuntime._runtime_shutdown_command_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        atomic_write(path, {
+            "command": "shutdown",
+            "reason": str(reason or "web_ui_shutdown"),
+            "requested_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        })
+        while time.monotonic() < deadline:
+            time.sleep(0.05)
+            probe = ProcessFileLock()
+            if probe.acquire(blocking=False):
+                probe.release()
+                return True
+        return False
 
     @classmethod
     def _resolve_runtime_launch(cls) -> tuple[list[str], dict[str, str]]:

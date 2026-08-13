@@ -214,7 +214,7 @@ class TestSchemaOnce:
             ).fetchone()
         finally:
             conn.close()
-        assert row is not None and row["value"] == "1"
+        assert row is not None and row["value"] == "2"
 
         # 外部 DROP 表（模拟迁移测试 / restore 场景）→ 探针失败 → 重路径自愈。
         db_path = TaskRepository.get_database_path("schema_book", create=False)

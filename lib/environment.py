@@ -20,6 +20,15 @@ from .tts_model_layout import (
     read_model_config_values,
     resolve_model_config_path,
 )
+from .tts_profile import (
+    ENGINE_BACKEND,
+    VERSION_V2 as PROFILE_VERSION_V2,
+    VERSION_V25 as PROFILE_VERSION_V25,
+    normalize_backend as normalize_profile_backend,
+    normalize_version as normalize_profile_version,
+    resolve_model_dir as resolve_profile_model_dir,
+    resolve_profile,
+)
 
 logger = logging.getLogger(__name__)
 PROGRAM_DIR = Path(__file__).resolve().parents[1]
@@ -28,7 +37,7 @@ PROGRAM_DIR = Path(__file__).resolve().parents[1]
 # diagnostics/UI can understand the two model layouts without importing an
 # IndexTTS adapter (or torch), while the existing runtime keeps using the
 # legacy ``config.get_model_dir()`` path until an adapter explicitly opts in.
-ENGINE_INDEXTTS = "indextts"
+ENGINE_INDEXTTS = ENGINE_BACKEND
 VERSION_V2 = "v2"
 VERSION_V25 = "v2.5"
 SUPPORTED_ENGINE_VERSIONS = (VERSION_V2, VERSION_V25)
@@ -133,33 +142,19 @@ def normalize_engine(value: Any) -> str | None:
     """Normalize supported IndexTTS engine spellings, or return ``None``."""
     if value in (None, ""):
         return None
-    raw = str(value).strip().lower().replace("_", "-").replace(" ", "")
-    if raw in {
-        "indextts",
-        "index-tts",
-        "legacy",
-        "indextts2",
-        "indextts2-legacy",
-        "indextts2.5",
-        "index-tts2",
-        "index-tts-2",
-        "index-tts25",
-        "index-tts2.5",
-        "indextts25",
-        "index-tts-2.5",
-    }:
-        return ENGINE_INDEXTTS
-    return None
+    return (
+        ENGINE_INDEXTTS
+        if normalize_profile_backend(value, default="") == ENGINE_INDEXTTS
+        else None
+    )
 
 
 def normalize_version(value: Any) -> str | None:
     """Normalize v2/v2.5 aliases without guessing arbitrary versions."""
-    if value in (None, ""):
-        return None
-    raw = str(value).strip().lower().replace("_", ".").replace("-", ".")
-    if raw in {"v2", "v2.0", "2", "2.0", "indextts2", "index.tts.2"}:
+    normalized = normalize_profile_version(value)
+    if normalized == PROFILE_VERSION_V2:
         return VERSION_V2
-    if raw in {"25", "v2.5", "v25", "2.5", "indextts25", "index.tts.2.5"}:
+    if normalized == PROFILE_VERSION_V25:
         return VERSION_V25
     return None
 
@@ -204,79 +199,30 @@ def resolve_engine_selection() -> EngineSelection:
     """
     data = _read_environment_config()
     warnings: list[str] = []
-
-    raw_engine = os.environ.get(ENV_ENGINE) or os.environ.get(ENV_TTS_BACKEND)
-    engine_source = "environment" if raw_engine else "config"
-    if not raw_engine:
-        raw_engine = _nested_value(
-            data,
-            "engine",
-            "engine_backend",
-            "tts_engine",
-            "engine_name",
-            "backend",
-        )
+    explicit_engine = os.environ.get(ENV_ENGINE) or os.environ.get(ENV_TTS_BACKEND)
+    configured_engine = _nested_value(
+        data, "engine", "engine_backend", "tts_engine", "engine_name", "backend"
+    )
+    raw_engine = explicit_engine or configured_engine
     engine = normalize_engine(raw_engine) or ENGINE_INDEXTTS
+    engine_source = "environment" if explicit_engine else "config" if configured_engine else "default"
     if raw_engine and normalize_engine(raw_engine) is None:
         warnings.append("未识别的 engine，已回退到 IndexTTS。")
         engine_source = "fallback"
-    if raw_engine is None:
-        engine_source = "default"
 
-    raw_version = (
-        os.environ.get(ENV_ENGINE_VERSION)
-        or os.environ.get(ENV_TTS_VERSION)
-        or os.environ.get(ENV_VERSION)
+    auto_dirs = {
+        PROFILE_VERSION_V2: str(_auto_model_dir(VERSION_V2) or ""),
+        PROFILE_VERSION_V25: str(_auto_model_dir(VERSION_V25) or ""),
+    }
+    profile = resolve_profile(
+        config_data=data,
+        environ=os.environ,
+        auto_model_dirs=auto_dirs,
     )
-    version_source = "environment" if raw_version else "config"
-    if not raw_version:
-        raw_version = _nested_value(
-            data,
-            "engine_version",
-            "tts_version",
-            "version",
-            "indextts_version",
-        )
-    version = normalize_version(raw_version)
-    if raw_version and version is None:
-        warnings.append("未识别的 engine version，已按本地模型目录自动选择。")
-        version_source = "auto"
-    if version is None and raw_engine:
-        version = _engine_version_hint(raw_engine)
-        if version:
-            version_source = "engine_alias"
-    if version is None:
-        v25 = _auto_model_dir(VERSION_V25)
-        v2 = _auto_model_dir(VERSION_V2)
-        # A pre-dual-engine installation may only expose its old directory
-        # through the legacy resolver (or a launcher monkeypatch); preserve
-        # that deployment instead of making the diagnostic report a missing
-        # v2.5 directory as an error.
-        legacy_runtime_dir = ""
-        try:
-            legacy_runtime_dir = str(_cfg.get_model_dir() or "")
-        except (OSError, RuntimeError, TypeError, ValueError):
-            legacy_runtime_dir = ""
-        if legacy_runtime_dir and os.path.isdir(legacy_runtime_dir) and not v25:
-            version = VERSION_V2
-            version_source = "legacy_model_dir"
-        elif v2 and not v25:
-            version = VERSION_V2
-            version_source = "auto"
-        elif v25 or v2:
-            # Both installed (or only the recommended one installed): choose
-            # the recommended release unless an explicit legacy model_dir
-            # already made this installation a rollback deployment.
-            version = VERSION_V25
-            version_source = "auto"
-        else:
-            legacy_configured = (
-                os.environ.get("AUDIOBOOK_STUDIO_MODEL_DIR")
-                or _nested_value(data, "model_dir", "model_dir_v2", "legacy_model_dir")
-            )
-            version = VERSION_V2 if legacy_configured else VERSION_V25
-            version_source = "legacy_config" if legacy_configured else "default"
-
+    version = normalize_version(profile.get("engine_version")) or VERSION_V25
+    version_source = str(profile.get("selection_version_source") or "default")
+    if version_source == "explicit":
+        version_source = "environment"
     return EngineSelection(
         engine=engine,
         version=version,
@@ -320,43 +266,24 @@ def resolve_model_directories() -> dict[str, dict[str, str]]:
     caller to inspect; this function never creates, downloads, or repairs them.
     """
     data = _read_environment_config()
-    result: dict[str, dict[str, str]] = {}
-    for version, env_name in (
-        (VERSION_V2, ENV_MODEL_DIR_V2),
-        (VERSION_V25, ENV_MODEL_DIR_V25),
-    ):
-        configured = os.environ.get(env_name)
-        if not configured and version == VERSION_V25:
-            configured = (
-                os.environ.get(ENV_MODEL_DIR_V25_ALIAS)
-                or os.environ.get(ENV_MODEL_DIR_V25_LEGACY_ALIAS)
-                or os.environ.get(ENV_MODEL_DIR_V25_PACKAGE_ALIAS)
-            )
-        source = "environment"
-        if not configured and version == VERSION_V2:
-            configured = (
-                os.environ.get(ENV_MODEL_DIR_LEGACY)
-                or os.environ.get("AUDIOBOOK_STUDIO_MODEL_DIR")
-            )
-            source = "legacy_environment" if configured else source
-        if not configured:
-            configured = _configured_model_dir(data, version)
-            source = "config" if configured else source
-        if not configured and version == VERSION_V2:
-            # Preserve the old config resolver, including its default sibling
-            # path and any legacy config.json model_dir value.
-            configured = _cfg.get_model_dir()
-            source = "legacy_config_or_default"
-        if not configured:
-            auto = _auto_model_dir(version)
-            if auto:
-                configured = str(auto)
-                source = "auto"
-        if not configured:
-            configured = str(_default_model_dir(version))
-            source = "default"
-        result[version] = {"path": _as_absolute_path(configured), "source": source}
-    return result
+    auto_dirs = {
+        PROFILE_VERSION_V2: str(_auto_model_dir(VERSION_V2) or ""),
+        PROFILE_VERSION_V25: str(_auto_model_dir(VERSION_V25) or ""),
+    }
+    return {
+        VERSION_V2: resolve_profile_model_dir(
+            PROFILE_VERSION_V2,
+            config_data=data,
+            environ=os.environ,
+            auto_model_dirs=auto_dirs,
+        ),
+        VERSION_V25: resolve_profile_model_dir(
+            PROFILE_VERSION_V25,
+            config_data=data,
+            environ=os.environ,
+            auto_model_dirs=auto_dirs,
+        ),
+    }
 
 
 def model_checkpoint_state(version: str, model_dir: str | os.PathLike[str]) -> dict[str, Any]:

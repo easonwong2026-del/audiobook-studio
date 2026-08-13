@@ -37,6 +37,7 @@ ENV_PYTHON = "AUDIOBOOK_STUDIO_PYTHON"
 ENV_FFMPEG = "AUDIOBOOK_STUDIO_FFMPEG"
 ENV_TTS_BACKEND = "AUDIOBOOK_STUDIO_TTS_BACKEND"
 ENV_TTS_VERSION = "AUDIOBOOK_STUDIO_TTS_VERSION"
+ENV_HOST = "AUDIOBOOK_STUDIO_HOST"
 
 _DEFAULT_DATA_DIR = os.path.join(os.path.expanduser("~"), "AudiobookStudio")
 
@@ -204,6 +205,15 @@ def get_ffmpeg_path() -> str:
         return env
     found = shutil.which("ffmpeg")
     return found or "ffmpeg"
+
+
+def get_host() -> str:
+    """Return the Web host: environment, config, then localhost."""
+    configured = os.environ.get(ENV_HOST)
+    if not configured:
+        raw = _read_config()
+        configured = raw.get("host") or raw.get("server_name")
+    return str(configured or "127.0.0.1").strip() or "127.0.0.1"
 
 
 @dataclass(frozen=True)

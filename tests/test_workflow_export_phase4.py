@@ -230,19 +230,18 @@ def test_export_plan_blocks_frozen_engine_mismatch(delivery_project):
 
 def test_plan_export_blocks_active_production_and_repair(delivery_project):
     _finish_and_review(delivery_project)
-    task = TaskRecord(
-        task_id="synthesis_active_for_export",
-        task_type="synthesis",
-        project=delivery_project,
-        status="running",
-        owner_id="runtime-test",
-    )
-    TaskRepository.save_task(task)
-    try:
+    for status in ("running", "recovering"):
+        task = TaskRecord(
+            task_id=f"synthesis_{status}_for_export",
+            task_type="synthesis",
+            project=delivery_project,
+            status=status,
+            owner_id="runtime-test",
+        )
+        TaskRepository.save_task(task)
         plan = ExportService.plan_export(delivery_project, "wav")
         assert plan["ready"] is False
         assert any(item["code"] == "PRODUCTION_ACTIVE" for item in plan["blockers"])
-    finally:
         TaskRepository.delete_task(task.task_id)
 
     repair = QualityRepository.create_history_record(
