@@ -30,10 +30,17 @@ index-tts/
 └── checkpoints-v2.5/   # v2.5
 ```
 
-诊断对每个版本做本地目录检查。v2 核心文件组包括 `config.yaml`（或 `config.yml`）、
-GPT、S2Mel、DVAE、BPE/tokenizer、CampPlus 和 wav2vec2-BERT stats；v2.5 在此基础
-上检查 `feat1.pt` 与 `feat2.pt`。同一角色存在一个支持的常见文件名即可。检查是
-best-effort，不读取权重内容，也不替代引擎实际加载验证。
+诊断和 runtime 共用版本专用 config resolution：v2 优先 `config.yaml`，兼容
+`config.yml`；v2.5 优先官方式 `config_v2_5.yaml`，然后兼容 `config.yaml` /
+`config.yml`。v2 保留 Legacy 的 `config.yaml`、GPT、S2Mel、DVAE、BPE/tokenizer、
+CampPlus 和 wav2vec2-BERT stats 检查。
+
+v2.5 不复用 v2 清单。诊断从选中的 config 读取 GPT、S2Mel、`feat1` speaker matrix、
+`feat2` emotion matrix、wav2vec2-BERT stats 和 tokenizer/BPE 文件名，并检查 Native
+固定读取的 `codec.pth`；同时检查 `qwen_emo_path` 目录以及本地
+`hf_cache/w2v-bert-2.0`、`hf_cache/campplus_cn_common.bin`、`hf_cache/bigvgan`。
+v2.5 不要求 `dvae.pth` 或 `campplus.onnx`。检查只读取轻量 config 和文件元数据，
+不读取权重内容，不联网，不替代引擎实际加载验证。
 
 ## 3. 配置优先级
 
@@ -121,11 +128,10 @@ AUDIOBOOK_STUDIO_MODEL_DIR_V2=<原 v2 目录>
 ## 8. 风险与注意事项
 
 - v2 与 v2.5 的配置、权重和 tokenizer 不应混放；目录存在不代表版本正确。
-- checkpoint 文件名存在官方发行差异，best-effort 检查可能给出 warning；缺失提示应
-  回到对应发行包的官方清单核对。
+- checkpoint 文件名由 v2.5 config 指定；缺失提示会包含具体 config role，便于回到
+  对应发行包的官方清单核对。
 - Torch CUDA runtime、NVIDIA 驱动、GPU 架构和 Windows wheel 需要整体匹配；仅看到
   GPU 名称或 BF16=True 不能证明引擎加载成功。
 - RTX 5070 Ti 基线上的显存峰值、速度和音质不应直接外推到其他 GPU；变更 fp16、
   kernel、加速或 beam 参数时应重新做 A/B。
-- 迁移配置只影响选择与诊断范围。本次实现不改 adapter、cache、runtime，不自动迁移
-  模型文件，不联网，也不提交任何变更。
+- 迁移配置只影响选择与诊断范围；模型文件不会自动迁移，诊断阶段不会联网或下载。

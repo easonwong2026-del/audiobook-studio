@@ -15,6 +15,11 @@ from pathlib import Path
 from typing import Any
 
 from . import config as _cfg
+from .tts_model_layout import (
+    config_value,
+    read_model_config_values,
+    resolve_model_config_path,
+)
 
 logger = logging.getLogger(__name__)
 PROGRAM_DIR = Path(__file__).resolve().parents[1]
@@ -40,33 +45,27 @@ ENV_MODEL_DIR_V25_ALIAS = "AUDIOBOOK_STUDIO_MODEL_DIR_2_5"
 ENV_MODEL_DIR_V25_LEGACY_ALIAS = "AUDIOBOOK_STUDIO_MODEL_DIR_25"
 ENV_MODEL_DIR_V25_PACKAGE_ALIAS = "AUDIOBOOK_STUDIO_INDEXTTS25_MODEL_DIR"
 
-# IndexTTS model releases have kept these top-level checkpoint roles, while
-# some mirrors/package revisions changed the suffix of a file.  Each tuple is
-# an OR-group.  The first name is the canonical name used in the official
-# layout and is also the name reported when the whole group is absent.
-_MODEL_REQUIRED_COMMON: tuple[tuple[str, tuple[str, ...]], ...] = (
-        ("config.yaml", ("config.yaml", "config.yml")),
-        ("gpt.pth", ("gpt.pth", "gpt.pt", "gpt.safetensors")),
-        ("s2mel.pth", ("s2mel.pth", "s2mel.pt", "s2mel.safetensors")),
-        ("dvae.pth", ("dvae.pth", "dvae.pt", "dvae.safetensors")),
-        ("bpe.model", ("bpe.model", "tokenizer.model")),
-        ("campplus.onnx", ("campplus.onnx", "campplus.pt")),
-        (
-            "wav2vec2bert_stats.pt",
-            ("wav2vec2bert_stats.pt", "wav2vec2bert_stats.bin"),
-        ),
+# v2 is retained as a small role-based compatibility check.  v2.5 is not
+# derived from this list: its native adapter reads the paths below from the
+# selected config and always loads codec.pth.  Auxiliary directories are
+# required because the official v2.5 constructor uses them locally when the
+# no-download runtime guard is enabled.
+_MODEL_REQUIRED_V2: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("gpt.pth", ("gpt.pth", "gpt.pt", "gpt.safetensors")),
+    ("s2mel.pth", ("s2mel.pth", "s2mel.pt", "s2mel.safetensors")),
+    ("dvae.pth", ("dvae.pth", "dvae.pt", "dvae.safetensors")),
+    ("bpe.model", ("bpe.model", "tokenizer.model")),
+    ("campplus.onnx", ("campplus.onnx", "campplus.pt")),
+    ("wav2vec2bert_stats.pt", ("wav2vec2bert_stats.pt", "wav2vec2bert_stats.bin")),
 )
-_MODEL_REQUIRED_V25: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("feat1.pt", ("feat1.pt", "feat1.bin", "feat1.safetensors")),
-    ("feat2.pt", ("feat2.pt", "feat2.bin", "feat2.safetensors")),
-)
+
+# Public for callers/tests that previously inspected this constant.  The v2.5
+# groups are generated from its config and are intentionally not listed here.
 MODEL_REQUIRED_FILE_GROUPS: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
-    VERSION_V2: _MODEL_REQUIRED_COMMON,
-    VERSION_V25: _MODEL_REQUIRED_COMMON + _MODEL_REQUIRED_V25,
+    VERSION_V2: _MODEL_REQUIRED_V2,
+    VERSION_V25: (),
 }
 
-# These files appear in some package layouts but are not required by every
-# current IndexTTS2/2.5 checkpoint bundle.  Report them as advisory only.
 MODEL_OPTIONAL_FILES: tuple[str, ...] = ()
 
 
@@ -363,35 +362,111 @@ def resolve_model_directories() -> dict[str, dict[str, str]]:
 def model_checkpoint_state(version: str, model_dir: str | os.PathLike[str]) -> dict[str, Any]:
     """Best-effort local checkpoint inspection for one supported version.
 
-    Required groups intentionally use filename alternatives because official
-    package revisions can change a suffix/container without changing the
-    checkpoint role.  No recursive scan, import, network access, or download
-    is performed.  The diagnostic layer receives only a display-safe path label.
+    v2 uses its stable legacy role list.  v2.5 derives checkpoint filenames
+    from the selected config and validates its native fixed assets plus local
+    auxiliary directories.  No recursive scan, import, network access, or
+    download is performed.  The diagnostic layer receives only a display-safe
+    path label.
     """
     normalized = normalize_version(version)
     if normalized not in SUPPORTED_ENGINE_VERSIONS:
         raise ValueError(f"unsupported IndexTTS version: {version}")
     path = Path(model_dir)
     if not path.is_dir():
+        if normalized == VERSION_V25:
+            return {
+                "exists": False,
+                "directory": False,
+                "config_path": None,
+                "config_name": None,
+                "missing_required": [
+                    "config_v2_5.yaml",
+                    "gpt checkpoint (config)",
+                    "s2mel checkpoint (config)",
+                    "codec.pth",
+                    "feat1/spk matrix (config)",
+                    "feat2/emo matrix (config)",
+                    "wav2vec2bert stats (config)",
+                    "tokenizer/BPE resource (config)",
+                    "hf_cache/w2v-bert-2.0",
+                    "hf_cache/campplus_cn_common.bin",
+                    "hf_cache/bigvgan",
+                ],
+                "present_required": [],
+                "optional_present": [],
+            }
         return {
             "exists": False,
             "directory": False,
-            "missing_required": [name for name, _ in MODEL_REQUIRED_FILE_GROUPS[normalized]],
+            "missing_required": ["config.yaml", *[name for name, _ in MODEL_REQUIRED_FILE_GROUPS[normalized]]],
             "present_required": [],
             "optional_present": [],
         }
 
-    present_required: list[str] = []
-    missing_required: list[str] = []
-    for canonical, alternatives in MODEL_REQUIRED_FILE_GROUPS[normalized]:
-        if any((path / candidate).is_file() for candidate in alternatives):
-            present_required.append(canonical)
+    config_path = resolve_model_config_path(normalized, path)
+    if normalized == VERSION_V25:
+        values = read_model_config_values(config_path)
+        required: list[tuple[str, tuple[Path, ...], str]] = []
+
+        def configured_file(label: str, *keys: str) -> None:
+            value = config_value(values, *keys)
+            required.append((label, (path / value,) if value else (), "file"))
+
+        def configured_dir(label: str, *keys: str) -> None:
+            value = config_value(values, *keys)
+            required.append((label, (path / value,) if value else (), "dir"))
+
+        def any_file(label: str, *candidates: Path) -> None:
+            required.append((label, tuple(candidates), "file"))
+
+        configured_file("gpt checkpoint (config)", "gpt_checkpoint")
+        configured_file("s2mel checkpoint (config)", "s2mel_checkpoint")
+        configured_file("feat1/spk matrix (config)", "spk_matrix")
+        configured_file("feat2/emo matrix (config)", "emo_matrix")
+        configured_file("wav2vec2bert stats (config)", "w2v_stat")
+        bpe_value = config_value(values, "dataset.bpe_model", "bpe_model")
+        bpe_candidates = ((path / bpe_value,) if bpe_value else ()) + (
+            path / "multilingual_zh_ja_yue_char_del.tiktoken",
+        )
+        any_file("tokenizer/BPE resource", *bpe_candidates)
+        configured_dir("qwen emotion directory", "qwen_emo_path")
+        required.extend([
+            ("codec.pth", (path / "codec.pth",), "file"),
+            ("hf_cache/w2v-bert-2.0", (path / "hf_cache" / "w2v-bert-2.0",), "dir"),
+            ("hf_cache/campplus_cn_common.bin", (path / "hf_cache" / "campplus_cn_common.bin",), "file"),
+            ("hf_cache/bigvgan", (path / "hf_cache" / "bigvgan",), "dir"),
+        ])
+        if config_path is None:
+            required.insert(0, ("config_v2_5.yaml", (), "file"))
+
+        def exists(candidates: tuple[Path, ...], kind: str) -> bool:
+            if kind == "dir":
+                return any(
+                    candidate.is_dir() and any(candidate.iterdir())
+                    for candidate in candidates
+                )
+            return any(candidate.is_file() for candidate in candidates)
+
+        present_required = [label for label, candidates, kind in required if exists(candidates, kind)]
+        missing_required = [label for label, candidates, kind in required if not exists(candidates, kind)]
+    else:
+        present_required = []
+        missing_required = []
+        if config_path is not None:
+            present_required.append("config.yaml")
         else:
-            missing_required.append(canonical)
+            missing_required.append("config.yaml")
+        for canonical, alternatives in MODEL_REQUIRED_FILE_GROUPS[normalized]:
+            if any((path / candidate).is_file() for candidate in alternatives):
+                present_required.append(canonical)
+            else:
+                missing_required.append(canonical)
     optional_present = [name for name in MODEL_OPTIONAL_FILES if (path / name).is_file()]
     return {
         "exists": True,
         "directory": True,
+        "config_path": str(config_path) if config_path else None,
+        "config_name": config_path.name if config_path else None,
         "missing_required": missing_required,
         "present_required": present_required,
         "optional_present": optional_present,
@@ -400,9 +475,12 @@ def model_checkpoint_state(version: str, model_dir: str | os.PathLike[str]) -> d
 
 def detect_model_version(model_dir: str | os.PathLike[str]) -> str | None:
     """Read a small local config hint, if present; never infer from weights."""
-    config_path = Path(model_dir) / "config.yaml"
-    if not config_path.is_file():
-        config_path = Path(model_dir) / "config.yml"
+    path = Path(model_dir)
+    config_path = resolve_model_config_path(VERSION_V25, path)
+    if config_path is None:
+        config_path = resolve_model_config_path(VERSION_V2, path)
+    if config_path is None:
+        return None
     try:
         text = config_path.read_text(encoding="utf-8", errors="ignore")[:65536]
     except OSError:
@@ -482,7 +560,7 @@ class EnvironmentCheckResult:
 
     Attributes:
         python_ok: Python 解释器可用。
-        model_ok: IndexTTS2 模型目录存在且含 config.yaml。
+        model_ok: 选中 IndexTTS 模型目录及其版本配置可用。
         ffmpeg_ok: ffmpeg 系统二进制可用（mp3 / m4b 导出需要）。
         cuda_ok: CUDA 可用（GPU 推理）。
         messages: 可读诊断信息列表（供 UI / 启动器展示）。
@@ -501,11 +579,10 @@ def _check_python() -> bool:
 
 
 def _check_model() -> bool:
-    """模型目录存在且含 config.yaml 才算就绪。"""
-    model_dir = _cfg.get_model_dir()
-    return os.path.isdir(model_dir) and os.path.isfile(
-        os.path.join(model_dir, "config.yaml")
-    )
+    """选中版本的模型目录和版本专用配置可用才算就绪。"""
+    selection = resolve_engine_selection()
+    model_dir = resolve_model_directories()[selection.version]["path"]
+    return os.path.isdir(model_dir) and resolve_model_config_path(selection.version, model_dir) is not None
 
 
 def _check_ffmpeg() -> bool:
@@ -537,7 +614,7 @@ def check_environment() -> EnvironmentCheckResult:
         messages.append("Python 解释器不可用（不应发生）。")
     if model_ok:
         messages.append(
-            f"✅ 模型目录就绪：{display_path(_cfg.get_model_dir(), 'model-dir')}"
+            f"✅ IndexTTS 模型目录就绪：{display_path(get_selected_model_dir(), 'model-dir')}"
         )
     else:
         messages.append(

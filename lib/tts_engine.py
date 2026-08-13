@@ -11,6 +11,7 @@ from . import config as _cfg
 from . import audio_format as af
 from .segment_cache import SpeakerEmbeddingLRU
 from .failures import PHASE_ENGINE_INFER
+from .tts_model_layout import model_config_candidates, resolve_model_config_path
 
 logger = logging.getLogger(__name__)
 
@@ -340,10 +341,13 @@ def init_engine(
         backend = _backend_for(version)
         IndexTTS2 = backend.load_class()
 
-        cfg_path = os.path.join(model_dir, "config.yaml")
-        if not os.path.isdir(model_dir) or not os.path.isfile(cfg_path):
+        cfg_path = resolve_model_config_path(version, model_dir)
+        if not os.path.isdir(model_dir) or cfg_path is None:
+            candidates = ", ".join(
+                candidate.name for candidate in model_config_candidates(version, model_dir)
+            )
             raise FileNotFoundError(
-                f"IndexTTS {version} 模型目录未找到或缺少 config.yaml："
+                f"IndexTTS {version} 模型目录未找到或缺少配置文件（{candidates}）："
                 f"{model_dir}\n"
                 "请在设置页为该版本配置本地模型目录后重试。"
             )
@@ -365,13 +369,13 @@ def init_engine(
         # inherits these optional acceleration flags.
         if version == "2.5":
             common = backend.constructor_kwargs(
-                cfg_path=cfg_path,
+                cfg_path=str(cfg_path),
                 model_dir=model_dir,
                 precision=precision,
             )
         else:
             common = backend.constructor_kwargs(
-                cfg_path=cfg_path,
+                cfg_path=str(cfg_path),
                 model_dir=model_dir,
                 precision=precision,
                 use_cuda_kernel=use_cuda_kernel,
@@ -395,29 +399,13 @@ def _profile_matches(left: Mapping[str, object], right: Mapping[str, object]) ->
 
 
 def _looks_like_local_v25_bundle(model_dir: str) -> bool:
-    names = set()
-    try:
-        names = {item.name for item in os.scandir(model_dir) if item.is_file()}
-    except OSError:
-        return False
-    roles = (
-        {"gpt.pth", "gpt.pt", "gpt.safetensors"},
-        {"s2mel.pth", "s2mel.pt", "s2mel.safetensors"},
-        {"dvae.pth", "dvae.pt", "dvae.safetensors"},
-        {"bpe.model", "tokenizer.model"},
-    )
-    # Official mirrors sometimes put a role in a subdirectory.  The presence
-    # of the config plus at least two checkpoint roles is enough to distinguish
-    # a prepared local bundle from a config-only directory without hardcoding a
-    # particular mirror's exact filenames.
-    role_count = sum(bool(names & role) for role in roles)
-    if role_count >= 2:
-        return True
-    try:
-        children = {item.name for item in os.scandir(model_dir) if item.is_dir()}
-    except OSError:
-        children = set()
-    return role_count >= 1 and bool(children & {"gpt2", "qwen", "campplus", "wav2vec2bert"})
+    # Keep the runtime's no-hidden-download guard aligned with the dependency-
+    # free diagnostics.  In particular, v2.5 is identified by its actual
+    # codec/config-driven asset layout, not by legacy dvae/campplus files.
+    from .environment import model_checkpoint_state
+
+    state = model_checkpoint_state("v2.5", model_dir)
+    return bool(state.get("directory") and not state.get("missing_required"))
 
 
 def _normalize_language(value) -> str:

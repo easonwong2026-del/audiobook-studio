@@ -106,6 +106,7 @@ def _model_dir_check(
             "directory_exists": bool(state["directory"]),
             "required_complete": bool(complete),
             "version_match": version_match,
+            "config_name": state.get("config_name"),
             "detected_version": detected_version,
             "missing_files": missing,
             "optional_files_present": list(state["optional_present"]),
@@ -170,7 +171,10 @@ def run_environment_diagnostics() -> dict[str, Any]:
         }
     add("数据目录", data_dir_check)
 
-    model_dir = config.get_model_dir()
+    # Keep the summary checks on the same version-resolved directory used by
+    # the per-version model inspection below.  The legacy config resolver is
+    # still honored inside resolve_model_directories() for v2 compatibility.
+    model_dir = selected_model_dir
     index_dir = str(Path(model_dir).parent)
     add("IndexTTS2 项目目录", lambda: _path_state(index_dir))
 
@@ -234,6 +238,7 @@ def run_environment_diagnostics() -> dict[str, Any]:
                 "selected_engine": selection.engine,
                 "selected_version": selection.version,
                 "selected_model_dir": environment_lib.display_path(selected_model_dir, "model-dir"),
+                "config_name": state.get("config_name"),
                 "detected_model_version": detected_version,
                 "version_match": version_match,
                 "missing_files": list(state["missing_required"]),

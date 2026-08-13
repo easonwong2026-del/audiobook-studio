@@ -198,16 +198,21 @@ def get_tts_engine_settings() -> dict[str, Any]:
 
 
 def _model_ready(model_dir: str, _version: str | None = None) -> bool:
-    # This matches the existing runtime's GPU-free preflight contract.
-    return bool(model_dir and os.path.isdir(model_dir) and os.path.isfile(
-        os.path.join(model_dir, "config.yaml")
-    ))
+    if not model_dir:
+        return False
+    try:
+        from lib.tts_model_layout import resolve_model_config_path
+
+        return resolve_model_config_path(_version or "v2", model_dir) is not None
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError):
+        return False
 
 
 def _ready_message(model_dir: str, version: str | None = None) -> str:
     if _model_ready(model_dir, version):
         return "✅ 已就绪"
-    return f"⚠ 未就绪：目录不存在或缺少 `config.yaml`（{html.escape(model_dir or '未配置')}）"
+    config_label = "config.yaml / config.yml" if str(version or "v2") in {"v2", "2"} else "config_v2_5.yaml / config.yaml / config.yml"
+    return f"⚠ 未就绪：目录不存在或缺少 {config_label} / 必需模型文件（{html.escape(model_dir or '未配置')}）"
 
 
 def _active_tts_tasks() -> list[Any]:

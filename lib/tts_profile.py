@@ -14,6 +14,15 @@ import os
 from pathlib import Path
 from typing import Any, Mapping
 
+from .tts_model_layout import (
+    VERSION_V2 as MODEL_VERSION_V2,
+    VERSION_V25 as MODEL_VERSION_V25,
+    config_value,
+    model_config_candidates,
+    read_model_config_values,
+    resolve_model_config_path,
+)
+
 
 ENGINE_BACKEND = "indextts"
 VERSION_V2 = "2"
@@ -117,31 +126,69 @@ def _model_dir(version: str, data: Mapping[str, Any], explicit: Any = None) -> s
     return os.path.abspath(os.path.expanduser(str(value)))
 
 
-def model_fingerprint(model_dir: Any) -> str:
+def model_fingerprint(model_dir: Any, version: Any = None) -> str:
     """Return a stable, path-free local model identity.
 
-    The fingerprint uses the configured directory's basename-independent
-    metadata and shallow file metadata.  It does not include the absolute
-    path and never reads large checkpoint contents.
+    The fingerprint uses the engine version, selected config name/content,
+    config-referenced checkpoint names, and shallow file sizes.  It does not
+    include an absolute path or mtime and never reads large checkpoint
+    contents, so copying one bundle to another directory keeps its identity.
     """
     path = Path(str(model_dir or "")).expanduser()
+    normalized_version = normalize_version(version)
+    if normalized_version is None:
+        v25_config = resolve_model_config_path(MODEL_VERSION_V25, path)
+        hint_values = read_model_config_values(v25_config)
+        hinted_version = normalize_version(config_value(
+            hint_values, "version", "model_version", "indextts_version"
+        ))
+        normalized_version = hinted_version or (
+            MODEL_VERSION_V25 if (path / "config_v2_5.yaml").is_file() else MODEL_VERSION_V2
+        )
+    config_path = resolve_model_config_path(normalized_version, path)
+    config_values = read_model_config_values(config_path)
     entries: list[dict[str, Any]] = []
+    candidate_names = {
+        candidate.name for candidate in model_config_candidates(normalized_version, path)
+    }
+    for key in (
+        "gpt_checkpoint", "s2mel_checkpoint", "w2v_stat", "spk_matrix",
+        "emo_matrix", "dataset.bpe_model", "bpe_model",
+    ):
+        value = config_value(config_values, key)
+        if value:
+            candidate_names.add(Path(value).name)
+    candidate_names.update({
+        "codec.pth",
+        "feat1.pt", "feat2.pt", "gpt.pth", "s2mel.pth",
+        "wav2vec2bert_stats.pt", "bpe.model",
+        "multilingual_zh_ja_yue_char_del.tiktoken",
+    })
     try:
         if path.is_dir():
-            for child in sorted(path.iterdir(), key=lambda item: item.name):
-                if not child.is_file():
-                    continue
-                if child.name in {"config.yaml", "config.yml"} or child.suffix.lower() in {
-                    ".pth", ".pt", ".bin", ".onnx", ".safetensors", ".model"
-                }:
+            for name in sorted(candidate_names):
+                child = path / name
+                if child.is_file():
                     stat = child.stat()
-                    entries.append({"name": child.name, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
+                    entries.append({"name": name, "size": stat.st_size})
     except OSError:
         entries = []
-    # The absolute path is only an input to the digest, never returned.  It
-    # prevents two different checkpoints with the same basename from sharing
-    # a cache identity while keeping task/status payloads path-free.
-    payload = {"directory_digest": hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()[:16], "entries": entries}
+
+    config_bytes = b""
+    if config_path is not None:
+        try:
+            config_bytes = config_path.read_bytes()[:262144]
+        except OSError:
+            config_bytes = b""
+    payload = {
+        "engine_version": normalized_version,
+        "config_name": config_path.name if config_path else next(
+            (candidate.name for candidate in model_config_candidates(normalized_version, path)),
+            "",
+        ),
+        "config_hash": hashlib.sha256(config_bytes).hexdigest()[:16],
+        "entries": entries,
+    }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
 
 
@@ -199,7 +246,7 @@ def resolve_profile(value: Mapping[str, Any] | str | None = None) -> dict[str, A
         "engine_version": version,
         "engine_identity": identity,
         "model_dir": model_dir,
-        "model_identity": str(explicit.get("model_identity") or model_fingerprint(model_dir)),
+        "model_identity": str(explicit.get("model_identity") or model_fingerprint(model_dir, version)),
         "precision": precision,
         "device": str(explicit.get("device") or "auto"),
     }

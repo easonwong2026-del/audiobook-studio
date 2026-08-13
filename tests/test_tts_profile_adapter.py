@@ -24,6 +24,46 @@ def test_profile_freezes_version_model_fingerprint_and_precision(tmp_path):
     assert str(legacy) not in public_profile(v2).values()
 
 
+def test_model_identity_is_path_independent_but_changes_with_config_or_checkpoint_size(tmp_path):
+    first = tmp_path / "first" / "checkpoints_25"
+    second = tmp_path / "second" / "checkpoints_25"
+    for root in (first, second):
+        root.mkdir(parents=True)
+        (root / "config_v2_5.yaml").write_text(
+            "gpt_checkpoint: gpt.pth\nversion: 2.5\n", encoding="utf-8"
+        )
+        (root / "gpt.pth").write_bytes(b"same-checkpoint")
+    assert resolve_profile({"engine_version": "2.5", "model_dir": str(first)})["model_identity"] == resolve_profile(
+        {"engine_version": "2.5", "model_dir": str(second)}
+    )["model_identity"]
+
+    (second / "gpt.pth").write_bytes(b"different-size")
+    assert resolve_profile({"engine_version": "2.5", "model_dir": str(first)})["model_identity"] != resolve_profile(
+        {"engine_version": "2.5", "model_dir": str(second)}
+    )["model_identity"]
+
+    (second / "gpt.pth").write_bytes(b"same-checkpoint")
+    (second / "config_v2_5.yaml").write_text(
+        "gpt_checkpoint: gpt.pth\nversion: 2.5\nchanged: true\n", encoding="utf-8"
+    )
+    assert resolve_profile({"engine_version": "2.5", "model_dir": str(first)})["model_identity"] != resolve_profile(
+        {"engine_version": "2.5", "model_dir": str(second)}
+    )["model_identity"]
+
+
+def test_model_fingerprint_without_explicit_version_reads_v25_generic_config(tmp_path):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    for root in (first, second):
+        root.mkdir()
+        (root / "config.yaml").write_text(
+            "gpt_checkpoint: gpt.pth\nversion: 2.5\n", encoding="utf-8"
+        )
+        (root / "gpt.pth").write_bytes(b"same")
+    from lib.tts_profile import model_fingerprint
+
+    assert model_fingerprint(first) == model_fingerprint(second)
+
 def test_clean_profile_defaults_to_recommended_v25_without_legacy_config(monkeypatch):
     monkeypatch.delenv("AUDIOBOOK_STUDIO_ENGINE_VERSION", raising=False)
     monkeypatch.delenv("AUDIOBOOK_STUDIO_VERSION", raising=False)
@@ -150,7 +190,8 @@ def test_init_engine_selects_native_version_and_precision(monkeypatch, tmp_path)
     ):
         model_dir = tmp_path / version
         model_dir.mkdir()
-        (model_dir / "config.yaml").write_text(f"version: {version}\n", encoding="utf-8")
+        config_name = "config_v2_5.yaml" if version == "2.5" else "config.yaml"
+        (model_dir / config_name).write_text(f"version: {version}\n", encoding="utf-8")
         tts_engine.reset_engine()
         tts_engine.init_engine(
             profile=resolve_profile({
@@ -160,6 +201,7 @@ def test_init_engine_selects_native_version_and_precision(monkeypatch, tmp_path)
         )
         kwargs = captured[-1]
         assert kwargs[expected] is True
+        assert kwargs["cfg_path"].endswith(config_name)
         if version == "2.5":
             assert kwargs["use_cuda_kernel"] is False
             assert kwargs["use_deepspeed"] is False
@@ -168,6 +210,33 @@ def test_init_engine_selects_native_version_and_precision(monkeypatch, tmp_path)
         else:
             assert "use_bf16" not in kwargs
     tts_engine.reset_engine()
+
+
+def test_v25_local_bundle_guard_uses_config_driven_layout(tmp_path):
+    bundle = tmp_path / "checkpoints_25"
+    bundle.mkdir()
+    (bundle / "config_v2_5.yaml").write_text(
+        "gpt_checkpoint: gpt.pth\n"
+        "s2mel_checkpoint: s2mel.pth\n"
+        "spk_matrix: feat1.pt\n"
+        "emo_matrix: feat2.pt\n"
+        "w2v_stat: wav2vec2bert_stats.pt\n"
+        "bpe_model: bpe.model\n"
+        "qwen_emo_path: qwen/\n",
+        encoding="utf-8",
+    )
+    for name in ("gpt.pth", "s2mel.pth", "codec.pth", "feat1.pt", "feat2.pt", "wav2vec2bert_stats.pt", "bpe.model"):
+        (bundle / name).write_bytes(b"x")
+    (bundle / "qwen").mkdir()
+    (bundle / "qwen" / "config.json").write_text("{}", encoding="utf-8")
+    (bundle / "hf_cache" / "w2v-bert-2.0").mkdir(parents=True)
+    (bundle / "hf_cache" / "w2v-bert-2.0" / "config.json").write_text("{}", encoding="utf-8")
+    (bundle / "hf_cache" / "campplus_cn_common.bin").write_bytes(b"x")
+    (bundle / "hf_cache" / "bigvgan").mkdir(parents=True)
+    (bundle / "hf_cache" / "bigvgan" / "config.json").write_text("{}", encoding="utf-8")
+    assert tts_engine._looks_like_local_v25_bundle(str(bundle)) is True
+    (bundle / "codec.pth").unlink()
+    assert tts_engine._looks_like_local_v25_bundle(str(bundle)) is False
 
 
 def test_v25_emotion_mapping_reports_approximation_for_non_native_labels():
