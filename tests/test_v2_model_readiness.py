@@ -141,9 +141,13 @@ class TestV2ReadinessContract:
             lambda: {"model_dir": str(v2_dir)},
         )
         monkeypatch.setattr(environment, "_auto_model_dir", lambda _version: None)
+        # Isolate the real machine's legacy runtime directory resolver: this
+        # test exercises legacy *config* model_dir selection, not existing
+        # legacy runtime directory detection.
+        monkeypatch.setattr(environment._cfg, "get_model_dir", lambda: "")
         selection = environment.resolve_engine_selection()
         assert selection.version == "v2"
-        assert selection.version_source == "legacy_model_dir"
+        assert selection.version_source == "legacy_config"
 
     def test_config_yml_alias_still_resolves_for_v2(self, tmp_path):
         """config.yml (not config.yaml) remains a valid v2 config name."""
