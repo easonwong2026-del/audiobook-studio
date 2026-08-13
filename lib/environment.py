@@ -45,24 +45,38 @@ ENV_MODEL_DIR_V25_ALIAS = "AUDIOBOOK_STUDIO_MODEL_DIR_2_5"
 ENV_MODEL_DIR_V25_LEGACY_ALIAS = "AUDIOBOOK_STUDIO_MODEL_DIR_25"
 ENV_MODEL_DIR_V25_PACKAGE_ALIAS = "AUDIOBOOK_STUDIO_INDEXTTS25_MODEL_DIR"
 
-# v2 is retained as a small role-based compatibility check.  v2.5 is not
-# derived from this list: its native adapter reads the paths below from the
-# selected config and always loads codec.pth.  Auxiliary directories are
-# required because the official v2.5 constructor uses them locally when the
-# no-download runtime guard is enabled.
-_MODEL_REQUIRED_V2: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("gpt.pth", ("gpt.pth", "gpt.pt", "gpt.safetensors")),
-    ("s2mel.pth", ("s2mel.pth", "s2mel.pt", "s2mel.safetensors")),
-    ("dvae.pth", ("dvae.pth", "dvae.pt", "dvae.safetensors")),
-    ("bpe.model", ("bpe.model", "tokenizer.model")),
-    ("campplus.onnx", ("campplus.onnx", "campplus.pt")),
-    ("wav2vec2bert_stats.pt", ("wav2vec2bert_stats.pt", "wav2vec2bert_stats.bin")),
+# The v2 and v2.5 readiness checks are both derived from the selected native
+# config plus the adapter's unconditionally-loaded fixed assets.  The official
+# ``indextts.infer_v2`` adapter (2026-08 main) loads gpt/s2mel/w2v/spk/emo/BPE
+# from the config and always loads campplus + semantic codec + w2v-bert +
+# BigVGAN from ``hf_cache/`` via ``ensure_models_available``.  It does not use
+# ``dvae.pth`` or ``campplus.onnx``, so those legacy 1.x filenames must not be
+# required.  This tuple keeps the directory-missing placeholder label list in
+# sync with those real requirements; the per-file existence check itself is
+# config-driven inside ``model_checkpoint_state``.
+_V2_CONFIG_REQUIRED_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("gpt checkpoint (config)", ("gpt_checkpoint",)),
+    ("s2mel checkpoint (config)", ("s2mel_checkpoint",)),
+    ("wav2vec2bert stats (config)", ("w2v_stat",)),
+    ("feat1/spk matrix (config)", ("spk_matrix",)),
+    ("feat2/emo matrix (config)", ("emo_matrix",)),
+    ("tokenizer/BPE resource (config)", ("dataset.bpe_model", "bpe_model")),
+)
+_V2_REQUIRED_ASSETS: tuple[tuple[str, str], ...] = (
+    ("hf_cache/campplus_cn_common.bin", "file"),
+    ("hf_cache/semantic_codec_model.safetensors", "file"),
+    ("hf_cache/w2v-bert-2.0", "dir"),
+    ("hf_cache/bigvgan", "dir"),
 )
 
-# Public for callers/tests that previously inspected this constant.  The v2.5
-# groups are generated from its config and are intentionally not listed here.
+# Public for callers/tests that previously inspected this constant.  The
+# per-file checks are generated from the config in ``model_checkpoint_state``;
+# these entries provide the stable label list for a missing directory and for
+# the required assets that the native adapter always loads.
 MODEL_REQUIRED_FILE_GROUPS: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
-    VERSION_V2: _MODEL_REQUIRED_V2,
+    VERSION_V2: tuple(
+        (label, aliases) for label, aliases in _V2_CONFIG_REQUIRED_KEYS
+    ) + tuple((label, ()) for label, _kind in _V2_REQUIRED_ASSETS),
     VERSION_V25: (),
 }
 
@@ -362,11 +376,12 @@ def resolve_model_directories() -> dict[str, dict[str, str]]:
 def model_checkpoint_state(version: str, model_dir: str | os.PathLike[str]) -> dict[str, Any]:
     """Best-effort local checkpoint inspection for one supported version.
 
-    v2 uses its stable legacy role list.  v2.5 derives checkpoint filenames
-    from the selected config and validates its native fixed assets plus local
-    auxiliary directories.  No recursive scan, import, network access, or
-    download is performed.  The diagnostic layer receives only a display-safe
-    path label.
+    Both v2 and v2.5 derive checkpoint filenames from the selected native
+    config and validate the fixed assets the adapter unconditionally loads.
+    v2 additionally requires the local auxiliary bundle (campplus / semantic
+    codec / w2v-bert / BigVGAN) that ``indextts.infer_v2`` loads from
+    ``hf_cache/``.  No recursive scan, import, network access, or download is
+    performed.  The diagnostic layer receives only a display-safe path label.
     """
     normalized = normalize_version(version)
     if normalized not in SUPPORTED_ENGINE_VERSIONS:
@@ -450,17 +465,36 @@ def model_checkpoint_state(version: str, model_dir: str | os.PathLike[str]) -> d
         present_required = [label for label, candidates, kind in required if exists(candidates, kind)]
         missing_required = [label for label, candidates, kind in required if not exists(candidates, kind)]
     else:
-        present_required = []
-        missing_required = []
-        if config_path is not None:
-            present_required.append("config.yaml")
-        else:
-            missing_required.append("config.yaml")
-        for canonical, alternatives in MODEL_REQUIRED_FILE_GROUPS[normalized]:
-            if any((path / candidate).is_file() for candidate in alternatives):
-                present_required.append(canonical)
+        values = read_model_config_values(config_path)
+        required: list[tuple[str, tuple[Path, ...], str]] = []
+
+        def v2_configured_file(label: str, *keys: str) -> None:
+            value = config_value(values, *keys)
+            candidates = (path / value,) if value else ()
+            # The native adapter only reads these from the config; a missing
+            # config entry is reported the same way as a missing file.
+            required.append((label, candidates, "file"))
+
+        for label, keys in _V2_CONFIG_REQUIRED_KEYS:
+            v2_configured_file(label, *keys)
+        for label, kind in _V2_REQUIRED_ASSETS:
+            if kind == "dir":
+                required.append((label, (path / label,), "dir"))
             else:
-                missing_required.append(canonical)
+                required.append((label, (path / label,), "file"))
+        if config_path is None:
+            required.insert(0, ("config.yaml", (), "file"))
+
+        def v2_exists(candidates: tuple[Path, ...], kind: str) -> bool:
+            if kind == "dir":
+                return any(
+                    candidate.is_dir() and any(candidate.iterdir())
+                    for candidate in candidates
+                )
+            return any(candidate.is_file() for candidate in candidates)
+
+        present_required = [label for label, candidates, kind in required if v2_exists(candidates, kind)]
+        missing_required = [label for label, candidates, kind in required if not v2_exists(candidates, kind)]
     optional_present = [name for name in MODEL_OPTIONAL_FILES if (path / name).is_file()]
     return {
         "exists": True,
