@@ -140,7 +140,9 @@ class SynthesisService:
               selected_segment_ids: Optional[list] = None,
               persist_task: bool = True,
               voice_overrides: Optional[dict[str, str]] = None,
-              recovery=None, budget=None, performance_trace=None) -> str:
+              recovery=None, budget=None, performance_trace=None,
+              engine_identity: str | None = None,
+              cb_audio=None) -> str:
         """提交后台合成，立即返回 task_id；重活在 worker 线程执行。
 
         阶段四：在提交 worker 前写入 TaskRecord（running 态）。
@@ -181,7 +183,8 @@ class SynthesisService:
             num_beams, emotion, emo_alpha, speech_rate, cb_seg_state,
             selected_chapters, selected_segment_ids, persist_task,
             voice_overrides, recovery, budget,
-            performance_trace,
+            performance_trace, engine_identity,
+            cb_audio,
         )
         # 写入任务状态记录（running）
         if persist_task:
@@ -309,7 +312,9 @@ class SynthesisService:
              selected_segment_ids: Optional[list] = None,
              persist_task: bool = True,
              voice_overrides: Optional[dict[str, str]] = None,
-             recovery=None, budget=None, performance_trace=None) -> None:
+             recovery=None, budget=None, performance_trace=None,
+             engine_identity: str | None = None,
+             cb_audio=None) -> None:
         """worker 主体：驱动 ``lib.queue.synthesize_project``，逐 yield 写回 ``state``。
 
         段边界检查 ``state.cancel`` -> 协作取消（置 ``cancelled`` 终态）；检查
@@ -394,7 +399,11 @@ class SynthesisService:
                 completed_ids = {
                     segment_id for segment_id in scope_ids
                     if meta.segments_status.get(segment_id) == "done"
-                    and segment_cache.has_segment_wav(segments_dir, segment_id)
+                    and segment_cache.has_segment_wav(
+                        segments_dir,
+                        segment_id,
+                        engine_identity=engine_identity,
+                    )
                 }
                 if state.completed <= 0:
                     state.completed = len(completed_ids)
@@ -419,6 +428,8 @@ class SynthesisService:
                 recovery=recovery,
                 budget=budget,
                 performance_trace=performance_trace,
+                engine_identity=engine_identity,
+                cb_audio=cb_audio,
             )
             # 手动驱动生成器：在「段边界」检查暂停/取消，并控制是否向下拉取（暂停时
             # 不调 next，从而不提交新段）。等价于原 ``for raw in gen``，但支持协作暂停。

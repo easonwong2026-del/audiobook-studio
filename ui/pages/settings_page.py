@@ -6,9 +6,11 @@ import platform
 import gradio as gr
 
 from lib import __version__, config
+from ui import settings_handlers
 
 
 def create_settings_page() -> dict:
+    tts_state = settings_handlers.get_tts_engine_ui_state()
     with gr.Group(
         visible=False,
         elem_id="grp-settings",
@@ -44,17 +46,56 @@ def create_settings_page() -> dict:
                         s_orphan_archive = gr.Button("移动到回收站", variant="stop")
                     s_orphan_status = gr.Markdown("")
 
-            with gr.Tab("TTS 与导出"), gr.Group(elem_classes=["settings-card"]):
+            with gr.Tab("TTS 与导出"):
+                with gr.Group(elem_classes=["settings-card"]):
                     gr.Markdown(
-                        "##### 本地生产环境\n"
+                        "##### TTS 引擎\n"
                         "Audiobook Studio 只使用本地 TTS 与 FFmpeg 完成合成和导出，"
                         "不会在启动、导入或绑定声音时连接外部模型服务。"
                     )
-                    s_model_dir = gr.Textbox(
-                        label="IndexTTS2 模型目录",
-                        value=config.get_model_dir(),
-                        interactive=False,
+                    s_tts_engine = gr.Radio(
+                        label="生产 TTS 引擎",
+                        choices=settings_handlers.TTS_ENGINE_CHOICES,
+                        value=tts_state["engine"],
+                        info="空闲时切换会保存设置并受控回收/重载 runtime。生产、试听、补录或导出进行中不可切换。",
+                        interactive=True,
                     )
+                    with gr.Row(equal_height=True):
+                        with gr.Column(scale=1):
+                            s_legacy_model_dir = gr.Textbox(
+                                label="IndexTTS 2 Legacy（回滚）模型目录",
+                                value=tts_state["legacy_model_dir"],
+                                interactive=True,
+                            )
+                            s_legacy_model_status = gr.Markdown(
+                                tts_state["legacy_model_status"],
+                                elem_classes=["tts-model-status"],
+                            )
+                        with gr.Column(scale=1):
+                            s_indextts25_model_dir = gr.Textbox(
+                                label="IndexTTS 2.5（推荐）模型目录",
+                                value=tts_state["indextts25_model_dir"],
+                                interactive=True,
+                            )
+                            s_indextts25_model_status = gr.Markdown(
+                                tts_state["indextts25_model_status"],
+                                elem_classes=["tts-model-status"],
+                            )
+                    with gr.Row():
+                        s_tts_apply = gr.Button("应用 TTS 引擎", variant="primary")
+                        s_tts_refresh = gr.Button("刷新状态")
+                    s_tts_status = gr.Markdown("")
+                    s_tts_runtime_engine = gr.Markdown(
+                        tts_state["runtime_engine_message"],
+                        elem_classes=["tts-runtime-status"],
+                    )
+                    s_tts_frozen_engine = gr.Markdown(
+                        tts_state["frozen_engine_message"],
+                        elem_classes=["tts-frozen-status"],
+                    )
+
+                with gr.Group(elem_classes=["settings-card"]):
+                    gr.Markdown("##### 本地生产环境")
                     s_ffmpeg_path = gr.Textbox(
                         label="FFmpeg",
                         value=config.get_ffmpeg_path(),
@@ -102,7 +143,16 @@ def create_settings_page() -> dict:
         "s_orphan_open": s_orphan_open,
         "s_orphan_archive": s_orphan_archive,
         "s_orphan_status": s_orphan_status,
-        "s_model_dir": s_model_dir,
+        "s_tts_engine": s_tts_engine,
+        "s_legacy_model_dir": s_legacy_model_dir,
+        "s_indextts25_model_dir": s_indextts25_model_dir,
+        "s_legacy_model_status": s_legacy_model_status,
+        "s_indextts25_model_status": s_indextts25_model_status,
+        "s_tts_apply": s_tts_apply,
+        "s_tts_refresh": s_tts_refresh,
+        "s_tts_status": s_tts_status,
+        "s_tts_runtime_engine": s_tts_runtime_engine,
+        "s_tts_frozen_engine": s_tts_frozen_engine,
         "s_ffmpeg_path": s_ffmpeg_path,
         "s_version": s_version,
         "s_python": s_python,

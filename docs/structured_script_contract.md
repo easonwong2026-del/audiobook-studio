@@ -74,6 +74,26 @@ Audiobook Studio 不分析小说原文。外部 Agent 或 Skill 负责理解原�
 合成、章节拼接、字幕和导出依赖 `id`、`role`/`speaker`、`text` 及上述 V3 演绎
 字段。片段顺序不会按角色或情绪重新排序。
 
+## Canonical Contract 与 TTS Adapter 边界
+
+`structured_script.json` 是与模型无关的 Canonical Contract。接入或切换
+IndexTTS 版本不得改变字段名称、字段含义、默认值、段落顺序或原始 JSON；模型版本
+差异只能由 Backend Adapter 在调用边界转换。
+
+Adapter 的每次合成都应保留结构化映射报告，至少区分：
+
+- `mapped`：直接映射到当前引擎的字段；
+- `approximated`：通过等价或近似参数实现的字段，例如 IndexTTS 2.5 将 Canonical
+  `speech_rate` 转为 `duration_factor`；
+- `unsupported`：当前引擎不具备的能力，例如未提供 pitch/breath 控制；
+- `ignored`：输入存在但当前调用没有可安全转换的值，例如未匹配到文本位置的
+  `pinyin_hints`。
+
+这些结果必须进入 runtime trace 或任务诊断，不能静默丢失。IndexTTS 2.5 的
+`<text|pronunciation>`、`lang`、`duration_factor` 等调用格式只存在于 Adapter 内部；
+Canonical JSON 保持原样。缓存、任务快照、质检 revision 和导出 manifest 必须同时带有
+冻结的 `engine_identity`，避免 UI 显示新引擎而实际复用旧引擎音频。
+
 ## 导入结果
 
 检查 JSON 时，工作台会显示作品、作者、章节数、片段数、角色数、旁白是否存在、未知

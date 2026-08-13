@@ -226,7 +226,8 @@ def _recovery_event(
 
 def _seg_cache_key(seg, emotion: str = None, emo_alpha: float = None,
                    speech_rate: float = None,
-                   speaker_fingerprint: str | None = None) -> str:
+                   speaker_fingerprint: str | None = None,
+                   engine_identity: str | None = None) -> str:
     """段缓存键（B7）：段标识 + 合成参数内容哈希，参数一变即生成新文件名。
 
     直接委派 ``lib.segment_cache.segment_cache_key``（单一公式来源），确保合成侧
@@ -260,6 +261,7 @@ def _seg_cache_key(seg, emotion: str = None, emo_alpha: float = None,
         getattr(seg, "pinyin_hints", None),
         segment_cache.director_metadata_for(seg),
         speaker_fingerprint,
+        engine_identity,
     )
 
 
@@ -280,9 +282,15 @@ def synthesize_project(
     recovery: Optional[RecoveryHooks] = None,
     budget: Optional[RecoveryBudget] = None,
     performance_trace=None,
+    engine_identity: str | None = None,
 ) -> Generator[str, None, None]:
     # NumPy / SciPy 随 TTS 适配层按需加载，不进入应用启动热路径。
     from . import tts_engine
+    if not engine_identity:
+        try:
+            engine_identity = tts_engine.get_engine_profile().get("cache_identity")
+        except (AttributeError, TypeError):
+            engine_identity = None
 
     project_dir = ProjectRepository.get_project_dir(project_name)
     # P2 提速：open_project 已把剧本读入内存（dict），直接用 from_dict 构造 Script，
@@ -308,7 +316,9 @@ def synthesize_project(
         for segment_id, path in (voice_overrides or {}).items()
         if str(segment_id).strip() and str(path).strip()
     }
-    remaining = ProjectRepository.get_remaining(project_name)
+    remaining = ProjectRepository.get_remaining(
+        project_name, engine_identity=engine_identity
+    )
     if selected_segment_set is not None:
         remaining = [segment_id for segment_id in remaining if segment_id in selected_segment_set]
     if not remaining:
@@ -486,7 +496,7 @@ def synthesize_project(
                 # B7：缓存键 = 段标识 + 合成参数内容哈希。
                 seg_path = os.path.join(
                     segments_dir,
-                    f"{_seg_cache_key(seg, emotion_eff, emo_alpha_eff, speech_rate_eff, speaker_fingerprint)}.wav",
+                    f"{_seg_cache_key(seg, emotion_eff, emo_alpha_eff, speech_rate_eff, speaker_fingerprint, engine_identity)}.wav",
                 )
 
                 cache_started = time.perf_counter()

@@ -14,7 +14,6 @@ director_metadata）+ speaker fingerprint」
 """
 from __future__ import annotations
 
-import glob
 import hashlib
 import json
 import os
@@ -30,6 +29,7 @@ def segment_cache_key(
     pinyin_hints: Any = None,
     director_metadata: Any = None,
     speaker_fingerprint: str | None = None,
+    engine_identity: str | None = None,
 ) -> str:
     """由段标识 + 合成参数派生稳定缓存键（不含扩展名）。
 
@@ -73,6 +73,8 @@ def segment_cache_key(
     # historical cache names and fallback behavior.
     if speaker_fingerprint:
         params += f"|speaker={str(speaker_fingerprint).strip()}"
+    if engine_identity:
+        params += f"|engine={str(engine_identity).strip()}"
     digest = hashlib.md5(params.encode("utf-8")).hexdigest()[:8]
     return f"{seg_id}_{digest}"
 
@@ -86,11 +88,12 @@ def segment_wav_path(
     pinyin_hints: Any = None,
     director_metadata: Any = None,
     speaker_fingerprint: str | None = None,
+    engine_identity: str | None = None,
 ) -> str:
     """返回参数感知的 wav 绝对路径（缓存键命名）。"""
     key = segment_cache_key(
         seg_id, emotion, emo_alpha, speech_rate, pinyin_hints, director_metadata,
-        speaker_fingerprint,
+        speaker_fingerprint, engine_identity,
     )
     return os.path.join(segments_dir, f"{key}.wav")
 
@@ -107,6 +110,7 @@ def find_segment_wav(
     director_metadata: Any = None,
     speaker_fingerprint: str | None = None,
     allow_legacy_fallback: bool | None = None,
+    engine_identity: str | None = None,
 ) -> Optional[str]:
     """查找某段已合成的 wav。
 
@@ -120,7 +124,7 @@ def find_segment_wav(
     # 1) 参数感知的缓存键文件
     ck = segment_cache_key(
         seg_id, emotion, emo_alpha, speech_rate, pinyin_hints, director_metadata,
-        speaker_fingerprint,
+        speaker_fingerprint, engine_identity,
     )
     fp = os.path.join(segments_dir, f"{ck}.wav")
     if os.path.isfile(fp):
@@ -130,7 +134,7 @@ def find_segment_wav(
     # cast change.  Callers that explicitly want a compatibility lookup can
     # pass allow_legacy_fallback=True.
     if allow_legacy_fallback is None:
-        allow_legacy_fallback = speaker_fingerprint is None
+        allow_legacy_fallback = speaker_fingerprint is None and not engine_identity
     if not allow_legacy_fallback:
         return None
 
@@ -150,6 +154,7 @@ def has_segment_wav(
     pinyin_hints: Any = None,
     director_metadata: Any = None,
     speaker_fingerprint: str | None = None,
+    engine_identity: str | None = None,
 ) -> bool:
     """某段是否已存在对应 wav（参数感知文件 / 旧版裸文件 / 任意参数变体均可）。
 
@@ -161,17 +166,18 @@ def has_segment_wav(
     """
     ck = segment_cache_key(
         seg_id, emotion, emo_alpha, speech_rate, pinyin_hints, director_metadata,
-        speaker_fingerprint,
+        speaker_fingerprint, engine_identity,
     )
     if os.path.isfile(os.path.join(segments_dir, f"{ck}.wav")):
         return True
-    if speaker_fingerprint:
+    if speaker_fingerprint or engine_identity:
         return False
     if os.path.isfile(os.path.join(segments_dir, f"{seg_id}.wav")):
         return True
-    if glob.glob(os.path.join(segments_dir, f"{seg_id}_*.wav")):
-        return True
-    return False
+    return any(
+        name.startswith(f"{seg_id}_") and name.endswith(".wav")
+        for name in os.listdir(segments_dir)
+    ) if os.path.isdir(segments_dir) else False
 
 
 def speaker_fingerprint_for_path(path: str | None) -> str | None:

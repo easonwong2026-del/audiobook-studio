@@ -1,6 +1,7 @@
 """Delivery input freshness and historical manifest contracts."""
 from __future__ import annotations
 
+import json
 import os
 
 import numpy as np
@@ -8,6 +9,7 @@ import pytest
 from scipy.io import wavfile
 
 from lib import postprocess, project_paths
+from lib.tts_profile import resolve_profile
 from repositories.project_repo import ProjectRepository
 from repositories.quality_repo import QualityRepository
 from repositories.voice_cast_repo import VoiceCastRepository
@@ -89,6 +91,21 @@ def _finish_and_review(project_name: str) -> None:
     QualityService.mark_review(project_name, "001-001", "passed")
 
 
+def _set_revision_engine(project_name: str, version: str) -> None:
+    active = QualityRepository.get_active_revision(project_name, "001-001")
+    assert active
+    params = dict(active.get("params") or {})
+    params["engine_snapshot"] = resolve_profile({
+        "engine_version": version,
+        "model_dir": os.path.join("/tmp", f"model-{version}"),
+    })
+    QualityRepository.update_revision(
+        project_name,
+        active["revision_id"],
+        params=params,
+    )
+
+
 def _manifest(project_name: str, *, with_hash: bool = True) -> dict:
     payload = {"project": project_name, "ready": True, "format": "wav"}
     if with_hash:
@@ -128,6 +145,51 @@ def test_delivery_snapshot_is_deterministic_and_manifest_history_is_queryable(
     assert QualityRepository.get_history_record(
         freshness_project, "delivery_manifests", historical["manifest_id"]
     )["manifest_id"] == historical["manifest_id"]
+
+
+def test_delivery_snapshot_records_uniform_engine_provenance(freshness_project):
+    _finish_and_review(freshness_project)
+    _set_revision_engine(freshness_project, "2.5")
+
+    snapshot = compute_delivery_input_snapshot(freshness_project)
+
+    assert snapshot["engine_provenance"]["status"] == "uniform"
+    assert snapshot["engine_provenance"]["engine_snapshot"]["engine_version"] == "2.5"
+    assert "/tmp/model-2.5" not in str(snapshot)
+
+
+def test_delivery_snapshot_marks_mixed_engine_provenance(freshness_project):
+    _finish_and_review(freshness_project)
+    # Add a second segment revision with the other native engine identity to
+    # exercise the same provenance shape used by a mixed historical project.
+    project_dir = ProjectRepository.get_project_dir(freshness_project)
+    script_path = os.path.join(project_dir, "structured_script.json")
+    with open(script_path, encoding="utf-8") as file:
+        script = json.load(file)
+    script["chapters"][0]["segments"].append({
+        "id": "001-002", "role": "旁白", "text": "第二段。",
+    })
+    with open(script_path, "w", encoding="utf-8") as file:
+        json.dump(script, file, ensure_ascii=False)
+    segments = project_paths.project_dir(project_dir, "segments", create=True)
+    wavfile.write(os.path.join(segments, "001-002.wav"), 22050, np.ones(22050, dtype=np.int16))
+    ProjectRepository.update_segment_status(freshness_project, "001-002", "done")
+    QualityService.ensure_active_revision(freshness_project, "001-002")
+    _set_revision_engine(freshness_project, "2.5")
+    _set_revision_engine(freshness_project, "2")
+    second = QualityRepository.get_active_revision(freshness_project, "001-002")
+    assert second
+    params = dict(second.get("params") or {})
+    params["engine_snapshot"] = resolve_profile({
+        "engine_version": "2.5",
+        "model_dir": os.path.join("/tmp", "model-2.5"),
+    })
+    QualityRepository.update_revision(freshness_project, second["revision_id"], params=params)
+
+    snapshot = compute_delivery_input_snapshot(freshness_project)
+
+    assert snapshot["engine_provenance"]["status"] == "mixed"
+    assert {item["engine_version"] for item in snapshot["engine_provenance"]["engines"]} == {"2", "2.5"}
 
 
 def test_repair_revision_stales_manifest_and_new_export_restores_delivery(

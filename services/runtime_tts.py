@@ -15,6 +15,7 @@ from typing import Any
 from lib import project_paths
 from repositories.project_repo import ProjectRepository
 from repositories.task_repo import TaskRecord, TaskRepository
+from lib.tts_profile import resolve_profile
 
 from .production_runtime import ProductionRuntime, ProductionRuntimeClient
 
@@ -91,6 +92,8 @@ class RuntimeTTSService:
     ) -> TaskRecord:
         task_id = f"task_{uuid.uuid4().hex[:20]}"
         now = _now()
+        options = dict(options or {})
+        options.setdefault("engine_snapshot", resolve_profile(options))
         record = TaskRecord(
             task_id=task_id,
             task_type=task_type,
@@ -126,13 +129,14 @@ class RuntimeTTSService:
         speaker_audio: str,
         *,
         timeout: float = 600.0,
+        engine_profile: dict[str, Any] | None = None,
     ) -> str:
         """Create a complete three-sentence voice preview in the singleton runtime."""
         project = str(project_name or "").strip()
         if not project or not TaskRepository.get_database_path(project, create=True):
             # Compatibility for isolated service tests without a real project.
             return ProductionRuntime().run_voice_preview_direct(
-                str(speaker_audio), str(role or "voice"), ""
+                str(speaker_audio), str(role or "voice"), "", engine_profile
             )
         task_id = f"preview_{uuid.uuid4().hex[:20]}"
         artifact_dir = cls._artifact_dir(project, "voice_previews", task_id)
@@ -143,6 +147,7 @@ class RuntimeTTSService:
             options={
                 "speaker_audio": os.path.abspath(str(speaker_audio)),
                 "role": str(role or "voice"),
+                "engine_snapshot": resolve_profile(engine_profile or {}),
             },
             total=3,
             timeout=timeout,
@@ -165,6 +170,7 @@ class RuntimeTTSService:
         num_beams: int,
         artifact_dir: str,
         timeout: float = 3600.0,
+        engine_profile: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Synthesize isolated supplement lines through the singleton runtime."""
         project = str(project_name or "").strip()
@@ -174,10 +180,11 @@ class RuntimeTTSService:
             "speaker_audio": str(speaker_audio),
             "overrides": dict(overrides or {}),
             "num_beams": max(int(num_beams or 2), 1),
+            "engine_snapshot": resolve_profile(engine_profile or {}),
         }
         if not project or not TaskRepository.get_database_path(project, create=True):
             # Legacy/unit-test fixtures have no durable project queue.
-            return ProductionRuntime().run_supplement_direct(payload, artifact_dir)
+            return ProductionRuntime().run_supplement_direct(payload, artifact_dir, engine_profile=payload["engine_snapshot"])
         record = cls._submit(
             project_name=project,
             task_type="supplement",

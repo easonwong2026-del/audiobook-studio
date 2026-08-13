@@ -6,6 +6,7 @@ processes communicate by writing transactional commands to ``TaskRepository``.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import re
@@ -24,9 +25,11 @@ from lib import project_paths
 from lib import progress as synthesis_progress
 from lib.failures import RecoveryBudget, RecoveryHooks, SynthesisFailure
 from repositories.project_repo import ProjectRepository
+from repositories._atomic import atomic_write
 from repositories.task_repo import RuntimePendingSignal, TaskRecord, TaskRepository
 
 from .runtime_engine import EngineInitError, RuntimeEngineLifecycle
+from lib.tts_profile import public_profile
 from .performance_trace import PerformanceTrace
 from .runtime_lock import ProcessFileLock
 from .synthesis import SynthesisService, SynthesisState
@@ -172,6 +175,76 @@ class ProductionRuntime:
     def reset_engine(self) -> None:
         """Force a fresh engine lifecycle (used by tests and restart)."""
         self._engine.reset()
+
+    def request_engine_recycle(self, engine_id: str | None = None) -> bool:
+        """Recycle an idle runtime to the selected profile.
+
+        This is called only after the client-side active-task guard.  The
+        runtime repeats the guard at its ownership boundary so a stale UI
+        request can never switch an engine while synthesis/export is active.
+        """
+        with self._state_lock:
+            if self._current_state is not None:
+                raise RuntimeError("生产任务仍在运行，不能切换 TTS 引擎")
+            if self._export_future is not None and not self._export_future.done():
+                raise RuntimeError("导出任务仍在运行，不能切换 TTS 引擎")
+        if self._durable_tts_task_active():
+            raise RuntimeError("当前有生产任务正在运行，不能切换 TTS 引擎")
+        from lib.tts_profile import resolve_profile
+
+        raw = str(engine_id or "").lower()
+        version = "2.5" if ("25" in raw or "2.5" in raw) else "2"
+        self._engine.recycle(resolve_profile({"engine_version": version}))
+        return True
+
+    @staticmethod
+    def _engine_command_path() -> str:
+        from lib import config
+
+        return os.path.join(config.get_data_dir(), "logs", "runtime_engine_command.json")
+
+    def _consume_engine_command(self) -> None:
+        """Consume one idle-only engine switch command in the owner process."""
+        path = self._engine_command_path()
+        try:
+            with open(path, encoding="utf-8") as file:
+                command = json.load(file)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return
+        if not isinstance(command, dict):
+            return
+        with self._state_lock:
+            if self._current_state is not None or (
+                self._export_future is not None and not self._export_future.done()
+            ):
+                return
+        if self._durable_tts_task_active():
+            return
+        try:
+            self.request_engine_recycle(str(command.get("engine_id") or ""))
+        except Exception as exc:
+            logger.error("runtime_event=engine_switch_failure error=%s", exc)
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _durable_tts_task_active() -> bool:
+        active_states = {
+            "active", "pending", "queued", "starting", "preparing", "submitting",
+            "running", "pausing", "paused", "recovering", "cancelling",
+        }
+        task_types = {"synthesis", "voice_preview", "preview", "supplement", "export"}
+        try:
+            return any(
+                str(getattr(record, "task_type", "")) in task_types
+                and str(getattr(record, "status", "")) in active_states
+                for record in TaskRepository.list_tasks()
+            )
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return True
 
     def start_background(self) -> bool:
         if self.requires_fresh_runtime:
@@ -416,6 +489,7 @@ class ProductionRuntime:
                 # synthesis 类型的 stamp 仍是旧值 → 新 notify 戳 ≠ 旧值 → 立即
                 # 全扫 claim 他项目 pending 任务（无 30s 兜底延迟）。
                 if state is None:
+                    self._consume_engine_command()
                     record = self._claim_pending("synthesis", {"synthesis"}, force_claim)
                     if record is not None:
                         self._note_task_claim(record)
@@ -490,6 +564,72 @@ class ProductionRuntime:
             return {}
         bindings = document.get("bindings", {})
         return bindings if isinstance(bindings, dict) else {}
+
+    @staticmethod
+    def _on_segment_audio(record: TaskRecord):
+        """Persist the task-frozen engine identity with each active revision."""
+        options = record.options if isinstance(record.options, dict) else {}
+        profile = options.get("engine_snapshot") if isinstance(options.get("engine_snapshot"), dict) else None
+
+        def _segment_inputs(segment_id: str) -> tuple[dict[str, Any] | None, str | None]:
+            try:
+                from lib import segment_cache
+
+                _meta, script, _bindings = ProjectRepository.load_project(record.project)
+                segment = next(
+                    (
+                        item
+                        for chapter in script.get("chapters", [])
+                        if isinstance(chapter, dict)
+                        for item in chapter.get("segments", [])
+                        if isinstance(item, dict) and str(item.get("id") or "") == str(segment_id)
+                    ),
+                    None,
+                )
+                if segment is None:
+                    return None, None
+                overrides = {
+                    "emotion": options.get("emotion"),
+                    "override": options.get("emo_alpha") is not None
+                    or options.get("speech_rate") is not None,
+                    "emo_alpha": options.get("emo_alpha") if options.get("emo_alpha") is not None else 1.0,
+                    "speech_rate": options.get("speech_rate") if options.get("speech_rate") is not None else 1.0,
+                }
+                emotion, emo_alpha, speech_rate = segment_cache.effective_params(segment, overrides)
+                params = {
+                    "emotion": emotion,
+                    "emo_alpha": emo_alpha,
+                    "speech_rate": speech_rate,
+                    "engine_snapshot": profile,
+                }
+                override = options.get("voice_overrides")
+                speaker_override = override.get(str(segment_id)) if isinstance(override, dict) else None
+                if speaker_override and not os.path.isabs(str(speaker_override)):
+                    speaker_override = os.path.join(
+                        ProjectRepository.get_project_dir(record.project), str(speaker_override)
+                    )
+                return params, speaker_override
+            except Exception:
+                return None, None
+
+        def _callback(segment_id, path):
+            try:
+                from services.quality import QualityService
+
+                params, speaker_override = _segment_inputs(str(segment_id))
+
+                QualityService.ensure_active_revision(
+                    record.project,
+                    str(segment_id),
+                    engine_snapshot=profile,
+                    source_path=path,
+                    params=params,
+                    speaker_override=speaker_override,
+                )
+            except Exception:
+                logger.debug("记录 segment engine revision 失败: %s", segment_id, exc_info=True)
+
+        return _callback
 
     @staticmethod
     def _segment_to_chapter(project: str) -> dict[str, str]:
@@ -572,11 +712,14 @@ class ProductionRuntime:
             timestamp=load_started,
         )
         try:
-            self._engine.ensure_ready()
+            options = record.options if isinstance(record.options, dict) else {}
+            engine_profile = options.get("engine_snapshot") if isinstance(options.get("engine_snapshot"), dict) else None
+            self._engine.ensure_ready(engine_profile)
         except EngineInitError as exc:
             self._fail_synthesis_engine_init(record, state, exc)
             return
-        state.engine_generation = self._engine.snapshot()["engine_generation"]
+        engine_snapshot = self._engine.snapshot()
+        state.engine_generation = engine_snapshot["engine_generation"]
         ready_at = self._utc_now()
         self._note_startup(
             record,
@@ -629,6 +772,7 @@ class ProductionRuntime:
                 "performance",
                 f"{record.task_id}.json",
             ),
+            engine=public_profile(engine_snapshot),
         )
         self._note_startup(record, "preparing_first_segment")
         _runtime_event(
@@ -671,6 +815,8 @@ class ProductionRuntime:
                 recovery=self._build_recovery_hooks(state, record),
                 budget=RecoveryBudget(),
                 performance_trace=performance_trace,
+                engine_identity=engine_snapshot.get("cache_identity"),
+                cb_audio=self._on_segment_audio(record),
             )
         except Exception as exc:
             state.status = "error"
@@ -686,7 +832,9 @@ class ProductionRuntime:
         """Build the runtime-owned self-healing callbacks for one task."""
 
         def _recycle() -> int:
-            generation = self._engine.recycle()
+            options = record.options if isinstance(record.options, dict) else {}
+            profile = options.get("engine_snapshot") if isinstance(options.get("engine_snapshot"), dict) else None
+            generation = self._engine.recycle(profile)
             state.engine_generation = generation
             return generation
 
@@ -1052,11 +1200,12 @@ class ProductionRuntime:
         speaker_audio: str,
         role: str,
         artifact_dir: str,
+        engine_profile: dict[str, Any] | None = None,
     ) -> str:
         """Runtime-owned direct worker; public callers submit through RuntimeTTSService."""
         from lib import config
 
-        self._engine.ensure_ready()
+        self._engine.ensure_ready(engine_profile)
 
         destination = artifact_dir or os.path.join(
             config.get_preview_dir(),
@@ -1092,12 +1241,13 @@ class ProductionRuntime:
         heartbeat: Any = None,
         initialize: bool = False,
         validate_output: bool = False,
+        engine_profile: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Runtime-owned isolated supplement worker."""
         from lib import config
 
         if initialize:
-            self._engine.ensure_ready()
+            self._engine.ensure_ready(engine_profile)
 
         destination = artifact_dir or os.path.join(
             config.get_preview_dir(),
@@ -1216,6 +1366,7 @@ class ProductionRuntime:
                     str(record.options.get("speaker_audio") or ""),
                     str(record.options.get("role") or "voice"),
                     artifact_dir,
+                    record.options.get("engine_snapshot") if isinstance(record.options, dict) else None,
                 )
                 result: dict[str, Any] = {"preview_path": preview}
                 completed, failed = 3, 0
@@ -1228,6 +1379,7 @@ class ProductionRuntime:
                     ),
                     initialize=True,
                     validate_output=True,
+                    engine_profile=record.options.get("engine_snapshot") if isinstance(record.options, dict) else None,
                 )
                 result = {"items": items}
                 completed = sum(item.get("status") == "ok" for item in items)
@@ -1421,6 +1573,31 @@ class ProductionRuntimeClient:
         if "PYTEST_CURRENT_TEST" in os.environ:
             return "inline"
         return "process"
+
+    @classmethod
+    def request_engine_recycle(cls, engine_id: str) -> bool:
+        """Ask the singleton owner to reload an idle selected engine."""
+        mode = cls.mode()
+        if mode in {"off", "disabled"}:
+            raise RuntimeError("生产 runtime 已禁用")
+        if mode == "inline":
+            with _INLINE_LOCK:
+                runtime = _INLINE_RUNTIME
+            if runtime is None:
+                cls.ensure_running()
+                with _INLINE_LOCK:
+                    runtime = _INLINE_RUNTIME
+            if runtime is None:
+                raise RuntimeError("无法取得 inline runtime")
+            return runtime.request_engine_recycle(engine_id)
+        path = ProductionRuntime._engine_command_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        atomic_write(path, {
+            "engine_id": str(engine_id or ""),
+            "requested_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        })
+        cls.ensure_running()
+        return True
 
     @classmethod
     def _resolve_runtime_launch(cls) -> tuple[list[str], dict[str, str]]:

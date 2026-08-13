@@ -11,7 +11,6 @@ import os
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
-from .exceptions import AtomicWriteError
 from ._atomic import atomic_write as _atomic_write
 
 logger = logging.getLogger(__name__)
@@ -40,6 +39,11 @@ class ConfigData:
     sample_rate: int = 24000
     channels: int = 1
     default_format: str = "wav"
+    engine_backend: str = "indextts"
+    engine_version: str = ""
+    model_dir_v2: str = ""
+    model_dir_v25: str = ""
+    tts_precision: str = ""
 
     def to_dict(self) -> dict:
         """序列化为 dict（略去空值字段以保持向后兼容）。"""
@@ -54,6 +58,16 @@ class ConfigData:
             d["model_dir"] = self.model_dir
         if self.ffmpeg_path:
             d["ffmpeg_path"] = self.ffmpeg_path
+        if self.engine_backend:
+            d["engine_backend"] = self.engine_backend
+        if self.engine_version:
+            d["engine_version"] = self.engine_version
+        if self.model_dir_v2:
+            d["model_dir_v2"] = self.model_dir_v2
+        if self.model_dir_v25:
+            d["model_dir_v25"] = self.model_dir_v25
+        if self.tts_precision:
+            d["tts_precision"] = self.tts_precision
         return d
 
     @staticmethod
@@ -67,6 +81,11 @@ class ConfigData:
             sample_rate=data.get("sample_rate", 24000),
             channels=data.get("channels", 1),
             default_format=data.get("default_format", "wav"),
+            engine_backend=data.get("engine_backend", data.get("engine", "indextts")),
+            engine_version=data.get("engine_version", data.get("tts_version", "")),
+            model_dir_v2=data.get("model_dir_v2", ""),
+            model_dir_v25=data.get("model_dir_v25", data.get("indextts25_model_dir", "")),
+            tts_precision=data.get("tts_precision", data.get("precision", "")),
         )
 
 
@@ -131,6 +150,11 @@ class ConfigRepository:
             sample_rate=cfg.sample_rate,
             channels=cfg.channels,
             default_format=cfg.default_format,
+            engine_backend=cfg.engine_backend,
+            engine_version=cfg.engine_version,
+            model_dir_v2=cfg.model_dir_v2,
+            model_dir_v25=cfg.model_dir_v25,
+            tts_precision=cfg.tts_precision,
         )
         ConfigRepository.save(new_cfg)
         return abs_path
@@ -155,6 +179,11 @@ class ConfigRepository:
             sample_rate=cfg.sample_rate,
             channels=cfg.channels,
             default_format=cfg.default_format,
+            engine_backend=cfg.engine_backend,
+            engine_version=cfg.engine_version,
+            model_dir_v2=abs_path,
+            model_dir_v25=cfg.model_dir_v25,
+            tts_precision=cfg.tts_precision,
         )
         ConfigRepository.save(new_cfg)
         return abs_path

@@ -198,12 +198,22 @@ def _canonical_options(value: Any) -> dict[str, Any]:
         )
         if str(segment_id).strip() and str(path).strip()
     } if isinstance(raw_voice_overrides, dict) else {}
+    engine_raw = raw.get("engine_snapshot")
+    engine_snapshot = {
+        str(key): engine_raw.get(key)
+        for key in (
+            "engine_backend", "engine_version", "engine_identity",
+            "model_identity", "precision", "device", "model_dir", "cache_identity",
+        )
+        if isinstance(engine_raw, dict) and engine_raw.get(key) not in (None, "")
+    }
     return {
         "num_beams": beams,
         "emotion": str(emotion) if emotion not in (None, "") else None,
         "emo_alpha": _canonical_optional_number(raw.get("emo_alpha")),
         "speech_rate": _canonical_optional_number(raw.get("speech_rate")),
         "voice_overrides": voice_overrides,
+        "engine_snapshot": engine_snapshot,
     }
 
 
@@ -792,6 +802,18 @@ class TaskRepository:
         """Atomically enqueue a non-production task for the singleton runtime."""
         if record.task_type not in _RUNTIME_TASK_TYPES - {_PRODUCTION_TYPE}:
             raise ValueError(f"不支持的 runtime task_type: {record.task_type}")
+        # Preview/supplement are TTS tasks too: freeze the profile before the
+        # row becomes claimable, so a later global setting change cannot alter
+        # a queued utility task.
+        if record.task_type in {"voice_preview", "preview", "supplement"}:
+            try:
+                from lib.tts_profile import resolve_profile
+
+                options = dict(record.options or {})
+                options.setdefault("engine_snapshot", resolve_profile({}))
+                record.options = options
+            except (ImportError, OSError, RuntimeError, TypeError, ValueError):
+                pass
         connection = TaskRepository._connect(record.project, create=True)
         if connection is None:
             raise FileNotFoundError(f"项目不存在: {record.project}")

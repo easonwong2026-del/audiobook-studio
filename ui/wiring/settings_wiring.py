@@ -1,4 +1,4 @@
-"""设置页事件接线；仅包含本地数据、项目残留和环境诊断。"""
+"""设置页事件接线；包含本地数据、TTS 引擎、项目残留和环境诊断。"""
 from __future__ import annotations
 
 from services.environment_diagnostics import (
@@ -20,6 +20,38 @@ def run_diagnostics_ui():
 
 
 def wire_settings_page(page: dict) -> None:
+    tts_inputs = [
+        page["s_tts_engine"],
+        page["s_legacy_model_dir"],
+        page["s_indextts25_model_dir"],
+    ]
+    tts_outputs = [
+        page["s_tts_status"],
+        page["s_legacy_model_status"],
+        page["s_indextts25_model_status"],
+        page["s_tts_runtime_engine"],
+        page["s_tts_frozen_engine"],
+    ]
+    page["s_tts_apply"].click(
+        settings_handlers.apply_tts_engine,
+        tts_inputs,
+        tts_outputs,
+    )
+    page["s_tts_refresh"].click(
+        settings_handlers.refresh_tts_engine_ui,
+        tts_inputs,
+        tts_outputs,
+    )
+    for component in (
+        page["s_tts_engine"],
+        page["s_legacy_model_dir"],
+        page["s_indextts25_model_dir"],
+    ):
+        component.change(
+            settings_handlers.refresh_tts_engine_ui,
+            tts_inputs,
+            tts_outputs,
+        )
     page["s_data_apply"].click(
         settings_handlers.apply_data_dir,
         [page["s_data_dir"]],

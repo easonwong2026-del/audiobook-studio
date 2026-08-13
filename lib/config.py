@@ -22,7 +22,7 @@ import os
 import shutil
 from dataclasses import dataclass
 
-from repositories.config_repo import ConfigRepository, ConfigData
+from repositories.config_repo import ConfigRepository
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,8 @@ ENV_LEGACY_DIR = "AUDIOBOOK_STUDIO_LEGACY_DIR"
 ENV_MODEL_DIR = "AUDIOBOOK_STUDIO_MODEL_DIR"
 ENV_PYTHON = "AUDIOBOOK_STUDIO_PYTHON"
 ENV_FFMPEG = "AUDIOBOOK_STUDIO_FFMPEG"
+ENV_TTS_BACKEND = "AUDIOBOOK_STUDIO_TTS_BACKEND"
+ENV_TTS_VERSION = "AUDIOBOOK_STUDIO_TTS_VERSION"
 
 _DEFAULT_DATA_DIR = os.path.join(os.path.expanduser("~"), "AudiobookStudio")
 
@@ -169,6 +171,20 @@ def get_model_dir() -> str:
     if not d:
         d = _DEFAULT_MODEL_DIR
     return os.path.abspath(d)
+
+
+def get_tts_profile(overrides=None) -> dict:
+    """Resolve the selected runtime engine without loading torch or TTS."""
+    from .tts_profile import resolve_profile
+
+    return resolve_profile(overrides)
+
+
+def get_public_tts_profile(overrides=None) -> dict:
+    """Return path-free engine identity fields for UI/status/task payloads."""
+    from .tts_profile import public_profile
+
+    return public_profile(get_tts_profile(overrides))
 
 
 def get_python_path() -> str:

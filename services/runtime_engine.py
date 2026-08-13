@@ -85,6 +85,13 @@ def _empty_runtime_engine_status() -> dict[str, Any]:
         "last_error_code": "",
         "last_recovery_at": "",
         "status_stale": True,
+        "engine_backend": "",
+        "engine_version": "",
+        "engine_identity": "",
+        "model_identity": "",
+        "precision": "",
+        "device": "",
+        "cache_identity": "",
     }
 
 
@@ -218,6 +225,13 @@ def read_runtime_engine_status() -> dict[str, Any]:
             "last_error_code": str(data.get("last_error_code") or ""),
             "last_recovery_at": str(data.get("last_recovery_at") or ""),
             "status_stale": not live,
+            "engine_backend": str(data.get("engine_backend") or "") if live else "",
+            "engine_version": str(data.get("engine_version") or "") if live else "",
+            "engine_identity": str(data.get("engine_identity") or "") if live else "",
+            "model_identity": str(data.get("model_identity") or "") if live else "",
+            "precision": str(data.get("precision") or "") if live else "",
+            "device": str(data.get("device") or "") if live else "",
+            "cache_identity": str(data.get("cache_identity") or "") if live else "",
         }
         return status
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
@@ -261,6 +275,7 @@ class RuntimeEngineLifecycle:
         self._recovery_count = 0
         self._last_error_code = ""
         self._last_recovery_at = ""
+        self._engine_profile: dict[str, Any] = {}
 
     @property
     def state(self) -> str:
@@ -287,6 +302,13 @@ class RuntimeEngineLifecycle:
                 "recovery_count": self._recovery_count,
                 "last_error_code": self._last_error_code,
                 "last_recovery_at": self._last_recovery_at,
+                "engine_backend": self._engine_profile.get("engine_backend", ""),
+                "engine_version": self._engine_profile.get("engine_version", ""),
+                "engine_identity": self._engine_profile.get("engine_identity", ""),
+                "model_identity": self._engine_profile.get("model_identity", ""),
+                "precision": self._engine_profile.get("precision", ""),
+                "device": self._engine_profile.get("device", ""),
+                "cache_identity": self._engine_profile.get("cache_identity", ""),
             }
 
     def reset(self) -> None:
@@ -295,6 +317,7 @@ class RuntimeEngineLifecycle:
             self._state = "uninitialized"
             self._error_summary = ""
             self._last_error_code = ""
+            self._engine_profile = {}
             self._publish_unlocked("uninitialized", error_summary="")
 
     @property
@@ -320,7 +343,7 @@ class RuntimeEngineLifecycle:
             self._runtime_updated_at = _now()
             self._publish_unlocked(self._state, error_summary=self._error_summary)
 
-    def ensure_ready(self) -> None:
+    def ensure_ready(self, profile: dict[str, Any] | None = None) -> None:
         """Initialize the TTS engine exactly once per lifecycle.
 
         - ``ready``: returns immediately (engine reused, no reload).
@@ -331,7 +354,35 @@ class RuntimeEngineLifecycle:
           same lock and sees the result when it completes.
         """
         with self._condition:
+            from lib.tts_profile import profile_matches, public_profile, resolve_profile
+            desired = resolve_profile(profile or {})
             if self._state == "ready":
+                if profile_matches(self._engine_profile, desired):
+                    return
+                # The runtime is serial: a new task can only reach here after
+                # the previous task retired.  Recycle the actual adapter before
+                # loading the newly frozen identity.
+                self._state = "recovering"
+                self._publish_unlocked("recovering", error_summary="")
+                try:
+                    from lib import tts_engine
+
+                    tts_engine.reset_engine()
+                    self._init_adapter(tts_engine, desired)
+                    self._engine_profile = dict(tts_engine.get_engine_profile() or desired)
+                    self._engine_profile.update(public_profile(self._engine_profile))
+                except Exception as exc:
+                    summary = sanitize_public_error(exc)
+                    self._error_summary = summary
+                    self._state = "error"
+                    self._last_error_code = "TTS_ENGINE_INIT_FAILED"
+                    self._publish_unlocked("error", error_summary=summary)
+                    raise EngineInitError(summary, original_exception=exc) from exc
+                self._generation += 1
+                self._recovery_count += 1
+                self._last_recovery_at = _now()
+                self._state = "ready"
+                self._publish_unlocked("ready", error_summary="")
                 return
             if self._state == "error":
                 raise EngineInitError(self._error_summary)
@@ -340,7 +391,9 @@ class RuntimeEngineLifecycle:
             try:
                 from lib import tts_engine
 
-                tts_engine.init_engine()
+                self._init_adapter(tts_engine, desired)
+                self._engine_profile = dict(tts_engine.get_engine_profile() or desired)
+                self._engine_profile.update(public_profile(self._engine_profile))
             except Exception as exc:  # pylint: disable=broad-except
                 summary = sanitize_public_error(exc)
                 self._error_summary = summary
@@ -366,7 +419,17 @@ class RuntimeEngineLifecycle:
                 self._owner_id,
             )
 
-    def recycle(self) -> int:
+    @staticmethod
+    def _init_adapter(tts_engine, profile: dict[str, Any]) -> None:
+        """Call the profile-aware adapter while retaining old test stubs."""
+        try:
+            tts_engine.init_engine(profile=profile)
+        except TypeError as exc:
+            if "unexpected keyword" not in str(exc) and "positional argument" not in str(exc):
+                raise
+            tts_engine.init_engine()
+
+    def recycle(self, profile: dict[str, Any] | None = None) -> int:
         """Detach the real engine, reload it, and advance the generation.
 
         Calls ``lib.tts_engine.reset_engine()`` (actual ``_tts`` detach under
@@ -385,7 +448,12 @@ class RuntimeEngineLifecycle:
                 from lib import tts_engine
 
                 tts_engine.reset_engine()
-                tts_engine.init_engine()
+                from lib.tts_profile import public_profile, resolve_profile
+
+                desired = resolve_profile(profile or self._engine_profile or {})
+                self._init_adapter(tts_engine, desired)
+                self._engine_profile = dict(tts_engine.get_engine_profile() or desired)
+                self._engine_profile.update(public_profile(self._engine_profile))
             except Exception as exc:  # pylint: disable=broad-except
                 summary = sanitize_public_error(exc)
                 self._error_summary = summary
@@ -428,6 +496,7 @@ class RuntimeEngineLifecycle:
             self._runtime_state = "unknown"
             self._runtime_updated_at = _now()
             self._error_summary = ""
+            self._engine_profile = {}
             self._publish_unlocked("unknown", error_summary="")
 
     def _publish_unlocked(self, state: str, *, error_summary: str) -> None:
@@ -446,6 +515,13 @@ class RuntimeEngineLifecycle:
                 "recovery_count": self._recovery_count,
                 "last_error_code": self._last_error_code,
                 "last_recovery_at": self._last_recovery_at,
+                "engine_backend": self._engine_profile.get("engine_backend", ""),
+                "engine_version": self._engine_profile.get("engine_version", ""),
+                "engine_identity": self._engine_profile.get("engine_identity", ""),
+                "model_identity": self._engine_profile.get("model_identity", ""),
+                "precision": self._engine_profile.get("precision", ""),
+                "device": self._engine_profile.get("device", ""),
+                "cache_identity": self._engine_profile.get("cache_identity", ""),
             })
         except Exception:  # pylint: disable=broad-except
             # A status snapshot is best-effort; engine work must not depend

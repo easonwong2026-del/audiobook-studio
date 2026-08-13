@@ -59,6 +59,31 @@ def synthesize(
     if engine is None:
         from . import tts_engine as engine
 
+    # Director fields remain Canonical Contract input.  The adapter reports
+    # any IndexTTS capability gap explicitly instead of silently dropping it.
+    adapter_report = {
+        "contract": "Structured Script JSON",
+        "mapped": [], "approximated": [], "unsupported": [], "ignored": [],
+    }
+    if _value(segment, "pause_before", 0) or _value(segment, "pause_after", 0) or _value(segment, "pauses", []):
+        adapter_report["mapped"].append("pause_before/pause_after/pauses")
+    delivery = _value(segment, "delivery", {})
+    delivery = delivery if isinstance(delivery, dict) else {}
+    pitch = _value(segment, "pitch", delivery.get("pitch", 0.0))
+    breath = _value(segment, "breath", delivery.get("breath", "none"))
+    if pitch not in (None, "", 0, 0.0):
+        adapter_report["unsupported"].append({"field": "pitch", "reason": "IndexTTS adapter has no pitch control"})
+    if breath not in (None, "", "none"):
+        adapter_report["unsupported"].append({"field": "breath", "reason": "IndexTTS adapter has no breath control"})
+    record_report = getattr(engine, "record_adapter_report", None)
+    if record_report is None:
+        try:
+            from . import tts_engine as adapter_module
+
+            record_report = adapter_module.record_adapter_report
+        except (ImportError, AttributeError):
+            record_report = None
+
     parts = text_parts(segment)
     pause_before = max(0, min(3000, int(_value(segment, "pause_before", 0) or 0)))
     pause_after = max(0, min(3000, int(_value(segment, "pause_after", 0) or 0)))
@@ -89,7 +114,10 @@ def synthesize(
         if trace is not None:
             started = time.perf_counter()
         try:
-            return engine.synthesize_segment(**engine_kwargs)
+            result = engine.synthesize_segment(**engine_kwargs)
+            if callable(record_report):
+                record_report(adapter_report, trace)
+            return result
         finally:
             if trace is not None and started is not None:
                 try:
@@ -133,6 +161,8 @@ def synthesize(
                 })
             engine.synthesize_segment(**engine_kwargs)
             wav_parts.append((str(part_path), internal_pause))
+        if callable(record_report):
+            record_report(adapter_report, trace)
         compose_started = None
         if trace is not None:
             compose_started = time.perf_counter()

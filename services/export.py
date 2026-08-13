@@ -23,6 +23,7 @@ from lib.procutil import run_no_window
 from repositories.task_repo import TaskRecord, TaskRepository
 from services.delivery import compute_delivery_input_snapshot
 from services.quality import QualityService
+from lib.tts_profile import public_profile, resolve_profile
 
 logger = logging.getLogger(__name__)
 
@@ -251,6 +252,7 @@ class ExportService:
         qa_policy: str = "require_passed",
         subtitle_formats: tuple[str, ...] | list[str] = (),
         exclude_task_id: str = "",
+        engine_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Return a machine-readable readiness plan without exporting files."""
         project = str(project_name or "").strip()
@@ -273,6 +275,15 @@ class ExportService:
         segments = cls._segments(script)
         project_status = dict(getattr(meta, "segments_status", {}) or {})
         revisions: list[dict[str, Any]] = []
+        requested_engine = (
+            public_profile(resolve_profile(engine_snapshot))
+            if isinstance(engine_snapshot, dict) and engine_snapshot
+            else None
+        )
+        requested_cache_identity = (
+            str(requested_engine.get("cache_identity") or "")
+            if requested_engine else ""
+        )
         quality_report = QualityService.get_quality_report(project)
         quality_by_segment = {
             str(item.get("segment_id") or ""): item
@@ -303,6 +314,27 @@ class ExportService:
                 })
                 continue
             revision_id = str(revision.get("revision_id") or "")
+            revision_engine = {}
+            raw_params = revision.get("params")
+            if isinstance(raw_params, dict):
+                raw_engine = raw_params.get("engine_snapshot")
+                if isinstance(raw_engine, dict):
+                    revision_engine = public_profile(resolve_profile(raw_engine))
+            revision_cache_identity = str(revision_engine.get("cache_identity") or "")
+            if requested_cache_identity and revision_cache_identity and revision_cache_identity != requested_cache_identity:
+                blockers.append({
+                    "code": "ENGINE_PROVENANCE_MISMATCH",
+                    "message": f"段落 active revision 引擎与导出任务冻结引擎不一致: {segment_id}",
+                    "segment_id": segment_id,
+                    "expected_engine": requested_engine,
+                    "actual_engine": revision_engine,
+                })
+            elif requested_cache_identity and not revision_cache_identity:
+                warnings.append({
+                    "code": "ENGINE_PROVENANCE_UNKNOWN",
+                    "message": f"段落 active revision 没有历史 engine provenance: {segment_id}",
+                    "segment_id": segment_id,
+                })
             technical_outcome = str(
                 quality.get("technical_outcome") or "unreviewed"
             )
@@ -349,6 +381,7 @@ class ExportService:
                 "relative_path": relative_path,
                 "cache_identity": str(revision.get("cache_identity") or ""),
                 "sha256": str((revision.get("metadata") or {}).get("sha256") or ""),
+                "engine_snapshot": revision_engine,
             })
         failed_ids = [
             segment_id
@@ -439,6 +472,14 @@ class ExportService:
             "revision_snapshot_hash": cls._snapshot_hash(revision_snapshot),
             "delivery_input_snapshot": delivery_snapshot,
             "delivery_input_hash": delivery_input_hash,
+            "engine_snapshot": requested_engine or (
+                delivery_snapshot.get("engine_provenance", {}).get("engine_snapshot", {})
+                if isinstance(delivery_snapshot, dict) else {}
+            ),
+            "engine_provenance": (
+                delivery_snapshot.get("engine_provenance", {})
+                if isinstance(delivery_snapshot, dict) else {}
+            ),
             "blockers": blockers,
             "warnings": warnings,
         }
@@ -615,7 +656,10 @@ class ExportService:
         plan: dict[str, Any],
         *,
         bitrate: str,
+        engine_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        snapshot = engine_snapshot or plan.get("engine_snapshot") or {}
+        frozen = resolve_profile(snapshot) if snapshot else {}
         return {
             "format": str(plan["format"]),
             "bitrate": str(bitrate or "192k"),
@@ -627,6 +671,7 @@ class ExportService:
             "delivery_input_snapshot": dict(
                 plan.get("delivery_input_snapshot") or {}
             ),
+            "engine_snapshot": frozen,
         }
 
     @classmethod
@@ -664,6 +709,12 @@ class ExportService:
                 "delivery_input_snapshot": dict(
                     options.get("delivery_input_snapshot") or {}
                 ),
+                "engine_provenance": (
+                    dict((options.get("delivery_input_snapshot") or {}).get("engine_provenance") or {})
+                    if isinstance(options.get("delivery_input_snapshot"), dict) else {}
+                ),
+                "engine_snapshot": public_profile(options.get("engine_snapshot"))
+                if isinstance(options.get("engine_snapshot"), dict) and options.get("engine_snapshot") else {},
                 "idempotency_key": record.idempotency_key,
                 "outputs": [],
                 "error": None,
@@ -708,6 +759,8 @@ class ExportService:
             qa_policy=str(options.get("qa_policy") or "require_passed"),
             subtitle_formats=list(options.get("subtitle_formats") or []),
             exclude_task_id=record.task_id,
+            engine_snapshot=options.get("engine_snapshot")
+            if isinstance(options.get("engine_snapshot"), dict) else None,
         )
         expected_hash = str(options.get("delivery_input_hash") or "")
         expected_revision_hash = str(options.get("revision_snapshot_hash") or "")
@@ -836,6 +889,12 @@ class ExportService:
                     "revision_snapshot": options.get("revision_snapshot", []),
                     "delivery_input_hash": options.get("delivery_input_hash", ""),
                     "delivery_input_snapshot": options.get("delivery_input_snapshot", {}),
+                    "engine_provenance": (
+                        dict((options.get("delivery_input_snapshot") or {}).get("engine_provenance") or {})
+                        if isinstance(options.get("delivery_input_snapshot"), dict) else {}
+                    ),
+                    "engine_snapshot": public_profile(options.get("engine_snapshot"))
+                    if isinstance(options.get("engine_snapshot"), dict) and options.get("engine_snapshot") else {},
                     "metadata": final["summary"]["metadata"],
                 },
             )
@@ -920,8 +979,14 @@ class ExportService:
                 qa_policy=qa_policy,
                 subtitle_formats=subtitle_formats,
                 exclude_task_id=existing.task_id,
+                engine_snapshot=(
+                    existing.options.get("engine_snapshot")
+                    if isinstance(existing.options, dict) else None
+                ),
             )
             replay_options = cls._task_options(replay_plan, bitrate=bitrate)
+            if isinstance(existing.options, dict) and isinstance(existing.options.get("engine_snapshot"), dict):
+                replay_options["engine_snapshot"] = existing.options["engine_snapshot"]
             if existing.options == replay_options:
                 return {"created": False, **cls._public_export(existing)}
             raise ExportIdempotencyConflict(existing.task_id)
@@ -933,7 +998,16 @@ class ExportService:
         )
         if not plan["ready"]:
             raise ExportPlanError(plan)
-        options = cls._task_options(plan, bitrate=bitrate)
+        # Export does not load TTS, but its provenance is the engine identity
+        # of the active revisions it will consume.  Freeze that identity into
+        # the task row and let execution revalidate it against the same plan.
+        provenance = plan.get("engine_provenance") if isinstance(plan, dict) else {}
+        frozen_engine = (
+            provenance.get("engine_snapshot")
+            if isinstance(provenance, dict) and provenance.get("status") == "uniform"
+            else None
+        )
+        options = cls._task_options(plan, bitrate=bitrate, engine_snapshot=frozen_engine)
         export_id = f"export_{uuid.uuid4().hex[:20]}"
         now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
         task = TaskRecord(
@@ -1003,6 +1077,8 @@ class ExportService:
                 "created_at": record.created_at,
                 "updated_at": record.updated_at,
                 "finished_at": record.finished_at,
+                "engine_snapshot": public_profile(options.get("engine_snapshot"))
+                if isinstance(options.get("engine_snapshot"), dict) and options.get("engine_snapshot") else {},
             }
         return {
             key: record.get(key)
@@ -1023,6 +1099,7 @@ class ExportService:
                 "created_at",
                 "updated_at",
                 "finished_at",
+                "engine_snapshot",
             )
             if key in record
         }
@@ -1045,6 +1122,8 @@ class ExportService:
                 "revision_snapshot_hash",
                 "delivery_input_hash",
                 "delivery_input_snapshot",
+                "engine_provenance",
+                "engine_snapshot",
                 "metadata",
                 "created_at",
                 "updated_at",

@@ -960,7 +960,7 @@ class ProjectRepository:
         return "🟢进行中"
 
     @staticmethod
-    def get_remaining(name: str) -> list[str]:
+    def get_remaining(name: str, engine_identity: str | None = None) -> list[str]:
         """返回所有待合成的段 ID（pending + failed + done 但 wav 不存在）。
 
         Args:
@@ -980,7 +980,9 @@ class ProjectRepository:
             elif status == "done":
                 # 标记 done 但对应 wav 实际不存在 → 重置为 pending
                 from lib import segment_cache
-                if not segment_cache.has_segment_wav(seg_dir, seg_id):
+                if not segment_cache.has_segment_wav(
+                    seg_dir, seg_id, engine_identity=engine_identity
+                ):
                     meta.segments_status[seg_id] = "pending"
                     meta.completed_count -= 1
                     meta.pending_count += 1

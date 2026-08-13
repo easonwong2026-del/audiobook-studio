@@ -6,6 +6,7 @@ import os
 import logging
 import threading
 import time
+from collections.abc import Mapping
 from . import config as _cfg
 from . import audio_format as af
 from .segment_cache import SpeakerEmbeddingLRU
@@ -15,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 # 懒加载：首次调用才初始化模型
 _tts = None
+_ENGINE_PROFILE: dict = {}
+_LAST_ADAPTER_REPORT: dict = {}
 _CAPABILITY_ENGINE_ID: int | None = None
 _CAPABILITY_ENGINE_REF = None
 _INFER_PARAM_NAMES: frozenset[str] = frozenset()
@@ -108,46 +111,449 @@ def _engine_capabilities() -> tuple[frozenset[str], bool]:
     return _INFER_PARAM_NAMES, _INFER_HAS_VAR_KEYWORD
 
 
-def init_engine(model_dir: str = None, use_fp16: bool = True, use_cuda_kernel: bool = True, use_deepspeed: bool = False, use_accel: bool = False):
-    global _tts
-    with _ENGINE_LOCK:
-        if _tts is not None:
-            return
-        __import__("torch")
+def _resolved_profile(profile=None, model_dir=None) -> dict:
+    from .tts_profile import resolve_profile
+
+    # Keep the legacy resolver reference explicit for older launchers and
+    # static configuration guards: `_cfg.get_model_dir()` remains the v2
+    # compatibility source inside the profile resolver.
+    overrides = dict(profile) if isinstance(profile, Mapping) else {}
+    if model_dir is not None:
+        overrides["model_dir"] = model_dir
+        # The legacy positional model_dir API has always meant IndexTTS2.
+        if not profile:
+            overrides.setdefault("engine_version", "2")
+    return resolve_profile(overrides)
+
+
+class IndexTTS2Backend:
+    """Native IndexTTS 2 adapter.
+
+    This concrete adapter keeps the legacy constructor and optional argument
+    compatibility in one place.  The application still calls the stable
+    ``synthesize_segment`` entry point; it never needs to know these details.
+    """
+
+    version = "2"
+
+    @staticmethod
+    def load_class():
         from indextts.infer_v2 import IndexTTS2
 
-        if model_dir is None:
-            model_dir = _cfg.get_model_dir()
+        return IndexTTS2
+
+    @staticmethod
+    def constructor_kwargs(
+        *,
+        cfg_path: str,
+        model_dir: str,
+        precision: str,
+        use_cuda_kernel: bool,
+        use_deepspeed: bool,
+        use_accel: bool,
+    ) -> dict[str, object]:
+        return {
+            "cfg_path": cfg_path,
+            "model_dir": model_dir,
+            "use_fp16": precision == "FP16",
+            "use_cuda_kernel": use_cuda_kernel,
+            "use_deepspeed": use_deepspeed,
+            "use_accel": use_accel,
+        }
+
+    @staticmethod
+    def emotion_control(emotion: str | None) -> tuple[bool, str | None, dict[str, list]]:
+        # Preserve the established v2 behavior: non-neutral canonical labels
+        # are passed to its text-emotion path unchanged.
+        use_emo = bool(emotion and emotion != "neutral")
+        return use_emo, emotion if use_emo else None, {
+            "mapped": ["emotion", "emo_alpha"],
+            "approximated": [],
+            "unsupported": [],
+        }
+
+    @staticmethod
+    def prepare(
+        *,
+        text: str,
+        pinyin_hints: object,
+        speech_rate: float,
+        param_names: frozenset[str],
+    ) -> tuple[str, dict[str, object], dict[str, list]]:
+        kwargs: dict[str, object] = {}
+        report: dict[str, list] = {"mapped": ["text"], "approximated": [], "unsupported": [], "ignored": []}
+        if speech_rate != 1.0:
+            if "speed" in param_names:
+                kwargs["speed"] = speech_rate
+                report["mapped"].append("speech_rate")
+            else:
+                report["unsupported"].append({"field": "speech_rate", "reason": "IndexTTS2 infer has no speed parameter"})
+        else:
+            report["mapped"].append("speech_rate")
+        if pinyin_hints:
+            if "pinyin_hints" in param_names:
+                kwargs["pinyin_hints"] = pinyin_hints
+                report["mapped"].append("pinyin_hints")
+            else:
+                report["unsupported"].append({"field": "pinyin_hints", "reason": "IndexTTS2 infer has no pinyin_hints parameter"})
+        else:
+            report["ignored"].append({"field": "pinyin_hints", "reason": "no_pinyin_hints"})
+        return text, kwargs, report
+
+
+class IndexTTS25Backend:
+    """Native IndexTTS 2.5 adapter with the conservative first baseline."""
+
+    version = "2.5"
+
+    @staticmethod
+    def load_class():
+        from indextts.infer_v2_5 import IndexTTS2
+
+        return IndexTTS2
+
+    @staticmethod
+    def constructor_kwargs(
+        *,
+        cfg_path: str,
+        model_dir: str,
+        precision: str,
+    ) -> dict[str, object]:
+        return {
+            "cfg_path": cfg_path,
+            "model_dir": model_dir,
+            "use_bf16": precision == "BF16",
+            "use_cuda_kernel": False,
+            "use_deepspeed": False,
+            "use_accel": False,
+            "use_torch_compile": False,
+            "use_qwen_emo": True,
+        }
+
+    @staticmethod
+    def emotion_control(emotion: str | None) -> tuple[bool, str | None, dict[str, list]]:
+        # QwenEmotion's stable labels are the four direct labels below.  The
+        # remaining Canonical labels use an explicit approximation or remain
+        # unsupported; they are never silently presented as exact mappings.
+        canonical = str(emotion or "neutral").strip().lower()
+        if canonical == "neutral":
+            return False, None, {"mapped": ["emotion", "emo_alpha"], "approximated": [], "unsupported": []}
+        direct = {"happy": "happy", "angry": "angry", "sad": "sad", "fearful": "afraid"}
+        approximate = {"excited": "happy", "tense": "afraid", "hesitant": "afraid", "cold": "calm", "confident": "calm"}
+        if canonical in direct:
+            return True, direct[canonical], {"mapped": ["emotion", "emo_alpha"], "approximated": [], "unsupported": []}
+        if canonical in approximate:
+            return True, approximate[canonical], {
+                "mapped": ["emo_alpha"],
+                "approximated": [{"field": "emotion", "target": "qwen_emotion", "value": approximate[canonical]}],
+                "unsupported": [],
+            }
+        return False, None, {
+            "mapped": ["emo_alpha"],
+            "approximated": [],
+            "unsupported": [{
+                "field": "emotion",
+                "reason": "IndexTTS 2.5 QwenEmotion has no stable mapping for this canonical value",
+                "value": canonical,
+            }],
+        }
+
+    @staticmethod
+    def prepare(
+        *,
+        text: str,
+        pinyin_hints: object,
+        speech_rate: float,
+        param_names: frozenset[str],
+    ) -> tuple[str, dict[str, object], dict[str, list]]:
+        del param_names  # official v2.5 exposes these stable infer parameters
+        infer_text, pinyin_report = _pinyin_annotations(text, pinyin_hints)
+        duration_factor = duration_factor_for_speech_rate(speech_rate)
+        report: dict[str, list] = {
+            "mapped": ["text", "lang", "duration_factor"],
+            "approximated": [{"field": "speech_rate", "target": "duration_factor", "value": duration_factor}],
+            "unsupported": [],
+            "ignored": [],
+        }
+        if pinyin_report.get("status") == "mapped":
+            report["mapped"].append("pinyin_hints")
+        else:
+            report["ignored"].append({"field": "pinyin_hints", "reason": pinyin_report.get("reason")})
+        return infer_text, {
+            "lang": _normalize_language(_canonical_language_from_text(text)),
+            "duration_factor": duration_factor,
+        }, report
+
+
+def _backend_for(version: str):
+    return IndexTTS25Backend() if str(version) == "2.5" else IndexTTS2Backend()
+
+
+def get_engine_profile() -> dict:
+    """Return the profile actually attached to this process, path included."""
+    with _ENGINE_LOCK:
+        return dict(_ENGINE_PROFILE)
+
+
+def get_public_engine_profile() -> dict:
+    """Return path-free identity fields for Web/MCP status responses."""
+    from .tts_profile import public_profile
+
+    with _ENGINE_LOCK:
+        return public_profile(_ENGINE_PROFILE) if _ENGINE_PROFILE else {}
+
+
+def last_adapter_report() -> dict:
+    with _ENGINE_LOCK:
+        return dict(_LAST_ADAPTER_REPORT)
+
+
+def init_engine(
+    model_dir: str = None,
+    use_fp16: bool = True,
+    use_cuda_kernel: bool = True,
+    use_deepspeed: bool = False,
+    use_accel: bool = False,
+    *,
+    profile: Mapping[str, object] | None = None,
+):
+    global _tts, _ENGINE_PROFILE
+    with _ENGINE_LOCK:
+        resolved = _resolved_profile(profile, model_dir)
+        # Preserve the historical positional API for callers that do not yet
+        # pass a frozen profile.  Task/runtime profiles remain authoritative;
+        # the legacy switch only affects the v2 default precision.
+        if profile is None and resolved.get("engine_version") == "2" and not use_fp16:
+            resolved["precision"] = "FP32"
+            from .tts_profile import cache_identity
+
+            resolved["cache_identity"] = cache_identity(resolved)
+        if _tts is not None:
+            if profile and not _profile_matches(_ENGINE_PROFILE, resolved):
+                raise RuntimeError(
+                    "TTS runtime 已加载另一 engine identity；必须先 recycle 后再切换"
+                )
+            return
+        __import__("torch")
+        version = str(resolved["engine_version"])
+        model_dir = str(resolved["model_dir"])
+        backend = _backend_for(version)
+        IndexTTS2 = backend.load_class()
 
         cfg_path = os.path.join(model_dir, "config.yaml")
         if not os.path.isdir(model_dir) or not os.path.isfile(cfg_path):
             raise FileNotFoundError(
-                "IndexTTS2 模型目录未找到或缺少 config.yaml："
+                f"IndexTTS {version} 模型目录未找到或缺少 config.yaml："
                 f"{model_dir}\n"
-                "请通过环境变量 AUDIOBOOK_STUDIO_MODEL_DIR、config.json 的 model_dir "
-                "字段，或在 UI 中首次配置模型路径后重试。"
+                "请在设置页为该版本配置本地模型目录后重试。"
             )
-        logger.info("Loading IndexTTS2 model (FP16)...")
-        # 速度相关参数实测结论（v2.7 本机 RTX 5070Ti Laptop / Blackwell）：
-        # - CUDA 定制 kernel（use_cuda_kernel）：本机无效——该 GPU 不支持该 kernel，
-        #   IndexTTS2 会静默回退或报 kernel/算子错误，实际 RTF 并无改善；保持默认开启仅为
-        #   兼容其它机器，若出现 CUDA / kernel 编译 / 找不到算子等报错，须回退为 False。
-        # - DeepSpeed（use_deepspeed）：本机 `pip show deepspeed` 显示未安装，传 True 也会被
-        #   静默忽略、无加速效果，故默认关；启用前需先 `pip install deepspeed` 并确认 GPU/CUDA 兼容。
-        # - flash_attn（use_accel）：Windows 无可用 wheel，开启会 ImportError，默认 False 不启用。
-        # - 真实可落地的加速杠杆：fp16（下方透传） + beam 设小（1~2，见 synthesize_segment）。
-        #   本机单段 RTF≈2 是受 GPU 算力与模型规模决定的物理上限，非参数可调。
-        _tts = IndexTTS2(
-            cfg_path=cfg_path,
-            model_dir=model_dir,
-            use_fp16=use_fp16,
-            use_deepspeed=use_deepspeed,
-            # use_accel 开启需本机已装 flash_attn，否则会 ImportError；默认 False 不启用
-            use_accel=use_accel,
-            use_cuda_kernel=use_cuda_kernel,
-        )
+        # infer_v2_5 may auto-download its auxiliary bundle from the network
+        # when files are missing.  Runtime must never turn a local task into a
+        # hidden download, so reject an obviously incomplete local bundle
+        # before constructing the official class.  Test/fake adapters may use
+        # a config-only fixture and are intentionally exempt from this check.
+        if version == "2.5" and not _looks_like_local_v25_bundle(model_dir):
+            module_name = getattr(IndexTTS2, "__module__", "")
+            if str(module_name).startswith("indextts"):
+                raise FileNotFoundError(
+                    "IndexTTS 2.5 本地模型不完整，已阻止自动下载；请先准备完整 checkpoint 目录"
+                )
+        precision = str(resolved["precision"])
+        logger.info("Loading IndexTTS %s model (%s)...", version, precision)
+        # Keep the legacy constructor defaults intact for rollback.  The v2.5
+        # adapter below owns its separate conservative baseline and never
+        # inherits these optional acceleration flags.
+        if version == "2.5":
+            common = backend.constructor_kwargs(
+                cfg_path=cfg_path,
+                model_dir=model_dir,
+                precision=precision,
+            )
+        else:
+            common = backend.constructor_kwargs(
+                cfg_path=cfg_path,
+                model_dir=model_dir,
+                precision=precision,
+                use_cuda_kernel=use_cuda_kernel,
+                use_deepspeed=use_deepspeed,
+                use_accel=use_accel,
+            )
+        _tts = IndexTTS2(**common)
+        _ENGINE_PROFILE = dict(resolved)
+        actual_device = getattr(_tts, "device", None)
+        if actual_device is not None:
+            _ENGINE_PROFILE["device"] = str(actual_device)
         _engine_capabilities()
         logger.info("Model loaded.")
+
+
+def _profile_matches(left: Mapping[str, object], right: Mapping[str, object]) -> bool:
+    return all(
+        str(left.get(key) or "") == str(right.get(key) or "")
+        for key in ("engine_identity", "model_identity", "precision")
+    )
+
+
+def _looks_like_local_v25_bundle(model_dir: str) -> bool:
+    names = set()
+    try:
+        names = {item.name for item in os.scandir(model_dir) if item.is_file()}
+    except OSError:
+        return False
+    roles = (
+        {"gpt.pth", "gpt.pt", "gpt.safetensors"},
+        {"s2mel.pth", "s2mel.pt", "s2mel.safetensors"},
+        {"dvae.pth", "dvae.pt", "dvae.safetensors"},
+        {"bpe.model", "tokenizer.model"},
+    )
+    # Official mirrors sometimes put a role in a subdirectory.  The presence
+    # of the config plus at least two checkpoint roles is enough to distinguish
+    # a prepared local bundle from a config-only directory without hardcoding a
+    # particular mirror's exact filenames.
+    role_count = sum(bool(names & role) for role in roles)
+    if role_count >= 2:
+        return True
+    try:
+        children = {item.name for item in os.scandir(model_dir) if item.is_dir()}
+    except OSError:
+        children = set()
+    return role_count >= 1 and bool(children & {"gpt2", "qwen", "campplus", "wav2vec2bert"})
+
+
+def _normalize_language(value) -> str:
+    raw = str(value or "ZH").strip().lower().replace("_", "-")
+    aliases = {
+        "zh": "ZH", "zh-cn": "ZH", "zh-tw": "ZH", "chinese": "ZH",
+        "en": "EN", "en-us": "EN", "en-gb": "EN", "english": "EN",
+        "ja": "JA", "ja-jp": "JA", "japanese": "JA",
+        "es": "ES", "es-es": "ES", "spanish": "ES",
+        "ar": "AR", "ar-sa": "AR", "arabic": "AR",
+    }
+    return aliases.get(raw, "ZH")
+
+
+def _canonical_language_from_text(text: str) -> str:
+    """Infer only the v2.5 adapter language; Canonical JSON stays untouched."""
+    if any("\u3040" <= char <= "\u30ff" for char in str(text or "")):
+        return "JA"
+    # Chinese is Audiobook Studio's default language.  Keep it for mixed
+    # Chinese/Latin text instead of switching the entire v2.5 call to EN.
+    if any("\u4e00" <= char <= "\u9fff" for char in str(text or "")):
+        return "ZH"
+    if any("\u0600" <= char <= "\u06ff" for char in str(text or "")):
+        return "AR"
+    if any("\u00c0" <= char <= "\u024f" for char in str(text or "") or ""):
+        return "ES"
+    if any("A" <= char <= "Z" or "a" <= char <= "z" for char in str(text or "")):
+        return "EN"
+    return "ZH"
+
+
+def _pinyin_annotations(text: str, hints) -> tuple[str, dict]:
+    """Render Canonical pinyin hints into v2.5's adapter syntax.
+
+    The canonical hint object is left untouched.  This adapter accepts both a
+    simple ``{"行": "xing2"}`` map and ordered entries with ``start`` offsets,
+    which is enough to preserve polyphonic occurrences without changing the
+    Structured Script JSON contract.
+    """
+    if not hints:
+        return text, {"status": "ignored", "reason": "no_pinyin_hints"}
+    annotations: list[tuple[int, int, str, str]] = []
+    if isinstance(hints, Mapping):
+        for token, pronunciation in hints.items():
+            if isinstance(pronunciation, Mapping):
+                pronunciation = pronunciation.get("pinyin") or pronunciation.get("pronunciation")
+            if isinstance(pronunciation, (list, tuple)):
+                pronunciation = pronunciation[0] if pronunciation else ""
+            token = str(token)
+            pronunciation = str(pronunciation or "").strip()
+            if not token or not pronunciation:
+                continue
+            start = 0
+            while True:
+                index = text.find(token, start)
+                if index < 0:
+                    break
+                annotations.append((index, index + len(token), token, pronunciation.upper()))
+                start = index + len(token)
+    elif isinstance(hints, list):
+        for item in hints:
+            if not isinstance(item, Mapping):
+                continue
+            token = str(item.get("text") or item.get("word") or "")
+            pronunciation = str(item.get("pinyin") or item.get("pronunciation") or "").strip()
+            if not token or not pronunciation:
+                continue
+            try:
+                start = int(item.get("start", item.get("position")))
+            except (TypeError, ValueError):
+                start = text.find(token)
+            if start >= 0 and text[start:start + len(token)] == token:
+                annotations.append((start, start + len(token), token, pronunciation.upper()))
+    if not annotations:
+        return text, {"status": "ignored", "reason": "pinyin_hints_unmatched"}
+    annotations.sort(key=lambda item: (item[0], -(item[1] - item[0])))
+    selected: list[tuple[int, int, str, str]] = []
+    cursor = -1
+    for item in annotations:
+        if item[0] >= cursor:
+            selected.append(item)
+            cursor = item[1]
+    rendered: list[str] = []
+    cursor = 0
+    for start, end, token, pronunciation in selected:
+        rendered.append(text[cursor:start])
+        rendered.append(f"<{token}|{pronunciation}>")
+        cursor = end
+    rendered.append(text[cursor:])
+    return "".join(rendered), {
+        "status": "mapped", "count": len(selected), "syntax": "<text|pronunciation>",
+    }
+
+
+def duration_factor_for_speech_rate(speech_rate: float) -> float:
+    """Adapt Canonical speed multiplier to v2.5's duration multiplier."""
+    try:
+        value = float(speech_rate or 1.0)
+    except (TypeError, ValueError):
+        value = 1.0
+    value = max(value, 0.01)
+    return min(max(1.0 / value, 0.5), 2.0)
+
+
+def _record_adapter_report(report: dict, trace=None) -> None:
+    global _LAST_ADAPTER_REPORT
+    _LAST_ADAPTER_REPORT = dict(report)
+    unsupported = report.get("unsupported") or []
+    if unsupported:
+        logger.warning("TTS adapter unsupported fields: %s", unsupported)
+    if trace is not None:
+        try:
+            trace.record_event("adapter_mapping", data=dict(report))
+        except Exception:  # noqa: BLE001
+            logger.debug("记录 adapter mapping 失败", exc_info=True)
+
+
+def record_adapter_report(report: dict, trace=None) -> None:
+    """Record adapter handling for Canonical Contract fields."""
+    addition = dict(report or {})
+    # Directed synthesis reports fields (for example pitch/breath) after the
+    # actual infer call.  Merge that report with the adapter's report for the
+    # same call so an adapter capability gap cannot overwrite the engine
+    # mapping report, and deduplicate repeated list entries.
+    merged = dict(_LAST_ADAPTER_REPORT)
+    for key in ("mapped", "approximated", "unsupported", "ignored"):
+        values = list(merged.get(key) or [])
+        for value in addition.get(key) or []:
+            if value not in values:
+                values.append(value)
+        if values:
+            merged[key] = values
+    for key, value in addition.items():
+        if key not in {"mapped", "approximated", "unsupported", "ignored"}:
+            merged.setdefault(key, value)
+    _record_adapter_report(merged, trace)
 
 
 def synthesize_segment(
@@ -186,15 +592,33 @@ def synthesize_segment(
             raise RuntimeError("TTS engine not initialized. Call init_engine() first.")
 
         MAX_RETRIES = 3
-
-        # 情感参数：只有非 neutral 时才启用文本情感控制
-        use_emo = emotion and emotion != "neutral"
-        emo_text = emotion if use_emo else None
-
-        # Capability discovery is cached per engine instance.  Tests and
-        # integrations may still replace ``_tts`` directly; the identity check
-        # refreshes the cache once for that replacement.
+        active_profile = dict(_ENGINE_PROFILE)
+        version = str(active_profile.get("engine_version") or "2")
+        backend = _backend_for(version)
+        # Capability discovery is cached per engine instance.  The concrete
+        # adapter uses it only for v2's optional legacy arguments; v2.5's
+        # official lang/duration API is explicit and stable.
         param_names, has_var_keyword = _engine_capabilities()
+        infer_text, adapter_kwargs, field_report = backend.prepare(
+            text=text,
+            pinyin_hints=pinyin_hints,
+            speech_rate=speech_rate,
+            param_names=param_names,
+        )
+        use_emo, emo_text, emotion_report = backend.emotion_control(emotion)
+        adapter_report = {
+            "contract": "Structured Script JSON",
+            "engine_identity": active_profile.get("engine_identity") or "indextts:2",
+            "engine_version": version,
+            "mapped": list(field_report.get("mapped") or []),
+            "approximated": list(field_report.get("approximated") or []),
+            "unsupported": list(field_report.get("unsupported") or []),
+            "ignored": list(field_report.get("ignored") or []),
+        }
+        for key in ("mapped", "approximated", "unsupported", "ignored"):
+            adapter_report[key].extend(emotion_report.get(key) or [])
+        adapter_report["mapped"].extend(["max_tokens", "num_beams"])
+        _record_adapter_report(adapter_report, trace)
         # Only engines that explicitly accept an embedding can benefit from
         # extraction.  Current IndexTTS2 does not, so avoid a guaranteed
         # exception and fallback on every segment.
@@ -216,7 +640,7 @@ def synthesize_segment(
                 # 避免参数名不符时在运行时抛 TypeError。
                 infer_kwargs = dict(
                     spk_audio_prompt=speaker_audio,
-                    text=text,
+                    text=infer_text,
                     output_path=output_path,
                     use_emo_text=use_emo,
                     emo_text=emo_text,
@@ -228,19 +652,10 @@ def synthesize_segment(
                 # 透传给下游 gpt 导致崩溃，且实测该引擎并未暴露 spk_embedding 参数；故以显式形参名为准。
                 if spk_emb is not None and "spk_embedding" in param_names:
                     infer_kwargs["spk_embedding"] = spk_emb
-                if "speed" in param_names:
-                    infer_kwargs["speed"] = speech_rate
-                else:
-                    logger.debug(
-                        "IndexTTS2.infer 不支持 speed 参数，未透传 speech_rate=%s", speech_rate
-                    )
-                if pinyin_hints:
-                    if "pinyin_hints" in param_names:
-                        infer_kwargs["pinyin_hints"] = pinyin_hints
-                    else:
-                        logger.debug(
-                            "IndexTTS2.infer 不支持 pinyin_hints 参数，未透传多音字提示"
-                        )
+                # The backend owns all version-specific arguments.  In
+                # particular, Canonical pinyin_hints never leaks into v2.5's
+                # generation kwargs: it is rendered into infer_text first.
+                infer_kwargs.update(adapter_kwargs)
 
                 # num_beams 控制 GPT beam search（默认 2=质量/速度折中；3=质量优先但慢；1=最快但需听测质量）
                 # 条件透传：当引擎 infer 签名显式支持 num_beams 或接受 **kwargs（如 **generation_kwargs）时传入；
@@ -473,10 +888,13 @@ def reset_engine() -> None:
     the runtime lifecycle (process-level recycle happens via runtime restart
     and ownership takeover).
     """
-    global _tts, _CAPABILITY_ENGINE_ID, _CAPABILITY_ENGINE_REF
+    global _tts, _ENGINE_PROFILE, _LAST_ADAPTER_REPORT
+    global _CAPABILITY_ENGINE_ID, _CAPABILITY_ENGINE_REF
     global _INFER_PARAM_NAMES, _INFER_HAS_VAR_KEYWORD
     with _ENGINE_LOCK:
         _tts = None
+        _ENGINE_PROFILE = {}
+        _LAST_ADAPTER_REPORT = {}
         _CAPABILITY_ENGINE_ID = None
         _CAPABILITY_ENGINE_REF = None
         _INFER_PARAM_NAMES = frozenset()

@@ -10,6 +10,7 @@ import pytest
 from scipy.io import wavfile
 
 from lib import postprocess, project_paths
+from lib.tts_profile import resolve_profile
 from repositories.project_repo import ProjectRepository
 from repositories.quality_repo import QualityRepository
 from repositories.task_repo import TaskRecord, TaskRepository
@@ -195,6 +196,36 @@ def test_formal_export_requires_qa_and_returns_only_public_paths(delivery_projec
 
     workflow = WorkflowService.get_state(delivery_project)
     assert workflow["stage"] == "delivered"
+
+
+def test_export_plan_blocks_frozen_engine_mismatch(delivery_project):
+    _finish_and_review(delivery_project)
+    active = QualityRepository.get_active_revision(delivery_project, "001-001")
+    assert active
+    params = dict(active.get("params") or {})
+    params["engine_snapshot"] = resolve_profile({
+        "engine_version": "2.5",
+        "model_dir": "/tmp/index-tts-v25",
+    })
+    QualityRepository.update_revision(
+        delivery_project,
+        active["revision_id"],
+        params=params,
+    )
+
+    plan = ExportService.plan_export(
+        delivery_project,
+        "wav",
+        engine_snapshot=resolve_profile({
+            "engine_version": "2",
+            "model_dir": "/tmp/index-tts-v2",
+        }),
+    )
+
+    assert plan["ready"] is False
+    mismatch = next(item for item in plan["blockers"] if item["code"] == "ENGINE_PROVENANCE_MISMATCH")
+    assert mismatch["expected_engine"]["engine_version"] == "2"
+    assert mismatch["actual_engine"]["engine_version"] == "2.5"
 
 
 def test_plan_export_blocks_active_production_and_repair(delivery_project):
