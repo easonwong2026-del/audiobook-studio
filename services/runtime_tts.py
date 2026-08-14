@@ -118,6 +118,65 @@ def _direct_progress_adapter(progress_cb: Any) -> Any:
     return _adapt
 
 
+def _runtime_current_profile() -> dict[str, Any] | None:
+    """GPU-free read of the singleton runtime's loaded engine profile.
+
+    Only a live runtime whose engine reached ``ready`` with a valid identity
+    counts as "current".  Returns ``None`` when the runtime is not running,
+    uninitialized, loading, recovering or error — callers then fall back to
+    the global default.  This never imports the model and never touches
+    ``lib.tts_engine``.
+    """
+    try:
+        from services.runtime_engine import read_runtime_engine_status
+
+        status = read_runtime_engine_status()
+    except Exception:  # pragma: no cover - best effort selection
+        return None
+    if not isinstance(status, dict):
+        return None
+    if str(status.get("engine_state") or "") != "ready":
+        return None
+    identity = str(status.get("engine_identity") or "")
+    if not identity:
+        return None
+    return {
+        "engine_backend": str(status.get("engine_backend") or ""),
+        "engine_version": str(status.get("engine_version") or ""),
+        "engine_identity": identity,
+        "model_identity": str(status.get("model_identity") or ""),
+        "precision": str(status.get("precision") or ""),
+        "device": str(status.get("device") or ""),
+    }
+
+
+def _select_utility_engine(
+    engine_profile: Any = None,
+) -> tuple[dict[str, Any], str]:
+    """Utility (preview/supplement) engine selection policy.
+
+    Priority: ``explicit`` engine_profile > ``runtime_current`` (the engine
+    already loaded by the singleton runtime) > ``global_default`` (settings).
+
+    Rationale (#38 regression): a supplement/preview task that freezes the
+    settings default while the runtime is warm with a *different* engine
+    forces a full ``reset_engine()`` + ``init_engine()`` reload on every
+    click.  A warm runtime must be reused unless the caller explicitly asks
+    for another engine.
+
+    Returns ``(profile, selection_source)`` where selection_source is one of
+    ``explicit`` / ``runtime_current`` / ``global_default``.  The caller then
+    freezes the chosen profile into ``engine_snapshot``; the snapshot never
+    tracks later settings changes.
+    """
+    if engine_profile:
+        return resolve_profile(engine_profile), "explicit"
+    current = _runtime_current_profile()
+    if current is not None:
+        return resolve_profile(current), "runtime_current"
+    return resolve_profile({}), "global_default"
+
+
 class RuntimeTTSBusyError(RuntimeError):
     """Raised when a project already has an active runtime task."""
 
@@ -203,7 +262,11 @@ class RuntimeTTSService:
         task_id = f"task_{uuid.uuid4().hex[:20]}"
         now = _now()
         options = dict(options or {})
-        options.setdefault("engine_snapshot", resolve_profile(options))
+        if "engine_snapshot" not in options:
+            # Uniform fallback for any caller that did not pre-freeze a
+            # snapshot: prefer the runtime's loaded engine over the settings
+            # default (same policy as synthesize_supplement / preview).
+            options["engine_snapshot"], _selection_source = _select_utility_engine(None)
         engine = options["engine_snapshot"]
         _supplement_event(
             "task_created",
@@ -277,10 +340,18 @@ class RuntimeTTSService:
     ) -> str:
         """Create a complete three-sentence voice preview in the singleton runtime."""
         project = str(project_name or "").strip()
+        snapshot, selection_source = _select_utility_engine(engine_profile)
+        _supplement_event(
+            "utility_engine_selection",
+            task_type="voice_preview",
+            selection_source=selection_source,
+            engine_version=str(snapshot.get("engine_version") or ""),
+            engine_identity=str(snapshot.get("engine_identity") or ""),
+        )
         if not project or not TaskRepository.get_database_path(project, create=True):
             # Compatibility for isolated service tests without a real project.
             return ProductionRuntime().run_voice_preview_direct(
-                str(speaker_audio), str(role or "voice"), "", engine_profile
+                str(speaker_audio), str(role or "voice"), "", snapshot
             )
         task_id = f"preview_{uuid.uuid4().hex[:20]}"
         artifact_dir = cls._artifact_dir(project, "voice_previews", task_id)
@@ -291,7 +362,7 @@ class RuntimeTTSService:
             options={
                 "speaker_audio": os.path.abspath(str(speaker_audio)),
                 "role": str(role or "voice"),
-                "engine_snapshot": resolve_profile(engine_profile or {}),
+                "engine_snapshot": snapshot,
             },
             total=3,
             timeout=timeout,
@@ -319,13 +390,21 @@ class RuntimeTTSService:
     ) -> list[dict[str, Any]]:
         """Synthesize isolated supplement lines through the singleton runtime."""
         project = str(project_name or "").strip()
+        snapshot, selection_source = _select_utility_engine(engine_profile)
+        _supplement_event(
+            "utility_engine_selection",
+            task_type="supplement",
+            selection_source=selection_source,
+            engine_version=str(snapshot.get("engine_version") or ""),
+            engine_identity=str(snapshot.get("engine_identity") or ""),
+        )
         payload = {
             "role": str(role or ""),
             "lines": [str(item) for item in lines],
             "speaker_audio": str(speaker_audio),
             "overrides": dict(overrides or {}),
             "num_beams": max(int(num_beams or 2), 1),
-            "engine_snapshot": resolve_profile(engine_profile or {}),
+            "engine_snapshot": snapshot,
         }
         engine = payload["engine_snapshot"]
         _supplement_event(
