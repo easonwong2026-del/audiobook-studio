@@ -1756,11 +1756,10 @@ def _terminate_pid(pid: int, timeout: float = 10.0) -> None:
         _wait_for_pid_exit(pid, timeout)
         return
     try:
-        _signal_module = signal
-        _signal_module.kill(pid, _signal_module.SIGTERM)
+        os.kill(pid, signal.SIGTERM)
         if _wait_for_pid_exit(pid, timeout):
             return
-        _signal_module.kill(pid, _signal_module.SIGKILL)
+        os.kill(pid, signal.SIGKILL)
         _wait_for_pid_exit(pid, timeout)
     except Exception:  # pragma: no cover - platform specific
         logger.exception("POSIX 终止 Runtime 进程失败 pid=%s", pid)
