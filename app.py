@@ -1851,12 +1851,17 @@ def do_supplement_parse_json(sup_json, ss):
 
 def do_supplement_synth(sup_role, sup_mode, sup_text, sup_json_role, sup_json_lines,
                         sup_emotion, sup_emo_alpha, sup_rate, sup_quality,
-                        sup_split_punct, sup_voice, ss):
+                        sup_split_punct, sup_voice, ss,
+                        progress: "gr.Progress" = None):
     """逐句补合成：按模式取（角色, 文本）→ 逐句 synthesize → 收集 wav + 逐句状态。
 
     输入模式（``sup_mode``）：
       - ``"paste"``：角色=``sup_role`` 下拉，文本=``sup_text`` 按行拆分（可选按标点切长段）；
       - ``"json"``：角色/文本来自解析小 JSON 的 state（``sup_json_role`` / ``sup_json_lines``）。
+
+    引擎加载/切换期间（IndexTTS 2.5 冷加载或 profile 切换可达数分钟）通过
+    ``progress`` 上报「已提交补录任务 / 正在加载引擎 / 正在生成第 X/N 句」，
+    避免点击后长时间无反馈。
 
     Returns:
         ``(sup_wavs state, 状态 markdown)``；状态 markdown 含逐句 ✅ / ❌ 句N 反馈。
@@ -1909,14 +1914,36 @@ def do_supplement_synth(sup_role, sup_mode, sup_text, sup_json_role, sup_json_li
         created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
         task_dir=task_dir,
     )
+    # 引擎加载/切换是多分钟级阻塞操作：#38 之后补录会在 Runtime 内做
+    # profile compliance（冷加载或 recycle）。把每个阶段透传为 Gradio 进度，
+    # 让用户在等待期间看到「正在加载 IndexTTS 2.5…」而不是“卡死”。
+    progress_phases: list[str] = []
+
+    def _supplement_progress(phase: str, message: str) -> None:
+        progress_phases.append(str(message or phase or ""))
+        if progress is not None:
+            try:
+                if phase in {"submitted", "runtime_start_requested", "engine_loading"}:
+                    progress(None, desc=str(message or "正在处理…"))
+                elif phase == "engine_ready":
+                    progress(0.99, desc=str(message or "引擎就绪"))
+                elif phase == "infer":
+                    progress(0.99, desc=str(message or "正在合成…"))
+            except Exception:  # pragma: no cover - progress is best effort
+                pass
+
     try:
         results = SupplementService.synthesize_lines(
             role=role, lines=lines, speaker_audio=speaker,
             overrides=overrides, num_beams=num_beams, task=task,
+            progress_cb=_supplement_progress,
         )
     except Exception as e:
         task.status = "error"
-        return [], f"❌ 补合成异常：{str(e)[:200]}"
+        hint = ""
+        if progress_phases:
+            hint = f"（阶段：{' → '.join(progress_phases[-3:])}）"
+        return [], f"❌ 补合成异常：{str(e)[:200]}{hint}"
 
     # 写 manifest.json（任务隔离产物清单，便于回放 / 调试）
     try:
@@ -1952,6 +1979,11 @@ def do_supplement_synth(sup_role, sup_mode, sup_text, sup_json_role, sup_json_li
         except Exception:  # pylint: disable=broad-except
             preview_path = None
 
+    engine_note = ""
+    for message in reversed(progress_phases):
+        if "引擎" in str(message) or "加载" in str(message):
+            engine_note = f"\n> ⏳ {message}"
+            break
     md = [f"### 🎙 补合成完成（{len(wav_paths)}/{len(results)} 成功）"]
     for r in results:
         txt = (r.get("text") or "")[:30]
@@ -1960,6 +1992,8 @@ def do_supplement_synth(sup_role, sup_mode, sup_text, sup_json_role, sup_json_li
         else:
             md.append(f"- {r['error']}")
     md.append(f"\n> 任务 ID：`{task_id}`｜产物目录：`{task_dir}`")
+    if engine_note:
+        md.append(engine_note)
     return wav_paths, "\n".join(md)
 
 

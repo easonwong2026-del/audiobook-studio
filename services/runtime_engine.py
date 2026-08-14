@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -343,7 +344,12 @@ class RuntimeEngineLifecycle:
             self._runtime_updated_at = _now()
             self._publish_unlocked(self._state, error_summary=self._error_summary)
 
-    def ensure_ready(self, profile: dict[str, Any] | None = None) -> None:
+    def ensure_ready(
+        self,
+        profile: dict[str, Any] | None = None,
+        *,
+        progress_cb: Any = None,
+    ) -> None:
         """Initialize the TTS engine exactly once per lifecycle.
 
         - ``ready``: returns immediately (engine reused, no reload).
@@ -352,22 +358,60 @@ class RuntimeEngineLifecycle:
         - otherwise: this caller performs the single initialization while
           holding the lifecycle lock; every concurrent caller blocks on the
           same lock and sees the result when it completes.
+
+        ``progress_cb(event, **fields)`` is an optional structured phase
+        reporter (no-op by default).  It is invoked at every observable
+        engine transition (``profile_match`` / ``engine_recycle_start`` /
+        ``engine_reset_done`` / ``engine_init_start`` / ``engine_init_done``)
+        with path-free identity fields so a task/UI can render "正在加载
+        IndexTTS 2.5…" instead of appearing hung during a multi-minute
+        model (re)load.
         """
         with self._condition:
             from lib.tts_profile import profile_matches, public_profile, resolve_profile
             desired = resolve_profile(profile or {})
+            target_fields = {
+                "engine_version": desired.get("engine_version", ""),
+                "engine_identity": desired.get("engine_identity", ""),
+                "precision": desired.get("precision", ""),
+            }
             if self._state == "ready":
                 if profile_matches(self._engine_profile, desired):
+                    if progress_cb is not None:
+                        progress_cb(
+                            "profile_match",
+                            engine_generation=self._generation,
+                            **target_fields,
+                        )
                     return
                 # The runtime is serial: a new task can only reach here after
                 # the previous task retired.  Recycle the actual adapter before
                 # loading the newly frozen identity.
                 self._state = "recovering"
                 self._publish_unlocked("recovering", error_summary="")
+                if progress_cb is not None:
+                    progress_cb(
+                        "engine_recycle_start",
+                        engine_generation=self._generation,
+                        **target_fields,
+                    )
+                recycle_started = time.monotonic()
                 try:
                     from lib import tts_engine
 
                     tts_engine.reset_engine()
+                    if progress_cb is not None:
+                        progress_cb(
+                            "engine_reset_done",
+                            engine_generation=self._generation,
+                            elapsed_ms=int((time.monotonic() - recycle_started) * 1000),
+                        )
+                    if progress_cb is not None:
+                        progress_cb(
+                            "engine_init_start",
+                            engine_generation=self._generation,
+                            **target_fields,
+                        )
                     self._init_adapter(tts_engine, desired)
                     self._engine_profile = dict(tts_engine.get_engine_profile() or desired)
                     self._engine_profile.update(public_profile(self._engine_profile))
@@ -377,17 +421,38 @@ class RuntimeEngineLifecycle:
                     self._state = "error"
                     self._last_error_code = "TTS_ENGINE_INIT_FAILED"
                     self._publish_unlocked("error", error_summary=summary)
+                    if progress_cb is not None:
+                        progress_cb(
+                            "engine_init_failed",
+                            engine_generation=self._generation,
+                            error_summary=summary,
+                            elapsed_ms=int((time.monotonic() - recycle_started) * 1000),
+                        )
                     raise EngineInitError(summary, original_exception=exc) from exc
                 self._generation += 1
                 self._recovery_count += 1
                 self._last_recovery_at = _now()
                 self._state = "ready"
                 self._publish_unlocked("ready", error_summary="")
+                if progress_cb is not None:
+                    progress_cb(
+                        "engine_init_done",
+                        engine_generation=self._generation,
+                        elapsed_ms=int((time.monotonic() - recycle_started) * 1000),
+                        **target_fields,
+                    )
                 return
             if self._state == "error":
                 raise EngineInitError(self._error_summary)
             self._state = "loading"
             self._publish_unlocked("loading", error_summary="")
+            if progress_cb is not None:
+                progress_cb(
+                    "engine_init_start",
+                    engine_generation=self._generation,
+                    **target_fields,
+                )
+            load_started = time.monotonic()
             try:
                 from lib import tts_engine
 
@@ -406,6 +471,13 @@ class RuntimeEngineLifecycle:
                     self._owner_id,
                     summary,
                 )
+                if progress_cb is not None:
+                    progress_cb(
+                        "engine_init_failed",
+                        engine_generation=self._generation,
+                        error_summary=summary,
+                        elapsed_ms=int((time.monotonic() - load_started) * 1000),
+                    )
                 raise EngineInitError(
                     summary,
                     original_exception=exc,
@@ -413,6 +485,13 @@ class RuntimeEngineLifecycle:
             self._generation += 1
             self._state = "ready"
             self._publish_unlocked("ready", error_summary="")
+            if progress_cb is not None:
+                progress_cb(
+                    "engine_init_done",
+                    engine_generation=self._generation,
+                    elapsed_ms=int((time.monotonic() - load_started) * 1000),
+                    **target_fields,
+                )
             logger.info(
                 "runtime_event=engine_init_success pid=%s owner=%s",
                 self._pid,
@@ -429,7 +508,12 @@ class RuntimeEngineLifecycle:
                 raise
             tts_engine.init_engine()
 
-    def recycle(self, profile: dict[str, Any] | None = None) -> int:
+    def recycle(
+        self,
+        profile: dict[str, Any] | None = None,
+        *,
+        progress_cb: Any = None,
+    ) -> int:
         """Detach the real engine, reload it, and advance the generation.
 
         Calls ``lib.tts_engine.reset_engine()`` (actual ``_tts`` detach under
@@ -438,19 +522,36 @@ class RuntimeEngineLifecycle:
         increments and the state returns to ``ready``; on failure the state
         becomes ``error`` and ``EngineInitError`` is raised so the caller
         can fail the task fast.
+
+        ``progress_cb`` mirrors ``ensure_ready``'s structured phase reporter.
         """
         with self._condition:
             if self._state not in {"ready", "uninitialized", "error"}:
                 raise EngineInitError("引擎当前状态不能执行 recycle")
             self._state = "recovering"
             self._publish_unlocked("recovering", error_summary="")
+            recycle_started = time.monotonic()
             try:
                 from lib import tts_engine
 
                 tts_engine.reset_engine()
+                if progress_cb is not None:
+                    progress_cb(
+                        "engine_reset_done",
+                        engine_generation=self._generation,
+                        elapsed_ms=int((time.monotonic() - recycle_started) * 1000),
+                    )
                 from lib.tts_profile import public_profile, resolve_profile
 
                 desired = resolve_profile(profile or self._engine_profile or {})
+                if progress_cb is not None:
+                    progress_cb(
+                        "engine_init_start",
+                        engine_generation=self._generation,
+                        engine_version=desired.get("engine_version", ""),
+                        engine_identity=desired.get("engine_identity", ""),
+                        precision=desired.get("precision", ""),
+                    )
                 self._init_adapter(tts_engine, desired)
                 self._engine_profile = dict(tts_engine.get_engine_profile() or desired)
                 self._engine_profile.update(public_profile(self._engine_profile))
@@ -469,6 +570,13 @@ class RuntimeEngineLifecycle:
                     self._recovery_count,
                     summary,
                 )
+                if progress_cb is not None:
+                    progress_cb(
+                        "engine_init_failed",
+                        engine_generation=self._generation,
+                        error_summary=summary,
+                        elapsed_ms=int((time.monotonic() - recycle_started) * 1000),
+                    )
                 raise EngineInitError(
                     summary,
                     original_exception=exc,
@@ -479,6 +587,15 @@ class RuntimeEngineLifecycle:
             self._last_error_code = ""
             self._state = "ready"
             self._publish_unlocked("ready", error_summary="")
+            if progress_cb is not None:
+                progress_cb(
+                    "engine_init_done",
+                    engine_generation=self._generation,
+                    elapsed_ms=int((time.monotonic() - recycle_started) * 1000),
+                    engine_version=desired.get("engine_version", ""),
+                    engine_identity=desired.get("engine_identity", ""),
+                    precision=desired.get("precision", ""),
+                )
             logger.info(
                 "runtime_event=engine_recycle_success pid=%s owner=%s "
                 "generation=%s recovery_count=%s",

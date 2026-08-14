@@ -375,7 +375,8 @@ class SupplementService:
     def synthesize_lines(role: str, lines: list[str], speaker_audio: str,
                          overrides: dict | None = None, num_beams: int = 2,
                          cache_dir: str = "",
-                         task: SupplementTaskState | None = None) -> list[dict]:
+                         task: SupplementTaskState | None = None,
+                         progress_cb=None) -> list[dict]:
         """逐句合成补录文本，返回每句结果（状态 + wav 路径 / 错误）。
 
         逐句调用 ``tts_engine.synthesize_segment``（引擎互斥锁自含，调用方无需加锁）。
@@ -400,6 +401,8 @@ class SupplementService:
                 生成隔离子目录。
             task: 可选 ``SupplementTaskState``；传入时产物写入 ``task.task_dir`` 并
                 更新 ``task.items``。
+            progress_cb: 可选 ``(phase, message)`` 进度回调，透传给
+                ``RuntimeTTSService.synthesize_supplement``（引擎加载/逐句进度）。
 
         Returns:
             列表，元素为 ``{'index': int, 'text': str, 'wav_path': str|None,
@@ -424,6 +427,7 @@ class SupplementService:
             overrides=overrides,
             num_beams=num_beams,
             artifact_dir=task_dir,
+            progress_cb=progress_cb,
         )
         items = [
             SupplementItemResult(

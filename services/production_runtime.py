@@ -1354,11 +1354,12 @@ class ProductionRuntime:
         role: str,
         artifact_dir: str,
         engine_profile: dict[str, Any] | None = None,
+        progress_cb: Any = None,
     ) -> str:
         """Runtime-owned direct worker; public callers submit through RuntimeTTSService."""
         from lib import config
 
-        self._engine.ensure_ready(engine_profile)
+        self._engine.ensure_ready(engine_profile, progress_cb=progress_cb)
 
         destination = artifact_dir or os.path.join(
             config.get_preview_dir(),
@@ -1395,12 +1396,13 @@ class ProductionRuntime:
         initialize: bool = False,
         validate_output: bool = False,
         engine_profile: dict[str, Any] | None = None,
+        progress_cb: Any = None,
     ) -> list[dict[str, Any]]:
         """Runtime-owned isolated supplement worker."""
         from lib import config
 
         if initialize:
-            self._engine.ensure_ready(engine_profile)
+            self._engine.ensure_ready(engine_profile, progress_cb=progress_cb)
 
         destination = artifact_dir or os.path.join(
             config.get_preview_dir(),
@@ -1424,11 +1426,20 @@ class ProductionRuntime:
         from lib import tts_engine
 
         results: list[dict[str, Any]] = []
-        for index, raw_text in enumerate(payload.get("lines", [])):
+        lines = list(payload.get("lines", []))
+        total = max(len(lines), 1)
+        for index, raw_text in enumerate(lines):
+            line_started = time.monotonic()
             if callable(heartbeat):
                 heartbeat()
             text = str(raw_text or "").strip()
             output = os.path.join(destination, f"{index + 1:03d}.wav")
+            if progress_cb is not None:
+                progress_cb(
+                    "supplement_infer_start",
+                    line_index=index,
+                    line_total=total,
+                )
             if not text:
                 results.append({
                     "index": index,
@@ -1466,6 +1477,14 @@ class ProductionRuntime:
                     "status": "ok",
                     "error": "",
                 })
+                if progress_cb is not None:
+                    progress_cb(
+                        "supplement_infer_done",
+                        line_index=index,
+                        line_total=total,
+                        status="ok",
+                        elapsed_ms=int((time.monotonic() - line_started) * 1000),
+                    )
             except Exception as exc:
                 try:
                     os.remove(temporary)
@@ -1478,6 +1497,14 @@ class ProductionRuntime:
                     "status": "failed",
                     "error": f"❌ 句{index + 1}: {str(exc)[:120]}",
                 })
+                if progress_cb is not None:
+                    progress_cb(
+                        "supplement_infer_done",
+                        line_index=index,
+                        line_total=total,
+                        status="failed",
+                        elapsed_ms=int((time.monotonic() - line_started) * 1000),
+                    )
         tts_engine.empty_cache()
         return results
 
@@ -1513,6 +1540,69 @@ class ProductionRuntime:
             project=record.project,
         )
         current = running or record
+        options = record.options if isinstance(record.options, dict) else {}
+        snapshot = options.get("engine_snapshot") if isinstance(options.get("engine_snapshot"), dict) else None
+
+        def _task_progress(event: str, **fields: Any) -> None:
+            """Persist one structured phase into the task log + runtime log.
+
+            Fields are path-free identity/elapsed data; the same event also
+            goes through ``_runtime_event`` so the runtime log carries the
+            full chain (``engine_load_start`` / ``engine_init_done`` /
+            ``supplement_infer_start`` / …).
+            """
+            nonlocal current
+            fields = dict(fields)
+            fields.setdefault("task_id", record.task_id)
+            fields.setdefault("owner", self.owner_id)
+            detail = " ".join(
+                f"{key}={value}"
+                for key, value in fields.items()
+                if value not in (None, "")
+            )
+            try:
+                progress = dict(current.progress or {})
+                log_lines = list(current.log_lines or [])
+                log_lines.append(f"[{event}] {detail}".strip())
+                updated = TaskRepository.persist_runtime_state(
+                    record.task_id,
+                    self.owner_id,
+                    status="running",
+                    progress=progress,
+                    failed_segment_ids=list(record.failed_segment_ids or []),
+                    error_summary="",
+                    log_lines=log_lines,
+                    project=record.project,
+                )
+                if updated is not None:
+                    current = updated
+            except Exception:
+                logger.debug("记录 utility 任务阶段失败: %s", event, exc_info=True)
+            _runtime_event(event, **fields)
+
+        # Engine intent diagnostics: if the claimed task needs a cold load or a
+        # profile switch, say so *before* the blocking reload so the web wait
+        # loop can render "正在加载 IndexTTS 2.5…" instead of dead silence.
+        try:
+            from lib.tts_profile import profile_matches, resolve_profile
+
+            engine_before = self._engine.snapshot()
+            desired = resolve_profile(snapshot or {})
+            loaded_id = str(engine_before.get("engine_identity") or "")
+            target_id = str(desired.get("engine_identity") or "")
+            engine_state = str(engine_before.get("state") or "unknown")
+            match = engine_state == "ready" and profile_matches(engine_before, desired)
+            _task_progress(
+                "engine_intent",
+                current_engine_identity=loaded_id or "none",
+                target_engine_identity=target_id or "none",
+                current_engine_version=str(engine_before.get("engine_version") or ""),
+                target_engine_version=str(desired.get("engine_version") or ""),
+                profile_match="true" if match else "false",
+                engine_state=engine_state,
+            )
+        except Exception:  # pragma: no cover - diagnostics must never break the task
+            logger.debug("引擎意图诊断失败: %s", record.task_id, exc_info=True)
         try:
             if record.task_type == "voice_preview":
                 preview = self.run_voice_preview_direct(
@@ -1520,6 +1610,7 @@ class ProductionRuntime:
                     str(record.options.get("role") or "voice"),
                     artifact_dir,
                     record.options.get("engine_snapshot") if isinstance(record.options, dict) else None,
+                    progress_cb=_task_progress,
                 )
                 result: dict[str, Any] = {"preview_path": preview}
                 completed, failed = 3, 0
@@ -1533,6 +1624,7 @@ class ProductionRuntime:
                     initialize=True,
                     validate_output=True,
                     engine_profile=record.options.get("engine_snapshot") if isinstance(record.options, dict) else None,
+                    progress_cb=_task_progress,
                 )
                 result = {"items": items}
                 completed = sum(item.get("status") == "ok" for item in items)
