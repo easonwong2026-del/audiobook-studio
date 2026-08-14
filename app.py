@@ -34,6 +34,7 @@ from services import (
     ProductionJobError,
     ProductionJobService,
     ProjectBackupService,
+    get_application_lifecycle,
     ProjectService,
     ProjectStorageService,
     QualityService,
@@ -3386,9 +3387,23 @@ if __name__ == "__main__":
     setup_logging(log_dir=os.path.join(BASE, "logs"))
     # 数据目录外置后，首次启动把程序目录内的旧克隆音色迁移到外置 voice_library（一次性、安全拷贝）。
     config.migrate_legacy_voice_library()
+
+    # ── 应用生命周期：把「应用退出」接通到「Runtime 优雅停机」这一缺失 edge ──
+    # 所有退出触发源（Gradio server close / SIGINT / SIGTERM / atexit）统一汇入
+    # ApplicationLifecycleService，由它 single-flight 编排 Runtime 关机，避免孤儿进程。
+    _lifecycle = get_application_lifecycle()
+    _lifecycle.install_process_exit_hooks()
+
     # Gradio 默认只允许 serve 当前 cwd 与 tempdir 下的文件。数据目录（音色库、预览、
     # 合成产物、导出）已全部外置到 config.get_data_dir()（如 D:\AudiobookStudio），
     # 不在 cwd 内，返回其下音频路径给 Audio/File 组件会在序列化阶段触发 InvalidPathError
     # 导致前端显示「错误」。将其加入 allowed_paths 白名单，递归放行其下所有子目录。
-    app.queue().launch(server_name="0.0.0.0", server_port=7862, share=False, inbrowser=True,
-                       allowed_paths=[config.get_data_dir()])
+    try:
+        app.queue().launch(server_name="0.0.0.0", server_port=7862, share=False, inbrowser=True,
+                           allowed_paths=[config.get_data_dir()])
+    finally:
+        # The Gradio server has stopped (normal close / Ctrl+C / exception):
+        # guarantee the production runtime is shut down before the process
+        # exits. 这是最可靠的一条 edge；single-flight 使其与上面的
+        # signal / atexit 触发相互幂等。
+        _lifecycle.request_application_shutdown("gradio_server_stop")

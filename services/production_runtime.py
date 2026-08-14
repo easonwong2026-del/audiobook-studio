@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -28,7 +29,12 @@ from repositories.project_repo import ProjectRepository
 from repositories._atomic import atomic_write
 from repositories.task_repo import RuntimePendingSignal, TaskRecord, TaskRepository
 
-from .runtime_engine import EngineInitError, RuntimeEngineLifecycle
+from .runtime_engine import (
+    EngineInitError,
+    RuntimeEngineLifecycle,
+    _pid_is_alive,
+    read_runtime_engine_status,
+)
 from lib.tts_profile import public_profile
 from .performance_trace import PerformanceTrace
 from .runtime_lock import ProcessFileLock
@@ -104,6 +110,7 @@ class ProductionRuntime:
         lock_path: str | None = None,
         status_path: str | None = None,
         poll_interval: float = 0.1,
+        shutdown_grace: float = 20.0,
     ) -> None:
         self.owner_id = owner_id or f"runtime_{uuid.uuid4().hex}"
         self.lock = ProcessFileLock(lock_path)
@@ -141,6 +148,12 @@ class ProductionRuntime:
         )
         self._engine_failure = False
         self._shutdown_after_task = False
+        self._shutdown_requested = False
+        # Upper bound for waiting on the active segment's safe boundary before
+        # forcing ``interrupted`` persistence.  Kept below the client's graceful
+        # timeout so the runtime normally exits on its own, never force-killed.
+        self._shutdown_grace = max(float(shutdown_grace), 0.0)
+        self._shutdown_deadline: float | None = None
         self._shutdown_complete = threading.Event()
         self._shutdown_complete.set()
 
@@ -229,6 +242,97 @@ class ProductionRuntime:
                 os.remove(path)
             except OSError:
                 pass
+
+    @staticmethod
+    def _shutdown_command_path() -> str:
+        from lib import config
+
+        return os.path.join(config.get_data_dir(), "logs", "runtime_shutdown_command.json")
+
+    def _consume_shutdown_command(self) -> None:
+        """Honor a parent/App shutdown request written by ProductionRuntimeClient.
+
+        Idempotent: once the request flag is set it stays set for this serve
+        cycle, so repeated command files or repeated ticks are harmless.
+        """
+        if self._shutdown_requested:
+            return
+        path = self._shutdown_command_path()
+        try:
+            with open(path, encoding="utf-8") as file:
+                command = json.load(file)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return
+        if not isinstance(command, dict) or command.get("command") != "shutdown":
+            return
+        self._shutdown_requested = True
+        self._shutdown_after_task = True
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        _runtime_event(
+            "runtime_shutdown_requested",
+            pid=os.getpid(),
+            owner=self.owner_id,
+            reason=str(command.get("reason") or ""),
+        )
+
+    def request_shutdown(
+        self,
+        reason: str = "",
+        wait: bool = True,
+        timeout: float = 30.0,
+    ) -> bool:
+        """In-process graceful shutdown request (inline mode & tests).
+
+        The detached process-mode path writes a command file via
+        ``ProductionRuntimeClient.request_shutdown``; this method is the
+        same-process equivalent.  Returns ``True`` once the shutdown intent is
+        registered — the loop stops at the next safe segment/claim boundary.
+        """
+        self._shutdown_requested = True
+        self._shutdown_after_task = True
+        self._wake.set()
+        if wait:
+            self.wait_until_stopped(timeout=max(float(timeout), 0.0))
+        return True
+
+    def _finalize_interrupted(self, state: SynthesisState) -> None:
+        """Persist an active task as ``interrupted`` and stop the serve loop.
+
+        Called only on a controlled Application Shutdown — never on User Cancel,
+        which flows through ``control_intent=cancel`` → ``cancelled``.  Progress
+        is preserved so the task stays recoverable on the next runtime takeover.
+        """
+        record = self._current_record
+        if record is None:
+            return
+        try:
+            TaskRepository.persist_runtime_state(
+                state.task_id,
+                self.owner_id,
+                status="interrupted",
+                progress=self._progress(state, record),
+                failed_segment_ids=list(state.failed_segment_ids),
+                error_summary="",
+                log_lines=list(state.log_lines),
+                project=record.project,
+            )
+        except Exception:  # pragma: no cover - defensive persistence boundary
+            logger.exception("应用关闭时持久化 interrupted 状态失败: %s", state.task_id)
+        _runtime_event(
+            "task_interrupted_by_app_shutdown",
+            task_id=state.task_id,
+            project=record.project,
+            owner=self.owner_id,
+        )
+        with self._state_lock:
+            self._current_state = None
+            self._current_record = None
+            self._current_segment_to_chapter = {}
+        self._shutdown_after_task = True
+        self._stop.set()
 
     @staticmethod
     def _durable_tts_task_active() -> bool:
@@ -468,6 +572,22 @@ class ProductionRuntime:
                     self._last_full_claim = now0
                 with self._state_lock:
                     state = self._current_state
+                # Honor a parent/App shutdown request at the top of every tick.
+                self._consume_shutdown_command()
+                if self._shutdown_requested:
+                    if state is None:
+                        # Idle runtime: nothing active, exit immediately.
+                        self._stop.set()
+                        break
+                    with self._state_lock:
+                        cur = self._current_state
+                    if cur is not None and not cur.shutdown_requested:
+                        # Active task: ask the synthesis loop to stop at the
+                        # next safe segment boundary (do not cancel).
+                        cur.shutdown_requested = True
+                        cur.append_log("⏹ 应用关闭请求，将在当前段完成后中断")
+                        cur.notify()
+                        self._shutdown_deadline = time.monotonic() + self._shutdown_grace
                 if state is not None:
                     self._apply_control(state)
                     future = state.future
@@ -485,10 +605,34 @@ class ProductionRuntime:
                             # cannot be handed to a new runtime mid-task.
                             self._stop.set()
                         state = None
+                # Controlled Application Shutdown: the synthesis worker broke at
+                # a safe segment boundary (``state.shutdown_requested``) without
+                # reaching a terminal status.  Only now — once the worker has
+                # actually stopped, so no segment is mid-write — persist
+                # ``interrupted`` (NOT cancelled) and stop the loop.  A bounded
+                # grace period guarantees exit even if a segment hangs.
+                if self._shutdown_requested and self._current_state is not None:
+                    cur = self._current_state
+                    if cur.status not in {"cancelled", "done", "error", "needs_attention"}:
+                        future = cur.future
+                        at_boundary = future is None or future.done()
+                        expired = (
+                            self._shutdown_deadline is not None
+                            and time.monotonic() >= self._shutdown_deadline
+                        )
+                        if at_boundary or expired:
+                            if expired and not at_boundary:
+                                _runtime_event(
+                                    "runtime_shutdown_boundary_timeout",
+                                    task_id=cur.task_id,
+                                    owner=self.owner_id,
+                                )
+                            self._finalize_interrupted(cur)
+                            state = None
                 # 合成 claim 放在 retire 之后：若本 tick 刚 retire 上一个任务，
                 # synthesis 类型的 stamp 仍是旧值 → 新 notify 戳 ≠ 旧值 → 立即
                 # 全扫 claim 他项目 pending 任务（无 30s 兜底延迟）。
-                if state is None:
+                if state is None and not self._shutdown_requested:
                     self._consume_engine_command()
                     record = self._claim_pending("synthesis", {"synthesis"}, force_claim)
                     if record is not None:
@@ -499,12 +643,16 @@ class ProductionRuntime:
                     self._export_record = None
                     # 排队导出由 per-type stamp 机制覆盖：export claim 在 worker
                     # 运行期间被跳过 → 其 stamp 未更新 → worker 结束后立即全扫。
-                if self._export_future is None:
+                if self._export_future is None and not self._shutdown_requested:
                     export_record = self._claim_pending("export", {"export"}, force_claim)
                     if export_record is not None:
                         self._note_task_claim(export_record)
                         self._launch_export(export_record)
-                if self._current_state is None and self._export_future is None:
+                if (
+                    self._current_state is None
+                    and self._export_future is None
+                    and not self._shutdown_requested
+                ):
                     utility_record = self._claim_pending(
                         "utility", {"supplement", "voice_preview"}, force_claim
                     )
@@ -717,6 +865,11 @@ class ProductionRuntime:
             self._engine.ensure_ready(engine_profile)
         except EngineInitError as exc:
             self._fail_synthesis_engine_init(record, state, exc)
+            return
+        if self._shutdown_requested:
+            # Application shutdown arrived during engine loading: do not start
+            # synthesis; leave the freshly-claimed task as interrupted.
+            self._finalize_interrupted(state)
             return
         engine_snapshot = self._engine.snapshot()
         state.engine_generation = engine_snapshot["engine_generation"]
@@ -1559,6 +1712,58 @@ class ProductionRuntime:
 _INLINE_LOCK = threading.RLock()
 _INLINE_RUNTIME: ProductionRuntime | None = None
 
+# Exact, process-owned handle to the runtime subprocess spawned by THIS process
+# (via ``ensure_running``).  Used only as a precise termination fallback after a
+# graceful shutdown timeout.  Pre-existing runtimes (spawned by another process,
+# e.g. a previous app session) are NOT referenced here and are terminated only
+# after runtime-identity verification — never by blind pid or process scan.
+_RUNTIME_PROCESS: "subprocess.Popen | None" = None
+_PROCESS_LOCK = threading.Lock()
+
+
+def _wait_for_pid_exit(pid: int, timeout: float) -> bool:
+    """Event-driven bounded wait for a pid to disappear (no fixed sleep)."""
+    deadline = time.monotonic() + max(float(timeout), 0.0)
+    while True:
+        if not _pid_is_alive(pid):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _terminate_pid(pid: int, timeout: float = 10.0) -> None:
+    """Terminate a *confirmed* Audiobook Studio runtime by pid (last resort).
+
+    Only ever called after ``read_runtime_engine_status`` has verified the pid
+    belongs to a live, owned runtime.  Never used against arbitrary pids.
+    """
+    if pid <= 0 or not _pid_is_alive(pid):
+        return
+    if _is_windows():
+        try:
+            import ctypes
+
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            handle = kernel32.OpenProcess(0x0001, False, pid)  # PROCESS_TERMINATE
+            if handle:
+                kernel32.TerminateProcess(handle, 0)
+                kernel32.CloseHandle(handle)
+        except Exception:  # pragma: no cover - platform specific
+            logger.exception("Windows 终止 Runtime 进程失败 pid=%s", pid)
+        # TerminateProcess is asynchronous: wait for the kernel to actually
+        # reap it, otherwise the caller may probe the lock too early.
+        _wait_for_pid_exit(pid, timeout)
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+        if _wait_for_pid_exit(pid, timeout):
+            return
+        os.kill(pid, signal.SIGKILL)
+        _wait_for_pid_exit(pid, timeout)
+    except Exception:  # pragma: no cover - platform specific
+        logger.exception("POSIX 终止 Runtime 进程失败 pid=%s", pid)
+
 
 class ProductionRuntimeClient:
     """Client-side lifecycle helper; task data itself always flows through SQLite."""
@@ -1727,6 +1932,9 @@ class ProductionRuntimeClient:
         finally:
             if bootstrap is not None:
                 bootstrap.close()
+        global _RUNTIME_PROCESS
+        with _PROCESS_LOCK:
+            _RUNTIME_PROCESS = child
         logger.info(
             "runtime_event=runtime_spawn pid=%s parent_pid=%s command=%s",
             child.pid,
@@ -1756,6 +1964,149 @@ class ProductionRuntimeClient:
             _INLINE_RUNTIME = None
         if runtime is not None:
             runtime.stop()
+
+    # ── Graceful shutdown (orphan Runtime fix) ──────────────────────────────
+
+    @staticmethod
+    def _shutdown_command_path() -> str:
+        return ProductionRuntime._shutdown_command_path()
+
+    @classmethod
+    def _runtime_is_running(cls) -> bool:
+        """True when a runtime owns the singleton lock (i.e. is alive)."""
+        lock = ProcessFileLock()
+        if lock.acquire(blocking=False):
+            lock.release()
+            return False
+        return True
+
+    @classmethod
+    def _runtime_has_exited(cls) -> bool:
+        """True once the runtime process is really gone.
+
+        The singleton lock is the authoritative signal: it is an OS advisory
+        lock, so it is released the moment the owning process dies — including
+        a hard kill.  A *stale status file* must NOT count as "exited": a hung
+        runtime that stopped publishing status while still holding the lock is
+        precisely the orphan we are trying to reap, and treating it as gone
+        would make ``request_shutdown`` report a false success.
+
+        The only extra signal we trust is the exact process handle for a
+        runtime this process spawned: if it has exited, our runtime is gone
+        regardless of who else may hold the lock.
+        """
+        lock = ProcessFileLock()
+        if lock.acquire(blocking=False):
+            lock.release()
+            return True
+        with _PROCESS_LOCK:
+            proc = _RUNTIME_PROCESS
+        return proc is not None and proc.poll() is not None
+
+    @classmethod
+    def _write_shutdown_command(cls, reason: str) -> None:
+        path = cls._shutdown_command_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        atomic_write(path, {
+            "command": "shutdown",
+            "reason": str(reason or ""),
+            "requested_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        })
+
+    @classmethod
+    def _clear_runtime_process(cls) -> None:
+        global _RUNTIME_PROCESS
+        with _PROCESS_LOCK:
+            _RUNTIME_PROCESS = None
+
+    @classmethod
+    def _terminate_runtime(cls, terminate_timeout: float = 10.0) -> None:
+        """Forced termination fallback after a graceful timeout.
+
+        Priority: exact-owned process handle → hard kill.  For a pre-existing
+        runtime (no handle) terminate by pid ONLY after confirming it is
+        genuinely our runtime (fresh status + owner_id + alive pid).  This
+        prevents killing an unrelated process that reuses a stale pid.
+        """
+        with _PROCESS_LOCK:
+            proc = _RUNTIME_PROCESS
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=max(float(terminate_timeout), 0.0))
+            except Exception:
+                pass
+            if proc.poll() is None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            return
+        status = read_runtime_engine_status()
+        pid = int(status.get("pid") or 0)
+        if status.get("status_stale") or not status.get("owner_id") or pid <= 0:
+            return
+        if not _pid_is_alive(pid):
+            return
+        _terminate_pid(pid, timeout=max(float(terminate_timeout), 0.0))
+
+    @classmethod
+    def request_shutdown(
+        cls,
+        reason: str = "application_shutdown",
+        timeout: float = 30.0,
+        terminate_timeout: float = 10.0,
+    ) -> bool:
+        """Gracefully stop the detached production runtime (cross-process).
+
+        Protocol:
+          1. if no runtime is running → return (idempotent no-op).
+          2. atomically write ``runtime_shutdown_command.json`` (idempotent).
+          3. wait (event-driven on lock release / status staleness) up to
+             ``timeout`` for the runtime to exit on its own safe boundary.
+          4. on timeout → terminate the *exact-owned* process handle, then
+             hard-kill as final fail-safe; for a pre-existing runtime verify
+             runtime identity (fresh status + owner_id + pid alive) before
+             terminating by pid.  Never kills unrelated Python processes.
+
+        Returns ``True`` if the runtime is gone (or was never running).
+        """
+        mode = cls.mode()
+        if mode == "inline":
+            with _INLINE_LOCK:
+                runtime = _INLINE_RUNTIME
+            if runtime is None:
+                return True
+            runtime.request_shutdown(reason=reason, wait=False)
+            runtime.wait_until_stopped(timeout=max(float(timeout), 0.0))
+            return True
+        if not cls._runtime_is_running():
+            return True
+        cls._write_shutdown_command(reason)
+        if cls._wait_for_exit(timeout):
+            cls._clear_runtime_process()
+            _runtime_event("runtime_shutdown_graceful", reason=reason)
+            return True
+        # Graceful timeout → forced termination (precise ownership only).
+        _runtime_event("runtime_shutdown_graceful_timeout", reason=reason)
+        cls._terminate_runtime(terminate_timeout=max(float(terminate_timeout), 0.0))
+        # The OS releases the lock as the process dies, but not necessarily
+        # before ``_terminate_*`` returns; wait (bounded) instead of racing.
+        exited = cls._wait_for_exit(min(max(float(terminate_timeout), 0.0), 10.0))
+        cls._clear_runtime_process()
+        _runtime_event("runtime_shutdown_forced", reason=reason, exited=exited)
+        return exited
+
+    @classmethod
+    def _wait_for_exit(cls, timeout: float) -> bool:
+        """Bounded, event-driven wait on runtime disappearance (no fixed sleep)."""
+        deadline = time.monotonic() + max(float(timeout), 0.0)
+        while True:
+            if cls._runtime_has_exited():
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -35,6 +35,10 @@ from .structured_script_import import (
 )
 from .supplement import SupplementService, SupplementTaskState
 from .synthesis import SynthesisService, SynthesisState
+from .application_lifecycle import (
+    ApplicationLifecycleService,
+    get_application_lifecycle,
+)
 from .voice_assets import VoiceAssetError, VoiceAssetService
 from .voice_cast import VoiceCastError, VoiceCastResolver, VoiceCastService
 from .workflow import WorkflowService
@@ -64,6 +68,8 @@ __all__ = [
     "SupplementTaskState",
     "SynthesisService",
     "SynthesisState",
+    "ApplicationLifecycleService",
+    "get_application_lifecycle",
     "VoiceAssetError",
     "VoiceAssetService",
     "VoiceCastError",
