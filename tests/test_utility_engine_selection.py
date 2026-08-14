@@ -121,6 +121,32 @@ def _write_runtime_status(
     }, open(path, "w", encoding="utf-8"))
 
 
+def _write_engine_command(monkeypatch, tmp_path, engine_id: str) -> None:
+    """Persist a controlled recycle request the Settings handler would write."""
+    import lib.config as cfg
+
+    data_dir = str(tmp_path / "runtime-data")
+    monkeypatch.setattr(cfg, "get_data_dir", lambda: data_dir)
+    path = os.path.join(data_dir, "logs", "runtime_engine_command.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    json.dump({
+        "engine_id": engine_id,
+        "requested_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }, open(path, "w", encoding="utf-8"))
+
+
+def _write_broken_engine_command(monkeypatch, tmp_path) -> None:
+    """Corrupt the controlled recycle request file (not valid JSON)."""
+    import lib.config as cfg
+
+    data_dir = str(tmp_path / "runtime-data")
+    monkeypatch.setattr(cfg, "get_data_dir", lambda: data_dir)
+    path = os.path.join(data_dir, "logs", "runtime_engine_command.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("{not valid json")
+
+
 def _submit_spy(monkeypatch, tmp_path):
     """Replace RuntimeTTSService._submit with a spy capturing the frozen options.
 
@@ -338,3 +364,143 @@ def test_production_snapshot_logic_untouched():
     # new utility selection helper
     assert "_select_utility_engine" not in source
     assert "resolve_profile" in source
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Third round: pending-switch window (Case 9-14)
+# Settings save persists a controlled recycle request (engine command file)
+# BEFORE the runtime consumes it; during that window the runtime still reports
+# the old engine as ready.  Utility tasks must honor the pending target.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── Case 9: pending switch 2.5 + runtime still ready Legacy -> supplement ──
+def test_supplement_honors_pending_switch_target(
+    runtime_project, tmp_path, monkeypatch, global_default_v25,
+):
+    _write_runtime_status(
+        monkeypatch, tmp_path,
+        engine_version="2", engine_identity="indextts:2",
+        model_identity="fp-legacy", precision="FP16",
+    )
+    _write_engine_command(monkeypatch, tmp_path, engine_id="indextts25")
+    captured = _submit_spy(monkeypatch, tmp_path)
+    RuntimeTTSService.synthesize_supplement(
+        project_name="book", role="旁白", lines=["甲"], speaker_audio="a.wav",
+        overrides=None, num_beams=2, artifact_dir=str(tmp_path / "sup9"),
+    )
+    snapshot = _snapshot_of(captured)
+    # must NOT silently freeze the old Legacy; honors the requested 2.5
+    assert snapshot["engine_identity"] == "indextts:2.5"
+    profile, source = runtime_tts._select_utility_engine(None)
+    assert source == "runtime_switch_target"
+    assert profile["engine_identity"] == "indextts:2.5"
+
+
+# ── Case 10: pending switch 2.5 + runtime ready Legacy -> preview ──────────
+def test_preview_honors_pending_switch_target(
+    runtime_project, tmp_path, monkeypatch, global_default_v25,
+):
+    _write_runtime_status(
+        monkeypatch, tmp_path,
+        engine_version="2", engine_identity="indextts:2",
+        model_identity="fp-legacy", precision="FP16",
+    )
+    _write_engine_command(monkeypatch, tmp_path, engine_id="indextts25")
+    captured = _submit_spy(monkeypatch, tmp_path)
+    Path(tmp_path / "preview.wav").write_bytes(b"RIFF\x00" * 32)
+    RuntimeTTSService.test_voice_and_concat_wavs("book", "旁白", "speaker.wav")
+    snapshot = _snapshot_of(captured)
+    assert captured["task_type"] == "voice_preview"
+    assert snapshot["engine_identity"] == "indextts:2.5"
+
+
+# ── Case 11: runtime already recovering/loading target 2.5 -> no Legacy ────
+def test_utility_does_not_reuse_old_engine_while_recovering(
+    runtime_project, tmp_path, monkeypatch, global_default_v25,
+):
+    # engine_state=recovering: the published engine_identity may still show
+    # the OLD Legacy value; selection must NOT treat it as current.
+    _write_runtime_status(
+        monkeypatch, tmp_path,
+        engine_version="2", engine_identity="indextts:2",
+        model_identity="fp-legacy", precision="FP16", state="recovering",
+    )
+    captured = _submit_spy(monkeypatch, tmp_path)
+    RuntimeTTSService.synthesize_supplement(
+        project_name="book", role="旁白", lines=["甲"], speaker_audio="a.wav",
+        overrides=None, num_beams=2, artifact_dir=str(tmp_path / "sup11"),
+    )
+    snapshot = _snapshot_of(captured)
+    # falls back to the global default (2.5) — never the recovering old engine
+    assert snapshot["engine_identity"] == "indextts:2.5"
+    profile, source = runtime_tts._select_utility_engine(None)
+    assert source == "global_default"
+
+
+# ── Case 12: switch finished, runtime ready 2.5 -> runtime_current ─────────
+def test_utility_uses_runtime_current_after_switch_completed(
+    runtime_project, tmp_path, monkeypatch, global_default_v25,
+):
+    _write_runtime_status(
+        monkeypatch, tmp_path,
+        engine_version="2.5", engine_identity="indextts:2.5",
+        model_identity="fp-25", precision="BF16",
+    )
+    # no pending command: switch already consumed
+    captured = _submit_spy(monkeypatch, tmp_path)
+    RuntimeTTSService.synthesize_supplement(
+        project_name="book", role="旁白", lines=["甲"], speaker_audio="a.wav",
+        overrides=None, num_beams=2, artifact_dir=str(tmp_path / "sup12"),
+    )
+    snapshot = _snapshot_of(captured)
+    assert snapshot["engine_identity"] == "indextts:2.5"
+    profile, source = runtime_tts._select_utility_engine(None)
+    assert source == "runtime_current"
+    assert profile["engine_identity"] == "indextts:2.5"
+
+
+# ── Case 13: recycle request invalid/corrupt -> no permanent pending ───────
+def test_utility_survives_invalid_engine_command(
+    runtime_project, tmp_path, monkeypatch, global_default_v25,
+):
+    # engine_id present but not a valid 2/2.5 alias: mirror the runtime's own
+    # fallback (anything without "25"/"2.5" resolves to Legacy v2); the
+    # selection must not hang or fail.
+    _write_runtime_status(
+        monkeypatch, tmp_path,
+        engine_version="2", engine_identity="indextts:2",
+        model_identity="fp-legacy", precision="FP16",
+    )
+    _write_engine_command(monkeypatch, tmp_path, engine_id="garbage-id")
+    profile, source = runtime_tts._select_utility_engine(None)
+    assert source == "runtime_switch_target"
+    assert profile["engine_identity"] == "indextts:2"  # mirrors runtime fallback
+
+    # corrupt command file (invalid JSON) -> ignored, no crash, no pending
+    _write_broken_engine_command(monkeypatch, tmp_path)
+    profile, source = runtime_tts._select_utility_engine(None)
+    assert source == "runtime_current"
+    assert profile["engine_identity"] == "indextts:2"
+
+
+# ── Case 14: no pending switch -> config drift is NOT an active switch ─────
+def test_utility_distinguishes_config_drift_from_active_switch(
+    runtime_project, tmp_path, monkeypatch, global_default_v25,
+):
+    # runtime ready Legacy, settings default 2.5, but NO engine command file:
+    # this is the second-round regression scenario — reuse Legacy, no recycle.
+    _write_runtime_status(
+        monkeypatch, tmp_path,
+        engine_version="2", engine_identity="indextts:2",
+        model_identity="fp-legacy", precision="FP16",
+    )
+    captured = _submit_spy(monkeypatch, tmp_path)
+    RuntimeTTSService.synthesize_supplement(
+        project_name="book", role="旁白", lines=["甲"], speaker_audio="a.wav",
+        overrides=None, num_beams=2, artifact_dir=str(tmp_path / "sup14"),
+    )
+    snapshot = _snapshot_of(captured)
+    assert snapshot["engine_identity"] == "indextts:2"
+    profile, source = runtime_tts._select_utility_engine(None)
+    assert source == "runtime_current"
+    assert profile["engine_identity"] == "indextts:2"

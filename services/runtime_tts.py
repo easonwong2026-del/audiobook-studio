@@ -6,6 +6,7 @@ or initializes the TTS engine.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -150,13 +151,44 @@ def _runtime_current_profile() -> dict[str, Any] | None:
     }
 
 
+def _pending_engine_switch_target() -> dict[str, Any] | None:
+    """Read the durable controlled recycle request, if one is pending.
+
+    The Settings handler persists ``runtime_engine_command.json`` (engine_id +
+    requested_at) *before* the singleton runtime consumes it on its next idle
+    tick.  While that file exists, the user has explicitly requested a switch
+    and the runtime has not finished it; a utility task must honor the
+    requested target instead of silently reusing the old loaded engine.
+    The engine_id → version mapping mirrors the runtime's own
+    ``request_engine_recycle`` exactly.  GPU-free: a pure file read, never
+    imports the model.
+    """
+    try:
+        from services.production_runtime import ProductionRuntime
+
+        path = ProductionRuntime._engine_command_path()
+        with open(path, encoding="utf-8") as fh:
+            command = json.load(fh)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError, ImportError):
+        return None
+    if not isinstance(command, dict):
+        return None
+    raw = str(command.get("engine_id") or "").strip().lower()
+    if not raw:
+        return None
+    version = "2.5" if ("25" in raw or "2.5" in raw) else "2"
+    return resolve_profile({"engine_version": version})
+
+
 def _select_utility_engine(
     engine_profile: Any = None,
 ) -> tuple[dict[str, Any], str]:
     """Utility (preview/supplement) engine selection policy.
 
-    Priority: ``explicit`` engine_profile > ``runtime_current`` (the engine
-    already loaded by the singleton runtime) > ``global_default`` (settings).
+    Priority: ``explicit`` engine_profile > ``runtime_switch_target`` (a
+    user-requested engine switch the runtime has not finished yet) >
+    ``runtime_current`` (the engine already loaded by the singleton runtime) >
+    ``global_default`` (settings).
 
     Rationale (#38 regression): a supplement/preview task that freezes the
     settings default while the runtime is warm with a *different* engine
@@ -164,13 +196,23 @@ def _select_utility_engine(
     click.  A warm runtime must be reused unless the caller explicitly asks
     for another engine.
 
+    A *pending controlled switch* sits above ``runtime_current``: after the
+    user clicks 应用引擎 the Settings handler persists a recycle request
+    before the runtime consumes it; during that window the runtime still
+    reports the old engine as ``ready``, so honoring ``runtime_current``
+    would silently generate with the engine the user just switched away
+    from.
+
     Returns ``(profile, selection_source)`` where selection_source is one of
-    ``explicit`` / ``runtime_current`` / ``global_default``.  The caller then
-    freezes the chosen profile into ``engine_snapshot``; the snapshot never
-    tracks later settings changes.
+    ``explicit`` / ``runtime_switch_target`` / ``runtime_current`` /
+    ``global_default``.  The caller then freezes the chosen profile into
+    ``engine_snapshot``; the snapshot never tracks later settings changes.
     """
     if engine_profile:
         return resolve_profile(engine_profile), "explicit"
+    pending = _pending_engine_switch_target()
+    if pending is not None:
+        return pending, "runtime_switch_target"
     current = _runtime_current_profile()
     if current is not None:
         return resolve_profile(current), "runtime_current"
