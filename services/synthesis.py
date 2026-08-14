@@ -75,6 +75,7 @@ class SynthesisState:
     log_lines: list[str] = field(default_factory=list)
     cancel: bool = False
     cancel_requested: bool = False
+    shutdown_requested: bool = False
     future: Any = None
     error: Optional[str] = None
     paused: bool = False
@@ -168,6 +169,7 @@ class SynthesisService:
         state.status = "pending"
         state.cancel = False
         state.cancel_requested = False
+        state.shutdown_requested = False
         state.paused = False
         state.error = None
         state.selected_chapters = (
@@ -454,6 +456,13 @@ class SynthesisService:
                         SynthesisService._persist_legacy_task(
                             state, project, "cancelled"
                         )
+                    state.notify()
+                    return
+                if state.shutdown_requested:
+                    # 段边界协作「应用关闭」：不置任何终态、不算取消，直接返回。
+                    # 由 Runtime 在确认 worker 已停后落库 ``interrupted``（保留进度）。
+                    # 优先级低于 cancel：用户已显式取消时保留 ``cancelled`` 语义。
+                    state.append_log("⏹ 应用关闭，合成在段边界中断")
                     state.notify()
                     return
 
