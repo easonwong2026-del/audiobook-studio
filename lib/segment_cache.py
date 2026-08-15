@@ -361,49 +361,132 @@ def _public_engine_snapshot(value: Any) -> dict[str, Any]:
         return {}
 
 
-def _task_engine_provenance(project_name: str) -> dict[str, Any]:
-    """Return the newest production task's frozen engine snapshot (task level).
+def _task_covers_segment(record: Any, seg_id: str, segment_chapters: dict[str, str] | None) -> bool:
+    """Whether a durable task's scope includes the segment.
+
+    ``all`` scopes cover every segment; explicit ``segment_ids`` are matched
+    directly; ``chapter_ids`` requires the segment→chapter mapping loaded from
+    the project script.  A chapter-scoped task whose mapping is unavailable
+    (unreadable project) is treated as non-covering so a segment is never
+    attributed to an engine it cannot be proven to belong to.
+    """
+    scope = getattr(record, "scope", None)
+    scope = scope if isinstance(scope, dict) else {}
+    if scope.get("all"):
+        return True
+    seg_ids = {str(item) for item in scope.get("segment_ids", []) if str(item).strip()}
+    if seg_id in seg_ids:
+        return True
+    chapter_ids = {str(item) for item in scope.get("chapter_ids", []) if str(item).strip()}
+    if chapter_ids and segment_chapters is not None:
+        return segment_chapters.get(seg_id) in chapter_ids
+    return False
+
+
+def _task_needs_chapter_membership(record: Any, seg_id: str) -> bool:
+    """Whether a task's scope is chapter-based (needs the script mapping)."""
+    scope = getattr(record, "scope", None)
+    scope = scope if isinstance(scope, dict) else {}
+    if scope.get("all"):
+        return False
+    seg_ids = {str(item) for item in scope.get("segment_ids", []) if str(item).strip()}
+    if seg_id in seg_ids:
+        return False
+    return bool(scope.get("chapter_ids"))
+
+
+def _project_segment_chapters(project_name: str) -> dict[str, str] | None:
+    """Return ``{seg_id: chapter_id}`` for a project, or None when unreadable."""
+    try:
+        from repositories.project_repo import ProjectRepository
+        from . import script_loader
+
+        _meta, script, _bindings = ProjectRepository.load_project(project_name)
+        _voices, chapters = script_loader.resolve_collections(script)
+    except Exception:
+        return None
+    mapping: dict[str, str] = {}
+    for chapter in chapters:
+        if not isinstance(chapter, dict):
+            continue
+        chapter_id = str(chapter.get("id") or "").strip()
+        for segment in chapter.get("segments", []):
+            if isinstance(segment, dict):
+                segment_id = str(segment.get("id") or "").strip()
+                if segment_id:
+                    mapping[segment_id] = chapter_id
+    return mapping
+
+
+def _task_engine_provenance(
+    project_name: str,
+    seg_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return frozen engine snapshots of the project's synthesis tasks.
+
+    Candidates are ordered newest→oldest and deduplicated by cache_identity.
+    When ``seg_id`` is given only tasks whose durable scope covers that segment
+    contribute, so a mixed-engine project (e.g. chapters 1-10 under v2, then
+    11-20 under v2.5) resolves each segment with the engine that actually
+    produced it instead of the newest project engine.
 
     A short TTL cache keeps per-segment review loops from re-reading the
-    SQLite task table for every segment.  Tasks are durable and engine
-    snapshots are frozen at creation, so a 10s cache cannot serve stale data
-    that changes the correctness of a review/export lookup.  The cache key
-    includes the data dir so parallel test workspaces never collide.
+    SQLite task table for every segment.  Task creation/deletion and
+    engine-sensitive task completion explicitly invalidate the cache (see
+    ``invalidate_task_engine_cache``), so a freshly created production task is
+    recognized immediately even inside the TTL window.
     """
     key = str(project_name or "").strip()
     if not key:
-        return {}
+        return []
     from . import config as _cfg
 
     cache_key = f"{_cfg.get_data_dir()}|{key}"
     now = time.monotonic()
     cached = _TASK_ENGINE_CACHE.get(cache_key)
     if cached is not None and now - cached[0] < _TASK_ENGINE_CACHE_TTL:
-        return cached[1]
-    try:
-        from repositories.task_repo import TaskRepository
+        payload = cached[1]
+    else:
+        try:
+            from repositories.task_repo import TaskRepository
 
-        records = TaskRepository.list_tasks(
-            project=key or None,
-            task_type="synthesis",
-        )
-    except Exception:
-        return {}
+            records = TaskRepository.list_tasks(
+                project=key or None,
+                task_type="synthesis",
+            )
+        except Exception:
+            records = []
+        payload: dict[str, Any] = {"records": records, "segment_chapters": None}
+        _TASK_ENGINE_CACHE[cache_key] = (now, payload)
+        if len(_TASK_ENGINE_CACHE) > 128:
+            for stale_key in [k for k, v in _TASK_ENGINE_CACHE.items() if now - v[0] >= _TASK_ENGINE_CACHE_TTL]:
+                _TASK_ENGINE_CACHE.pop(stale_key, None)
+
+    records = payload.get("records") or []
+    segment_chapters: dict[str, str] | None = None
+    if seg_id:
+        need_chapters = any(_task_needs_chapter_membership(record, seg_id) for record in records)
+        if need_chapters:
+            segment_chapters = payload.get("segment_chapters")
+            if segment_chapters is None:
+                segment_chapters = _project_segment_chapters(key)
+                payload["segment_chapters"] = segment_chapters
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
     def _created_at(record: Any) -> str:
         return str(getattr(record, "created_at", "") or "")
-    records.sort(key=_created_at, reverse=True)
-    result: dict[str, Any] = {}
-    for record in records:
+
+    for record in sorted(records, key=_created_at, reverse=True):
+        if seg_id and not _task_covers_segment(record, seg_id, segment_chapters):
+            continue
         options = getattr(record, "options", None)
         if isinstance(options, dict) and isinstance(options.get("engine_snapshot"), dict):
             snapshot = _public_engine_snapshot(options["engine_snapshot"])
-            if snapshot.get("cache_identity"):
-                result = snapshot
-                break
-    _TASK_ENGINE_CACHE[cache_key] = (now, result)
-    if len(_TASK_ENGINE_CACHE) > 128:
-        for stale_key in [k for k, v in _TASK_ENGINE_CACHE.items() if now - v[0] >= _TASK_ENGINE_CACHE_TTL]:
-            _TASK_ENGINE_CACHE.pop(stale_key, None)
+            identity = snapshot.get("cache_identity")
+            if identity and identity not in seen:
+                seen.add(identity)
+                result.append(snapshot)
     return result
 
 
@@ -412,9 +495,41 @@ _TASK_ENGINE_CACHE_TTL = 10.0
 _TASK_ENGINE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
+def invalidate_task_engine_cache(project_name: str) -> None:
+    """Drop the TTL provenance cache entry for one project.
+
+    Called when a new production/repair task is created, a task is deleted, or
+    an engine-sensitive task reaches a terminal state.  Without this a freshly
+    created task could be invisible to provenance lookups for up to the 10s
+    TTL window, mis-attributing a segment to an older engine.
+    """
+    key = str(project_name or "").strip()
+    if not key:
+        return
+    try:
+        from . import config as _cfg
+
+        cache_key = f"{_cfg.get_data_dir()}|{key}"
+    except Exception:
+        return
+    _TASK_ENGINE_CACHE.pop(cache_key, None)
+
+
 def project_task_engine_snapshot(project_name: str) -> dict[str, Any]:
     """Public wrapper: newest production task's frozen engine snapshot."""
-    return _task_engine_provenance(project_name)
+    profiles = _task_engine_provenance(project_name)
+    return profiles[0] if profiles else {}
+
+
+def project_production_engines(project_name: str) -> list[dict[str, Any]]:
+    """Distinct frozen engine snapshots across all of a project's synthesis
+    tasks, newest first.
+
+    Empty list when the project has no production task provenance.  Used by
+    the UI to display the real historical production engine(s) — never the
+    runtime current engine and never the Settings default.
+    """
+    return _task_engine_provenance(project_name, seg_id=None)
 
 
 def _revision_engine_provenance(project_name: str, seg_id: str) -> dict[str, Any]:
@@ -449,7 +564,9 @@ def _engine_candidates(
     An explicit snapshot is authoritative: when present it short-circuits the
     provenance queries so plan/start never mix a caller's frozen engine with
     task/revision history.  Without an explicit snapshot the resolver consults
-    segment revision provenance, then task provenance, then Settings default.
+    segment revision provenance, then *every* task-level engine that covers
+    this segment (newest→oldest, so a mixed-engine project resolves each
+    segment with the engine that actually produced it), then Settings default.
     """
     from .tts_profile import resolve_profile
 
@@ -463,12 +580,12 @@ def _engine_candidates(
         revision_profile = _revision_engine_provenance(project_name, seg_id)
         if revision_profile.get("cache_identity"):
             candidates.append((revision_profile, "revision"))
-        task_profile = _task_engine_provenance(project_name)
-        if task_profile.get("cache_identity") and not any(
-            item[0].get("cache_identity") == task_profile["cache_identity"]
-            for item in candidates
-        ):
-            candidates.append((task_profile, "task"))
+        for task_profile in _task_engine_provenance(project_name, seg_id):
+            if task_profile.get("cache_identity") and not any(
+                item[0].get("cache_identity") == task_profile["cache_identity"]
+                for item in candidates
+            ):
+                candidates.append((task_profile, "task"))
     if include_settings_default:
         settings_profile = resolve_profile({})
         if settings_profile.get("cache_identity") and not any(
@@ -498,10 +615,12 @@ def resolve_segment_artifact(
     """Resolve the segment WAV using unified provenance-aware lookup.
 
     Engine provenance priority: explicit engine_snapshot > segment revision
-    provenance > latest production task provenance > Settings default.  The
-    Settings default is only ever a *candidate* and never overrides a real
-    historical provenance, so yesterday's IndexTTS2 audio remains playable
-    even after Settings switches to IndexTTS 2.5.
+    provenance > task-level engine candidates (every production task covering
+    this segment, newest→oldest) > Settings default.  The Settings default is
+    only ever a *candidate* and never overrides a real historical provenance,
+    so yesterday's IndexTTS2 audio remains playable even after Settings
+    switches to IndexTTS 2.5, and a mixed-engine project resolves each segment
+    with the engine that actually produced it.
 
     Compatibility classes tried in order:
       1. engine-aware ``{seg_id}_{md5(...,speaker,engine)}.wav``

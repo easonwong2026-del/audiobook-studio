@@ -23,6 +23,7 @@ from lib import (
     config,
     project_paths,
     script_loader,
+    segment_cache,
     voice_lib,
 )
 from lib import dataframe_style as df_style
@@ -190,7 +191,12 @@ def open_project(name, ss):
 
 
 def refresh_top_status(ss):
-    """O11：刷新顶部全局状态栏文本（项目 / 章节 / 进度 / 引擎加载状态）。"""
+    """O11：刷新顶部全局状态栏文本（项目 / 章节 / 进度 / 引擎状态）。
+
+    生产引擎展示语义（P1）：顶部必须区分「项目生产引擎」（来自该项目生产
+    task 的 frozen engine provenance）与「Runtime 当前引擎」（实际加载的
+    引擎）。绝不把 runtime current 或 Settings default 伪装成项目使用过的引擎。
+    """
     if not ss or not ss.project:
         return "*等待打开项目…*"
     try:
@@ -204,22 +210,10 @@ def refresh_top_status(ss):
         total = getattr(meta, "total_segments", 0)
         title = script.get("meta", {}).get("title", ss.project)
         health = ProductionJobService.get_runtime_health()
-        engine_state = str(health.get("engine_state") or "unknown")
-        actual_engine = health if health.get("engine_identity") else {}
-        default_engine = health.get("global_default_engine") or _global_default_engine()
-        selected_engine = actual_engine or default_engine
-        engine_version = str(selected_engine.get("engine_version") or "")
-        engine_identity = str(selected_engine.get("engine_identity") or "")
-        precision = str(selected_engine.get("precision") or "")
-        runtime_label = {
-            "ready": "Ready", "loading": "Loading", "recovering": "Recovering",
-            "error": "Error", "unknown": "Unknown",
-        }.get(engine_state, engine_state)
-        engine_state = " · ".join(item for item in (_engine_name(engine_identity) or engine_version, precision, runtime_label) if item)
-        if not engine_state:
-            engine_state = "Unknown"
+        project_engine_text = _project_production_engine_text(ss.project)
+        runtime_engine_text = _runtime_engine_text(health)
         return (f"📖 **{title}** · {chapters} 章 · {done}/{total} 段 · "
-                f"生产引擎: {engine_state}")
+                f"{project_engine_text} · Runtime：{runtime_engine_text}")
     except Exception as exc:
         return f"📖 {ss.project}（状态读取失败：{exc}）"
 
@@ -317,6 +311,47 @@ def _global_default_engine() -> dict[str, Any]:
         return profile if isinstance(profile, dict) else {}
     except (OSError, RuntimeError, TypeError, ValueError):
         return {}
+
+
+def _project_production_engine_text(project_name: str) -> str:
+    """Describe the project's *real historical* production engine(s).
+
+    The source is production task provenance only — never the runtime current
+    engine and never the Settings default.  A mixed-engine project shows every
+    distinct engine it actually used (e.g. "IndexTTS 2 / 2.5") instead of
+    claiming a single one.
+    """
+    try:
+        engines = segment_cache.project_production_engines(project_name)
+    except Exception:
+        engines = []
+    names = [
+        name for name in (
+            _engine_name(engine.get("engine_identity") or engine.get("engine_version"))
+            for engine in engines
+            if isinstance(engine, dict)
+        ) if name
+    ]
+    if not names:
+        return "项目引擎：尚无生产记录"
+    return f"项目引擎：{' / '.join(names)}"
+
+
+def _runtime_engine_text(health: dict[str, Any]) -> str:
+    """Render only the actual runtime engine + state (never Settings/project)."""
+    state = str(health.get("engine_state") or "unknown")
+    actual = health if health.get("engine_identity") else {}
+    identity = _engine_name(
+        actual.get("engine_identity") or actual.get("engine_version") or ""
+    )
+    precision = str(actual.get("precision") or "")
+    state_label = {
+        "ready": "Ready", "loading": "Loading", "recovering": "Recovering",
+        "error": "Error", "unknown": "Unknown",
+    }.get(state, state)
+    if not identity:
+        return state_label
+    return " · ".join(item for item in (identity, precision, state_label) if item)
 
 
 def _engine_label(profile: Any) -> str:
@@ -460,17 +495,20 @@ def refresh_production_task(ss):
 
 
 def refresh_production_engine_status(_ss=None):
-    """Render only the runtime-owned engine identity for the production header."""
+    """Render project production engine vs runtime current engine.
+
+    The header must not claim the runtime current (or Settings default) is the
+    project's production engine.  ``_ss`` is the Gradio session state; when a
+    project is open its historical task provenance is shown.
+    """
     health = ProductionJobService.get_runtime_health()
-    state = str(health.get("engine_state") or "unknown")
-    actual_engine = health if health.get("engine_identity") else {}
-    selected_engine = actual_engine or health.get("global_default_engine") or _global_default_engine()
-    identity = _engine_name(
-        selected_engine.get("engine_identity") or selected_engine.get("engine_version") or "unknown"
+    project = getattr(_ss, "project", None) if _ss is not None else None
+    project_text = (
+        _project_production_engine_text(project)
+        if project else "项目引擎：—"
     )
-    precision = str(selected_engine.get("precision") or "")
-    state_label = {"ready": "Ready", "loading": "Loading", "recovering": "Recovering", "error": "Error", "unknown": "Unknown"}.get(state, state)
-    return f"生产引擎\n{identity} · {precision or '—'} · {state_label}"
+    runtime_text = _runtime_engine_text(health)
+    return f"{project_text}\nRuntime：{runtime_text}"
 
 
 def refresh_production_task_tick(ss):

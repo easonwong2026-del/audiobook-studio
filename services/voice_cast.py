@@ -563,6 +563,56 @@ class VoiceCastResolver:
         raise VoiceCastError("ROLE_NOT_IN_ROSTER", "角色不在 Character Roster 中", name=requested_name, role_id=requested_id or None)
 
     @classmethod
+    def resolve_segment_speaker_fingerprint(
+        cls,
+        project_name: str,
+        segment: dict[str, Any] | None = None,
+        *,
+        role_id: str | None = None,
+        role_name: str | None = None,
+    ) -> str | None:
+        """Return the content fingerprint of the voice bound to a segment's role.
+
+        Voice Cast projects resolve ``segment.role_id`` (falling back to
+        ``segment.role`` / ``segment.speaker`` canonical names) to the active
+        ``role_bindings`` entry, then compute the SHA-256 content fingerprint
+        of its ``project_voice_path``.  Legacy (non-Voice-Cast) projects return
+        ``None`` so their speaker-agnostic caches keep their historical keys.
+
+        Used by plan/retry accounting so a done segment produced under a Voice
+        Cast binding is matched with its real speaker-aware cache key instead
+        of being reported as remaining / retryable.
+        """
+        project_dir = _project_dir(project_name)
+        if not os.path.isfile(os.path.join(project_dir, "voice_cast.json")):
+            return None
+        segment = segment if isinstance(segment, dict) else {}
+        requested_id = str(
+            role_id if role_id is not None else segment.get("role_id") or ""
+        ).strip()
+        requested_name = str(
+            role_name if role_name is not None
+            else segment.get("role") or segment.get("speaker") or ""
+        ).strip()
+        bindings = ProjectRepository.load_bindings(project_dir)
+        role_bindings = bindings.get("role_bindings", {}) if isinstance(bindings, dict) else {}
+        binding = role_bindings.get(requested_id)
+        if not isinstance(binding, dict) and requested_name:
+            binding = next(
+                (item for item in role_bindings.values()
+                 if isinstance(item, dict) and item.get("role_name") == requested_name),
+                None,
+            )
+        if not isinstance(binding, dict):
+            return None
+        path = str(binding.get("project_voice_path") or "")
+        if not path:
+            return None
+        if not os.path.isabs(path):
+            path = os.path.join(project_dir, path)
+        return segment_cache.speaker_fingerprint_for_path(path)
+
+    @classmethod
     def _cast_validation(cls, project_name: str, cast: Any = None) -> tuple[dict[str, Any], dict[str, dict[str, Any]], dict[str, Any] | None]:
         roster_document = _read_roster(project_name)
         roster = _roster_map(roster_document)

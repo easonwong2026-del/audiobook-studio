@@ -362,6 +362,33 @@ class ProductionJobService:
                 "error": str(exc),
             }
 
+    @staticmethod
+    def _segment_speaker_fingerprint(
+        project_name: str,
+        segment_obj: dict[str, Any] | None,
+        cache: dict[str, str | None],
+    ) -> str | None:
+        """Resolve a segment's Voice Cast speaker fingerprint (cached per role).
+
+        ``segment_cache.speaker_fingerprint_for_path`` hashes the voice file
+        (SHA-256), so plan/retry must not re-hash the same file for every
+        segment of the same role.  The per-call ``cache`` is keyed by the
+        segment's role identity (role_id, then role/speaker name) and lives for
+        exactly one plan/retry invocation, so a later rebind is never hidden.
+        """
+        segment_obj = segment_obj or {}
+        role_key = str(
+            segment_obj.get("role_id")
+            or segment_obj.get("role")
+            or segment_obj.get("speaker")
+            or ""
+        ).strip()
+        if role_key not in cache:
+            cache[role_key] = VoiceCastResolver.resolve_segment_speaker_fingerprint(
+                project_name, segment_obj
+            )
+        return cache[role_key]
+
     @classmethod
     def plan(cls, project_name: str, scope: Any = None, options: Any = None) -> dict[str, Any]:
         """Validate a production scope without creating a task."""
@@ -444,6 +471,7 @@ class ProductionJobService:
         completed = 0
         failed_ids: list[str] = []
         remaining = 0
+        fingerprint_cache: dict[str, str | None] = {}
         for segment_id in selected_ids:
             persisted = str(getattr(meta, "segments_status", {}).get(segment_id, "pending"))
             segment_obj = segment_map.get(segment_id)
@@ -455,7 +483,9 @@ class ProductionJobService:
                 speech_rate=(segment_obj or {}).get("speech_rate", 1.0),
                 pinyin_hints=(segment_obj or {}).get("pinyin_hints"),
                 director_metadata=segment_cache.director_metadata_for(segment_obj or {}),
-                speaker_fingerprint=None,
+                speaker_fingerprint=cls._segment_speaker_fingerprint(
+                    name, segment_obj, fingerprint_cache
+                ),
                 engine_snapshot=engine_snapshot,
                 project_name=name,
                 allow_legacy_fallback=True,
@@ -976,6 +1006,7 @@ class ProductionJobService:
             else None
         )
         retryable: list[str] = []
+        fingerprint_cache: dict[str, str | None] = {}
         for segment_id in selected:
             segment_obj = segment_map.get(segment_id)
             if meta.segments_status.get(segment_id) == "failed":
@@ -989,7 +1020,9 @@ class ProductionJobService:
                 speech_rate=(segment_obj or {}).get("speech_rate", 1.0),
                 pinyin_hints=(segment_obj or {}).get("pinyin_hints"),
                 director_metadata=segment_cache.director_metadata_for(segment_obj or {}),
-                speaker_fingerprint=None,
+                speaker_fingerprint=cls._segment_speaker_fingerprint(
+                    record.project, segment_obj, fingerprint_cache
+                ),
                 engine_snapshot=record_engine,
                 project_name=record.project,
                 allow_any_variant=False,
