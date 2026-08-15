@@ -195,6 +195,15 @@ class ProductionRuntime:
         This is called only after the client-side active-task guard.  The
         runtime repeats the guard at its ownership boundary so a stale UI
         request can never switch an engine while synthesis/export is active.
+
+        Idempotent switch (P0-1): when the runtime is already ``ready`` and
+        its current engine profile matches the requested target, the engine
+        switch is treated as already satisfied — no ``recycle()`` (no
+        ``reset_engine`` / ``init_engine``), no generation or recovery bump.
+        This is safe because it only guards *controlled* Settings switches /
+        command consumption; the self-healing recovery path calls
+        ``RuntimeEngineLifecycle.recycle`` directly and still force-reloads
+        the same profile when a segment failed.
         """
         with self._state_lock:
             if self._current_state is not None:
@@ -203,11 +212,15 @@ class ProductionRuntime:
                 raise RuntimeError("导出任务仍在运行，不能切换 TTS 引擎")
         if self._durable_tts_task_active():
             raise RuntimeError("当前有生产任务正在运行，不能切换 TTS 引擎")
-        from lib.tts_profile import resolve_profile
+        from lib.tts_profile import profile_matches, resolve_profile
 
         raw = str(engine_id or "").lower()
         version = "2.5" if ("25" in raw or "2.5" in raw) else "2"
-        self._engine.recycle(resolve_profile({"engine_version": version}))
+        target = resolve_profile({"engine_version": version})
+        current = self._engine.snapshot()
+        if str(current.get("state") or "") == "ready" and profile_matches(current, target):
+            return True
+        self._engine.recycle(target)
         return True
 
     @staticmethod
@@ -1354,11 +1367,12 @@ class ProductionRuntime:
         role: str,
         artifact_dir: str,
         engine_profile: dict[str, Any] | None = None,
+        progress_cb: Any = None,
     ) -> str:
         """Runtime-owned direct worker; public callers submit through RuntimeTTSService."""
         from lib import config
 
-        self._engine.ensure_ready(engine_profile)
+        self._engine.ensure_ready(engine_profile, progress_cb=progress_cb)
 
         destination = artifact_dir or os.path.join(
             config.get_preview_dir(),
@@ -1395,12 +1409,13 @@ class ProductionRuntime:
         initialize: bool = False,
         validate_output: bool = False,
         engine_profile: dict[str, Any] | None = None,
+        progress_cb: Any = None,
     ) -> list[dict[str, Any]]:
         """Runtime-owned isolated supplement worker."""
         from lib import config
 
         if initialize:
-            self._engine.ensure_ready(engine_profile)
+            self._engine.ensure_ready(engine_profile, progress_cb=progress_cb)
 
         destination = artifact_dir or os.path.join(
             config.get_preview_dir(),
@@ -1424,11 +1439,20 @@ class ProductionRuntime:
         from lib import tts_engine
 
         results: list[dict[str, Any]] = []
-        for index, raw_text in enumerate(payload.get("lines", [])):
+        lines = list(payload.get("lines", []))
+        total = max(len(lines), 1)
+        for index, raw_text in enumerate(lines):
+            line_started = time.monotonic()
             if callable(heartbeat):
                 heartbeat()
             text = str(raw_text or "").strip()
             output = os.path.join(destination, f"{index + 1:03d}.wav")
+            if progress_cb is not None:
+                progress_cb(
+                    "supplement_infer_start",
+                    line_index=index,
+                    line_total=total,
+                )
             if not text:
                 results.append({
                     "index": index,
@@ -1466,6 +1490,14 @@ class ProductionRuntime:
                     "status": "ok",
                     "error": "",
                 })
+                if progress_cb is not None:
+                    progress_cb(
+                        "supplement_infer_done",
+                        line_index=index,
+                        line_total=total,
+                        status="ok",
+                        elapsed_ms=int((time.monotonic() - line_started) * 1000),
+                    )
             except Exception as exc:
                 try:
                     os.remove(temporary)
@@ -1478,6 +1510,14 @@ class ProductionRuntime:
                     "status": "failed",
                     "error": f"❌ 句{index + 1}: {str(exc)[:120]}",
                 })
+                if progress_cb is not None:
+                    progress_cb(
+                        "supplement_infer_done",
+                        line_index=index,
+                        line_total=total,
+                        status="failed",
+                        elapsed_ms=int((time.monotonic() - line_started) * 1000),
+                    )
         tts_engine.empty_cache()
         return results
 
@@ -1513,6 +1553,69 @@ class ProductionRuntime:
             project=record.project,
         )
         current = running or record
+        options = record.options if isinstance(record.options, dict) else {}
+        snapshot = options.get("engine_snapshot") if isinstance(options.get("engine_snapshot"), dict) else None
+
+        def _task_progress(event: str, **fields: Any) -> None:
+            """Persist one structured phase into the task log + runtime log.
+
+            Fields are path-free identity/elapsed data; the same event also
+            goes through ``_runtime_event`` so the runtime log carries the
+            full chain (``engine_load_start`` / ``engine_init_done`` /
+            ``supplement_infer_start`` / …).
+            """
+            nonlocal current
+            fields = dict(fields)
+            fields.setdefault("task_id", record.task_id)
+            fields.setdefault("owner", self.owner_id)
+            detail = " ".join(
+                f"{key}={value}"
+                for key, value in fields.items()
+                if value not in (None, "")
+            )
+            try:
+                progress = dict(current.progress or {})
+                log_lines = list(current.log_lines or [])
+                log_lines.append(f"[{event}] {detail}".strip())
+                updated = TaskRepository.persist_runtime_state(
+                    record.task_id,
+                    self.owner_id,
+                    status="running",
+                    progress=progress,
+                    failed_segment_ids=list(record.failed_segment_ids or []),
+                    error_summary="",
+                    log_lines=log_lines,
+                    project=record.project,
+                )
+                if updated is not None:
+                    current = updated
+            except Exception:
+                logger.debug("记录 utility 任务阶段失败: %s", event, exc_info=True)
+            _runtime_event(event, **fields)
+
+        # Engine intent diagnostics: if the claimed task needs a cold load or a
+        # profile switch, say so *before* the blocking reload so the web wait
+        # loop can render "正在加载 IndexTTS 2.5…" instead of dead silence.
+        try:
+            from lib.tts_profile import profile_matches, resolve_profile
+
+            engine_before = self._engine.snapshot()
+            desired = resolve_profile(snapshot or {})
+            loaded_id = str(engine_before.get("engine_identity") or "")
+            target_id = str(desired.get("engine_identity") or "")
+            engine_state = str(engine_before.get("state") or "unknown")
+            match = engine_state == "ready" and profile_matches(engine_before, desired)
+            _task_progress(
+                "engine_intent",
+                current_engine_identity=loaded_id or "none",
+                target_engine_identity=target_id or "none",
+                current_engine_version=str(engine_before.get("engine_version") or ""),
+                target_engine_version=str(desired.get("engine_version") or ""),
+                profile_match="true" if match else "false",
+                engine_state=engine_state,
+            )
+        except Exception:  # pragma: no cover - diagnostics must never break the task
+            logger.debug("引擎意图诊断失败: %s", record.task_id, exc_info=True)
         try:
             if record.task_type == "voice_preview":
                 preview = self.run_voice_preview_direct(
@@ -1520,6 +1623,7 @@ class ProductionRuntime:
                     str(record.options.get("role") or "voice"),
                     artifact_dir,
                     record.options.get("engine_snapshot") if isinstance(record.options, dict) else None,
+                    progress_cb=_task_progress,
                 )
                 result: dict[str, Any] = {"preview_path": preview}
                 completed, failed = 3, 0
@@ -1533,6 +1637,7 @@ class ProductionRuntime:
                     initialize=True,
                     validate_output=True,
                     engine_profile=record.options.get("engine_snapshot") if isinstance(record.options, dict) else None,
+                    progress_cb=_task_progress,
                 )
                 result = {"items": items}
                 completed = sum(item.get("status") == "ok" for item in items)
@@ -1765,6 +1870,50 @@ def _terminate_pid(pid: int, timeout: float = 10.0) -> None:
         logger.exception("POSIX 终止 Runtime 进程失败 pid=%s", pid)
 
 
+class RuntimeStartFailedError(RuntimeError):
+    """The freshly spawned runtime exited before it could own the task.
+
+    Raised by ``ProductionRuntimeClient.confirm_started`` when the exact
+    process this client spawned has already exited while the durable task is
+    still pending/unclaimed.  The client must fail fast instead of waiting
+    out a full ``_wait`` timeout for a runtime that never started.
+
+    Attributes carried for diagnostics (stable error code ``RUNTIME_START_FAILED``):
+    ``task_id`` / ``spawned_pid`` / ``bootstrap_log`` / ``runtime_log`` /
+    ``last_runtime_state``.
+    """
+
+    code = "RUNTIME_START_FAILED"
+
+    def __init__(
+        self,
+        *,
+        task_id: str,
+        spawned_pid: int | None,
+        bootstrap_log: str,
+        runtime_log: str,
+        last_runtime_state: str,
+        detail: str = "",
+    ) -> None:
+        self.task_id = str(task_id or "")
+        self.spawned_pid = int(spawned_pid) if spawned_pid else None
+        self.bootstrap_log = str(bootstrap_log or "")
+        self.runtime_log = str(runtime_log or "")
+        self.last_runtime_state = str(last_runtime_state or "unknown")
+        self.detail = str(detail or "")
+        parts = [
+            "运行时进程启动失败（RUNTIME_START_FAILED）",
+            f"task_id={self.task_id}",
+            f"spawned_pid={self.spawned_pid or 'unknown'}",
+            f"bootstrap_log={self.bootstrap_log}",
+            f"runtime_log={self.runtime_log}",
+            f"last_runtime_state={self.last_runtime_state}",
+        ]
+        if self.detail:
+            parts.append(f"detail={self.detail}")
+        super().__init__(" | ".join(parts))
+
+
 class ProductionRuntimeClient:
     """Client-side lifecycle helper; task data itself always flows through SQLite."""
 
@@ -1942,6 +2091,81 @@ class ProductionRuntimeClient:
             " ".join(command),
         )
         return child.pid
+
+    @classmethod
+    def confirm_started(
+        cls,
+        task_id: str,
+        spawned_pid: int | None = None,
+        timeout: float = 30.0,
+    ) -> None:
+        """Bounded startup confirmation for a freshly spawned runtime.
+
+        Only meaningful right after ``ensure_running()`` returned a new pid
+        in process mode.  Waits up to ``timeout`` seconds for any of the
+        following success signals:
+
+        * the durable task is no longer pending/unclaimed (a worker claimed
+          it — ``owner_id`` set, or status moved off pending/queued);
+        * ``read_runtime_engine_status`` reports a live runtime (fresh
+          ``runtime_state`` in starting/running/recovering).
+
+        Failure: the exact spawned process handle has exited while the task
+        is still pending/unclaimed → raise ``RuntimeStartFailedError``
+        immediately instead of letting ``_wait`` block for up to its full
+        timeout (a child that dies during Python bootstrap never claims the
+        task, and a 3600s wait would look like a hang).
+
+        Deliberately does NOT wait for ``engine_state=ready``: "runtime
+        process started" ≠ "model initialized".  A cold IndexTTS 2.5 load
+        takes minutes and must never be misreported as a startup failure.
+        """
+        from lib import config
+
+        deadline = time.monotonic() + max(float(timeout), 2.0)
+        log_dir = os.path.join(config.get_data_dir(), "logs")
+        bootstrap_log = os.path.join(log_dir, "production_runtime_bootstrap.log")
+        runtime_log = os.path.join(log_dir, "production_runtime.log")
+        while time.monotonic() < deadline:
+            # Success 1: the task has been claimed / moved off pending.
+            record = TaskRepository.load_task(task_id)
+            if record is not None:
+                if str(record.status or "") not in {"pending", "queued"} or (
+                    record.owner_id or ""
+                ):
+                    return
+            # Success 2: the runtime worker published a live status.
+            status = read_runtime_engine_status()
+            if (
+                str(status.get("runtime_state") or "") in {"starting", "running", "recovering"}
+                and not bool(status.get("status_stale"))
+            ):
+                return
+            # Failure: our exact spawned child exited while nothing claimed
+            # the task yet.  Never use this against a pre-existing runtime
+            # (ensure_running returned None then, so we are not called).
+            with _PROCESS_LOCK:
+                proc = _RUNTIME_PROCESS
+            if proc is not None and proc.poll() is not None:
+                raise RuntimeStartFailedError(
+                    task_id=task_id,
+                    spawned_pid=getattr(proc, "pid", None) or spawned_pid,
+                    bootstrap_log=bootstrap_log,
+                    runtime_log=runtime_log,
+                    last_runtime_state=str(status.get("runtime_state") or "unknown"),
+                    detail=f"spawned process exited with code {proc.returncode}",
+                )
+            time.sleep(0.1)
+        # Timeout with the child still alive: the runtime is booting (e.g.
+        # importing torch / publishing status).  This is NOT a startup
+        # failure — keep waiting through the normal _wait path.
+        logger.info(
+            "runtime_event=runtime_startup_confirmation_timeout "
+            "task_id=%s spawned_pid=%s elapsed=%.1fs",
+            task_id,
+            spawned_pid,
+            max(float(timeout), 2.0),
+        )
 
     @staticmethod
     def get_runtime_state(task_id: str) -> Optional[SynthesisState]:
@@ -2138,4 +2362,8 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["ProductionRuntime", "ProductionRuntimeClient"]
+__all__ = [
+    "ProductionRuntime",
+    "ProductionRuntimeClient",
+    "RuntimeStartFailedError",
+]

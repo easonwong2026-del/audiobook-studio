@@ -6,6 +6,8 @@ or initializes the TTS engine.
 """
 from __future__ import annotations
 
+import json
+import logging
 import os
 import time
 import uuid
@@ -19,12 +21,202 @@ from lib.tts_profile import resolve_profile
 
 from .production_runtime import ProductionRuntime, ProductionRuntimeClient
 
+logger = logging.getLogger(__name__)
 
 _TERMINAL = frozenset({"done", "error", "cancelled", "interrupted"})
 
 
+def _supplement_event(event: str, **fields: Any) -> None:
+    """Emit one structured web-side supplement event (path-free fields only)."""
+    parts = [f"{key}={value}" for key, value in fields.items() if value not in (None, "")]
+    logger.info("supplement_event=%s %s", event, " ".join(parts))
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _latest_progress_phase(record: TaskRecord) -> tuple[str, str] | None:
+    """Map the newest durable task log line to a UI progress (phase, message).
+
+    The runtime writes structured ``[engine_intent]`` / ``[engine_init_start]`` /
+    ``[engine_init_done]`` / ``[supplement_infer_start]`` lines while loading
+    or running; the web wait loop turns them into readable progress text.
+    """
+    lines = list(getattr(record, "log_lines", None) or [])
+    if not lines:
+        return None
+    line = str(lines[-1])
+    if "[engine_intent]" in line and "profile_match=false" in line:
+        identity = _value_of(line, "target_engine_identity") or "引擎"
+        version = _value_of(line, "target_engine_version") or ""
+        return "engine_loading", f"正在加载 {_engine_display(identity, version)}（引擎切换/首次加载）…"
+    if "[engine_init_start]" in line or "[engine_recycle_start]" in line:
+        identity = _value_of(line, "engine_identity") or "引擎"
+        version = _value_of(line, "engine_version") or ""
+        return "engine_loading", f"正在加载 {_engine_display(identity, version)}…"
+    if "[engine_reset_done]" in line:
+        return "engine_loading", "已释放旧引擎，正在加载新引擎…"
+    if "[engine_init_done]" in line:
+        elapsed = _value_of(line, "elapsed_ms")
+        identity = _value_of(line, "engine_identity") or "引擎"
+        suffix = f"（耗时 {int(elapsed) / 1000:.0f} 秒）" if elapsed else ""
+        return "engine_ready", f"引擎 {identity} 就绪{suffix}"
+    if "[supplement_infer_start]" in line:
+        index = _value_of(line, "line_index")
+        total = _value_of(line, "line_total")
+        if index is not None and total:
+            return "infer", f"正在生成第 {int(index) + 1}/{total} 句…"
+    return None
+
+
+def _value_of(line: str, key: str) -> str | None:
+    prefix = f"{key}="
+    for token in str(line).split():
+        if token.startswith(prefix):
+            value = token[len(prefix):].strip()
+            if value and value != "none":
+                return value
+    return None
+
+
+def _engine_display(identity: str, version: str) -> str:
+    label = {
+        "indextts:2": "IndexTTS 2",
+        "indextts:2.5": "IndexTTS 2.5",
+    }.get(str(identity or ""), str(identity or "") or str(version or "") or "引擎")
+    return f"{label}（{version}）" if version and label != version else label
+
+
+def _direct_progress_adapter(progress_cb: Any) -> Any:
+    """Bridge lifecycle ``(event, **fields)`` callbacks to ``(phase, message)``.
+
+    Used by the legacy/direct runtime path (no durable task) so the UI gets
+    the same progress text as the durable queue path.
+    """
+    if progress_cb is None:
+        return None
+
+    def _adapt(event: str, **fields: Any) -> None:
+        if event == "engine_init_start":
+            progress_cb(
+                "engine_loading",
+                f"正在加载 {_engine_display(fields.get('engine_identity'), fields.get('engine_version'))}…",
+            )
+        elif event == "engine_reset_done":
+            progress_cb("engine_loading", "已释放旧引擎，正在加载新引擎…")
+        elif event == "engine_init_done":
+            elapsed = fields.get("elapsed_ms")
+            identity = str(fields.get("engine_identity") or "")
+            suffix = f"（耗时 {int(elapsed) / 1000:.0f} 秒）" if elapsed else ""
+            progress_cb("engine_ready", f"引擎 {_engine_display(identity, '')} 就绪{suffix}")
+        elif event == "supplement_infer_start":
+            index = fields.get("line_index")
+            total = fields.get("line_total")
+            if index is not None and total:
+                progress_cb("infer", f"正在生成第 {int(index) + 1}/{total} 句…")
+
+    return _adapt
+
+
+def _runtime_current_profile() -> dict[str, Any] | None:
+    """GPU-free read of the singleton runtime's loaded engine profile.
+
+    Only a live runtime whose engine reached ``ready`` with a valid identity
+    counts as "current".  Returns ``None`` when the runtime is not running,
+    uninitialized, loading, recovering or error — callers then fall back to
+    the global default.  This never imports the model and never touches
+    ``lib.tts_engine``.
+    """
+    try:
+        from services.runtime_engine import read_runtime_engine_status
+
+        status = read_runtime_engine_status()
+    except Exception:  # pragma: no cover - best effort selection
+        return None
+    if not isinstance(status, dict):
+        return None
+    if str(status.get("engine_state") or "") != "ready":
+        return None
+    identity = str(status.get("engine_identity") or "")
+    if not identity:
+        return None
+    return {
+        "engine_backend": str(status.get("engine_backend") or ""),
+        "engine_version": str(status.get("engine_version") or ""),
+        "engine_identity": identity,
+        "model_identity": str(status.get("model_identity") or ""),
+        "precision": str(status.get("precision") or ""),
+        "device": str(status.get("device") or ""),
+    }
+
+
+def _pending_engine_switch_target() -> dict[str, Any] | None:
+    """Read the durable controlled recycle request, if one is pending.
+
+    The Settings handler persists ``runtime_engine_command.json`` (engine_id +
+    requested_at) *before* the singleton runtime consumes it on its next idle
+    tick.  While that file exists, the user has explicitly requested a switch
+    and the runtime has not finished it; a utility task must honor the
+    requested target instead of silently reusing the old loaded engine.
+    The engine_id → version mapping mirrors the runtime's own
+    ``request_engine_recycle`` exactly.  GPU-free: a pure file read, never
+    imports the model.
+    """
+    try:
+        from services.production_runtime import ProductionRuntime
+
+        path = ProductionRuntime._engine_command_path()
+        with open(path, encoding="utf-8") as fh:
+            command = json.load(fh)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError, ImportError):
+        return None
+    if not isinstance(command, dict):
+        return None
+    raw = str(command.get("engine_id") or "").strip().lower()
+    if not raw:
+        return None
+    version = "2.5" if ("25" in raw or "2.5" in raw) else "2"
+    return resolve_profile({"engine_version": version})
+
+
+def _select_utility_engine(
+    engine_profile: Any = None,
+) -> tuple[dict[str, Any], str]:
+    """Utility (preview/supplement) engine selection policy.
+
+    Priority: ``explicit`` engine_profile > ``runtime_switch_target`` (a
+    user-requested engine switch the runtime has not finished yet) >
+    ``runtime_current`` (the engine already loaded by the singleton runtime) >
+    ``global_default`` (settings).
+
+    Rationale (#38 regression): a supplement/preview task that freezes the
+    settings default while the runtime is warm with a *different* engine
+    forces a full ``reset_engine()`` + ``init_engine()`` reload on every
+    click.  A warm runtime must be reused unless the caller explicitly asks
+    for another engine.
+
+    A *pending controlled switch* sits above ``runtime_current``: after the
+    user clicks 应用引擎 the Settings handler persists a recycle request
+    before the runtime consumes it; during that window the runtime still
+    reports the old engine as ``ready``, so honoring ``runtime_current``
+    would silently generate with the engine the user just switched away
+    from.
+
+    Returns ``(profile, selection_source)`` where selection_source is one of
+    ``explicit`` / ``runtime_switch_target`` / ``runtime_current`` /
+    ``global_default``.  The caller then freezes the chosen profile into
+    ``engine_snapshot``; the snapshot never tracks later settings changes.
+    """
+    if engine_profile:
+        return resolve_profile(engine_profile), "explicit"
+    pending = _pending_engine_switch_target()
+    if pending is not None:
+        return pending, "runtime_switch_target"
+    current = _runtime_current_profile()
+    if current is not None:
+        return resolve_profile(current), "runtime_current"
+    return resolve_profile({}), "global_default"
 
 
 class RuntimeTTSBusyError(RuntimeError):
@@ -64,14 +256,32 @@ class RuntimeTTSService:
         return path
 
     @staticmethod
-    def _wait(task_id: str, timeout: float) -> TaskRecord:
+    def _wait(
+        task_id: str,
+        timeout: float,
+        progress_cb: Any = None,
+    ) -> TaskRecord:
+        """Block until the durable task reaches a terminal state.
+
+        ``progress_cb(phase, message)`` is invoked while polling with the
+        latest task log line / runtime engine state, so the UI can render
+        "正在加载 IndexTTS 2.5…" / "正在生成第 X/N 句" during a multi-minute
+        engine (re)load instead of appearing hung.
+        """
         deadline = time.monotonic() + max(float(timeout), 1.0)
+        last_phase = ""
         while time.monotonic() < deadline:
             record = TaskRepository.load_task(task_id)
-            if record is not None and record.status in _TERMINAL:
-                if record.status == "done":
-                    return record
-                raise RuntimeTTSError(record)
+            if record is not None:
+                if record.status in _TERMINAL:
+                    if record.status == "done":
+                        return record
+                    raise RuntimeTTSError(record)
+                if progress_cb is not None:
+                    phase = _latest_progress_phase(record)
+                    if phase and phase != last_phase:
+                        last_phase = phase
+                        progress_cb(*phase)
             time.sleep(0.05)
         record = TaskRepository.load_task(task_id)
         if record is None:
@@ -89,11 +299,25 @@ class RuntimeTTSService:
         options: dict[str, Any],
         total: int,
         timeout: float,
+        progress_cb: Any = None,
     ) -> TaskRecord:
         task_id = f"task_{uuid.uuid4().hex[:20]}"
         now = _now()
         options = dict(options or {})
-        options.setdefault("engine_snapshot", resolve_profile(options))
+        if "engine_snapshot" not in options:
+            # Uniform fallback for any caller that did not pre-freeze a
+            # snapshot: prefer the runtime's loaded engine over the settings
+            # default (same policy as synthesize_supplement / preview).
+            options["engine_snapshot"], _selection_source = _select_utility_engine(None)
+        engine = options["engine_snapshot"]
+        _supplement_event(
+            "task_created",
+            task_id=task_id,
+            task_type=task_type,
+            engine_version=str(engine.get("engine_version") or ""),
+            engine_identity=str(engine.get("engine_identity") or ""),
+            total=total,
+        )
         record = TaskRecord(
             task_id=task_id,
             task_type=task_type,
@@ -118,8 +342,49 @@ class RuntimeTTSService:
         outcome, durable = TaskRepository.create_runtime_task(record)
         if outcome == "active":
             raise RuntimeTTSBusyError(durable)
-        ProductionRuntimeClient.ensure_running()
-        return cls._wait(durable.task_id, timeout)
+        if progress_cb is not None:
+            progress_cb("runtime_ensure_requested", "正在等待运行时…")
+        _supplement_event(
+            "runtime_ensure_requested",
+            task_id=task_id,
+            task_type=task_type,
+        )
+        spawned_pid = ProductionRuntimeClient.ensure_running()
+        if spawned_pid is not None:
+            # 冷启动 fail-fast：刚 spawn 的 runtime 子进程必须在有限窗口内证明
+            # 存活（status live / 任务已被 claim）。若子进程立即退出且任务仍
+            # pending，直接抛 RUNTIME_START_FAILED，而不是在 _wait 里等满
+            # 最长 3600s。注意：只确认「worker 活着/拥有 runtime」，不要求
+            # 模型 ready——IndexTTS 2.5 冷加载数分钟不能误判为启动失败。
+            ProductionRuntimeClient.confirm_started(
+                durable.task_id,
+                spawned_pid=spawned_pid,
+            )
+        started = time.monotonic()
+        try:
+            result = cls._wait(durable.task_id, timeout, progress_cb=progress_cb)
+        except Exception:
+            if progress_cb is not None:
+                # P1-B：终态进度——把残留的「正在加载模型…」替换为失败终态。
+                progress_cb("error", "❌ 任务失败")
+            _supplement_event(
+                "task_error",
+                task_id=task_id,
+                task_type=task_type,
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+            )
+            raise
+        if progress_cb is not None:
+            # P1-B：终态进度——任务 done 后清空/替换「正在加载模型…」提示。
+            progress_cb("done", "✅ 任务完成")
+        _supplement_event(
+            "task_done",
+            task_id=task_id,
+            task_type=task_type,
+            status=str(result.status),
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+        )
+        return result
 
     @classmethod
     def test_voice_and_concat_wavs(
@@ -133,10 +398,18 @@ class RuntimeTTSService:
     ) -> str:
         """Create a complete three-sentence voice preview in the singleton runtime."""
         project = str(project_name or "").strip()
+        snapshot, selection_source = _select_utility_engine(engine_profile)
+        _supplement_event(
+            "utility_engine_selection",
+            task_type="voice_preview",
+            selection_source=selection_source,
+            engine_version=str(snapshot.get("engine_version") or ""),
+            engine_identity=str(snapshot.get("engine_identity") or ""),
+        )
         if not project or not TaskRepository.get_database_path(project, create=True):
             # Compatibility for isolated service tests without a real project.
             return ProductionRuntime().run_voice_preview_direct(
-                str(speaker_audio), str(role or "voice"), "", engine_profile
+                str(speaker_audio), str(role or "voice"), "", snapshot
             )
         task_id = f"preview_{uuid.uuid4().hex[:20]}"
         artifact_dir = cls._artifact_dir(project, "voice_previews", task_id)
@@ -147,7 +420,7 @@ class RuntimeTTSService:
             options={
                 "speaker_audio": os.path.abspath(str(speaker_audio)),
                 "role": str(role or "voice"),
-                "engine_snapshot": resolve_profile(engine_profile or {}),
+                "engine_snapshot": snapshot,
             },
             total=3,
             timeout=timeout,
@@ -171,20 +444,45 @@ class RuntimeTTSService:
         artifact_dir: str,
         timeout: float = 3600.0,
         engine_profile: dict[str, Any] | None = None,
+        progress_cb: Any = None,
     ) -> list[dict[str, Any]]:
         """Synthesize isolated supplement lines through the singleton runtime."""
         project = str(project_name or "").strip()
+        snapshot, selection_source = _select_utility_engine(engine_profile)
+        _supplement_event(
+            "utility_engine_selection",
+            task_type="supplement",
+            selection_source=selection_source,
+            engine_version=str(snapshot.get("engine_version") or ""),
+            engine_identity=str(snapshot.get("engine_identity") or ""),
+        )
         payload = {
             "role": str(role or ""),
             "lines": [str(item) for item in lines],
             "speaker_audio": str(speaker_audio),
             "overrides": dict(overrides or {}),
             "num_beams": max(int(num_beams or 2), 1),
-            "engine_snapshot": resolve_profile(engine_profile or {}),
+            "engine_snapshot": snapshot,
         }
+        engine = payload["engine_snapshot"]
+        _supplement_event(
+            "supplement_request_received",
+            task_type="supplement",
+            role=str(role or ""),
+            lines=len(lines),
+            engine_version=str(engine.get("engine_version") or ""),
+            engine_identity=str(engine.get("engine_identity") or ""),
+        )
+        if progress_cb is not None:
+            progress_cb("submitted", "已提交补录任务，正在等待运行时…")
         if not project or not TaskRepository.get_database_path(project, create=True):
             # Legacy/unit-test fixtures have no durable project queue.
-            return ProductionRuntime().run_supplement_direct(payload, artifact_dir, engine_profile=payload["engine_snapshot"])
+            return ProductionRuntime().run_supplement_direct(
+                payload,
+                artifact_dir,
+                engine_profile=payload["engine_snapshot"],
+                progress_cb=_direct_progress_adapter(progress_cb),
+            )
         record = cls._submit(
             project_name=project,
             task_type="supplement",
@@ -192,6 +490,7 @@ class RuntimeTTSService:
             options=payload,
             total=len(lines),
             timeout=timeout,
+            progress_cb=progress_cb,
         )
         result = record.progress.get("result", {}) if isinstance(record.progress, dict) else {}
         items = result.get("items", [])

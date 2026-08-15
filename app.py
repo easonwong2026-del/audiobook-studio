@@ -1851,12 +1851,17 @@ def do_supplement_parse_json(sup_json, ss):
 
 def do_supplement_synth(sup_role, sup_mode, sup_text, sup_json_role, sup_json_lines,
                         sup_emotion, sup_emo_alpha, sup_rate, sup_quality,
-                        sup_split_punct, sup_voice, ss):
+                        sup_split_punct, sup_voice, ss,
+                        progress: "gr.Progress" = None):
     """逐句补合成：按模式取（角色, 文本）→ 逐句 synthesize → 收集 wav + 逐句状态。
 
     输入模式（``sup_mode``）：
       - ``"paste"``：角色=``sup_role`` 下拉，文本=``sup_text`` 按行拆分（可选按标点切长段）；
       - ``"json"``：角色/文本来自解析小 JSON 的 state（``sup_json_role`` / ``sup_json_lines``）。
+
+    引擎加载/切换期间（IndexTTS 2.5 冷加载或 profile 切换可达数分钟）通过
+    ``progress`` 上报「已提交补录任务 / 正在加载引擎 / 正在生成第 X/N 句」，
+    避免点击后长时间无反馈。
 
     Returns:
         ``(sup_wavs state, 状态 markdown)``；状态 markdown 含逐句 ✅ / ❌ 句N 反馈。
@@ -1909,14 +1914,51 @@ def do_supplement_synth(sup_role, sup_mode, sup_text, sup_json_role, sup_json_li
         created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
         task_dir=task_dir,
     )
+    # 引擎加载/切换是多分钟级阻塞操作：#38 之后补录会在 Runtime 内做
+    # profile compliance（冷加载或 recycle）。把每个阶段透传为 Gradio 进度，
+    # 让用户在等待期间看到「正在加载 IndexTTS 2.5…」而不是“卡死”。
+    progress_phases: list[str] = []
+
+    def _supplement_progress(phase: str, message: str) -> None:
+        progress_phases.append(str(message or phase or ""))
+        if progress is not None:
+            try:
+                if phase in {"submitted", "runtime_ensure_requested", "engine_loading"}:
+                    progress(None, desc=str(message or "正在处理…"))
+                elif phase == "engine_ready":
+                    progress(0.99, desc=str(message or "引擎就绪"))
+                elif phase == "infer":
+                    progress(0.99, desc=str(message or "正在合成…"))
+                elif phase in {"done", "error"}:
+                    # 终态：清空/替换残留的「正在加载模型…」，进度条回到明确终态。
+                    progress(
+                        1.0,
+                        desc=str(
+                            message
+                            or ("✅ 任务完成" if phase == "done" else "❌ 任务失败")
+                        ),
+                    )
+            except Exception:  # pragma: no cover - progress is best effort
+                pass
+
     try:
         results = SupplementService.synthesize_lines(
             role=role, lines=lines, speaker_audio=speaker,
             overrides=overrides, num_beams=num_beams, task=task,
+            progress_cb=_supplement_progress,
         )
     except Exception as e:
         task.status = "error"
-        return [], f"❌ 补合成异常：{str(e)[:200]}"
+        hint = ""
+        if progress_phases:
+            hint = f"（阶段：{' → '.join(progress_phases[-3:])}）"
+        if progress is not None:
+            try:
+                # P1-B：失败也必须把残留的「正在加载…」进度替换为明确终态。
+                progress(1.0, desc="❌ 补合成失败")
+            except Exception:  # pragma: no cover - progress is best effort
+                pass
+        return [], f"❌ 补合成异常：{str(e)[:200]}{hint}"
 
     # 写 manifest.json（任务隔离产物清单，便于回放 / 调试）
     try:
@@ -1952,7 +1994,28 @@ def do_supplement_synth(sup_role, sup_mode, sup_text, sup_json_role, sup_json_li
         except Exception:  # pylint: disable=broad-except
             preview_path = None
 
-    md = [f"### 🎙 补合成完成（{len(wav_paths)}/{len(results)} 成功）"]
+    engine_note = ""
+    for message in reversed(progress_phases):
+        if "引擎" in str(message) or "加载" in str(message):
+            note = str(message)
+            # P1-B MEDIUM（QA）：终态 markdown 不得残留「正在加载…」进行时——
+            # 实机「上面显示补合成完成，下面仍残留 正在加载 IndexTTS 2.5…」
+            # 的“下面”就是这一行。成功返回时把进行时改写为过去时/中性表述，
+            # 去掉尾部省略号；非进行时（如「引擎 … 就绪」）保持原样。
+            if "正在加载" in note:
+                note = note.replace("正在加载", "本次已加载")
+            engine_note = f"\n> ⏳ {note.rstrip('…')}"
+            break
+    ok_count = len(wav_paths)
+    total_count = len(results)
+    if ok_count > 0:
+        title = f"### 🎙 补合成完成（{ok_count}/{total_count} 成功）"
+        done_desc = f"✅ 补录完成（{ok_count}/{total_count} 成功）"
+    else:
+        # LOW（QA）：0 成功时不得用 ✅ 误导文案，改中性/失败表述。
+        title = f"### 🎙 补合成完成（0/{total_count} 成功，全部失败）"
+        done_desc = f"❌ 补录完成（0/{total_count} 成功）"
+    md = [title]
     for r in results:
         txt = (r.get("text") or "")[:30]
         if r["status"] == "ok":
@@ -1960,6 +2023,15 @@ def do_supplement_synth(sup_role, sup_mode, sup_text, sup_json_role, sup_json_li
         else:
             md.append(f"- {r['error']}")
     md.append(f"\n> 任务 ID：`{task_id}`｜产物目录：`{task_dir}`")
+    if engine_note:
+        md.append(engine_note)
+    if progress is not None:
+        try:
+            # P1-B：任务完成后把残留的「正在加载模型…」进度替换为明确终态，
+            # 避免同时显示「补合成完成」与「正在加载 IndexTTS 2.5…」。
+            progress(1.0, desc=done_desc)
+        except Exception:  # pragma: no cover - progress is best effort
+            pass
     return wav_paths, "\n".join(md)
 
 
@@ -2015,6 +2087,21 @@ def play_lib_voice(choice):
     fp=_lib_path(choice) if choice else None
     return fp if fp and os.path.isfile(fp) else None
 
+def _save_category_choices(cats: list[str] | None) -> list[str]:
+    """构建保存分类下拉的可选值：真实分类 ∪ {未分类} + “— 新建 —”占位。
+
+    “未分类”是合法业务值（``voice_lib._category_of`` 对无下划线前缀文件的
+    默认分类，同时也是保存时的默认分类）。当音色库只有带前缀文件时
+    ``voice_lib.list_categories()`` 不含“未分类”，若此时 value 仍为
+    “未分类”，Gradio 会告警 value-not-in-choices，因此必须始终把“未分类”
+    放进 choices（去重，不改变已有分类语义）。
+    """
+    base = [str(c) for c in (cats or []) if str(c)]
+    if "未分类" not in base:
+        base.insert(0, "未分类")
+    return base + ["— 新建 —"]
+
+
 def save_to_lib(recorded, uploaded, name, category, ss):
     """保存到音色库（业务委托 ProjectService.save_to_lib，支持分类前缀）。"""
     try:
@@ -2026,7 +2113,7 @@ def save_to_lib(recorded, uploaded, name, category, ss):
     return (f"已保存至音色库: {os.path.basename(dest)}",
             gr.update(choices=_lib_voices()),
             gr.update(choices=_lib_voices()),
-            gr.update(choices=cats + ["— 新建 —"] if cats else ["未分类", "— 新建 —"], value=category or "未分类"))
+            gr.update(choices=_save_category_choices(cats), value=category or "未分类"))
 
 
 def filter_vlib_by_category(category):
@@ -2457,7 +2544,7 @@ def refresh_categories():
     return (
         gr.update(choices=cats or ["未分类"]),
         gr.update(
-            choices=(cats or []) + ["— 新建 —"] if cats else ["未分类", "— 新建 —"],
+            choices=_save_category_choices(cats),
             value="未分类",
         ),
     )
@@ -2467,7 +2554,7 @@ def refresh_voice_filters():
     """一次扫描结果刷新绑定筛选、资产筛选和新声音分类。"""
     cats = voice_lib.list_categories()
     filter_choices = cats or ["未分类"]
-    save_choices = cats + ["— 新建 —"] if cats else ["未分类", "— 新建 —"]
+    save_choices = _save_category_choices(cats)
     return (
         gr.update(choices=filter_choices, value=None),
         gr.update(choices=filter_choices, value=None),
