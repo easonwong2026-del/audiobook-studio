@@ -276,6 +276,22 @@ class ProductionJobService:
                 "message": "所选范围尚未达到合成就绪状态。",
                 "fix_hint": "完成当前范围所需角色的声音绑定并重新检查。",
             })
+        # 人工确认门：Voice Cast 项目必须先由用户确认（confirmed_revision ==
+        # cast_revision），未确认时 plan 仍可返回，但 ready 必须为 false 且带
+        # 明确的 confirmation blocker，让 Agent 先展示给用户而不是直接启动。
+        confirmation_state = cls._voice_cast_confirmation_state(project_name)
+        if confirmation_state.get("mode") == "voice_cast" and not confirmation_state.get("confirmed", False):
+            blockers.append({
+                "code": "VOICE_CAST_CONFIRMATION_REQUIRED",
+                "message": "Voice Cast 角色绑定尚未经用户确认，不能开始生产。",
+                "fix_hint": "先向用户展示角色→声音映射，取得明确确认后调用 confirm_voice_cast。",
+                "project_name": project_name,
+                "cast_revision": confirmation_state.get("cast_revision", 0),
+                "confirmed_revision": confirmation_state.get("confirmed_revision"),
+                "role_bindings": confirmation_state.get("role_bindings", []),
+                "changed_roles": confirmation_state.get("changed_roles", []),
+                "next_actions": ["get_voice_cast", "confirm_voice_cast"],
+            })
         runtime_status = str(status.get("runtime_status") or "unknown")
         engine_state = str(status.get("engine_state") or "unknown")
         engine_ready = bool(status.get("engine_ready", False))
@@ -313,12 +329,38 @@ class ProductionJobService:
             "unbound_roles": list(selected_check.get("unbound_roles", [])),
             "missing_roles": list(selected_check.get("missing_roles", [])),
             "cast_ready": production_ready,
+            "confirmation_required": bool(
+                confirmation_state.get("mode") == "voice_cast"
+                and not confirmation_state.get("confirmed", False)
+            ),
+            "confirmed": bool(confirmation_state.get("confirmed", False)),
+            "cast_revision": confirmation_state.get("cast_revision", 0),
+            "confirmed_revision": confirmation_state.get("confirmed_revision"),
             "runtime_status": runtime_status,
             "engine_state": engine_state,
             "engine_ready": engine_ready,
             "production_ready": production_ready,
             "synthesis_ready": synthesis_ready,
         }, blockers, warnings
+
+    @classmethod
+    def _voice_cast_confirmation_state(cls, project_name: str) -> dict[str, Any]:
+        """Read the Voice Cast human-confirmation gate state (no mutation)."""
+        try:
+            from .voice_cast import VoiceCastResolver
+
+            return VoiceCastResolver.get_confirmation_state(project_name)
+        except Exception as exc:  # project missing / unreadable
+            return {
+                "mode": "unknown",
+                "confirmed": True,
+                "confirmation_required": False,
+                "cast_revision": 0,
+                "confirmed_revision": None,
+                "role_bindings": [],
+                "changed_roles": [],
+                "error": str(exc),
+            }
 
     @classmethod
     def plan(cls, project_name: str, scope: Any = None, options: Any = None) -> dict[str, Any]:
@@ -386,17 +428,38 @@ class ProductionJobService:
             selected_chapter_ids = set(normalized_scope["chapter_ids"]) & set(chapter_map)
         project_dir = ProjectRepository.get_project_dir(name)
         segments_dir = project_paths.project_dir(project_dir, "segments")
+        # Unified engine resolution: an explicit caller engine_snapshot wins;
+        # otherwise Settings current default profile is used.  Never copy a
+        # "if no engine: version = 2" rule at the MCP boundary.
+        options_dict = options if isinstance(options, dict) else {}
+        raw_explicit_engine = options_dict.get("engine_snapshot")
         engine_snapshot = resolve_profile(
-            (options or {}).get("engine_snapshot") if isinstance(options, dict) else None
-        ) if options is not None else {}
-        engine_identity = engine_snapshot.get("cache_identity") if engine_snapshot else None
+            raw_explicit_engine if isinstance(raw_explicit_engine, dict) else {}
+        )
+        engine_selection_source = str(
+            options_dict.get("engine_selection_source") or ""
+        ) or (
+            "explicit" if isinstance(raw_explicit_engine, dict) and raw_explicit_engine else "settings_default"
+        )
         completed = 0
         failed_ids: list[str] = []
         remaining = 0
         for segment_id in selected_ids:
             persisted = str(getattr(meta, "segments_status", {}).get(segment_id, "pending"))
-            has_audio = segment_cache.has_segment_wav(
-                segments_dir, segment_id, engine_identity=engine_identity
+            segment_obj = segment_map.get(segment_id)
+            has_audio = segment_cache.has_segment_audio(
+                segments_dir=segments_dir,
+                seg_id=segment_id,
+                emotion=str((segment_obj or {}).get("emotion") or "neutral"),
+                emo_alpha=(segment_obj or {}).get("emo_alpha", 1.0),
+                speech_rate=(segment_obj or {}).get("speech_rate", 1.0),
+                pinyin_hints=(segment_obj or {}).get("pinyin_hints"),
+                director_metadata=segment_cache.director_metadata_for(segment_obj or {}),
+                speaker_fingerprint=None,
+                engine_snapshot=engine_snapshot,
+                project_name=name,
+                allow_legacy_fallback=True,
+                allow_any_variant=False,
             )
             if persisted == "done" and has_audio:
                 completed += 1
@@ -444,6 +507,12 @@ class ProductionJobService:
             "required_roles": voice_cast.get("required_roles", []),
             "unbound_roles": voice_cast.get("unbound_roles", []),
             "missing_roles": voice_cast.get("missing_roles", []),
+            # Effective engine for this plan (Fix 2): explicit caller snapshot
+            # wins, otherwise Settings current default profile.  start_production
+            # freezes exactly this profile into the durable TaskRecord.
+            "engine": public_profile(engine_snapshot),
+            "engine_selection_source": engine_selection_source,
+            "engine_snapshot": public_profile(engine_snapshot),
             "blockers": blockers,
             "warnings": warnings,
         }
@@ -488,6 +557,13 @@ class ProductionJobService:
             # resumed task can load exactly the model it was created with.
             # Public task snapshots redact it at the boundary.
             "engine_snapshot": resolve_profile(raw.get("engine_snapshot") or raw),
+            # Record how the frozen engine was chosen so plan/start report the
+            # same selection source ("explicit" vs "settings_default").
+            "engine_selection_source": (
+                "explicit"
+                if isinstance(raw.get("engine_snapshot"), dict) and raw.get("engine_snapshot")
+                else "settings_default"
+            ),
         }
         return TaskRepository.canonical_options(result)
 
@@ -559,6 +635,26 @@ class ProductionJobService:
             )
         plan = cls.plan(name, scope, normalized_options)
         if not plan["ready"]:
+            confirmation_blockers = [
+                blocker for blocker in plan.get("blockers", [])
+                if isinstance(blocker, dict)
+                and blocker.get("code") == "VOICE_CAST_CONFIRMATION_REQUIRED"
+            ]
+            if confirmation_blockers:
+                first = confirmation_blockers[0]
+                raise ProductionJobError(
+                    "VOICE_CAST_CONFIRMATION_REQUIRED",
+                    str(first.get("message") or "Voice Cast 角色绑定尚未经用户确认"),
+                    project_name=name,
+                    cast_revision=first.get("cast_revision", 0),
+                    confirmed_revision=first.get("confirmed_revision"),
+                    role_bindings=first.get("role_bindings", []),
+                    changed_roles=first.get("changed_roles", []),
+                    next_actions=first.get(
+                        "next_actions", ["get_voice_cast", "confirm_voice_cast"]
+                    ),
+                    plan=plan,
+                )
             raise ProductionJobError(
                 "PRODUCTION_BLOCKED", "生产前检查未通过",
                 project_name=name, blockers=plan["blockers"], plan=plan,
@@ -691,6 +787,9 @@ class ProductionJobService:
             },
             "options": public_options,
             "engine_snapshot": public_options.get("engine_snapshot", {}),
+            "engine_selection_source": str(
+                public_options.get("engine_selection_source") or ""
+            ),
             "progress": base_progress,
             "failed_segment_ids": failed_ids,
             "attempt": int(record.attempt or 1),
@@ -870,20 +969,33 @@ class ProductionJobService:
         project_dir = ProjectRepository.get_project_dir(record.project)
         segments_dir = project_paths.project_dir(project_dir, "segments")
         meta = _meta
-        return [
-            segment_id for segment_id in selected
-            if meta.segments_status.get(segment_id) == "failed"
-            or not segment_cache.has_segment_wav(
-                segments_dir,
-                segment_id,
-                engine_identity=(
-                    record.options.get("engine_snapshot", {}).get("cache_identity")
-                    if isinstance(record.options, dict)
-                    and isinstance(record.options.get("engine_snapshot"), dict)
-                    else None
-                ),
-            )
-        ]
+        record_engine = (
+            record.options.get("engine_snapshot")
+            if isinstance(record.options, dict)
+            and isinstance(record.options.get("engine_snapshot"), dict)
+            else None
+        )
+        retryable: list[str] = []
+        for segment_id in selected:
+            segment_obj = segment_map.get(segment_id)
+            if meta.segments_status.get(segment_id) == "failed":
+                retryable.append(segment_id)
+                continue
+            if not segment_cache.has_segment_audio(
+                segments_dir=segments_dir,
+                seg_id=segment_id,
+                emotion=str((segment_obj or {}).get("emotion") or "neutral"),
+                emo_alpha=(segment_obj or {}).get("emo_alpha", 1.0),
+                speech_rate=(segment_obj or {}).get("speech_rate", 1.0),
+                pinyin_hints=(segment_obj or {}).get("pinyin_hints"),
+                director_metadata=segment_cache.director_metadata_for(segment_obj or {}),
+                speaker_fingerprint=None,
+                engine_snapshot=record_engine,
+                project_name=record.project,
+                allow_any_variant=False,
+            ):
+                retryable.append(segment_id)
+        return retryable
 
     @classmethod
     def retry_failed_segments(
@@ -964,6 +1076,26 @@ class ProductionJobService:
             # actual runtime remains old/stale; it must never overwrite the
             # runtime identity with configuration data.
             "global_default_engine": public_profile(resolve_profile({})),
+            # Explicit aliases for the three distinct engine views required by
+            # the dual-engine contract: configured default (Settings) /
+            # runtime current (actual loaded engine) / frozen task engine.
+            "configured_default": public_profile(resolve_profile({})),
+            "runtime_current": {
+                "engine_backend": status.get("engine_backend", ""),
+                "engine_version": status.get("engine_version", ""),
+                "engine_identity": status.get("engine_identity", ""),
+                "model_identity": status.get("model_identity", ""),
+                "precision": status.get("precision", ""),
+                "device": status.get("device", ""),
+                "cache_identity": status.get("cache_identity", ""),
+            },
+            "task_engine": (
+                public_profile(active_task["engine_snapshot"])
+                if active_task
+                and isinstance(active_task.get("engine_snapshot"), dict)
+                and active_task["engine_snapshot"]
+                else {}
+            ),
         }
         if active_task:
             startup = active_task.get("startup") or {}

@@ -88,6 +88,21 @@ def finalize_voice_cast(arguments: dict[str, Any]) -> dict[str, Any]:
     return _call(VoiceCastResolver.finalize_voice_cast, _project(arguments))
 
 
+def confirm_voice_cast(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Record an explicit human confirmation of the current Voice Cast.
+
+    Only call this after the user has explicitly confirmed the
+    role -> voice mapping.  Sets confirmed_revision = cast_revision and locks
+    the cast; any later bind/rebind invalidates the confirmation.
+    """
+    return _call(VoiceCastResolver.confirm_voice_cast, _project(arguments))
+
+
+def get_voice_cast_confirmation(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Return the confirmation gate state without mutating the cast."""
+    return _call(VoiceCastResolver.get_confirmation_state, _project(arguments))
+
+
 def get_voice_binding_status(arguments: dict[str, Any]) -> dict[str, Any]:
     return _call(VoiceCastResolver.get_voice_binding_status, _project(arguments))
 
@@ -101,7 +116,8 @@ def check_chapter_roles(arguments: dict[str, Any]) -> dict[str, Any]:
 
 __all__ = [
     "add_character_roles", "bind_cast_role", "check_chapter_roles",
-    "finalize_voice_cast", "get_character_roster", "get_voice_binding_status",
-    "get_voice_cast", "set_character_roster", "set_voice_cast",
+    "confirm_voice_cast", "finalize_voice_cast", "get_character_roster",
+    "get_voice_binding_status", "get_voice_cast", "get_voice_cast_confirmation",
+    "set_character_roster", "set_voice_cast",
     "update_character_role", "validate_character_roster", "validate_voice_cast",
 ]

@@ -20,9 +20,16 @@ def _call(function: Callable[..., dict[str, Any]], *args: Any, **kwargs: Any) ->
 
 
 def plan_production(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Validate a production scope and resolve the effective engine.
+
+    ``options`` is forwarded so plan/start agree on the same engine intent
+    (explicit ``engine_snapshot`` wins; otherwise Settings current default).
+    The plan response includes ``engine`` and ``engine_selection_source``.
+    """
     return ProductionJobService.plan(
         str(arguments.get("project_name") or ""),
         arguments.get("scope"),
+        arguments.get("options"),
     )
 
 

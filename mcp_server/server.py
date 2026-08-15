@@ -56,10 +56,12 @@ from .tools.voice_cast import (
     add_character_roles,
     bind_cast_role,
     check_chapter_roles,
+    confirm_voice_cast,
     finalize_voice_cast,
     get_character_roster,
     get_voice_binding_status,
     get_voice_cast,
+    get_voice_cast_confirmation,
     set_character_roster,
     set_voice_cast,
     update_character_role,
@@ -339,7 +341,40 @@ _TOOLS: dict[str, dict[str, Any]] = {
     },
     "finalize_voice_cast": {
         "name": "finalize_voice_cast",
-        "description": "在所有角色就绪后锁定项目 Voice Cast。",
+        "description": (
+            "锁定项目 Voice Cast（标记角色 locked，防止后续普通换声）。"
+            "注意：这不是用户确认门。Agent 自动完成角色绑定后必须先调用 "
+            "confirm_voice_cast 记录用户明确确认，否则 start_production 会返回 "
+            "VOICE_CAST_CONFIRMATION_REQUIRED。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name"],
+            "properties": {"project_name": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
+    "confirm_voice_cast": {
+        "name": "confirm_voice_cast",
+        "description": (
+            "记录用户对当前 Voice Cast 角色→声音绑定的明确确认（人工确认门）。"
+            "只有在用户明确确认角色绑定后才可调用；成功后 confirmed_revision = "
+            "cast_revision，随后才允许 start_production。之后任意角色绑定/换声会"
+            "使确认自动失效，需要再次确认。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name"],
+            "properties": {"project_name": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
+    "get_voice_cast_confirmation": {
+        "name": "get_voice_cast_confirmation",
+        "description": (
+            "只读返回 Voice Cast 人工确认门状态（cast_revision / confirmed_revision / "
+            "confirmed / role_bindings / changed_roles），不修改任何数据。"
+        ),
         "inputSchema": {
             "type": "object",
             "required": ["project_name"],
@@ -374,7 +409,9 @@ _TOOLS: dict[str, dict[str, Any]] = {
             "整本 {all:true}；章节 {all:false,chapter_ids:[\"1\",\"2\"]}；"
             "精确段落 {all:false,segment_ids:[\"2-001\",\"3-005\"]}。"
             "返回规范化 scope、selected_segment_count、required_roles、scope-specific readiness、"
-            "blockers 和 progress 统计。segment_ids 不会扩大为所属章节。"
+            "blockers、progress 统计以及 effective engine（engine / engine_selection_source，"
+            "显式 options.engine_snapshot 优先，否则 Settings 当前默认）。"
+            "segment_ids 不会扩大为所属章节。"
         ),
         "inputSchema": {
             "type": "object",
@@ -404,6 +441,27 @@ _TOOLS: dict[str, dict[str, Any]] = {
                     },
                     "additionalProperties": False,
                 },
+                "options": {
+                    "type": "object",
+                    "properties": {
+                        "num_beams": {"type": "integer", "minimum": 1},
+                        "emotion": {"type": ["string", "null"]},
+                        "emo_alpha": {"type": ["number", "null"]},
+                        "speech_rate": {"type": ["number", "null"]},
+                        "engine_snapshot": {
+                            "type": "object",
+                            "properties": {
+                                "engine_backend": {"type": "string"},
+                                "engine_version": {"type": "string", "enum": ["2", "2.5", "v2", "v2.5"]},
+                                "engine_identity": {"type": "string"},
+                                "model_dir": {"type": "string"},
+                                "precision": {"type": "string", "enum": ["FP16", "BF16", "FP32"]},
+                            },
+                            "additionalProperties": False,
+                        },
+                    },
+                    "additionalProperties": False,
+                },
             },
             "additionalProperties": False,
         },
@@ -415,6 +473,8 @@ _TOOLS: dict[str, dict[str, Any]] = {
             "章节 {all:false,chapter_ids:[\"1\",\"2\"]} 或精确段落 "
             "{all:false,segment_ids:[\"2-001\",\"3-005\"]}；segment scope 严格只处理这些段，"
             "不要求整本 Voice Cast 已 locked。启动/claim 时会再次校验当前 scope 并锁定实际使用的角色。"
+            "Voice Cast 项目必须已通过 confirm_voice_cast 记录用户确认，否则返回 "
+            "VOICE_CAST_CONFIRMATION_REQUIRED。"
         ),
         "inputSchema": {
             "type": "object",
@@ -771,6 +831,7 @@ _READ_ONLY_TOOLS = {
     "get_workflow_state",
     "get_runtime_health",
     "plan_production",
+    "get_voice_cast_confirmation",
     "get_production_task",
     "list_production_tasks",
     "get_quality_report",
@@ -793,6 +854,7 @@ _MUTATION_TOOLS = {
     "set_voice_cast",
     "bind_cast_role",
     "finalize_voice_cast",
+    "confirm_voice_cast",
     "start_production",
     "pause_production",
     "resume_production",
@@ -893,6 +955,8 @@ _HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "bind_cast_role": bind_cast_role,
     "validate_voice_cast": validate_voice_cast,
     "finalize_voice_cast": finalize_voice_cast,
+    "confirm_voice_cast": confirm_voice_cast,
+    "get_voice_cast_confirmation": get_voice_cast_confirmation,
     "get_voice_binding_status": get_voice_binding_status,
     "check_chapter_roles": check_chapter_roles,
     "plan_production": plan_production,

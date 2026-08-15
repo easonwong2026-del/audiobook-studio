@@ -106,6 +106,7 @@ def export_book(project_dir: str, format: str = "mp3", bitrate: str = "192k",
                     seg.get("pinyin_hints"),
                     segment_cache.director_metadata_for(seg),
                     _cast_speaker_fingerprint(project_dir, seg),
+                    project_name=project_name,
                 )
             if fp:
                 if canonical_rate is None:
@@ -327,16 +328,32 @@ def _find_segment(segments_dir: str, seg_id: str, text: str, role: str, emotion:
                   emo_alpha: float = 1.0, speech_rate: float = 1.0,
                   pinyin_hints: Any = None,
                   director_metadata: Any = None,
-                  speaker_fingerprint: str | None = None) -> str | None:
+                  speaker_fingerprint: str | None = None,
+                  project_name: str | None = None,
+                  engine_identity: str | None = None) -> str | None:
     """查找某段已合成 wav：参数感知缓存键优先，旧版裸文件回退（B7 兼容）。
 
-    委托给 ``segment_cache.find_segment_wav``，保持导出链路在 B7 文件名
-    变更后仍完整：既命中新写入的 ``{seg_id}_{hash}.wav``，也兼容历史裸文件。
+    委托给统一 ``segment_cache.resolve_segment_artifact``，保持导出链路在 B7 /
+    双引擎文件名变更后仍完整：既命中新写入的 ``{seg_id}_{hash}.wav``（含
+    engine-aware），也兼容历史裸文件 / speaker-aware / param-aware 缓存。
     """
-    return segment_cache.find_segment_wav(
-        segments_dir, seg_id, text, role, emotion, emo_alpha, speech_rate,
-        pinyin_hints, director_metadata, speaker_fingerprint,
+    artifact = segment_cache.resolve_segment_artifact(
+        segments_dir=segments_dir,
+        seg_id=seg_id,
+        emotion=emotion,
+        emo_alpha=emo_alpha,
+        speech_rate=speech_rate,
+        pinyin_hints=pinyin_hints,
+        director_metadata=director_metadata,
+        speaker_fingerprint=speaker_fingerprint,
+        engine_snapshot=(
+            {"engine_identity": engine_identity}
+            if engine_identity and "|" in str(engine_identity)
+            else ({"cache_identity": engine_identity} if engine_identity else None)
+        ),
+        project_name=project_name,
     )
+    return artifact.path if artifact.exists() else None
 
 
 def _cast_speaker_fingerprint(project_dir: str, segment: dict[str, Any]) -> str | None:
@@ -430,6 +447,7 @@ def generate_subtitles(
                     seg.get("pinyin_hints"),
                     segment_cache.director_metadata_for(seg),
                     _cast_speaker_fingerprint(project_dir, seg),
+                    project_name=os.path.basename(os.path.normpath(project_dir)),
                 )
             if not fp:
                 missing_ids.append(str(seg["id"]))
@@ -580,6 +598,7 @@ def concat_for_preview(project_dir: str, chapter_id, output_path: str) -> str | 
             seg.get("pinyin_hints"),
             segment_cache.director_metadata_for(seg),
             _cast_speaker_fingerprint(project_dir, seg),
+            project_name=os.path.basename(os.path.normpath(project_dir)),
         )
         if not fp:
             # 失败段跳过

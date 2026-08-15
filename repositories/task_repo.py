@@ -214,6 +214,11 @@ def _canonical_options(value: Any) -> dict[str, Any]:
         "speech_rate": _canonical_optional_number(raw.get("speech_rate")),
         "voice_overrides": voice_overrides,
         "engine_snapshot": engine_snapshot,
+        "engine_selection_source": (
+            str(raw.get("engine_selection_source"))
+            if raw.get("engine_selection_source") in {"explicit", "settings_default"}
+            else ""
+        ),
     }
 
 

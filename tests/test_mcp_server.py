@@ -408,6 +408,34 @@ def test_mcp_production_chain_plan_start_query_cancel(
     })["result"]
     assert locked["structuredContent"]["status"] == "locked"
 
+    # finalize_voice_cast locks the cast but does NOT record the human
+    # confirmation; the new hard gate blocks production until the user has
+    # explicitly confirmed through confirm_voice_cast.
+    before_confirm = handle_request({
+        "jsonrpc": "2.0", "id": 25, "method": "tools/call",
+        "params": {
+            "name": "plan_production",
+            "arguments": {"project_name": "MCP 生产"},
+        },
+    })["result"]
+    assert before_confirm["structuredContent"]["ready"] is False
+    assert any(
+        item.get("code") == "VOICE_CAST_CONFIRMATION_REQUIRED"
+        for item in before_confirm["structuredContent"]["blockers"]
+    )
+
+    confirmed = handle_request({
+        "jsonrpc": "2.0", "id": 26, "method": "tools/call",
+        "params": {
+            "name": "confirm_voice_cast",
+            "arguments": {"project_name": "MCP 生产"},
+        },
+    })["result"]
+    assert confirmed["structuredContent"]["confirmed"] is True
+    assert confirmed["structuredContent"]["confirmed_revision"] == (
+        confirmed["structuredContent"]["cast_revision"]
+    )
+
     plan = handle_request({
         "jsonrpc": "2.0", "id": 30, "method": "tools/call",
         "params": {
@@ -419,6 +447,13 @@ def test_mcp_production_chain_plan_start_query_cancel(
     assert plan["structuredContent"]["ready"] is True
     assert plan["structuredContent"]["voice_cast"]["cast_ready"] is True
     assert "runtime_status" in plan["structuredContent"]["voice_cast"]
+    # Plan reports the effective engine and how it was selected.
+    assert plan["structuredContent"]["engine"]["engine_identity"] in {
+        "indextts:2", "indextts:2.5",
+    }
+    assert plan["structuredContent"]["engine_selection_source"] in {
+        "explicit", "settings_default",
+    }
 
     started_task = handle_request({
         "jsonrpc": "2.0", "id": 31, "method": "tools/call",

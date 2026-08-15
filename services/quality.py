@@ -202,22 +202,51 @@ class QualityService:
         if os.path.isfile(path):
             return path, cache_identity, fingerprint, effective
         project_dir = ProjectRepository.get_project_dir(project_name)
-        legacy = segment_cache.find_segment_wav(
-            project_paths.project_dir(project_dir, "segments"),
-            str(segment.get("id")),
-            str(segment.get("text") or ""),
-            str(segment.get("role") or segment.get("speaker") or ""),
-            str(effective["emotion"] or "neutral"),
-            effective["emo_alpha"],
-            effective["speech_rate"],
-            effective["pinyin_hints"],
-            effective["director_metadata"],
-            fingerprint if os.path.isfile(os.path.join(project_dir, "voice_cast.json")) else None,
-            None,
-            (effective.get("engine_snapshot") or {}).get("cache_identity")
-            or (effective.get("engine_snapshot") or {}).get("engine_identity"),
+        cast_active = os.path.isfile(
+            os.path.join(project_dir, "voice_cast.json")
         )
-        return legacy, cache_identity, fingerprint, effective
+        artifact = segment_cache.resolve_segment_artifact(
+            segments_dir=project_paths.project_dir(project_dir, "segments"),
+            seg_id=str(segment.get("id")),
+            emotion=str(effective["emotion"] or "neutral"),
+            emo_alpha=effective["emo_alpha"],
+            speech_rate=effective["speech_rate"],
+            pinyin_hints=effective["pinyin_hints"],
+            director_metadata=effective["director_metadata"],
+            # Legacy projects (no voice_cast.json) stay speaker-agnostic so the
+            # resolver's non-strict fallback can still match bare/param files.
+            speaker_fingerprint=(fingerprint or None) if cast_active else None,
+            engine_snapshot=(effective.get("engine_snapshot") or None),
+            project_name=project_name,
+        )
+        resolved = artifact.path if artifact.exists() else None
+        if resolved is not None:
+            # Record the actual engine provenance of the resolved file so the
+            # revision's params/cache_identity match the real artifact instead
+            # of a Settings-based guess (segment-level provenance upgrade).
+            # Only engine-aware files carry provenance; pre-engine legacy
+            # files (param/bare) keep their historical identity untouched.
+            if (
+                artifact.engine_provenance
+                and artifact.matched_class == "engine_aware"
+                and not effective.get("engine_snapshot")
+            ):
+                effective = dict(effective)
+                effective["engine_snapshot"] = artifact.engine_provenance
+                cache_identity = segment_cache.segment_cache_key(
+                    str(segment.get("id")),
+                    str(effective["emotion"] or "neutral"),
+                    effective["emo_alpha"],
+                    effective["speech_rate"],
+                    effective["pinyin_hints"],
+                    effective["director_metadata"],
+                    fingerprint or None,
+                    (
+                        artifact.engine_provenance.get("cache_identity")
+                        or artifact.engine_provenance.get("engine_identity")
+                    ),
+                )
+        return resolved, cache_identity, fingerprint, effective
 
     @classmethod
     def ensure_active_revision(
@@ -1007,21 +1036,19 @@ class QualityService:
             )
             path = os.path.join(segments_dir, f"{identity}.wav")
             if not os.path.isfile(path):
-                path = segment_cache.find_segment_wav(
-                    segments_dir,
-                    segment_id,
-                    str(segment.get("text") or ""),
-                    str(segment.get("role") or segment.get("speaker") or ""),
-                    str(effective["emotion"] or "neutral"),
-                    effective["emo_alpha"],
-                    effective["speech_rate"],
-                    effective["pinyin_hints"],
-                    effective["director_metadata"],
-                    fingerprint if cast_active else None,
-                    None,
-                    (effective.get("engine_snapshot") or {}).get("cache_identity")
-                    or (effective.get("engine_snapshot") or {}).get("engine_identity"),
+                artifact = segment_cache.resolve_segment_artifact(
+                    segments_dir=segments_dir,
+                    seg_id=segment_id,
+                    emotion=str(effective["emotion"] or "neutral"),
+                    emo_alpha=effective["emo_alpha"],
+                    speech_rate=effective["speech_rate"],
+                    pinyin_hints=effective["pinyin_hints"],
+                    director_metadata=effective["director_metadata"],
+                    speaker_fingerprint=fingerprint or None,
+                    engine_snapshot=(effective.get("engine_snapshot") or None),
+                    project_name=project_name,
                 )
+                path = artifact.path if artifact.exists() else None
             if path and os.path.isfile(path):
                 candidates.append({
                     "segment_id": segment_id,
