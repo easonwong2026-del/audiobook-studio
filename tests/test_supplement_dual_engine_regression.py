@@ -367,6 +367,12 @@ def test_windows_spawn_keeps_detached_structure(tmp_path, monkeypatch):
         return _FakeProc()
 
     monkeypatch.setattr(pr, "_is_windows", lambda: True)
+    # Inject the Windows creation-flag constants on every platform so the
+    # Linux CI can still exercise the Windows spawn branch (the production
+    # code reads them via getattr(..., 0)).  Without this, Linux sees 0|0=0
+    # and `flags & detached` is always falsy.
+    monkeypatch.setattr(subprocess, "DETACHED_PROCESS", 0x00000008, raising=False)
+    monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200, raising=False)
     monkeypatch.setenv("AUDIOBOOK_STUDIO_RUNTIME_MODE", "process")  # bypass pytest inline default
     monkeypatch.setattr(pr.ProductionRuntimeClient, "_resolve_runtime_launch",
                         classmethod(lambda cls: (["py", "-m", "services.production_runtime", "--serve"], {})))

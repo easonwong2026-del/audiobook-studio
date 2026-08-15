@@ -195,6 +195,15 @@ class ProductionRuntime:
         This is called only after the client-side active-task guard.  The
         runtime repeats the guard at its ownership boundary so a stale UI
         request can never switch an engine while synthesis/export is active.
+
+        Idempotent switch (P0-1): when the runtime is already ``ready`` and
+        its current engine profile matches the requested target, the engine
+        switch is treated as already satisfied — no ``recycle()`` (no
+        ``reset_engine`` / ``init_engine``), no generation or recovery bump.
+        This is safe because it only guards *controlled* Settings switches /
+        command consumption; the self-healing recovery path calls
+        ``RuntimeEngineLifecycle.recycle`` directly and still force-reloads
+        the same profile when a segment failed.
         """
         with self._state_lock:
             if self._current_state is not None:
@@ -203,11 +212,15 @@ class ProductionRuntime:
                 raise RuntimeError("导出任务仍在运行，不能切换 TTS 引擎")
         if self._durable_tts_task_active():
             raise RuntimeError("当前有生产任务正在运行，不能切换 TTS 引擎")
-        from lib.tts_profile import resolve_profile
+        from lib.tts_profile import profile_matches, resolve_profile
 
         raw = str(engine_id or "").lower()
         version = "2.5" if ("25" in raw or "2.5" in raw) else "2"
-        self._engine.recycle(resolve_profile({"engine_version": version}))
+        target = resolve_profile({"engine_version": version})
+        current = self._engine.snapshot()
+        if str(current.get("state") or "") == "ready" and profile_matches(current, target):
+            return True
+        self._engine.recycle(target)
         return True
 
     @staticmethod
