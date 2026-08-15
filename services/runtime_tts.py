@@ -343,17 +343,30 @@ class RuntimeTTSService:
         if outcome == "active":
             raise RuntimeTTSBusyError(durable)
         if progress_cb is not None:
-            progress_cb("runtime_start_requested", "正在等待运行时…")
+            progress_cb("runtime_ensure_requested", "正在等待运行时…")
         _supplement_event(
-            "runtime_start_requested",
+            "runtime_ensure_requested",
             task_id=task_id,
             task_type=task_type,
         )
-        ProductionRuntimeClient.ensure_running()
+        spawned_pid = ProductionRuntimeClient.ensure_running()
+        if spawned_pid is not None:
+            # 冷启动 fail-fast：刚 spawn 的 runtime 子进程必须在有限窗口内证明
+            # 存活（status live / 任务已被 claim）。若子进程立即退出且任务仍
+            # pending，直接抛 RUNTIME_START_FAILED，而不是在 _wait 里等满
+            # 最长 3600s。注意：只确认「worker 活着/拥有 runtime」，不要求
+            # 模型 ready——IndexTTS 2.5 冷加载数分钟不能误判为启动失败。
+            ProductionRuntimeClient.confirm_started(
+                durable.task_id,
+                spawned_pid=spawned_pid,
+            )
         started = time.monotonic()
         try:
             result = cls._wait(durable.task_id, timeout, progress_cb=progress_cb)
         except Exception:
+            if progress_cb is not None:
+                # P1-B：终态进度——把残留的「正在加载模型…」替换为失败终态。
+                progress_cb("error", "❌ 任务失败")
             _supplement_event(
                 "task_error",
                 task_id=task_id,
@@ -361,6 +374,9 @@ class RuntimeTTSService:
                 elapsed_ms=int((time.monotonic() - started) * 1000),
             )
             raise
+        if progress_cb is not None:
+            # P1-B：终态进度——任务 done 后清空/替换「正在加载模型…」提示。
+            progress_cb("done", "✅ 任务完成")
         _supplement_event(
             "task_done",
             task_id=task_id,

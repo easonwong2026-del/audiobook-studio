@@ -1870,6 +1870,50 @@ def _terminate_pid(pid: int, timeout: float = 10.0) -> None:
         logger.exception("POSIX 终止 Runtime 进程失败 pid=%s", pid)
 
 
+class RuntimeStartFailedError(RuntimeError):
+    """The freshly spawned runtime exited before it could own the task.
+
+    Raised by ``ProductionRuntimeClient.confirm_started`` when the exact
+    process this client spawned has already exited while the durable task is
+    still pending/unclaimed.  The client must fail fast instead of waiting
+    out a full ``_wait`` timeout for a runtime that never started.
+
+    Attributes carried for diagnostics (stable error code ``RUNTIME_START_FAILED``):
+    ``task_id`` / ``spawned_pid`` / ``bootstrap_log`` / ``runtime_log`` /
+    ``last_runtime_state``.
+    """
+
+    code = "RUNTIME_START_FAILED"
+
+    def __init__(
+        self,
+        *,
+        task_id: str,
+        spawned_pid: int | None,
+        bootstrap_log: str,
+        runtime_log: str,
+        last_runtime_state: str,
+        detail: str = "",
+    ) -> None:
+        self.task_id = str(task_id or "")
+        self.spawned_pid = int(spawned_pid) if spawned_pid else None
+        self.bootstrap_log = str(bootstrap_log or "")
+        self.runtime_log = str(runtime_log or "")
+        self.last_runtime_state = str(last_runtime_state or "unknown")
+        self.detail = str(detail or "")
+        parts = [
+            "运行时进程启动失败（RUNTIME_START_FAILED）",
+            f"task_id={self.task_id}",
+            f"spawned_pid={self.spawned_pid or 'unknown'}",
+            f"bootstrap_log={self.bootstrap_log}",
+            f"runtime_log={self.runtime_log}",
+            f"last_runtime_state={self.last_runtime_state}",
+        ]
+        if self.detail:
+            parts.append(f"detail={self.detail}")
+        super().__init__(" | ".join(parts))
+
+
 class ProductionRuntimeClient:
     """Client-side lifecycle helper; task data itself always flows through SQLite."""
 
@@ -2047,6 +2091,81 @@ class ProductionRuntimeClient:
             " ".join(command),
         )
         return child.pid
+
+    @classmethod
+    def confirm_started(
+        cls,
+        task_id: str,
+        spawned_pid: int | None = None,
+        timeout: float = 30.0,
+    ) -> None:
+        """Bounded startup confirmation for a freshly spawned runtime.
+
+        Only meaningful right after ``ensure_running()`` returned a new pid
+        in process mode.  Waits up to ``timeout`` seconds for any of the
+        following success signals:
+
+        * the durable task is no longer pending/unclaimed (a worker claimed
+          it — ``owner_id`` set, or status moved off pending/queued);
+        * ``read_runtime_engine_status`` reports a live runtime (fresh
+          ``runtime_state`` in starting/running/recovering).
+
+        Failure: the exact spawned process handle has exited while the task
+        is still pending/unclaimed → raise ``RuntimeStartFailedError``
+        immediately instead of letting ``_wait`` block for up to its full
+        timeout (a child that dies during Python bootstrap never claims the
+        task, and a 3600s wait would look like a hang).
+
+        Deliberately does NOT wait for ``engine_state=ready``: "runtime
+        process started" ≠ "model initialized".  A cold IndexTTS 2.5 load
+        takes minutes and must never be misreported as a startup failure.
+        """
+        from lib import config
+
+        deadline = time.monotonic() + max(float(timeout), 2.0)
+        log_dir = os.path.join(config.get_data_dir(), "logs")
+        bootstrap_log = os.path.join(log_dir, "production_runtime_bootstrap.log")
+        runtime_log = os.path.join(log_dir, "production_runtime.log")
+        while time.monotonic() < deadline:
+            # Success 1: the task has been claimed / moved off pending.
+            record = TaskRepository.load_task(task_id)
+            if record is not None:
+                if str(record.status or "") not in {"pending", "queued"} or (
+                    record.owner_id or ""
+                ):
+                    return
+            # Success 2: the runtime worker published a live status.
+            status = read_runtime_engine_status()
+            if (
+                str(status.get("runtime_state") or "") in {"starting", "running", "recovering"}
+                and not bool(status.get("status_stale"))
+            ):
+                return
+            # Failure: our exact spawned child exited while nothing claimed
+            # the task yet.  Never use this against a pre-existing runtime
+            # (ensure_running returned None then, so we are not called).
+            with _PROCESS_LOCK:
+                proc = _RUNTIME_PROCESS
+            if proc is not None and proc.poll() is not None:
+                raise RuntimeStartFailedError(
+                    task_id=task_id,
+                    spawned_pid=getattr(proc, "pid", None) or spawned_pid,
+                    bootstrap_log=bootstrap_log,
+                    runtime_log=runtime_log,
+                    last_runtime_state=str(status.get("runtime_state") or "unknown"),
+                    detail=f"spawned process exited with code {proc.returncode}",
+                )
+            time.sleep(0.1)
+        # Timeout with the child still alive: the runtime is booting (e.g.
+        # importing torch / publishing status).  This is NOT a startup
+        # failure — keep waiting through the normal _wait path.
+        logger.info(
+            "runtime_event=runtime_startup_confirmation_timeout "
+            "task_id=%s spawned_pid=%s elapsed=%.1fs",
+            task_id,
+            spawned_pid,
+            max(float(timeout), 2.0),
+        )
 
     @staticmethod
     def get_runtime_state(task_id: str) -> Optional[SynthesisState]:
@@ -2243,4 +2362,8 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["ProductionRuntime", "ProductionRuntimeClient"]
+__all__ = [
+    "ProductionRuntime",
+    "ProductionRuntimeClient",
+    "RuntimeStartFailedError",
+]
