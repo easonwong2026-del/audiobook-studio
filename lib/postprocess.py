@@ -129,6 +129,8 @@ def normalize_loudness_streaming(
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
     except FileNotFoundError:
         # ffmpeg binary disappeared between _ffmpeg_path() check and run;
@@ -181,6 +183,8 @@ def normalize_loudness_streaming(
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         os.replace(temporary, wav_path)
     except (OSError, subprocess.CalledProcessError):
@@ -219,6 +223,8 @@ def apply_eq_streaming(
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         os.replace(temporary, wav_path)
     except Exception:

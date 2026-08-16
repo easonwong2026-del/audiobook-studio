@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -1850,6 +1851,35 @@ def refresh_supplement_roles(ss):
     return gr.update(interactive=True, choices=choices, value=choices[0][1])
 
 
+def _fmt_elapsed(seconds: int) -> str:
+    """Format elapsed seconds as ``MM:SS`` / ``H:MM:SS`` (progress display)."""
+    seconds = max(int(seconds or 0), 0)
+    minutes, sec = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}时{minutes}分{sec}秒"
+    if minutes:
+        return f"{minutes}分{sec}秒"
+    return f"{sec}秒"
+
+
+def _infer_percent(message: str) -> float | None:
+    """Extract ``进度 P%`` from an infer progress message.
+
+    ``_latest_progress_phase`` renders ``… 进度 25.0%``; ``gr.Progress``
+    expects a 0..1 fraction.  Returns ``None`` when the message has no
+    progress token (caller falls back to indeterminate).
+    """
+    try:
+        match = re.search(r"进度\s*([\d.]+)\s*%", str(message or ""))
+        if not match:
+            return None
+        value = float(match.group(1))
+        return max(0.0, min(value / 100.0, 1.0))
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
 def do_supplement_parse_json(sup_json, ss):
     """解析上传的小 JSON：校验角色命中 + 至少一句文本，回填角色下拉与状态 state。
 
@@ -1958,17 +1988,30 @@ def do_supplement_synth(sup_role, sup_mode, sup_text, sup_json_role, sup_json_li
     # profile compliance（冷加载或 recycle）。把每个阶段透传为 Gradio 进度，
     # 让用户在等待期间看到「正在加载 IndexTTS 2.5…」而不是“卡死”。
     progress_phases: list[str] = []
+    _progress_started_at = time.monotonic()
 
     def _supplement_progress(phase: str, message: str) -> None:
         progress_phases.append(str(message or phase or ""))
         if progress is not None:
             try:
-                if phase in {"submitted", "runtime_ensure_requested", "engine_loading"}:
+                elapsed = int(time.monotonic() - _progress_started_at)
+                if phase in {"submitted", "runtime_ensure_requested"}:
                     progress(None, desc=str(message or "正在处理…"))
+                elif phase == "engine_loading":
+                    # 模型加载阶段不伪造百分比：indeterminate + 阶段名 + 已耗时。
+                    progress(
+                        None,
+                        desc=f"{str(message or '正在加载引擎…')} 已等待 {_fmt_elapsed(elapsed)}",
+                    )
                 elif phase == "engine_ready":
-                    progress(0.99, desc=str(message or "引擎就绪"))
+                    progress(0.0, desc=str(message or "引擎就绪"))
                 elif phase == "infer":
-                    progress(0.99, desc=str(message or "正在合成…"))
+                    # 真实 determinate 进度：解析 "正在生成第 X/N 句 · 已完成 C · 失败 F · 进度 P%"
+                    percent = _infer_percent(message)
+                    if percent is None:
+                        progress(0.0, desc=str(message or "正在合成…"))
+                    else:
+                        progress(percent, desc=str(message or "正在合成…"))
                 elif phase in {"done", "error"}:
                     # 终态：清空/替换残留的「正在加载模型…」，进度条回到明确终态。
                     progress(
@@ -2175,17 +2218,24 @@ def do_quick_tts_synth(qt_voice, qt_text, ss, progress: "gr.Progress" = None):
     if not speaker or not os.path.isfile(speaker):
         return [], f"❌ 声音文件不存在：{qt_voice}"
     progress_phases: list[str] = []
+    _qt_started_at = time.monotonic()
 
     def _qt_progress(phase: str, message: str) -> None:
         progress_phases.append(str(message or phase or ""))
         if progress is not None:
             try:
-                if phase in {"submitted", "runtime_ensure_requested", "engine_loading"}:
+                elapsed = int(time.monotonic() - _qt_started_at)
+                if phase in {"submitted", "runtime_ensure_requested"}:
                     progress(None, desc=str(message or "正在处理…"))
+                elif phase == "engine_loading":
+                    progress(
+                        None,
+                        desc=f"{str(message or '正在加载引擎…')} 已等待 {_fmt_elapsed(elapsed)}",
+                    )
                 elif phase == "engine_ready":
-                    progress(0.99, desc=str(message or "引擎就绪"))
+                    progress(0.0, desc=str(message or "引擎就绪"))
                 elif phase == "infer":
-                    progress(0.99, desc=str(message or "正在合成…"))
+                    progress(0.5, desc=str(message or "正在合成…"))
                 elif phase in {"done", "error"}:
                     progress(1.0, desc=str(message or ("✅ 任务完成" if phase == "done" else "❌ 任务失败")))
             except Exception:  # pragma: no cover - progress is best effort

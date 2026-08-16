@@ -100,35 +100,93 @@ class PrewarmService:
 
     @staticmethod
     def has_active_tts_tasks() -> bool:
-        """Whether any TTS/export lane is active (production / supplement / ...)."""
+        """Whether any TTS/export lane is genuinely live (not merely stale).
+
+        A task is only "active" when it has a live owner runtime behind it
+        (fresh heartbeat) or is still pending/unclaimed with a recent
+        timestamp.  A ``cancelling`` / ``running`` row whose owner runtime
+        died days ago must NOT block prewarm forever — it is stale, not
+        active (see incident: a 5-day-old ``cancelling`` task previously
+        blocked prewarm permanently).
+        """
         try:
+            from datetime import datetime, timezone
+
             from repositories.task_repo import TaskRepository
 
-            return any(
-                str(getattr(record, "status", ""))
-                in {
-                    "active", "pending", "queued", "starting", "preparing",
-                    "submitting", "running", "pausing", "paused", "recovering",
-                    "cancelling",
-                }
-                for record in TaskRepository.list_tasks()
-                if str(getattr(record, "task_type", ""))
-                in {"synthesis", "voice_preview", "preview", "supplement", "quick_tts", "export"}
-            )
+            active_statuses = {
+                "active", "pending", "queued", "starting", "preparing",
+                "submitting", "running", "pausing", "paused", "recovering",
+                "cancelling",
+            }
+            now = datetime.now(timezone.utc)
+            for record in TaskRepository.list_tasks():
+                status = str(getattr(record, "status", "") or "")
+                task_type = str(getattr(record, "task_type", "") or "")
+                if task_type not in {
+                    "synthesis", "voice_preview", "preview", "supplement",
+                    "quick_tts", "export",
+                }:
+                    continue
+                if status not in active_statuses:
+                    continue
+                owner = str(getattr(record, "owner_id", "") or "")
+                # A claimed task (owner set) is live only while its heartbeat
+                # is fresh (<= 90s).  Stale claimed rows => dead owner.
+                if owner:
+                    heartbeat = str(getattr(record, "heartbeat_at", "") or "")
+                    if heartbeat:
+                        try:
+                            parsed = datetime.fromisoformat(
+                                heartbeat.replace("Z", "+00:00")
+                            )
+                            if parsed.tzinfo is None:
+                                parsed = parsed.replace(tzinfo=timezone.utc)
+                            age = (now - parsed).total_seconds()
+                            if age > 90.0:
+                                continue
+                        except (ValueError, TypeError):
+                            pass
+                # Unclaimed but very old pending rows are leftovers too.
+                created = str(getattr(record, "created_at", "") or "")
+                if not owner and created:
+                    try:
+                        parsed = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                        if parsed.tzinfo is None:
+                            parsed = parsed.replace(tzinfo=timezone.utc)
+                        if (now - parsed).total_seconds() > 3600.0:
+                            continue
+                    except (ValueError, TypeError):
+                        pass
+                return True
+            return False
         except Exception:  # pragma: no cover - a read failure must not crash
             logger.debug("读取活动任务失败", exc_info=True)
             return True
 
     @staticmethod
+    def prewarm_skip_reason() -> str | None:
+        """Return the exact skip reason, or ``None`` when prewarm should run.
+
+        Diagnostic-friendly replacement for the old merged
+        ``skipped (disabled / no default / busy)`` log line.  Callers that
+        need to know *why* prewarm did not fire use this; UI/tests may also
+        surface it.
+        """
+        if not PrewarmService.is_enabled():
+            return "disabled"
+        if not PrewarmService.default_engine_id():
+            return "no_default_engine"
+        if PrewarmService.has_active_tts_tasks():
+            return "active_task"
+        if not PrewarmService._lifecycle_allows_runtime():
+            return "application_shutdown"
+        return None
+
+    @staticmethod
     def should_prewarm() -> bool:
         """Prewarm precondition: toggle on + default engine resolvable + idle."""
-        if not PrewarmService.is_enabled():
-            return False
-        if not PrewarmService.default_engine_id():
-            return False
-        if PrewarmService.has_active_tts_tasks():
-            return False
-        return True
+        return PrewarmService.prewarm_skip_reason() is None
 
     @staticmethod
     def _lifecycle_allows_runtime() -> bool:
@@ -197,7 +255,10 @@ class PrewarmService:
                 message = cls.prewarm()
                 logger.info("prewarm_event=%s", message)
             else:
-                logger.info("prewarm_event=skipped (disabled / no default / busy)")
+                reason = cls.prewarm_skip_reason() or "unknown"
+                if reason == "active_task":
+                    _log_active_task_detail()
+                logger.info("prewarm_event=skipped reason=%s", reason)
         except Exception:  # pragma: no cover - prewarm is best effort
             logger.exception("后台预热失败")
 
@@ -229,6 +290,41 @@ class PrewarmService:
         except Exception as exc:  # pragma: no cover - prewarm is best effort
             logger.warning("后台预热请求失败: %s", exc)
             return f"prewarm_failed error={exc}"
+
+
+def _log_active_task_detail() -> None:
+    """Log the concrete active task(s) blocking prewarm (diagnostic only)."""
+    try:
+        from repositories.task_repo import TaskRepository
+
+        active_statuses = {
+            "active", "pending", "queued", "starting", "preparing",
+            "submitting", "running", "pausing", "paused", "recovering",
+            "cancelling",
+        }
+        for record in TaskRepository.list_tasks():
+            status = str(getattr(record, "status", "") or "")
+            task_type = str(getattr(record, "task_type", "") or "")
+            if (
+                task_type
+                in {
+                    "synthesis", "voice_preview", "preview", "supplement",
+                    "quick_tts", "export",
+                }
+                and status in active_statuses
+            ):
+                logger.info(
+                    "prewarm_blocker task_id=%s task_type=%s task_status=%s "
+                    "owner=%s heartbeat=%s created=%s",
+                    getattr(record, "task_id", ""),
+                    task_type,
+                    status,
+                    str(getattr(record, "owner_id", "") or ""),
+                    str(getattr(record, "heartbeat_at", "") or ""),
+                    str(getattr(record, "created_at", "") or ""),
+                )
+    except Exception:  # pragma: no cover - diagnostic must not crash
+        logger.debug("prewarm_blocker 详情读取失败", exc_info=True)
 
 
 def reset_prewarm_state() -> None:

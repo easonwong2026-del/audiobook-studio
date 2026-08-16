@@ -26,6 +26,30 @@ logger = logging.getLogger(__name__)
 _TERMINAL = frozenset({"done", "error", "cancelled", "interrupted"})
 
 
+def _mark_interrupted(record: TaskRecord, reason: str) -> None:
+    """Mark a non-terminal task interrupted via the official API.
+
+    Preserves owner / progress / log_lines / error history; appends one
+    recovery log line and a clear error_summary (never "user cancelled").
+    """
+    try:
+        progress = dict(record.progress or {})
+        log_lines = list(record.log_lines or [])
+        log_lines.append("[task_recovered] status→interrupted reason=runtime_lost stale_heartbeat")
+        TaskRepository.persist_runtime_state(
+            record.task_id,
+            str(getattr(record, "owner_id", "") or ""),
+            status="interrupted",
+            progress=progress,
+            failed_segment_ids=list(record.failed_segment_ids or []),
+            error_summary=reason,
+            log_lines=log_lines,
+            project=getattr(record, "project", None) or None,
+        )
+    except Exception:  # pragma: no cover - recovery is best effort
+        logger.warning("标记任务 interrupted 失败: %s", record.task_id, exc_info=True)
+
+
 def _supplement_event(event: str, **fields: Any) -> None:
     """Emit one structured web-side supplement event (path-free fields only)."""
     parts = [f"{key}={value}" for key, value in fields.items() if value not in (None, "")]
@@ -37,12 +61,23 @@ def _now() -> str:
 
 
 def _latest_progress_phase(record: TaskRecord) -> tuple[str, str] | None:
-    """Map the newest durable task log line to a UI progress (phase, message).
+    """Map durable task state to a UI progress (phase, message).
 
-    The runtime writes structured ``[engine_intent]`` / ``[engine_init_start]`` /
-    ``[engine_init_done]`` / ``[supplement_infer_start]`` lines while loading
-    or running; the web wait loop turns them into readable progress text.
+    ``record.progress`` is the structured fact (authoritative for infer
+    phase); ``log_lines`` are diagnostics that additionally describe engine
+    loading detail.  The infer phase renders a real X/N + percent; engine
+    loading stays indeterminate.
     """
+    progress = getattr(record, "progress", None)
+    if isinstance(progress, dict) and str(progress.get("phase") or "") == "infer":
+        total = int(progress.get("total") or 0)
+        completed = int(progress.get("completed") or 0)
+        failed = int(progress.get("failed") or 0)
+        current = int(progress.get("current_line") or 0)
+        percent = float(progress.get("percent") or 0.0)
+        if total > 0:
+            line = f"正在生成第 {current}/{total} 句 · 已完成 {completed} · 失败 {failed} · 进度 {percent:.1f}%"
+            return "infer", line
     lines = list(getattr(record, "log_lines", None) or [])
     if not lines:
         return None
@@ -275,6 +310,17 @@ class RuntimeTTSError(RuntimeError):
         self.task_type = record.task_type
 
 
+class RuntimeLostError(RuntimeTTSError):
+    """The task's owner runtime died (stale heartbeat + dead process).
+
+    Raised by the ``_wait`` stale watchdog instead of blocking for the full
+    3600s timeout; the durable task is first marked ``interrupted`` through
+    the official ``TaskRepository`` API (provenance preserved).
+    """
+
+    code = "RUNTIME_LOST"
+
+
 class RuntimeTTSService:
     """Submit preview/supplement commands and wait on durable task state."""
 
@@ -287,10 +333,65 @@ class RuntimeTTSService:
         return path
 
     @staticmethod
+    def _runtime_lost(record: TaskRecord, stale_after: float = 60.0) -> bool:
+        """Whether a non-terminal task's owner runtime is likely dead.
+
+        Joint condition (never kills a slow-but-alive model load):
+        1. the task is owned by someone (``owner_id`` non-empty) and has a
+           heartbeat, AND
+        2. the heartbeat is older than ``stale_after`` seconds, AND
+        3. the runtime engine status is stale / the runtime process pid is
+           no longer alive.
+
+        IndexTTS 2.5 cold load can take minutes while the runtime *process*
+        stays alive and keeps its heartbeat fresh — that case must NOT be
+        treated as lost.
+        """
+        owner = str(getattr(record, "owner_id", "") or "")
+        heartbeat = str(getattr(record, "heartbeat_at", "") or "")
+        if not owner or not heartbeat:
+            return False
+        try:
+            parsed = datetime.fromisoformat(heartbeat.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - parsed).total_seconds()
+        except (ValueError, TypeError):
+            return False
+        if age < stale_after:
+            return False
+        # The runtime engine status is the authoritative liveness probe: it
+        # carries the current runtime's pid and owner, and ``status_stale``
+        # already folds in pid-alive + timestamp-fresh checks.  A dead runtime
+        # shows ``runtime_state=unknown`` / ``status_stale=True`` (or belongs
+        # to a different owner after a takeover).
+        try:
+            from .runtime_engine import read_runtime_engine_status
+
+            status = read_runtime_engine_status()
+            runtime_state = str(status.get("runtime_state") or "")
+            status_stale = bool(status.get("status_stale"))
+            status_owner = str(status.get("owner_id") or "")
+            if status_owner and status_owner != owner:
+                # A different runtime now owns the lane → this task's runtime
+                # is gone (a newer runtime may have taken over / recovered).
+                return True
+            if runtime_state in {"", "unknown"} and status_stale:
+                return True
+        except Exception:
+            # Status unreadable: fall back to heartbeat-only staleness after a
+            # long window (runtime died without ever writing a stale flag).
+            if age >= max(stale_after * 6, 300.0):
+                return True
+        return False
+
+    @staticmethod
     def _wait(
         task_id: str,
         timeout: float,
         progress_cb: Any = None,
+        *,
+        stale_after: float = 60.0,
     ) -> TaskRecord:
         """Block until the durable task reaches a terminal state.
 
@@ -298,6 +399,12 @@ class RuntimeTTSService:
         latest task log line / runtime engine state, so the UI can render
         "正在加载 IndexTTS 2.5…" / "正在生成第 X/N 句" during a multi-minute
         engine (re)load instead of appearing hung.
+
+        Stale watchdog: if the task is still non-terminal while its owner
+        runtime has been dead (stale heartbeat + dead pid) for a while, the
+        task is marked ``interrupted`` through the official API and a
+        ``RuntimeLostError`` (a ``RuntimeTTSError`` subclass) is raised
+        immediately instead of blocking for the full 3600s timeout.
         """
         deadline = time.monotonic() + max(float(timeout), 1.0)
         last_phase = ""
@@ -313,6 +420,14 @@ class RuntimeTTSService:
                     if phase and phase != last_phase:
                         last_phase = phase
                         progress_cb(*phase)
+                # Stale watchdog: engine load can legitimately take minutes,
+                # so only declare the runtime lost when BOTH the heartbeat is
+                # stale AND the owner process/status is gone.
+                if RuntimeTTSService._runtime_lost(record, stale_after=stale_after):
+                    _mark_interrupted(record, "Runtime process exited/stale heartbeat during engine initialization")
+                    record = TaskRepository.load_task(task_id)
+                    if record is not None and record.status in _TERMINAL:
+                        raise RuntimeLostError(record)
             time.sleep(0.05)
         record = TaskRepository.load_task(task_id)
         if record is None:
