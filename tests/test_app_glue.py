@@ -219,3 +219,10 @@ def test_json_import_service_is_wired_without_source_analysis():
         assert "StructuredScriptImportService" in service_file.read()
     assert "create_from_source" not in SRC
     assert "AI 分析并创建项目" not in SRC
+
+
+def test_json_create_chain_tail_refreshes_catalog():
+    """PR C：创建项目成功链尾统一刷新目录类组件（书架 / p_sel / 回收站）。"""
+    assert "catalog_ui.refresh_project_catalog" in SRC
+    assert "voice_create_chain.then(\n        catalog_ui.refresh_project_catalog" in SRC
+    assert "bookshelf_search" in SRC

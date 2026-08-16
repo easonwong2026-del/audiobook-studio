@@ -19,7 +19,7 @@ def run_diagnostics_ui():
     )
 
 
-def wire_settings_page(page: dict) -> None:
+def wire_settings_page(page: dict, catalog_refresh: tuple | None = None) -> None:
     tts_inputs = [
         page["s_tts_engine"],
         page["s_legacy_model_dir"],
@@ -52,11 +52,15 @@ def wire_settings_page(page: dict) -> None:
             tts_inputs,
             tts_outputs,
         )
-    page["s_data_apply"].click(
+    data_dir_chain = page["s_data_apply"].click(
         settings_handlers.apply_data_dir,
         [page["s_data_dir"]],
         [page["s_data_msg"], page["s_data_dir"]],
     )
+    if catalog_refresh is not None:
+        # 切换数据目录成功后统一刷新目录类组件（书架 / p_sel / 回收站）
+        fn, inputs, outputs = catalog_refresh
+        data_dir_chain.then(fn, inputs, outputs)
     page["s_data_open"].click(
         settings_handlers.open_data_dir,
         [],

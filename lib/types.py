@@ -64,3 +64,25 @@ class ProjectMeta:
     storage_version: int = 1
     directories: dict[str, str] = field(default_factory=dict)
     source_file: str = ""
+
+
+@dataclass(frozen=True)
+class ProjectSummary:
+    """统一轻量项目摘要（一次解析，首页书架 / Dropdown / 搜索共用）。
+
+    title/author 来自 ``structured_script.json`` 的 ``meta``（坏文件回退
+    project_name / "未填写"）；``failed/status/progress`` 为书架展示派生字段，
+    全部来自同一次 ``project.json`` 解析，不引入额外磁盘读。
+    """
+
+    project_name: str          # 目录名（scan 名称）
+    title: str                 # structured_script.json meta.title，缺省回退 project_name
+    author: str                # structured_script.json meta.author，缺省 "未填写"
+    chapters: int              # project.json total_chapters
+    segments: int              # project.json total_segments
+    completed: int             # project.json completed_count
+    modified_at: str | None    # 目录最近修改时间（ISO 8601，本地时间秒级）
+    # 展示派生字段（同一解析内算好，避免二次解析；沿用 _project_status 语义）
+    failed: int = 0
+    status: str = "⚪未开始"    # ✅完成 / 🟢进行中 / 🟡部分 / ⚪未开始 / 🔴有失败
+    progress: float = 0.0

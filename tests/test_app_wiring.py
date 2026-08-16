@@ -127,3 +127,16 @@ def test_main_groups_follow_navigation_order():
         "grp_production_nav", "grp_synth", "grp_review", "grp_export",
         "grp_supplement", "grp_settings",
     ]
+
+
+def test_bookshelf_select_wired_to_catalog_handler():
+    """PR C：书架 select 只设 selected（不打开项目），接 catalog handler。"""
+    assert "ov_bookshelf.select(" in SRC
+    assert "catalog_ui.select_bookshelf_row" in SRC
+    assert "select_project_from_bookshelf, [ov_bookshelf], [p_sel]).then(open_project" not in SRC
+
+
+def test_wire_project_catalog_invoked():
+    """PR C：项目书架 wiring 已在 Blocks 内调用。"""
+    assert "wire_project_catalog(" in SRC
+    assert "catalog_ui.bind_open_project(open_project)" in SRC
