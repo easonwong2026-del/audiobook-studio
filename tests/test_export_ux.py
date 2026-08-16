@@ -10,7 +10,10 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
+
+import pytest
 
 
 from services.export_naming import (
@@ -106,6 +109,7 @@ def test_build_export_path_and_unique_combined(tmp_path):
 
 
 # ── 打开所在文件夹 handler（no-window）────────────────────────────────────
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")
 def test_open_folder_handler_uses_no_window(monkeypatch, tmp_path):
 
     import lib.procutil as procutil

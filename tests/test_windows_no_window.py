@@ -16,12 +16,15 @@ import os
 import subprocess
 import sys
 
+import pytest
+
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lib import procutil  # noqa: E402
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")
 def test_run_no_window_adds_create_no_window_on_windows(monkeypatch):
     monkeypatch.setattr(procutil, "_is_windows", lambda: True)
     captured: dict = {}
@@ -56,6 +59,7 @@ def test_run_no_window_passthrough_on_posix(monkeypatch):
     assert "creationflags" not in captured["kwargs"]
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")
 def test_popen_no_window_adds_create_no_window_on_windows(monkeypatch):
     monkeypatch.setattr(procutil, "_is_windows", lambda: True)
     captured: dict = {}
@@ -73,6 +77,7 @@ def test_popen_no_window_adds_create_no_window_on_windows(monkeypatch):
     assert flags & getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")
 def test_open_in_folder_windows_uses_no_window_helper(monkeypatch, tmp_path):
     """Windows 打开文件所在文件夹：explorer 走 popen_no_window（no-window）。"""
     monkeypatch.setattr(procutil, "_is_windows", lambda: True)
@@ -97,6 +102,7 @@ def test_open_in_folder_windows_uses_no_window_helper(monkeypatch, tmp_path):
     assert flags & getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")
 def test_open_in_folder_windows_dir_uses_startfile(monkeypatch, tmp_path):
     """Windows 打开目录：os.startfile（本身无 console）。"""
     monkeypatch.setattr(procutil, "_is_windows", lambda: True)
