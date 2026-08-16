@@ -29,6 +29,22 @@ ACTIVE_TASK_STATES = frozenset({
 TERMINAL_TASK_STATES = frozenset({"done", "error", "cancelled", "interrupted"})
 
 
+def _repair_engine_snapshot(project_name: str) -> dict[str, Any]:
+    """Resolve the repair engine: newest production task provenance first.
+
+    Falls back to Settings current default only when the project has no
+    production task provenance.  The returned profile is frozen into the
+    repair's production task so the regenerated segment uses exactly the
+    engine identity recorded in its revision provenance.
+    """
+    from lib.segment_cache import project_task_engine_snapshot
+
+    provenance = project_task_engine_snapshot(project_name)
+    if provenance:
+        return provenance
+    return resolve_profile({})
+
+
 class RepairError(ValueError):
     def __init__(self, code: str, message: str, **details: Any) -> None:
         super().__init__(message)
@@ -100,6 +116,7 @@ class RepairService:
         emo_alpha: float | None,
         speech_rate: float | None,
         num_beams: int,
+        project_name: str = "",
     ) -> dict[str, Any]:
         try:
             beams = max(int(num_beams), 1)
@@ -121,7 +138,13 @@ class RepairService:
                 options["speech_rate"] = float(speech_rate)
             except (TypeError, ValueError) as exc:
                 raise RepairError("INVALID_OPTIONS", "speech_rate 必须是数字") from exc
-        options["engine_snapshot"] = resolve_profile({})
+        # Engine selection follows the same single rule as production: use the
+        # newest production task's frozen engine when available (provenance),
+        # otherwise Settings current default.  This prevents a repair from
+        # silently regenerating a v2 book under v2.5 (or reusing another
+        # engine's cache key) after Settings changed.
+        options["engine_snapshot"] = _repair_engine_snapshot(project_name)
+        options["engine_selection_source"] = "explicit"
         return options
 
     @classmethod
@@ -144,7 +167,7 @@ class RepairService:
         if not project:
             raise RepairError("PROJECT_REQUIRED", "project_name 不能为空")
         ids = cls._normalize_segment_ids(project, segment_ids)
-        options = cls._options(emotion, emo_alpha, speech_rate, num_beams)
+        options = cls._options(emotion, emo_alpha, speech_rate, num_beams, project)
         key = str(idempotency_key or "").strip()
         if key:
             replay = QualityRepository.find_history_by_field(

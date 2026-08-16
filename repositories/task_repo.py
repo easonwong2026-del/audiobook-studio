@@ -214,6 +214,11 @@ def _canonical_options(value: Any) -> dict[str, Any]:
         "speech_rate": _canonical_optional_number(raw.get("speech_rate")),
         "voice_overrides": voice_overrides,
         "engine_snapshot": engine_snapshot,
+        "engine_selection_source": (
+            str(raw.get("engine_selection_source"))
+            if raw.get("engine_selection_source") in {"explicit", "settings_default"}
+            else ""
+        ),
     }
 
 
@@ -746,6 +751,24 @@ class TaskRepository:
             connection.close()
 
     @staticmethod
+    def _invalidate_engine_provenance(project: str) -> None:
+        """Drop the segment_cache provenance TTL entry for a project.
+
+        Called after task creation/deletion/terminal transitions so a freshly
+        created production task is recognized by review/export/plan provenance
+        lookups immediately instead of waiting out the TTL window.
+        """
+        name = str(project or "").strip()
+        if not name:
+            return
+        try:
+            from lib.segment_cache import invalidate_task_engine_cache
+
+            invalidate_task_engine_cache(name)
+        except Exception:
+            pass
+
+    @staticmethod
     def create_production_task(record: TaskRecord) -> tuple[str, TaskRecord]:
         """Atomically create a production task.
 
@@ -790,6 +813,7 @@ class TaskRepository:
             TaskRepository._insert_record(connection, record)
             connection.commit()
             RuntimePendingSignal.notify()
+            TaskRepository._invalidate_engine_provenance(record.project)
             return "created", record
         except Exception:
             connection.rollback()
@@ -852,6 +876,7 @@ class TaskRepository:
             TaskRepository._insert_record(connection, record)
             connection.commit()
             RuntimePendingSignal.notify()
+            TaskRepository._invalidate_engine_provenance(record.project)
             return "created", record
         except Exception:
             connection.rollback()
@@ -1052,6 +1077,8 @@ class TaskRepository:
             # 状态变为 pending（未持有者 resume）→ 通知 runtime 可能有可 claim 任务。
             if new_status == "pending":
                 RuntimePendingSignal.notify()
+            if new_status in _TERMINAL_STATES:
+                TaskRepository._invalidate_engine_provenance(current.project)
             row = connection.execute(
                 "SELECT * FROM production_tasks WHERE task_id=?", (current.task_id,)
             ).fetchone()
@@ -1357,6 +1384,8 @@ class TaskRepository:
                 ),
             )
             connection.commit()
+            if effective_status in _TERMINAL_STATES:
+                TaskRepository._invalidate_engine_provenance(current.project)
             updated = connection.execute(
                 "SELECT * FROM production_tasks WHERE task_id=?", (task_id,)
             ).fetchone()
@@ -1386,6 +1415,8 @@ class TaskRepository:
                 os.remove(path)
         except OSError as exc:
             logger.warning("删除任务记录 %s 失败: %s", task_id, exc)
+        if record is not None:
+            TaskRepository._invalidate_engine_provenance(record.project)
 
     @staticmethod
     def cleanup_old_tasks(max_age_days: int = 7) -> int:

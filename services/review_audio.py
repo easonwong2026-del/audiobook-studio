@@ -101,7 +101,14 @@ def _allowed_audio_path(project_name: str, path: str, kind: str = "segments") ->
     return destination if _nonempty_file(destination) else None
 
 
-def _segment_audio(project_dir: str, segment: dict[str, Any]) -> str | None:
+def _segment_audio(project_name: str, project_dir: str, segment: dict[str, Any]) -> str | None:
+    """Resolve a segment's WAV through the unified artifact resolver.
+
+    The resolver uses engine provenance (segment revision > latest production
+    task > Settings default) so a segment produced yesterday with IndexTTS 2
+    stays playable even after Settings switches to IndexTTS 2.5, and a
+    dual-engine project can always find the audio it actually produced.
+    """
     seg_dir = project_paths.project_dir(project_dir, "segments")
     speaker_fingerprint = None
     if os.path.isfile(os.path.join(project_dir, "voice_cast.json")):
@@ -125,18 +132,18 @@ def _segment_audio(project_dir: str, segment: dict[str, Any]) -> str | None:
                 speaker_fingerprint = segment_cache.speaker_fingerprint_for_path(path)
         except Exception:
             speaker_fingerprint = None
-    return segment_cache.find_segment_wav(
-        seg_dir,
-        str(segment.get("id")),
-        str(segment.get("text") or ""),
-        str(segment.get("role") or segment.get("speaker") or ""),
-        str(segment.get("emotion") or "neutral"),
-        segment.get("emo_alpha", 1.0),
-        segment.get("speech_rate", 1.0),
-        segment.get("pinyin_hints"),
-        segment_cache.director_metadata_for(segment),
-        speaker_fingerprint,
+    artifact = segment_cache.resolve_segment_artifact(
+        segments_dir=seg_dir,
+        seg_id=str(segment.get("id") or ""),
+        emotion=str(segment.get("emotion") or "neutral"),
+        emo_alpha=segment.get("emo_alpha", 1.0),
+        speech_rate=segment.get("speech_rate", 1.0),
+        pinyin_hints=segment.get("pinyin_hints"),
+        director_metadata=segment_cache.director_metadata_for(segment),
+        speaker_fingerprint=speaker_fingerprint,
+        project_name=project_name,
     )
+    return artifact.path if artifact.exists() else None
 
 
 def _segment_label(segment: dict[str, Any]) -> str:
@@ -146,12 +153,12 @@ def _segment_label(segment: dict[str, Any]) -> str:
     return f"{segment.get('id')} · {segment.get('role') or segment.get('speaker') or ''} · {text}"
 
 
-def build_segment_choices(project_dir: str, script: dict[str, Any]) -> list[tuple[str, str]]:
+def build_segment_choices(project_name: str, project_dir: str, script: dict[str, Any]) -> list[tuple[str, str]]:
     """Build label/value choices only for segments with valid audio."""
     choices: list[tuple[str, str]] = []
     for chapter in script.get("chapters", []):
         for segment in chapter.get("segments", []):
-            audio = _segment_audio(project_dir, segment)
+            audio = _segment_audio(project_name, project_dir, segment)
             if _valid_wav_file(audio):
                 choices.append((_segment_label(segment), str(segment.get("id"))))
     return choices
@@ -183,7 +190,7 @@ def play_segment(project_name: str, project_dir: str, script: dict[str, Any], ch
         for segment in chapter.get("segments", []):
             if str(segment.get("id")) != str(selected_id):
                 continue
-            audio = _segment_audio(project_dir, segment)
+            audio = _segment_audio(project_name, project_dir, segment)
             if not _valid_wav_file(audio):
                 _record_event(project_dir, "segment_preview", "missing", segment_id=str(selected_id))
                 return ReviewAudioResult(None, f"ℹ 当前段落 {selected_id} 没有已合成音频。")
@@ -196,10 +203,10 @@ def play_segment(project_name: str, project_dir: str, script: dict[str, Any], ch
     return ReviewAudioResult(None, f"⚠ 未找到段落 {selected_id}，请刷新项目后重试。")
 
 
-def _chapter_fingerprint(project_dir: str, chapter: dict[str, Any]) -> str:
+def _chapter_fingerprint(project_name: str, project_dir: str, chapter: dict[str, Any]) -> str:
     files: list[dict[str, Any]] = []
     for segment in chapter.get("segments", []):
-        audio = _segment_audio(project_dir, segment)
+        audio = _segment_audio(project_name, project_dir, segment)
         stat: dict[str, Any] = {"id": str(segment.get("id")), "path": ""}
         if audio:
             try:
@@ -225,7 +232,7 @@ def render_chapter_preview(project_name: str, project_dir: str, script: dict[str
     index, chapter = target
     valid_audio = [
         audio for segment in chapter.get("segments", [])
-        for audio in [_segment_audio(project_dir, segment)]
+        for audio in [_segment_audio(project_name, project_dir, segment)]
         if _valid_wav_file(audio)
     ]
     label = chapter_identity.chapter_label(chapter, index, len(chapters))
@@ -233,7 +240,7 @@ def render_chapter_preview(project_name: str, project_dir: str, script: dict[str
         _record_event(project_dir, "chapter_preview", "missing", chapter_id=str(chapter_id))
         return ReviewAudioResult(None, f"ℹ {label} 没有可试听的已合成音频。")
 
-    fingerprint = _chapter_fingerprint(project_dir, chapter)
+    fingerprint = _chapter_fingerprint(project_name, project_dir, chapter)
     safe_project = _safe_project_name(project_name)
     safe_chapter = chapter_identity.chapter_file_stem(chapter, index, len(chapters))
     output_dir = preview_cache_dir(project_name, "chapters")
@@ -257,7 +264,7 @@ def render_chapter_preview(project_name: str, project_dir: str, script: dict[str
         return ReviewAudioResult(None, f"❌ {label} 合并试听失败，请点击重新加载。")
 
 
-def build_chapter_table(project_dir: str, script: dict[str, Any], meta: Any) -> tuple[str, list[tuple[str, str]]]:
+def build_chapter_table(project_name: str, project_dir: str, script: dict[str, Any], meta: Any) -> tuple[str, list[tuple[str, str]]]:
     chapters = script.get("chapters", [])
     total_done = 0
     total_segments = 0
@@ -265,7 +272,7 @@ def build_chapter_table(project_dir: str, script: dict[str, Any], meta: Any) -> 
     choices: list[tuple[str, str]] = []
     for index, chapter in enumerate(chapters):
         segments = chapter.get("segments", [])
-        done_ids = [str(segment.get("id")) for segment in segments if _valid_wav_file(_segment_audio(project_dir, segment))]
+        done_ids = [str(segment.get("id")) for segment in segments if _valid_wav_file(_segment_audio(project_name, project_dir, segment))]
         missing_ids = [str(segment.get("id")) for segment in segments if str(segment.get("id")) not in done_ids]
         total_done += len(done_ids)
         total_segments += len(segments)
@@ -290,14 +297,14 @@ def initialize(project_name: str | None, project_dir: str | None, script: dict[s
             chapter_status="⚪ 尚未打开项目。",
             segment_status="⚪ 尚未加载段落列表。",
         )
-    table, chapter_choices = build_chapter_table(project_dir, script, meta)
+    table, chapter_choices = build_chapter_table(project_name, project_dir, script, meta)
     selected_chapter = chapter_choices[0][1] if chapter_choices else None
     chapter_result = (
         render_chapter_preview(project_name, project_dir, script, selected_chapter)
         if selected_chapter is not None
         else ReviewAudioResult(None, "⚪ 当前项目没有可用章节。")
     )
-    segment_choices = build_segment_choices(project_dir, script)
+    segment_choices = build_segment_choices(project_name, project_dir, script)
     selected_segment = segment_choices[0][1] if segment_choices else None
     segment_result = (
         play_segment(project_name, project_dir, script, selected_segment)

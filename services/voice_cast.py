@@ -152,9 +152,11 @@ def _normalize_cast(project_name: str, value: Any, roster: dict[str, dict[str, A
     if isinstance(value, dict) and "roles" in value:
         status = str(value.get("status") or "draft")
         raw_roles = value.get("roles")
+        raw_document = value
     else:
         status = "draft"
         raw_roles = value
+        raw_document = None
     records, _ = _cast_records(raw_roles)
     roles: dict[str, dict[str, Any]] = {}
     for raw in records:
@@ -172,11 +174,32 @@ def _normalize_cast(project_name: str, value: Any, roster: dict[str, dict[str, A
         roles[role_id] = role
     if status not in {"draft", "locked"}:
         status = "draft"
+    # Lifecycle revision fields (人工确认门): preserved across re-normalization
+    # so every create/modify/rebind can be tracked without external state.
+    def _revision(value: Any, default: int = 0) -> int:
+        try:
+            return max(int(value or default), 0)
+        except (TypeError, ValueError):
+            return default
+
+    cast_revision = _revision(
+        raw_document.get("cast_revision") if raw_document is not None else None
+    )
+    confirmed_raw = raw_document.get("confirmed_revision") if raw_document is not None else None
+    confirmed_revision = _revision(confirmed_raw, 0) if confirmed_raw not in (None, "") else None
+    changed_raw = raw_document.get("changed_roles") if raw_document is not None else None
+    changed_roles = (
+        [str(item) for item in changed_raw]
+        if isinstance(changed_raw, list) else []
+    )
     return {
         "version": "1.0",
         "project_name": str(project_name),
         "status": status,
         "roles": roles,
+        "cast_revision": cast_revision,
+        "confirmed_revision": confirmed_revision,
+        "changed_roles": changed_roles,
     }
 
 
@@ -186,7 +209,31 @@ def _cast_document(project_name: str, roles: dict[str, dict[str, Any]], status: 
         "project_name": str(project_name),
         "status": status if status in {"draft", "locked"} else "draft",
         "roles": roles,
+        "cast_revision": 0,
+        "confirmed_revision": None,
+        "changed_roles": [],
     }
+
+
+def _mark_cast_changed(document: dict[str, Any], role_ids: list[str] | None = None) -> None:
+    """Bump cast_revision and invalidate the human confirmation.
+
+    Called by every create/modify/rebind Voice Cast mutation.  Only an
+    explicit ``confirm_voice_cast`` re-sets ``confirmed_revision``.
+    """
+    try:
+        document["cast_revision"] = int(document.get("cast_revision") or 0) + 1
+    except (TypeError, ValueError):
+        document["cast_revision"] = 1
+    document["confirmed_revision"] = None
+    changed = document.get("changed_roles")
+    if not isinstance(changed, list):
+        changed = []
+    for role_id in role_ids or []:
+        role_id = str(role_id)
+        if role_id and role_id not in changed:
+            changed.append(role_id)
+    document["changed_roles"] = changed
 
 
 def _relative_project_voice_path(filename: str) -> str:
@@ -457,6 +504,7 @@ class VoiceCastResolver:
             cast = _normalize_cast(project_name, cast_document, validation["roles"])
             if target in cast["roles"]:
                 cast["roles"][target]["name"] = validation["roles"][target]["name"]
+                _mark_cast_changed(cast, [target])
                 VoiceCastRepository.save_cast(project_dir, cast)
                 cls.apply_cast(project_name, cast, [target])
                 runtime_bindings = ProjectRepository.load_bindings(project_dir)
@@ -513,6 +561,56 @@ class VoiceCastResolver:
         if allow_legacy and not roles and requested_name:
             return {"role_id": None, "name": requested_name, "role": None, "matched_by": "legacy_name", "legacy": True}
         raise VoiceCastError("ROLE_NOT_IN_ROSTER", "角色不在 Character Roster 中", name=requested_name, role_id=requested_id or None)
+
+    @classmethod
+    def resolve_segment_speaker_fingerprint(
+        cls,
+        project_name: str,
+        segment: dict[str, Any] | None = None,
+        *,
+        role_id: str | None = None,
+        role_name: str | None = None,
+    ) -> str | None:
+        """Return the content fingerprint of the voice bound to a segment's role.
+
+        Voice Cast projects resolve ``segment.role_id`` (falling back to
+        ``segment.role`` / ``segment.speaker`` canonical names) to the active
+        ``role_bindings`` entry, then compute the SHA-256 content fingerprint
+        of its ``project_voice_path``.  Legacy (non-Voice-Cast) projects return
+        ``None`` so their speaker-agnostic caches keep their historical keys.
+
+        Used by plan/retry accounting so a done segment produced under a Voice
+        Cast binding is matched with its real speaker-aware cache key instead
+        of being reported as remaining / retryable.
+        """
+        project_dir = _project_dir(project_name)
+        if not os.path.isfile(os.path.join(project_dir, "voice_cast.json")):
+            return None
+        segment = segment if isinstance(segment, dict) else {}
+        requested_id = str(
+            role_id if role_id is not None else segment.get("role_id") or ""
+        ).strip()
+        requested_name = str(
+            role_name if role_name is not None
+            else segment.get("role") or segment.get("speaker") or ""
+        ).strip()
+        bindings = ProjectRepository.load_bindings(project_dir)
+        role_bindings = bindings.get("role_bindings", {}) if isinstance(bindings, dict) else {}
+        binding = role_bindings.get(requested_id)
+        if not isinstance(binding, dict) and requested_name:
+            binding = next(
+                (item for item in role_bindings.values()
+                 if isinstance(item, dict) and item.get("role_name") == requested_name),
+                None,
+            )
+        if not isinstance(binding, dict):
+            return None
+        path = str(binding.get("project_voice_path") or "")
+        if not path:
+            return None
+        if not os.path.isabs(path):
+            path = os.path.join(project_dir, path)
+        return segment_cache.speaker_fingerprint_for_path(path)
 
     @classmethod
     def _cast_validation(cls, project_name: str, cast: Any = None) -> tuple[dict[str, Any], dict[str, dict[str, Any]], dict[str, Any] | None]:
@@ -610,6 +708,10 @@ class VoiceCastResolver:
             }
         document = _normalize_cast(project_name, cast, roster)
         validation = cls.validate_voice_cast(project_name, document)
+        cast_revision = int(document.get("cast_revision") or 0)
+        confirmed_raw = document.get("confirmed_revision")
+        confirmed_revision = int(confirmed_raw) if confirmed_raw is not None else None
+        confirmed = confirmed_revision is not None and confirmed_revision == cast_revision
         return {
             "exists": True,
             **document,
@@ -618,6 +720,13 @@ class VoiceCastResolver:
             "errors": validation["errors"],
             "warnings": validation["warnings"],
             "summary": validation["summary"],
+            "confirmation_required": not confirmed,
+            "confirmed": confirmed,
+            "next_actions": (
+                ["plan_production", "start_production"]
+                if confirmed else
+                ["get_voice_cast", "confirm_voice_cast"]
+            ),
         }
 
     @classmethod
@@ -631,6 +740,7 @@ class VoiceCastResolver:
         _raise_validation(validation)
         document = validation["cast"]
         document["status"] = "draft"
+        _mark_cast_changed(document, list(document["roles"]))
         old_runtime_bindings = ProjectRepository.load_bindings(project_dir)
         segments_to_invalidate: list[str] = []
         # A project that already has formal output for a role starts that cast
@@ -803,6 +913,7 @@ class VoiceCastResolver:
         cast["roles"][rid] = role_binding
         if old_id != aid and cast.get("status") == "locked" and not force_rebind:
             cast["status"] = "draft"
+        _mark_cast_changed(cast, [rid])
         VoiceCastRepository.save_cast(project_dir, cast)
         applied = cls.apply_cast(project_name, cast, [rid])
         invalidated = 0
@@ -822,6 +933,12 @@ class VoiceCastResolver:
 
     @classmethod
     def finalize_voice_cast(cls, project_name: str) -> dict[str, Any]:
+        """Lock the cast for production without recording a user confirmation.
+
+        Legacy semantic: marks every bound role ``locked`` so a later bind
+        requires ``force_rebind``.  This is *not* the human confirmation gate;
+        use ``confirm_voice_cast`` for the explicit user-confirmation flow.
+        """
         _guard_mutation(project_name, "finalize_voice_cast")
         project_dir = _project_dir(project_name)
         validation = cls.validate_voice_cast(project_name)
@@ -835,9 +952,109 @@ class VoiceCastResolver:
         for binding in document["roles"].values():
             if binding.get("voice_asset_id"):
                 binding["locked"] = True
+        _mark_cast_changed(document, [])
         VoiceCastRepository.save_cast(project_dir, document)
         applied = cls.apply_cast(project_name, document)
         return {"success": True, "status": "locked", "cast": applied["cast"]}
+
+    @classmethod
+    def confirm_voice_cast(cls, project_name: str) -> dict[str, Any]:
+        """Human confirmation gate: record that a user explicitly confirmed.
+
+        Sets ``confirmed_revision = cast_revision`` (current binding state) and
+        locks every bound role.  Any later create/modify/rebind bumps
+        ``cast_revision`` and clears ``confirmed_revision``, so a stale
+        confirmation can never authorize production with changed voices.
+        Returns machine-readable state including role_bindings and
+        ``next_actions`` for the confirmation payload.
+        """
+        _guard_mutation(project_name, "confirm_voice_cast")
+        project_dir = _project_dir(project_name)
+        validation = cls.validate_voice_cast(project_name)
+        if not validation["ready"]:
+            errors = list(validation.get("errors") or [])
+            for role_id in validation.get("unbound_roles", []):
+                errors.append(_issue("ROLE_UNBOUND", "角色尚未绑定声音", role_id=role_id))
+            raise VoiceCastError("CAST_NOT_READY", "Voice Cast 尚未完成，不能确认", errors=errors)
+        document = validation["cast"]
+        document["status"] = "locked"
+        for binding in document["roles"].values():
+            if binding.get("voice_asset_id"):
+                binding["locked"] = True
+        # A confirmation only captures the exact revision it validates; the
+        # cast_revision is not bumped by confirming.
+        document["confirmed_revision"] = int(document.get("cast_revision") or 0)
+        document["changed_roles"] = []
+        VoiceCastRepository.save_cast(project_dir, document)
+        applied = cls.apply_cast(project_name, document)
+        role_bindings = [
+            {
+                "role_id": role_id,
+                "name": str(role.get("name") or ""),
+                "voice_asset_id": str(role.get("voice_asset_id") or ""),
+                "voice_sha256": str(role.get("voice_sha256") or ""),
+                "locked": bool(role.get("locked", False)),
+            }
+            for role_id, role in applied["cast"].get("roles", {}).items()
+            if isinstance(role, dict)
+        ]
+        return {
+            "success": True,
+            "status": "locked",
+            "confirmed": True,
+            "cast_revision": int(applied["cast"].get("cast_revision") or 0),
+            "confirmed_revision": int(applied["cast"].get("confirmed_revision") or 0),
+            "role_bindings": role_bindings,
+            "changed_roles": list(applied["cast"].get("changed_roles") or []),
+            "next_actions": ["plan_production", "start_production"],
+            "cast": applied["cast"],
+        }
+
+    @classmethod
+    def get_confirmation_state(cls, project_name: str) -> dict[str, Any]:
+        """Return the confirmation gate state for one project (no mutation)."""
+        _project_dir(project_name)
+        roster = _roster_map(_read_roster(project_name))
+        cast_document = _read_cast(project_name)
+        if cast_document is None:
+            return {
+                "mode": "legacy_manual",
+                "confirmed": True,
+                "confirmation_required": False,
+                "cast_revision": 0,
+                "confirmed_revision": None,
+                "role_bindings": [],
+                "changed_roles": [],
+            }
+        cast = _normalize_cast(project_name, cast_document, roster)
+        cast_revision = int(cast.get("cast_revision") or 0)
+        confirmed_raw = cast.get("confirmed_revision")
+        confirmed_revision = int(confirmed_raw) if confirmed_raw is not None else None
+        confirmed = confirmed_revision is not None and confirmed_revision == cast_revision
+        role_bindings = [
+            {
+                "role_id": role_id,
+                "name": str(role.get("name") or ""),
+                "voice_asset_id": str(role.get("voice_asset_id") or ""),
+                "locked": bool(role.get("locked", False)),
+            }
+            for role_id, role in sorted(cast.get("roles", {}).items())
+            if isinstance(role, dict)
+        ]
+        return {
+            "mode": "voice_cast",
+            "confirmed": confirmed,
+            "confirmation_required": not confirmed,
+            "cast_revision": cast_revision,
+            "confirmed_revision": confirmed_revision,
+            "role_bindings": role_bindings,
+            "changed_roles": list(cast.get("changed_roles") or []),
+            "next_actions": (
+                ["plan_production", "start_production"]
+                if confirmed else
+                ["get_voice_cast", "confirm_voice_cast"]
+            ),
+        }
 
     @classmethod
     def get_unbound_roles(cls, project_name: str) -> list[dict[str, Any]]:
@@ -957,6 +1174,10 @@ class VoiceCastResolver:
         runtime_state = runtime_status["runtime_state"]
         engine_state = runtime_status["engine_state"]
         locked_roles = [item for item in items if item.get("locked")]
+        cast_revision = int(cast.get("cast_revision") or 0)
+        confirmed_raw = cast.get("confirmed_revision")
+        confirmed_revision = int(confirmed_raw) if confirmed_raw is not None else None
+        confirmed = confirmed_revision is not None and confirmed_revision == cast_revision
         return {
             "project_name": project_name,
             "mode": "voice_cast",
@@ -976,6 +1197,10 @@ class VoiceCastResolver:
             "cast_locked": cast.get("status") == "locked",
             "cast_ready": cast_ready,
             "production_ready": cast_ready,
+            "confirmation_required": not confirmed,
+            "confirmed": confirmed,
+            "cast_revision": cast_revision,
+            "confirmed_revision": confirmed_revision,
             "runtime_status": runtime_state,
             "engine_state": engine_state,
             "engine_ready": engine_state == "ready",

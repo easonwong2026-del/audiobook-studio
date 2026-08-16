@@ -76,7 +76,7 @@ def scope_project(tmp_path, monkeypatch):
     yield "scope"
 
 
-def test_segment_readiness_is_exact_and_draft_cast_is_allowed(scope_project):
+def test_segment_readiness_is_exact_and_draft_cast_requires_confirmation(scope_project):
     selected = VoiceCastResolver.check_production_scope(scope_project, ["3-005"])
     assert selected["ready"] is True
     assert [role["role_id"] for role in selected["required_roles"]] == ["role_a"]
@@ -87,15 +87,26 @@ def test_segment_readiness_is_exact_and_draft_cast_is_allowed(scope_project):
     assert same_chapter_unbound["ready"] is False
     assert any(item["code"] == "ROLE_UNBOUND" for item in same_chapter_unbound["errors"])
 
+    # The human confirmation gate blocks plan readiness until the user has
+    # explicitly confirmed the Voice Cast (confirmed_revision == cast_revision),
+    # even for an otherwise scope-ready subset.
     plan = ProductionJobService.plan(scope_project, {"segment_ids": ["3-005"]})
-    assert plan["ready"] is True
+    assert plan["ready"] is False
+    assert any(
+        item.get("code") == "VOICE_CAST_CONFIRMATION_REQUIRED"
+        for item in plan["blockers"]
+    )
+    assert plan["voice_cast"]["scope_ready"] is True
+    assert plan["voice_cast"]["confirmation_required"] is True
     assert plan["scope"] == {
         "all": False,
         "chapter_ids": [],
         "segment_ids": ["3-005"],
     }
     assert plan["voice_cast"]["full_book_ready"] is False
-    assert plan["voice_cast"]["scope_ready"] is True
+    # The plan always reports the effective engine it would freeze on start.
+    assert plan["engine"]["engine_version"] in {"2", "2.5"}
+    assert plan["engine_selection_source"] in {"explicit", "settings_default"}
 
 
 def test_whole_book_still_requires_every_used_role(scope_project):
@@ -112,8 +123,13 @@ def test_plan_is_read_only_and_lock_only_touches_selected_roles(scope_project):
     before_tasks = TaskRepository.list_tasks(project=scope_project, task_type="synthesis")
     plan = ProductionJobService.plan(scope_project, {"segment_ids": ["3-005"]})
     after = VoiceCastResolver.get_voice_cast(scope_project)
-    assert plan["ready"] is True
+    assert plan["ready"] is False  # confirmation gate (read-only, no mutation)
+    assert any(
+        item.get("code") == "VOICE_CAST_CONFIRMATION_REQUIRED"
+        for item in plan["blockers"]
+    )
     assert after["roles"] == before["roles"]
+    assert after["cast_revision"] == before["cast_revision"]
     assert TaskRepository.list_tasks(project=scope_project, task_type="synthesis") == before_tasks
 
     locked = VoiceCastResolver.lock_production_scope(scope_project, ["3-005"])
@@ -131,6 +147,33 @@ def test_start_persists_exact_scope_without_requiring_full_cast_lock(scope_proje
         "services.production_jobs.ProductionRuntimeClient.ensure_running",
         staticmethod(lambda: None),
     )
+    # The confirmation gate rejects an unconfirmed Voice Cast.
+    with pytest.raises(ProductionJobError) as gate:
+        ProductionJobService.start(
+            scope_project,
+            {"segment_ids": ["3-005"]},
+            source="mcp",
+            idempotency_key="scope-start-before-confirm",
+        )
+    assert gate.value.code == "VOICE_CAST_CONFIRMATION_REQUIRED"
+    assert "cast_revision" in gate.value.details
+    assert "role_bindings" in gate.value.details
+    assert gate.value.details["next_actions"] == ["get_voice_cast", "confirm_voice_cast"]
+
+    # Bind the remaining roster roles so the cast can be confirmed, then
+    # confirm through the user-facing gate.
+    assets = {item["file_name"]: item for item in VoiceAssetService.list_assets()}
+    for role_id, filename in (
+        ("role_b", "清亮_b.wav"),
+        ("role_c", "低沉_c.wav"),
+    ):
+        VoiceCastResolver.bind_cast_role(
+            scope_project, role_id, assets[filename]["voice_asset_id"]
+        )
+    confirmed = VoiceCastResolver.confirm_voice_cast(scope_project)
+    assert confirmed["confirmed"] is True
+    assert confirmed["confirmed_revision"] == confirmed["cast_revision"]
+
     started = ProductionJobService.start(
         scope_project,
         {"segment_ids": ["3-005"]},
@@ -141,14 +184,23 @@ def test_start_persists_exact_scope_without_requiring_full_cast_lock(scope_proje
     assert started["scope"]["segment_ids"] == ["3-005"]
     assert started["progress"]["selected_total"] == 1
     assert started["progress"]["already_completed"] == 0
-    # The actual role lock is deferred to runtime claim, not plan/start UI
-    # selection.  This is the read-only boundary required by the workflow.
+    # confirm_voice_cast locks every bound role; start does not widen scope.
     cast = VoiceCastResolver.get_voice_cast(scope_project)
-    assert cast["roles"]["role_a"]["locked"] is False
+    assert cast["roles"]["role_a"]["locked"] is True
+    assert cast["roles"].get("role_b", {}).get("locked", False) is True
     TaskRepository.request_control(started["task_id"], "cancel")
 
 
 def test_start_rechecks_after_plan_when_binding_becomes_invalid(scope_project, monkeypatch):
+    assets = {item["file_name"]: item for item in VoiceAssetService.list_assets()}
+    for role_id, filename in (
+        ("role_b", "清亮_b.wav"),
+        ("role_c", "低沉_c.wav"),
+    ):
+        VoiceCastResolver.bind_cast_role(
+            scope_project, role_id, assets[filename]["voice_asset_id"]
+        )
+    VoiceCastResolver.confirm_voice_cast(scope_project)
     plan = ProductionJobService.plan(scope_project, {"segment_ids": ["3-005"]})
     assert plan["ready"] is True
     project_dir = ProjectRepository.get_project_dir(scope_project)

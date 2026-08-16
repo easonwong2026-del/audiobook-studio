@@ -17,7 +17,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from collections import OrderedDict
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 
@@ -308,3 +310,487 @@ def director_metadata_for(seg) -> dict | None:
     ):
         return None
     return metadata
+
+
+# ---------------------------------------------------------------------------
+# Unified Segment Artifact resolution (双引擎正确性收口)
+#
+# 背景：生产端自双引擎起把 engine_identity/cache_identity 加入 segment cache
+# key（文件名形如 ``{seg_id}_{md5(参数|speaker|engine)}.wav``），但读取链
+# （Review / Chapter Preview / Export / QA / Repair）长期只按 speaker 查找，
+# 导致 "音频已生成但试听/导出找不到"。本模块是唯一 artifact 解析入口：
+#
+#   - 权威 engine provenance 优先：调用方显式 engine_snapshot >
+#     segment 级 active revision provenance > task 级 provenance >
+#     Settings 当前默认（仅最后兜底，绝不覆盖历史真实 provenance）。
+#   - 兼容 4 类历史项目：
+#       A. 旧裸文件 ``001.wav``
+#       B. 老参数缓存 ``001_abcd1234.wav``
+#       C. Voice Cast speaker-aware ``001_<speaker>.wav``
+#       D. 双引擎 engine-aware ``001_<speaker+engine>.wav``
+#   - 解析结果带 resolution metadata，供测试与诊断核对。
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SegmentArtifact:
+    """Resolved segment audio plus resolution metadata."""
+
+    path: str | None
+    seg_id: str
+    matched_key: str = ""
+    matched_class: str = ""  # engine_aware|speaker_aware|param_aware|legacy_bare|any_variant
+    engine_provenance: dict[str, Any] = field(default_factory=dict)
+    engine_source: str = "none"  # explicit|revision|task|settings_default|none
+    speaker_fingerprint: str | None = None
+    candidates: list[dict[str, Any]] = field(default_factory=list)
+
+    def exists(self) -> bool:
+        return bool(self.path and os.path.isfile(self.path))
+
+
+def _public_engine_snapshot(value: Any) -> dict[str, Any]:
+    """Normalize a stored engine_snapshot into path-free identity fields."""
+    if not isinstance(value, dict) or not value:
+        return {}
+    try:
+        from .tts_profile import public_profile, resolve_profile
+
+        return public_profile(resolve_profile(value))
+    except (OSError, TypeError, ValueError, RuntimeError):
+        return {}
+
+
+def _task_covers_segment(record: Any, seg_id: str, segment_chapters: dict[str, str] | None) -> bool:
+    """Whether a durable task's scope includes the segment.
+
+    ``all`` scopes cover every segment; explicit ``segment_ids`` are matched
+    directly; ``chapter_ids`` requires the segment→chapter mapping loaded from
+    the project script.  A chapter-scoped task whose mapping is unavailable
+    (unreadable project) is treated as non-covering so a segment is never
+    attributed to an engine it cannot be proven to belong to.
+    """
+    scope = getattr(record, "scope", None)
+    scope = scope if isinstance(scope, dict) else {}
+    if scope.get("all"):
+        return True
+    seg_ids = {str(item) for item in scope.get("segment_ids", []) if str(item).strip()}
+    if seg_id in seg_ids:
+        return True
+    chapter_ids = {str(item) for item in scope.get("chapter_ids", []) if str(item).strip()}
+    if chapter_ids and segment_chapters is not None:
+        return segment_chapters.get(seg_id) in chapter_ids
+    return False
+
+
+def _task_needs_chapter_membership(record: Any, seg_id: str) -> bool:
+    """Whether a task's scope is chapter-based (needs the script mapping)."""
+    scope = getattr(record, "scope", None)
+    scope = scope if isinstance(scope, dict) else {}
+    if scope.get("all"):
+        return False
+    seg_ids = {str(item) for item in scope.get("segment_ids", []) if str(item).strip()}
+    if seg_id in seg_ids:
+        return False
+    return bool(scope.get("chapter_ids"))
+
+
+def _project_segment_chapters(project_name: str) -> dict[str, str] | None:
+    """Return ``{seg_id: chapter_id}`` for a project, or None when unreadable."""
+    try:
+        from repositories.project_repo import ProjectRepository
+        from . import script_loader
+
+        _meta, script, _bindings = ProjectRepository.load_project(project_name)
+        _voices, chapters = script_loader.resolve_collections(script)
+    except Exception:
+        return None
+    mapping: dict[str, str] = {}
+    for chapter in chapters:
+        if not isinstance(chapter, dict):
+            continue
+        chapter_id = str(chapter.get("id") or "").strip()
+        for segment in chapter.get("segments", []):
+            if isinstance(segment, dict):
+                segment_id = str(segment.get("id") or "").strip()
+                if segment_id:
+                    mapping[segment_id] = chapter_id
+    return mapping
+
+
+def _task_engine_provenance(
+    project_name: str,
+    seg_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return frozen engine snapshots of the project's synthesis tasks.
+
+    Candidates are ordered newest→oldest and deduplicated by cache_identity.
+    When ``seg_id`` is given only tasks whose durable scope covers that segment
+    contribute, so a mixed-engine project (e.g. chapters 1-10 under v2, then
+    11-20 under v2.5) resolves each segment with the engine that actually
+    produced it instead of the newest project engine.
+
+    A short TTL cache keeps per-segment review loops from re-reading the
+    SQLite task table for every segment.  Task creation/deletion and
+    engine-sensitive task completion explicitly invalidate the cache (see
+    ``invalidate_task_engine_cache``), so a freshly created production task is
+    recognized immediately even inside the TTL window.
+    """
+    key = str(project_name or "").strip()
+    if not key:
+        return []
+    from . import config as _cfg
+
+    cache_key = f"{_cfg.get_data_dir()}|{key}"
+    now = time.monotonic()
+    cached = _TASK_ENGINE_CACHE.get(cache_key)
+    if cached is not None and now - cached[0] < _TASK_ENGINE_CACHE_TTL:
+        payload = cached[1]
+    else:
+        try:
+            from repositories.task_repo import TaskRepository
+
+            records = TaskRepository.list_tasks(
+                project=key or None,
+                task_type="synthesis",
+            )
+        except Exception:
+            records = []
+        payload: dict[str, Any] = {"records": records, "segment_chapters": None}
+        _TASK_ENGINE_CACHE[cache_key] = (now, payload)
+        if len(_TASK_ENGINE_CACHE) > 128:
+            for stale_key in [k for k, v in _TASK_ENGINE_CACHE.items() if now - v[0] >= _TASK_ENGINE_CACHE_TTL]:
+                _TASK_ENGINE_CACHE.pop(stale_key, None)
+
+    records = payload.get("records") or []
+    segment_chapters: dict[str, str] | None = None
+    if seg_id:
+        need_chapters = any(_task_needs_chapter_membership(record, seg_id) for record in records)
+        if need_chapters:
+            segment_chapters = payload.get("segment_chapters")
+            if segment_chapters is None:
+                segment_chapters = _project_segment_chapters(key)
+                payload["segment_chapters"] = segment_chapters
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def _created_at(record: Any) -> str:
+        return str(getattr(record, "created_at", "") or "")
+
+    for record in sorted(records, key=_created_at, reverse=True):
+        if seg_id and not _task_covers_segment(record, seg_id, segment_chapters):
+            continue
+        options = getattr(record, "options", None)
+        if isinstance(options, dict) and isinstance(options.get("engine_snapshot"), dict):
+            snapshot = _public_engine_snapshot(options["engine_snapshot"])
+            identity = snapshot.get("cache_identity")
+            if identity and identity not in seen:
+                seen.add(identity)
+                result.append(snapshot)
+    return result
+
+
+# TTL cache for task-level engine provenance (see _task_engine_provenance).
+_TASK_ENGINE_CACHE_TTL = 10.0
+_TASK_ENGINE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+def invalidate_task_engine_cache(project_name: str) -> None:
+    """Drop the TTL provenance cache entry for one project.
+
+    Called when a new production/repair task is created, a task is deleted, or
+    an engine-sensitive task reaches a terminal state.  Without this a freshly
+    created task could be invisible to provenance lookups for up to the 10s
+    TTL window, mis-attributing a segment to an older engine.
+    """
+    key = str(project_name or "").strip()
+    if not key:
+        return
+    try:
+        from . import config as _cfg
+
+        cache_key = f"{_cfg.get_data_dir()}|{key}"
+    except Exception:
+        return
+    _TASK_ENGINE_CACHE.pop(cache_key, None)
+
+
+def project_task_engine_snapshot(project_name: str) -> dict[str, Any]:
+    """Public wrapper: newest production task's frozen engine snapshot."""
+    profiles = _task_engine_provenance(project_name)
+    return profiles[0] if profiles else {}
+
+
+def project_production_engines(project_name: str) -> list[dict[str, Any]]:
+    """Distinct frozen engine snapshots across all of a project's synthesis
+    tasks, newest first.
+
+    Empty list when the project has no production task provenance.  Used by
+    the UI to display the real historical production engine(s) — never the
+    runtime current engine and never the Settings default.
+    """
+    return _task_engine_provenance(project_name, seg_id=None)
+
+
+def _revision_engine_provenance(project_name: str, seg_id: str) -> dict[str, Any]:
+    """Return the segment's active revision engine snapshot (segment level)."""
+    try:
+        from repositories.quality_repo import QualityRepository
+
+        revision = QualityRepository.get_active_revision(
+            str(project_name or "").strip(), str(seg_id or "").strip()
+        )
+    except Exception:
+        return {}
+    if not isinstance(revision, dict):
+        return {}
+    params = revision.get("params")
+    engine = params.get("engine_snapshot") if isinstance(params, dict) else None
+    snapshot = _public_engine_snapshot(engine)
+    if snapshot.get("cache_identity"):
+        return snapshot
+    return {}
+
+
+def _engine_candidates(
+    *,
+    explicit_snapshot: dict[str, Any] | None,
+    project_name: str | None,
+    seg_id: str,
+    include_settings_default: bool = True,
+) -> list[tuple[dict[str, Any], str]]:
+    """Return (engine_snapshot, source) candidates in priority order.
+
+    An explicit snapshot is authoritative: when present it short-circuits the
+    provenance queries so plan/start never mix a caller's frozen engine with
+    task/revision history.  Without an explicit snapshot the resolver consults
+    segment revision provenance, then *every* task-level engine that covers
+    this segment (newest→oldest, so a mixed-engine project resolves each
+    segment with the engine that actually produced it), then Settings default.
+    """
+    from .tts_profile import resolve_profile
+
+    candidates: list[tuple[dict[str, Any], str]] = []
+    if explicit_snapshot and isinstance(explicit_snapshot, dict):
+        profile = resolve_profile(explicit_snapshot)
+        if profile.get("cache_identity"):
+            candidates.append((profile, "explicit"))
+        return candidates
+    if project_name:
+        revision_profile = _revision_engine_provenance(project_name, seg_id)
+        if revision_profile.get("cache_identity"):
+            candidates.append((revision_profile, "revision"))
+        for task_profile in _task_engine_provenance(project_name, seg_id):
+            if task_profile.get("cache_identity") and not any(
+                item[0].get("cache_identity") == task_profile["cache_identity"]
+                for item in candidates
+            ):
+                candidates.append((task_profile, "task"))
+    if include_settings_default:
+        settings_profile = resolve_profile({})
+        if settings_profile.get("cache_identity") and not any(
+            item[0].get("cache_identity") == settings_profile["cache_identity"]
+            for item in candidates
+        ):
+            candidates.append((settings_profile, "settings_default"))
+    return candidates
+
+
+def resolve_segment_artifact(
+    *,
+    segments_dir: str,
+    seg_id: str,
+    emotion: str = "neutral",
+    emo_alpha: float = 1.0,
+    speech_rate: float = 1.0,
+    pinyin_hints: Any = None,
+    director_metadata: Any = None,
+    speaker_fingerprint: str | None = None,
+    engine_snapshot: dict[str, Any] | None = None,
+    project_name: str | None = None,
+    allow_legacy_fallback: bool | None = None,
+    allow_any_variant: bool | None = None,
+    include_settings_default: bool = True,
+) -> SegmentArtifact:
+    """Resolve the segment WAV using unified provenance-aware lookup.
+
+    Engine provenance priority: explicit engine_snapshot > segment revision
+    provenance > task-level engine candidates (every production task covering
+    this segment, newest→oldest) > Settings default.  The Settings default is
+    only ever a *candidate* and never overrides a real historical provenance,
+    so yesterday's IndexTTS2 audio remains playable even after Settings
+    switches to IndexTTS 2.5, and a mixed-engine project resolves each segment
+    with the engine that actually produced it.
+
+    Compatibility classes tried in order:
+      1. engine-aware ``{seg_id}_{md5(...,speaker,engine)}.wav``
+      2. speaker-aware ``{seg_id}_{md5(...,speaker)}.wav``
+      3. param-aware ``{seg_id}_{md5(...)}.wav``
+      4. legacy bare ``{seg_id}.wav``
+      5. any ``{seg_id}_*.wav`` variant (only when explicitly allowed)
+
+    ``allow_legacy_fallback`` gates the legacy bare file (defaults to enabled
+    for non-strict lookups).  ``allow_any_variant`` independently gates the
+    catch-all glob; plan accounting leaves it off so a file produced by a
+    *different* engine is reported as remaining instead of completed.
+    """
+    candidates_tried: list[dict[str, Any]] = []
+    strict = bool(speaker_fingerprint or engine_snapshot)
+    if allow_legacy_fallback is None:
+        allow_legacy_fallback = not strict
+    if allow_any_variant is None:
+        allow_any_variant = allow_legacy_fallback
+
+    engine_candidates = _engine_candidates(
+        explicit_snapshot=engine_snapshot,
+        project_name=project_name,
+        seg_id=seg_id,
+        include_settings_default=include_settings_default,
+    )
+
+    def _try(path: str, key: str, matched_class: str, provenance: dict[str, Any], source: str) -> SegmentArtifact | None:
+        candidates_tried.append({
+            "path": path,
+            "key": key,
+            "matched_class": matched_class,
+            "engine_source": source,
+            "exists": os.path.isfile(path),
+        })
+        if os.path.isfile(path):
+            return SegmentArtifact(
+                path=path,
+                seg_id=seg_id,
+                matched_key=key,
+                matched_class=matched_class,
+                engine_provenance=provenance,
+                engine_source=source,
+                speaker_fingerprint=speaker_fingerprint,
+                candidates=list(candidates_tried),
+            )
+        return None
+
+    # 1) engine-aware keys in provenance priority order
+    for profile, source in engine_candidates:
+        engine_identity = str(profile.get("cache_identity") or "").strip()
+        if not engine_identity:
+            continue
+        ck = segment_cache_key(
+            seg_id, emotion, emo_alpha, speech_rate, pinyin_hints,
+            director_metadata, speaker_fingerprint, engine_identity,
+        )
+        found = _try(
+            os.path.join(segments_dir, f"{ck}.wav"),
+            ck, "engine_aware", profile, source,
+        )
+        if found is not None:
+            return found
+
+    # 2) speaker-aware key (no engine identity)
+    ck = segment_cache_key(
+        seg_id, emotion, emo_alpha, speech_rate, pinyin_hints,
+        director_metadata, speaker_fingerprint, None,
+    )
+    found = _try(
+        os.path.join(segments_dir, f"{ck}.wav"),
+        ck, "speaker_aware", {}, "none",
+    )
+    if found is not None:
+        return found
+
+    # 3) param-aware key (no speaker, no engine)
+    ck = segment_cache_key(
+        seg_id, emotion, emo_alpha, speech_rate, pinyin_hints,
+        director_metadata, None, None,
+    )
+    found = _try(
+        os.path.join(segments_dir, f"{ck}.wav"),
+        ck, "param_aware", {}, "none",
+    )
+    if found is not None:
+        return found
+
+    # 4) legacy bare file.  Tried for legacy/no-strict lookups, and for strict
+    # lookups only when the caller explicitly opts in (a speaker/engine-aware
+    # project must never silently play an old actor's bare file after a rebind).
+    if allow_legacy_fallback or not strict:
+        legacy = os.path.join(segments_dir, f"{seg_id}.wav")
+        found = _try(legacy, seg_id, "legacy_bare", {}, "none")
+        if found is not None:
+            return found
+
+    # 5) any variant (explicit opt-in; never default for Voice Cast projects
+    # and never used by plan accounting, which must distinguish engines)
+    if allow_any_variant:
+        try:
+            if os.path.isdir(segments_dir):
+                for name in sorted(os.listdir(segments_dir)):
+                    if name.startswith(f"{seg_id}_") and name.endswith(".wav"):
+                        found = _try(
+                            os.path.join(segments_dir, name),
+                            os.path.splitext(name)[0], "any_variant", {}, "none",
+                        )
+                        if found is not None:
+                            return found
+        except OSError:
+            pass
+
+    return SegmentArtifact(
+        path=None,
+        seg_id=seg_id,
+        engine_provenance=(engine_candidates[0][0] if engine_candidates else {}),
+        engine_source=(engine_candidates[0][1] if engine_candidates else "none"),
+        speaker_fingerprint=speaker_fingerprint,
+        candidates=list(candidates_tried),
+    )
+
+
+def has_segment_audio(
+    *,
+    segments_dir: str,
+    seg_id: str,
+    emotion: str = "neutral",
+    emo_alpha: float = 1.0,
+    speech_rate: float = 1.0,
+    pinyin_hints: Any = None,
+    director_metadata: Any = None,
+    speaker_fingerprint: str | None = None,
+    engine_snapshot: dict[str, Any] | None = None,
+    project_name: str | None = None,
+    allow_legacy_fallback: bool = False,
+    allow_any_variant: bool = False,
+) -> bool:
+    """Return whether the segment has a resolvable audio artifact.
+
+    ``allow_legacy_fallback`` permits matching the pre-cache-key bare
+    ``{seg_id}.wav`` (used by plan accounting so old completed books stay
+    completed).  ``allow_any_variant`` matches any ``{seg_id}_*.wav`` glob and
+    is intended only for legacy projects that carry no engine provenance;
+    plan deliberately leaves it off so a file produced by a *different* engine
+    is treated as remaining and re-synthesized under the current task engine.
+    """
+    artifact = resolve_segment_artifact(
+        segments_dir=segments_dir,
+        seg_id=seg_id,
+        emotion=emotion,
+        emo_alpha=emo_alpha,
+        speech_rate=speech_rate,
+        pinyin_hints=pinyin_hints,
+        director_metadata=director_metadata,
+        speaker_fingerprint=speaker_fingerprint,
+        engine_snapshot=engine_snapshot,
+        project_name=project_name,
+        allow_legacy_fallback=allow_legacy_fallback or allow_any_variant,
+        allow_any_variant=allow_any_variant,
+    )
+    if artifact.exists():
+        return True
+    if allow_any_variant:
+        try:
+            if os.path.isdir(segments_dir):
+                return any(
+                    name.startswith(f"{seg_id}_") and name.endswith(".wav")
+                    for name in os.listdir(segments_dir)
+                )
+        except OSError:
+            return False
+    return False
