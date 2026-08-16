@@ -362,9 +362,12 @@ class TestWindowsStartupFlags:
         assert command[0] == str(fake)
         assert command[1:] == ["-m", "services.production_runtime", "--serve"]
 
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")
     def test_runtime_spawn_uses_detached_flags_not_create_no_window(self, monkeypatch, tmp_path):
         # The runtime subprocess must keep DETACHED_PROCESS and must NOT stack
         # CREATE_NO_WINDOW (mutually exclusive / ignored by Windows).
+        # DETACHED_PROCESS / CREATE_NO_WINDOW are Windows-only constants; on
+        # POSIX (Linux CI) the flags are meaningless, so the test is skipped.
         import subprocess as _sp
         from types import SimpleNamespace as _NS
 
