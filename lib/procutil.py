@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from typing import Any
 
 
@@ -50,4 +51,39 @@ def popen_no_window(*args: Any, **kwargs: Any) -> subprocess.Popen:
     return subprocess.Popen(*args, **no_window_kwargs(**kwargs))
 
 
-__all__ = ["no_window_kwargs", "run_no_window", "popen_no_window"]
+def open_in_folder(path: str) -> bool:
+    """Open a folder (or reveal a file) without spawning a console window.
+
+    Windows: 文件用 ``explorer /select,<path>``（在资源管理器中定位选中），
+    目录用 ``os.startfile`` —— 两者都不会弹出黑色 console；explorer 走
+    ``popen_no_window`` 双保险。非 Windows 回退 ``open`` / ``xdg-open``。
+
+    Args:
+        path: 要打开的目录或文件绝对路径。
+
+    Returns:
+        ``True`` 表示已尝试打开；路径不存在或打开失败返回 ``False``。
+    """
+    target = os.path.abspath(str(path or ""))
+    if not target or not os.path.exists(target):
+        return False
+    try:
+        if _is_windows():
+            if os.path.isfile(target):
+                # explorer 自身是 GUI 程序（无 console），仍统一走 no-window helper
+                # 防意外；subprocess 会把带空格的整个参数自动加引号。
+                popen_no_window(["explorer", f"/select,{os.path.normpath(target)}"])
+            else:
+                os.startfile(target)  # noqa: S606 - 打开目录，无 console
+            return True
+        reveal = target if os.path.isdir(target) else os.path.dirname(target)
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", reveal])
+        else:
+            subprocess.Popen(["xdg-open", reveal])
+        return True
+    except OSError:
+        return False
+
+
+__all__ = ["no_window_kwargs", "run_no_window", "popen_no_window", "open_in_folder"]

@@ -90,3 +90,8 @@ def wire_settings_page(page: dict) -> None:
             page["s_diagnostics_report"],
         ],
     )
+    page["s_prewarm_apply"].click(
+        settings_handlers.apply_prewarm_setting,
+        [page["s_prewarm"]],
+        [page["s_prewarm_status"]],
+    )

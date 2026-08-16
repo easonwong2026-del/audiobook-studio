@@ -16,7 +16,7 @@ from typing import Any
 
 from lib import project_paths
 from repositories.project_repo import ProjectRepository
-from repositories.task_repo import TaskRecord, TaskRepository
+from repositories.task_repo import QUICK_TTS_CONTEXT, TaskRecord, TaskRepository
 from lib.tts_profile import resolve_profile
 
 from .production_runtime import ProductionRuntime, ProductionRuntimeClient
@@ -183,7 +183,7 @@ def _pending_engine_switch_target() -> dict[str, Any] | None:
 def _select_utility_engine(
     engine_profile: Any = None,
 ) -> tuple[dict[str, Any], str]:
-    """Utility (preview/supplement) engine selection policy.
+    """Utility (preview/supplement/quick-tts) engine selection policy.
 
     Priority: ``explicit`` engine_profile > ``runtime_switch_target`` (a
     user-requested engine switch the runtime has not finished yet) >
@@ -217,6 +217,37 @@ def _select_utility_engine(
     if current is not None:
         return resolve_profile(current), "runtime_current"
     return resolve_profile({}), "global_default"
+
+
+_ACTIVE_LANE_STATES = frozenset({
+    "active", "pending", "queued", "starting", "preparing", "submitting",
+    "running", "pausing", "paused", "recovering", "cancelling",
+})
+_ACTIVE_LANE_TASK_TYPES = frozenset({
+    "synthesis", "voice_preview", "preview", "supplement", "quick_tts", "export",
+})
+
+
+def _active_tts_lane() -> TaskRecord | None:
+    """Return the first active TTS/export lane task across all projects + utility.
+
+    The singleton runtime is serial, so Quick TTS must not queue behind an
+    active production/supplement/preview/export: the client returns a busy
+    error immediately instead of waiting for the engine to free up.
+    """
+    try:
+        return next(
+            (
+                record
+                for record in TaskRepository.list_tasks()
+                if str(getattr(record, "task_type", "")) in _ACTIVE_LANE_TASK_TYPES
+                and str(getattr(record, "status", "")) in _ACTIVE_LANE_STATES
+            ),
+            None,
+        )
+    except Exception:  # pragma: no cover - a read failure must not crash
+        logger.debug("读取活动 TTS lane 失败", exc_info=True)
+        return None
 
 
 class RuntimeTTSBusyError(RuntimeError):
@@ -497,6 +528,71 @@ class RuntimeTTSService:
         if not isinstance(items, list):
             raise RuntimeTTSError(record)
         return [dict(item) for item in items if isinstance(item, dict)]
+
+    @classmethod
+    def quick_tts_synthesize(
+        cls,
+        *,
+        text: str,
+        speaker_audio: str,
+        num_beams: int = 2,
+        timeout: float = 3600.0,
+        engine_profile: dict[str, Any] | None = None,
+        progress_cb: Any = None,
+    ) -> str:
+        """Synthesize one Quick TTS (no-project) request via the singleton runtime.
+
+        Uses the formal global utility context (``QUICK_TTS_CONTEXT``) so the
+        durable task never touches a project bookshelf.  The engine snapshot is
+        frozen at submission time with the same utility selection policy as
+        preview/supplement (no new resolution path).
+
+        Returns the generated WAV absolute path.
+
+        Raises:
+            QuickTTSBusyError: another TTS/export lane is active.
+            RuntimeTTSError: runtime task failed / timed out.
+        """
+        text = str(text or "").strip()
+        snapshot, selection_source = _select_utility_engine(engine_profile)
+        _supplement_event(
+            "utility_engine_selection",
+            task_type="quick_tts",
+            selection_source=selection_source,
+            engine_version=str(snapshot.get("engine_version") or ""),
+            engine_identity=str(snapshot.get("engine_identity") or ""),
+        )
+        payload = {
+            "text": text,
+            "speaker_audio": os.path.abspath(str(speaker_audio)),
+            "num_beams": max(int(num_beams or 2), 1),
+            "engine_snapshot": snapshot,
+        }
+        active = _active_tts_lane()
+        if active is not None:
+            from .quick_tts import QuickTTSBusyError
+
+            raise QuickTTSBusyError(active)
+        from .quick_tts import QuickTTSService
+
+        task_id = f"quick_{uuid.uuid4().hex[:20]}"
+        artifact_dir = QuickTTSService.task_cache_dir(task_id)
+        if progress_cb is not None:
+            progress_cb("submitted", "已提交临时配音任务，正在等待运行时…")
+        record = cls._submit(
+            project_name=QUICK_TTS_CONTEXT,
+            task_type="quick_tts",
+            artifact_dir=artifact_dir,
+            options=payload,
+            total=1,
+            timeout=timeout,
+            progress_cb=progress_cb,
+        )
+        result = record.progress.get("result", {}) if isinstance(record.progress, dict) else {}
+        wav = str(result.get("wav_path") or "")
+        if not wav or not os.path.isfile(wav):
+            raise RuntimeTTSError(record)
+        return wav
 
 
 __all__ = [

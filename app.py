@@ -41,6 +41,8 @@ from services import (
     QualityService,
     RepairError,
     RepairService,
+    QuickTTSBusyError,
+    QuickTTSService,
     RuntimeTTSService,
     SupplementService,
     SupplementTaskState,
@@ -2073,8 +2075,11 @@ def do_supplement_synth(sup_role, sup_mode, sup_text, sup_json_role, sup_json_li
     return wav_paths, "\n".join(md)
 
 
-def do_supplement_export(sup_format, sup_bitrate, sup_wavs, sup_role, ss):
+def do_supplement_export(sup_format, sup_bitrate, sup_export_name, sup_wavs, sup_role, ss):
     """把已合成的补录 wav 导出为独立音频（不进整本拼接），经白名单后返回下载路径。
+
+    PR B 修复 4：支持自定义导出名称（非法字符清洗 / 扩展名归一 / 重名后缀）；
+    导出前显示保存位置，导出后显示最终文件路径。
 
     Returns:
         ``(_safe_path, msg)``；``_safe_path`` 经 ``_safe_path_for_file_component``
@@ -2087,7 +2092,11 @@ def do_supplement_export(sup_format, sup_bitrate, sup_wavs, sup_role, ss):
         return None, "❌ 没有可导出的补录音频（请先逐句补合成）"
     role = sup_role or "角色"
     project_dir = ProjectService.get_project_dir(ss.project)
-    out_path = SupplementService.build_output_path(project_dir, role, sup_format)
+    out_dir = project_paths.project_dir(project_dir, "exports", create=True)
+    name = sup_export_name or f"supplement_{_safe_name(role)}"
+    from services.export_naming import build_export_path, unique_path
+
+    out_path = unique_path(build_export_path(out_dir, name, sup_format, fallback=f"supplement_{_safe_name(role)}"))
     meta = ss.script.get("meta", {}) if isinstance(ss.script, dict) else {}
     title = f"{meta.get('title', 'audiobook')} - {role} 补录" if meta else None
     artist = meta.get("author") if meta else None
@@ -2096,9 +2105,188 @@ def do_supplement_export(sup_format, sup_bitrate, sup_wavs, sup_role, ss):
             paths=wavs, out_path=out_path, format=sup_format, bitrate=sup_bitrate,
             title=title, artist=artist,
         )
-        return _safe_path_for_file_component(final), f"✅ 导出完成：{os.path.basename(final)}"
+        msg = (
+            f"✅ 导出完成：`{os.path.basename(final)}`\n\n"
+            f"**保存位置：** `{out_dir}`\n\n"
+            f"**最终文件：** `{final}`"
+        )
+        return _safe_path_for_file_component(final), msg
     except Exception as e:
         return None, str(e)
+
+
+def refresh_supplement_export_hint(ss):
+    """导出前显示项目补录的保存位置（<project_dir>/exports）。"""
+    if not ss or not ss.project:
+        return "打开项目后将在此显示导出保存位置。"
+    project_dir = ProjectService.get_project_dir(ss.project)
+    out_dir = project_paths.project_dir(project_dir, "exports", create=True)
+    return f"**保存位置：** `{out_dir}`"
+
+
+def open_supplement_folder(sup_wavs, ss):
+    """打开项目补录导出目录（no-window，不弹黑框）。"""
+    if not ss or not ss.project:
+        return "请先打开项目"
+    project_dir = ProjectService.get_project_dir(ss.project)
+    out_dir = project_paths.project_dir(project_dir, "exports", create=True)
+    from lib.procutil import open_in_folder
+
+    ok = open_in_folder(out_dir)
+    return f"✅ 已打开导出目录：`{out_dir}`" if ok else f"❌ 打开目录失败：`{out_dir}`"
+
+
+def refresh_quick_tts_engine_info():
+    """显示临时配音将使用的 effective engine（复用既有 utility 选择规则）。"""
+    try:
+        from services.runtime_tts import _select_utility_engine
+
+        profile, source = _select_utility_engine(None)
+        label = _engine_display_label(profile)
+        source_label = {
+            "explicit": "显式指定",
+            "runtime_switch_target": "切换目标",
+            "runtime_current": "运行时已加载",
+            "global_default": "Settings 默认",
+        }.get(source, source)
+        return f"**当前引擎：** {label}（{source_label}）"
+    except Exception:
+        return "**当前引擎：** 读取失败"
+
+
+def _engine_display_label(profile):
+    version = str((profile or {}).get("engine_version") or "")
+    label = "IndexTTS 2.5" if version == "2.5" else "IndexTTS 2"
+    return f"{label}（v{version or '?'}）"
+
+
+def do_quick_tts_synth(qt_voice, qt_text, ss, progress: "gr.Progress" = None):
+    """临时配音：全局声音库 + 台词 → 通过 singleton runtime 生成 WAV。
+
+    Returns:
+        ``(qt_wavs state, 状态 markdown)``。
+    """
+    if not qt_voice:
+        return [], "❌ 请选择声音（全局声音库）"
+    text = str(qt_text or "").strip()
+    if not text:
+        return [], "❌ 请输入台词"
+    speaker = _lib_path(qt_voice)
+    if not speaker or not os.path.isfile(speaker):
+        return [], f"❌ 声音文件不存在：{qt_voice}"
+    progress_phases: list[str] = []
+
+    def _qt_progress(phase: str, message: str) -> None:
+        progress_phases.append(str(message or phase or ""))
+        if progress is not None:
+            try:
+                if phase in {"submitted", "runtime_ensure_requested", "engine_loading"}:
+                    progress(None, desc=str(message or "正在处理…"))
+                elif phase == "engine_ready":
+                    progress(0.99, desc=str(message or "引擎就绪"))
+                elif phase == "infer":
+                    progress(0.99, desc=str(message or "正在合成…"))
+                elif phase in {"done", "error"}:
+                    progress(1.0, desc=str(message or ("✅ 任务完成" if phase == "done" else "❌ 任务失败")))
+            except Exception:  # pragma: no cover - progress is best effort
+                pass
+
+    try:
+        wav = QuickTTSService.synthesize(
+            text=text,
+            speaker_audio=speaker,
+            num_beams=2,
+            progress_cb=_qt_progress,
+        )
+    except QuickTTSBusyError as e:
+        if progress is not None:
+            try:
+                progress(1.0, desc="❌ 临时配音繁忙")
+            except Exception:  # pragma: no cover
+                pass
+        return [], f"❌ {e}"
+    except Exception as e:
+        hint = ""
+        if progress_phases:
+            hint = f"（阶段：{' → '.join(progress_phases[-3:])}）"
+        if progress is not None:
+            try:
+                progress(1.0, desc="❌ 临时配音失败")
+            except Exception:  # pragma: no cover
+                pass
+        return [], f"❌ 临时配音失败：{str(e)[:200]}{hint}"
+    if progress is not None:
+        try:
+            progress(1.0, desc="✅ 临时配音完成")
+        except Exception:  # pragma: no cover
+            pass
+    md = "### 🎙 临时配音完成"
+    md += f"\n- ✅ 已生成：`{wav}`"
+    md += "\n> 临时配音不走项目书架；试听或导出后产物位于 Quick TTS 目录。"
+    return [wav], md
+
+
+def play_quick_tts(qt_wavs):
+    """试听临时配音音频。"""
+    wavs = [w for w in (qt_wavs or []) if w and os.path.isfile(w)]
+    if not wavs:
+        return None
+    return wavs[0]
+
+
+def do_quick_tts_export(qt_format, qt_bitrate, qt_export_name, qt_wavs):
+    """导出临时配音（Quick TTS exports 目录，自定义名称 / 重名后缀）。"""
+    wavs = [w for w in (qt_wavs or []) if w and os.path.isfile(w)]
+    if not wavs:
+        return None, "❌ 没有可导出的临时配音音频（请先生成）"
+    try:
+        final = QuickTTSService.export(
+            wav_path=wavs[0],
+            name=qt_export_name or "quick_tts",
+            fmt=qt_format,
+            bitrate=qt_bitrate,
+        )
+        out_dir = QuickTTSService.exports_root()
+        msg = (
+            f"✅ 导出完成：`{os.path.basename(final)}`\n\n"
+            f"**保存位置：** `{out_dir}`\n\n"
+            f"**最终文件：** `{final}`"
+        )
+        return _safe_path_for_file_component(final), msg
+    except Exception as e:
+        return None, str(e)
+
+
+def open_quick_tts_folder():
+    """打开临时配音导出目录（no-window，不弹黑框）。"""
+    out_dir = QuickTTSService.exports_root()
+    from lib.procutil import open_in_folder
+
+    ok = open_in_folder(out_dir)
+    return f"✅ 已打开导出目录：`{out_dir}`" if ok else f"❌ 打开目录失败：`{out_dir}`"
+
+
+def _on_ui_ready_prewarm():
+    """Gradio ``app.load`` callback: one-shot background prewarm (fast).
+
+    Gradio fires ``app.load`` only after the UI/server is confirmed usable,
+    so prewarm can never race a launch failure (port busy / server startup
+    error).  The callback only registers the one-shot request and spawns a
+    daemon worker -- it returns immediately and never blocks on the model
+    load (the multi-minute load stays inside the runtime process).  A second
+    shutdown guard inside the worker guarantees prewarm is skipped when the
+    application lifecycle already moved to shutting_down / stopped
+    (``prewarm_skipped=application_shutdown``).
+    """
+    from services.prewarm import PrewarmService
+
+    try:
+        message = PrewarmService.request_ui_prewarm()
+    except Exception:  # pragma: no cover - prewarm is best effort
+        logger.exception("prewarm_event=request_failed")
+        return None
+    logger.info("prewarm_event=%s", message)
+    return None
 
 
 def play_supplement_preview(which, sup_wavs, ss):
@@ -3050,7 +3238,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             e_subtitle_out = export_page["e_subtitle_out"]
             e_subtitle_msg = export_page["e_subtitle_msg"]
 
-            # ───────── 角色单独补录 / 补合成导出 ─────────
+            # ───────── 角色单独补录 / 补合成导出 / 临时配音 ─────────
             supplement_page = create_supplement_page()
             grp_supplement = supplement_page["group"]
             sup_role = supplement_page["sup_role"]
@@ -3073,11 +3261,30 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             sup_play_all = supplement_page["sup_play_all"]
             sup_play_seg = supplement_page["sup_play_seg"]
             sup_audio = supplement_page["sup_audio"]
+            sup_export_name = supplement_page["sup_export_name"]
             sup_format = supplement_page["sup_format"]
             sup_bitrate = supplement_page["sup_bitrate"]
             sup_export = supplement_page["sup_export"]
+            sup_open_folder = supplement_page["sup_open_folder"]
+            sup_save_loc = supplement_page["sup_save_loc"]
             sup_out = supplement_page["sup_out"]
             sup_path = supplement_page["sup_path"]
+            qt_voice = supplement_page["qt_voice"]
+            qt_engine = supplement_page["qt_engine"]
+            qt_text = supplement_page["qt_text"]
+            qt_synth = supplement_page["qt_synth"]
+            qt_status = supplement_page["qt_status"]
+            qt_wavs = supplement_page["qt_wavs"]
+            qt_play = supplement_page["qt_play"]
+            qt_audio = supplement_page["qt_audio"]
+            qt_export_name = supplement_page["qt_export_name"]
+            qt_format = supplement_page["qt_format"]
+            qt_bitrate = supplement_page["qt_bitrate"]
+            qt_export = supplement_page["qt_export"]
+            qt_open_folder = supplement_page["qt_open_folder"]
+            qt_save_loc = supplement_page["qt_save_loc"]
+            qt_out = supplement_page["qt_out"]
+            qt_path = supplement_page["qt_path"]
             # ───────── 设置 ─────────
             set_page = create_settings_page()
             grp_settings = set_page["group"]
@@ -3147,7 +3354,10 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         refresh_queue_list, [ss], [s_queue_list]).then(
         refresh_production_task, [ss], [s_task_status]).then(
         refresh_production_engine_status, [ss], [s_engine_status]).then(
-        refresh_supplement_roles, [ss], [sup_role])
+        refresh_supplement_roles, [ss], [sup_role]).then(
+        refresh_supplement_export_hint, [ss], [sup_save_loc]).then(
+        lambda: gr.update(choices=_lib_voices(), value=None), None, [qt_voice]).then(
+        refresh_quick_tts_engine_info, None, [qt_engine])
     nav_export.click(
         lambda: _goto("export"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-export')?.classList.add('active'); }").then(
@@ -3205,7 +3415,10 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         [e_quality_summary, e_seg_preview_sel, e_seg_regen_sel, e_segment_quality]).then(
         refresh_queue_list, [ss], [s_queue_list]).then(
         refresh_production_task, [ss], [s_task_status]).then(
-        refresh_supplement_roles, [ss], [sup_role])
+        refresh_supplement_roles, [ss], [sup_role]).then(
+        refresh_supplement_export_hint, [ss], [sup_save_loc]).then(
+        lambda: gr.update(choices=_lib_voices(), value=None), None, [qt_voice]).then(
+        refresh_quick_tts_engine_info, None, [qt_engine])
     ov_export.click(
         lambda: _goto("export"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-export')?.classList.add('active'); }").then(
@@ -3489,8 +3702,9 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     )
     e_subtitle_btn.click(do_export_subtitles, [ss, e_subtitle], [e_subtitle_out, e_subtitle_msg])
 
-    # ── 角色单独补录 / 补合成导出 ──
-    sup_refresh.click(refresh_supplement_roles, [ss], [sup_role])
+    # ── 角色单独补录 / 补合成导出 / 临时配音 ──
+    sup_refresh.click(refresh_supplement_roles, [ss], [sup_role]).then(
+        refresh_supplement_export_hint, [ss], [sup_save_loc])
     sup_json_parse.click(do_supplement_parse_json, [sup_json, ss],
                          [sup_role, sup_json_role, sup_json_lines, sup_synth_status])
     sup_synth.click(do_supplement_synth,
@@ -3499,12 +3713,30 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
                      sup_split_punct, sup_voice, ss],
                     [sup_wavs, sup_synth_status])
     sup_export.click(do_supplement_export,
-                     [sup_format, sup_bitrate, sup_wavs, sup_role, ss],
-                     [sup_out, sup_path])
+                     [sup_format, sup_bitrate, sup_export_name, sup_wavs, sup_role, ss],
+                     [sup_out, sup_path]).then(
+        refresh_supplement_export_hint, [ss], [sup_save_loc])
+    sup_open_folder.click(open_supplement_folder, [sup_wavs, ss], [sup_path])
     sup_play_all.click(lambda wavs, ss: play_supplement_preview("all", wavs, ss),
                        [sup_wavs, ss], [sup_audio])
     sup_play_seg.click(lambda wavs, ss: play_supplement_preview("seg", wavs, ss),
                        [sup_wavs, ss], [sup_audio])
+
+    # ── 临时配音（Quick TTS）──
+    qt_synth.click(do_quick_tts_synth, [qt_voice, qt_text, ss],
+                   [qt_wavs, qt_status])
+    qt_play.click(play_quick_tts, [qt_wavs], [qt_audio])
+    qt_export.click(do_quick_tts_export,
+                    [qt_format, qt_bitrate, qt_export_name, qt_wavs],
+                    [qt_out, qt_path])
+    qt_open_folder.click(open_quick_tts_folder, [], [qt_path])
+
+    # ── 后台预热：UI-ready 一次性事件（Gradio app.load）──
+    # 只有 Gradio 确认 UI/server 可用后才触发，杜绝「线程+sleep(2s) 猜 UI Ready」
+    # 与 launch 快速失败竞态；callback 只做 single-flight 登记 + 启动后台 daemon
+    # worker 并立即返回（不阻塞首屏、不加载模型）。worker 执行前再查 application
+    # lifecycle guard，确保 shutting_down / stopped 后绝不重启 detached runtime。
+    app.load(_on_ui_ready_prewarm)
 
 if __name__ == "__main__":
     os.chdir(BASE)

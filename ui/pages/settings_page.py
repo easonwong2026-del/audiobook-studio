@@ -93,6 +93,13 @@ def create_settings_page() -> dict:
                         tts_state["frozen_engine_message"],
                         elem_classes=["tts-frozen-status"],
                     )
+                    s_prewarm = gr.Checkbox(
+                        label="启动后预热默认 TTS 引擎",
+                        value=settings_handlers.get_prewarm_setting(),
+                        info="可减少首次配音等待时间，但会提前占用显存。首次物理模型加载会在 Studio 启动后的后台完成，不阻塞界面。",
+                    )
+                    s_prewarm_apply = gr.Button("保存预热设置", size="sm")
+                    s_prewarm_status = gr.Markdown("")
 
                 with gr.Group(elem_classes=["settings-card"]):
                     gr.Markdown("##### 本地生产环境")
@@ -153,6 +160,9 @@ def create_settings_page() -> dict:
         "s_tts_status": s_tts_status,
         "s_tts_runtime_engine": s_tts_runtime_engine,
         "s_tts_frozen_engine": s_tts_frozen_engine,
+        "s_prewarm": s_prewarm,
+        "s_prewarm_apply": s_prewarm_apply,
+        "s_prewarm_status": s_prewarm_status,
         "s_ffmpeg_path": s_ffmpeg_path,
         "s_version": s_version,
         "s_python": s_python,

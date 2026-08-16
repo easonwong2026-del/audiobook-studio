@@ -18,6 +18,7 @@ from .export import ExportPlanError, ExportService
 from .project import ProjectService
 from .project_backup import ProjectBackupService
 from .project_storage import ProjectStorageService
+from .quick_tts import QuickTTSBusyError, QuickTTSService
 from .production_jobs import (
     ACTIVE_PRODUCTION_STATES,
     PRODUCTION_STATES,
@@ -51,6 +52,8 @@ __all__ = [
     "ProjectService",
     "ProjectBackupService",
     "ProjectStorageService",
+    "QuickTTSBusyError",
+    "QuickTTSService",
     "ProductionJobError",
     "ProductionJobService",
     "QualityService",
