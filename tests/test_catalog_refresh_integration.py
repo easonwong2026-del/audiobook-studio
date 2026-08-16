@@ -110,5 +110,6 @@ def test_refresh_project_catalog_pure_contract():
     import inspect
 
     sig = inspect.signature(handlers.refresh_project_catalog)
-    assert list(sig.parameters) == ["search_query"]
+    assert list(sig.parameters) == ["search_query", "p_sel_value"]
     assert sig.parameters["search_query"].default == ""
+    assert sig.parameters["p_sel_value"].default == ""

@@ -30,11 +30,12 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
     cb = deps.get("callbacks", {})
     groups = deps.get("groups", [])
 
-    # ── 搜索 → 过滤书架行（同时清除选中项目 State，避免动作作用于隐藏旧选中） ──
+    # ── 搜索 → 过滤书架行（ss.catalog_query 单一状态来源；选中项被过滤出
+    #    结果时同步清空 ss.selected_project + UI 选中态，杜绝幽灵状态） ──
     for event_name in ("change", "submit"):
         page["bookshelf_search"].__getattribute__(event_name)(
             catalog_handlers.apply_project_search,
-            [page["bookshelf_search"]],
+            [page["bookshelf_search"], session],
             [
                 page["ov_bookshelf"],
                 page["bookshelf_selected"],
@@ -107,17 +108,32 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
         [page["bookshelf_selected_proj"]],
         [page["bookshelf_msg"], page["bookshelf_integrity_repair"]],
     )
-    page["bookshelf_archive"].click(
+
+    # ── 移入回收站：两步确认（确认态绑定项目名） ──
+    # 输出 4 元组（消息 / 确认态 / 选中项目 State / 选中信息 Markdown）：
+    # 首次确认与 guard 阻止不清 selection；成功后全清（handler 内完成）。
+    # 归档成功后统一刷新：先跑「打开项目」同款全链刷新（opened 被归档时
+    # ss 已 reset → 全部页面回空态；只归档 selected 时各页刷新为当前
+    # opened 项目状态），再跑目录类刷新（书架 / p_sel / 回收站）。
+    archive_chain = page["bookshelf_archive"].click(
         catalog_handlers.archive_selected,
         [
             page["bookshelf_selected_proj"],
             page["bookshelf_archive_confirm"],
             session,
         ],
-        [page["bookshelf_msg"], page["bookshelf_archive_confirm"]],
-    ).then(
+        [
+            page["bookshelf_msg"],
+            page["bookshelf_archive_confirm"],
+            page["bookshelf_selected_proj"],
+            page["bookshelf_selected"],
+        ],
+    )
+    if "open_chain_rest" in cb:
+        archive_chain = cb["open_chain_rest"](archive_chain)
+    archive_chain.then(
         catalog_handlers.refresh_project_catalog,
-        [page["bookshelf_search"]],
+        [page["bookshelf_search"], deps["project_sel"]],
         catalog_outputs,
     )
 
@@ -128,7 +144,7 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
         [page["bookshelf_msg"]],
     ).then(
         catalog_handlers.refresh_project_catalog,
-        [page["bookshelf_search"]],
+        [page["bookshelf_search"], deps["project_sel"]],
         catalog_outputs,
     )
 
@@ -148,7 +164,7 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
         [page["bookshelf_msg"]],
     ).then(
         catalog_handlers.refresh_project_catalog,
-        [page["bookshelf_search"]],
+        [page["bookshelf_search"], deps["project_sel"]],
         catalog_outputs,
     )
     page["bookshelf_trash_delete"].click(
@@ -157,7 +173,7 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
         [page["bookshelf_msg"]],
     ).then(
         catalog_handlers.refresh_project_catalog,
-        [page["bookshelf_search"]],
+        [page["bookshelf_search"], deps["project_sel"]],
         catalog_outputs,
     ).then(
         lambda: _update_checkbox_false(),

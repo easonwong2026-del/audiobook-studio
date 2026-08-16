@@ -36,6 +36,7 @@ from services import (
     ProductionJobError,
     ProductionJobService,
     ProjectBackupService,
+    ProjectCatalogService,
     get_application_lifecycle,
     ProjectService,
     ProjectStorageService,
@@ -3002,13 +3003,21 @@ def _dashboard_snapshot(ss):
 
 
 def refresh_overview(ss):
-    """刷新工作台的项目状态、生产摘要、待办和项目书架。"""
-    return (*_dashboard_snapshot(ss), refresh_bookshelf())
+    """刷新工作台的项目状态、生产摘要、待办和项目书架。
+
+    书架输出走 **catalog 数据源 + ``ss.catalog_query`` 过滤**（单一状态来源），
+    绝不使用 legacy ``refresh_bookshelf`` 覆盖——否则导航离开/返回时会把
+    搜索结果刷成全部项目（幽灵状态回归）。
+    """
+    query = (ss.catalog_query if ss is not None else "") or ""
+    return (*_dashboard_snapshot(ss), catalog_ui.render_bookshelf_rows(query))
 
 
 def refresh_p_sel(name):
-    """刷新项目下拉选项（确保选中项在 choices 内）。"""
-    return gr.update(choices=ProjectService.scan_projects(), value=name)
+    """刷新项目下拉选项（catalog 数据源；选中项不在新 catalog 中则清空）。"""
+    choices = [s.project_name for s in ProjectCatalogService.scan()]
+    value = name if name in choices else None
+    return gr.update(choices=choices, value=value)
 
 
 def _review_outputs():
@@ -3530,7 +3539,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     # 创建项目成功后统一刷新目录类组件（书架 / p_sel / 回收站）
     voice_create_chain.then(
         catalog_ui.refresh_project_catalog,
-        [bookshelf_search],
+        [bookshelf_search, p_sel],
         [ov_bookshelf, p_sel, bookshelf_trash_table, bookshelf_trash_sel, bookshelf_trash_status],
     )
 
@@ -3539,7 +3548,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         set_page,
         catalog_refresh=(
             catalog_ui.refresh_project_catalog,
-            [bookshelf_search],
+            [bookshelf_search, p_sel],
             [ov_bookshelf, p_sel, bookshelf_trash_table, bookshelf_trash_sel, bookshelf_trash_status],
         ),
     )

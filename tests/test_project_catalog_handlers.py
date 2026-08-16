@@ -119,14 +119,16 @@ def test_archive_two_step_confirmation(handler_workspace, tmp_path):
     assert os.path.isdir(project_dir)
 
     # 第一次点击：confirmed_project 为空（未确认）→ 仅提示，确认态记录 alpha
-    msg1, state1 = handlers.archive_selected("alpha", "", None)
+    msg1, state1, sel1, info1 = handlers.archive_selected("alpha", "", None)
     assert "确认将「alpha」移入回收站" in msg1
     assert state1.get("value") == "alpha"
+    # 第一次点击不清 selection（noop update）
+    assert not sel1.get("value")
     # 第一次点击绝不归档
     assert os.path.isdir(project_dir)
 
     # 第二次点击：confirmed_project == alpha → 才归档，确认态复位
-    msg2, state2 = handlers.archive_selected("alpha", "alpha", None)
+    msg2, state2, sel2, info2 = handlers.archive_selected("alpha", "alpha", None)
     assert "已移入回收站" in msg2
     assert state2.get("value") == ""
     assert not os.path.isdir(project_dir)
@@ -137,17 +139,17 @@ def test_archive_confirm_state_bound_to_project_name(handler_workspace):
     alpha_dir = os.path.join(handler_workspace, "projects", "alpha")
     beta_dir = os.path.join(handler_workspace, "projects", "beta")
     # 对 A 第一次点击 → 确认态记录 alpha
-    _msg1, state1 = handlers.archive_selected("alpha", "", None)
+    _msg1, state1, _sel1, _info1 = handlers.archive_selected("alpha", "", None)
     assert state1.get("value") == "alpha"
     # 改选 B（确认态仍为 alpha，未复位）→ 对 B 点击 → 必须要求重新确认
-    msg2, state2 = handlers.archive_selected("beta", state1.get("value"), None)
+    msg2, state2, _sel2, _info2 = handlers.archive_selected("beta", state1.get("value"), None)
     assert "确认将「beta」移入回收站" in msg2
     assert state2.get("value") == "beta"
     # 关键：beta 未被归档（两步确认未被绕过）
     assert os.path.isdir(alpha_dir)
     assert os.path.isdir(beta_dir)
     # 对 B 确认后再点 → 才归档 B
-    msg3, state3 = handlers.archive_selected("beta", "beta", None)
+    msg3, state3, _sel3, _info3 = handlers.archive_selected("beta", "beta", None)
     assert "已移入回收站" in msg3
     assert state3.get("value") == ""
     assert not os.path.isdir(beta_dir)
@@ -166,23 +168,31 @@ def test_archive_active_production_error_message(handler_workspace, monkeypatch)
     monkeypatch.setattr(
         "services.project_storage.ensure_project_mutation_allowed", _blocked
     )
-    msg, state = handlers.archive_selected("alpha", "alpha", None)
+    msg, state, sel, info = handlers.archive_selected("alpha", "alpha", None)
     assert "项目正在生产，请先停止任务后再移入回收站" in msg
     assert state.get("value") == ""
+    # guard 阻止时不清 selection（noop update）
+    assert not sel.get("value")
+    assert not info.get("value")
 
 
 def test_archive_opened_project_resets_session(handler_workspace):
-    """被归档项目 == ss.project 时安全 reset session。"""
+    """被归档项目 == ss.project 时安全 reset session（selected 同步清空）。"""
     ss = SessionState(project="alpha", script={"meta": {}}, bindings={"旁白": "x"})
+    ss.set_selected("alpha")
     ss.set_snapshot(object())  # 占位快照
     ss.synthesis = object()  # 占位合成态
-    msg, _state = handlers.archive_selected("alpha", "alpha", ss)
+    msg, _state, sel, info = handlers.archive_selected("alpha", "alpha", ss)
     assert "已移入回收站" in msg
     assert ss.project is None
     assert ss.script is None
     assert ss.bindings == {}
     assert ss.project_snapshot is None
     assert ss.synthesis is None
+    # archive 成功后 selected 全部清空
+    assert ss.selected_project is None
+    assert sel.get("value") == ""
+    assert "选择" in info.get("value", "")
 
 
 def test_refresh_project_catalog_contract(handler_workspace):

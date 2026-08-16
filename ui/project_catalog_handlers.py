@@ -73,13 +73,52 @@ def render_bookshelf_rows(search_query: str = "") -> dict:
     )
 
 
-def apply_project_search(query: str) -> tuple[dict, str, dict]:
-    """搜索 → 渲染书架行 + 重置选中信息（含清除选中项目 State）。
+def apply_project_search(query: str, ss=None) -> tuple[dict, str, dict]:
+    """搜索 → 渲染书架行 + 同步选中状态（含清除被过滤掉的 selected）。
+
+    Args:
+        query: 搜索关键词。
+        ss: 会话状态（可为 None，纯渲染用）。
 
     Returns:
         ``(书架行 update, 选中信息 Markdown, 选中项目 State 复位 update)`` 三元组。
+
+    选中项目如果被过滤出结果，则同步清空 ``ss.selected_project`` 与 UI 选中
+    态，避免「搜索后书架看不到 A，但动作仍作用于 A」的幽灵状态；若选中项目
+    仍在结果中则保留（不做无谓清除）。
     """
-    return render_bookshelf_rows(query), _BOOKSHELF_HINT, _update(value="")
+    styled = render_bookshelf_rows(query)
+    if ss is not None:
+        # 搜索 query 单一状态来源：导航离开/返回后仍保持过滤
+        ss.set_catalog_query(query)
+    visible = {row[0] for row in (styled.get("data") or [])}
+    selected = ss.selected_project if ss is not None else None
+    if selected and selected not in visible:
+        if ss is not None:
+            ss.clear_selected()
+        return styled, _BOOKSHELF_HINT, _update(value="")
+    if selected:
+        info = _selected_info(selected)
+        return styled, info, _update(value=selected)
+    return styled, _BOOKSHELF_HINT, _update(value="")
+
+
+def _selected_info(name: str) -> str:
+    """渲染选中项目信息 Markdown（失败时降级为可管理提示）。"""
+    summary = ProjectCatalogService.get_summary(name)
+    if summary is None:
+        return (
+            f"已选择项目：**`{html.escape(name)}`**\n"
+            "\n（项目摘要读取失败，仍可执行管理操作。）"
+        )
+    return (
+        f"已选择项目：**`{html.escape(name)}`**\n"
+        f"- 书名：{html.escape(summary.title)}\n"
+        f"- 作者：{html.escape(summary.author)}\n"
+        f"- 章：{summary.chapters} · 段：{summary.segments} · "
+        f"已完成：{summary.completed} · 失败：{summary.failed}\n"
+        f"- 状态：{summary.status}"
+    )
 
 
 def select_bookshelf_row(rows, ss, evt: gr.SelectData) -> tuple[str, str, dict]:
@@ -104,22 +143,7 @@ def select_bookshelf_row(rows, ss, evt: gr.SelectData) -> tuple[str, str, dict]:
     if not name:
         return "", _BOOKSHELF_HINT, _update()
     ss.set_selected(name)
-    summary = ProjectCatalogService.get_summary(name)
-    if summary is None:
-        info = (
-            f"已选择项目：**`{html.escape(name)}`**\n"
-            "\n（项目摘要读取失败，仍可执行管理操作。）"
-        )
-    else:
-        info = (
-            f"已选择项目：**`{html.escape(name)}`**\n"
-            f"- 书名：{html.escape(summary.title)}\n"
-            f"- 作者：{html.escape(summary.author)}\n"
-            f"- 章：{summary.chapters} · 段：{summary.segments} · "
-            f"已完成：{summary.completed} · 失败：{summary.failed}\n"
-            f"- 状态：{summary.status}"
-        )
-    return name, info, _update(value=name)
+    return name, _selected_info(name), _update(value=name)
 
 
 # ── 打开项目 / 目录 ──
@@ -306,7 +330,9 @@ def repair_selected_integrity(project_name: str) -> tuple[str, dict]:
 # ── 移入回收站（两步确认） ──
 
 
-def archive_selected(project_name: str, confirmed_project: str, ss) -> tuple[str, dict]:
+def archive_selected(
+    project_name: str, confirmed_project: str, ss
+) -> tuple[str, dict, dict, dict]:
     """移入回收站（两步确认，确认态**绑定项目名**）。
 
     第一次点击（``confirmed_project != project_name``）→ 显示「确认将项目移入
@@ -318,6 +344,12 @@ def archive_selected(project_name: str, confirmed_project: str, ss) -> tuple[str
     既有逻辑）后再归档；active production 拦截由 archive 内部
     ``ensure_project_mutation_allowed`` 保证（P0）。
 
+    选中态清理语义（本窗口状态一致性修复）：
+    - 第一次确认点击 / 被 guard 阻止 → **保留**选中态（不清任何 selection）；
+    - 归档成功 → 清 ``ss.selected_project`` + ``bookshelf_selected_proj`` State
+      + 选中信息 Markdown（若被归档项目正是当前 opened，同时 reset 整个
+      session，见 C 场景）。
+
     Args:
         project_name: 选中项目名（显式传入，不读 ``ss.project``）。
         confirmed_project: 已确认的项目名（State 值，字符串语义；``""`` 表示
@@ -325,32 +357,47 @@ def archive_selected(project_name: str, confirmed_project: str, ss) -> tuple[str
         ss: 会话状态（可能为 None）。
 
     Returns:
-        ``(消息, 确认状态 update)`` 二元组。
+        ``(消息, 确认状态 update, 选中项目 State update, 选中信息 Markdown update)``
+        四元组。
     """
+    noop = _update()
     if not project_name:
-        return "⚪ 请先从书架选择项目。", _update(value="")
+        return "⚪ 请先从书架选择项目。", _update(value=""), noop, noop
     if str(confirmed_project or "") != project_name:
         return (
             f"⚠ 确认将「{html.escape(project_name)}」移入回收站？"
             "回收站内可恢复；再次点击「移入回收站」执行。",
             _update(value=project_name),
+            noop,
+            noop,
         )
     try:
         target = ProjectStorageService.archive(project_name)
-        if ss is not None and ss.project == project_name:
-            ss.set_project(None, None, {})
-            ss.set_snapshot(None)
-            ss.synthesis = None
-            message = f"✅ 项目已移入回收站，可从 `{_dirname(target)}` 恢复。"
+        if ss is not None:
+            if ss.project == project_name:
+                ss.set_project(None, None, {})
+                ss.set_snapshot(None)
+                ss.synthesis = None
+                message = f"✅ 项目已移入回收站，可从 `{_dirname(target)}` 恢复。"
+            else:
+                message = f"✅ 项目已移入回收站：`{target}`"
+            # 归档成功：无论是否 opened，selected 一律清空（A 不再可被动作指向）
+            ss.clear_selected()
         else:
             message = f"✅ 项目已移入回收站：`{target}`"
-        return message, _update(value="")
+        return (
+            message,
+            _update(value=""),
+            _update(value=""),
+            _update(value=_BOOKSHELF_HINT),
+        )
     except Exception as exc:
         if getattr(exc, "code", None) == "PROJECT_HAS_ACTIVE_PRODUCTION":
             message = "项目正在生产，请先停止任务后再移入回收站"
         else:
             message = f"❌ 归档项目失败：{exc}"
-        return message, _update(value="")
+        # guard 阻止：仅复位确认态，selection 一律保留
+        return message, _update(value=""), noop, noop
 
 
 # ── 全局：从备份恢复 ──
@@ -433,8 +480,13 @@ def permanently_delete_archived_global(archive_id: str, confirmed: bool) -> str:
 # ── 统一刷新出口 ──
 
 
-def refresh_project_catalog(search_query: str = "") -> tuple:
+def refresh_project_catalog(search_query: str = "", p_sel_value: str = "") -> tuple:
     """目录类组件全量刷新唯一出口。
+
+    Args:
+        search_query: 当前书架搜索词（保持过滤状态，不因刷新突然变回全部）。
+        p_sel_value: 当前项目下拉选中值；若已不在新 catalog 中（如被归档）
+            则同步清空，避免「下拉还指着已归档项目」的幽灵状态。
 
     Returns:
         固定 5 元组契约：
@@ -443,8 +495,9 @@ def refresh_project_catalog(search_query: str = "") -> tuple:
     """
     bookshelf = render_bookshelf_rows(search_query)
     choices = [s.project_name for s in ProjectCatalogService.scan()]
+    value = str(p_sel_value or "") if str(p_sel_value or "") in choices else None
     rows, trash_choices, status = render_archived_projects()
-    return bookshelf, _update(choices=choices), rows, trash_choices, status
+    return bookshelf, _update(choices=choices, value=value), rows, trash_choices, status
 
 
 def _format_size(value: int) -> str:
