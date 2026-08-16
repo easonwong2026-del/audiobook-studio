@@ -1667,6 +1667,32 @@ class ProductionRuntime:
             project=record.project,
         )
         current = running or record
+        # ── Heartbeat coverage during blocking engine init ────────────────
+        # ``ensure_ready`` (cold IndexTTS 2.5 load) can block this thread for
+        # minutes while the main loop is also blocked on us — without this
+        # independent refresher the durable heartbeat would freeze and a
+        # healthy slow load could be misjudged as a dead runtime.  A daemon
+        # thread refreshes the task heartbeat every few seconds until the
+        # utility task finishes.
+        _hb_stop = threading.Event()
+        _hb_owner = self.owner_id
+        _hb_project = record.project
+
+        def _utility_heartbeat_loop() -> None:
+            try:
+                while not _hb_stop.wait(5.0):
+                    TaskRepository.update_runtime_heartbeat(
+                        _hb_owner, projects=[_hb_project]
+                    )
+            except Exception:  # pragma: no cover - heartbeat is best effort
+                logger.debug("utility heartbeat 线程异常退出", exc_info=True)
+
+        _hb_thread = threading.Thread(
+            target=_utility_heartbeat_loop,
+            name=f"hb-{record.task_id[:12]}",
+            daemon=True,
+        )
+        _hb_thread.start()
         options = record.options if isinstance(record.options, dict) else {}
         snapshot = options.get("engine_snapshot") if isinstance(options.get("engine_snapshot"), dict) else None
 
@@ -1677,6 +1703,13 @@ class ProductionRuntime:
             goes through ``_runtime_event`` so the runtime log carries the
             full chain (``engine_load_start`` / ``engine_init_done`` /
             ``supplement_infer_start`` / …).
+
+            Durable progress (``progress_json``) is updated as structured fact:
+            - ``supplement_infer_start`` → ``phase=infer`` + ``current_line``
+              (1-based); ``total`` preserved from the task.
+            - ``supplement_infer_done`` → ``phase=infer`` + ``completed`` /
+              ``failed`` accumulate; ``percent = processed/total*100``.
+            - other events keep progress untouched (log_lines only).
             """
             nonlocal current
             fields = dict(fields)
@@ -1691,6 +1724,49 @@ class ProductionRuntime:
                 progress = dict(current.progress or {})
                 log_lines = list(current.log_lines or [])
                 log_lines.append(f"[{event}] {detail}".strip())
+                if event == "supplement_infer_start":
+                    index = fields.get("line_index")
+                    total = fields.get("line_total")
+                    if index is not None and total:
+                        progress["phase"] = "infer"
+                        progress["total"] = max(int(total), int(progress.get("total") or 0))
+                        progress["current_line"] = int(index) + 1
+                        progress.setdefault("completed", 0)
+                        progress.setdefault("failed", 0)
+                        progress["processed"] = (
+                            int(progress.get("completed") or 0)
+                            + int(progress.get("failed") or 0)
+                        )
+                        progress["pending"] = max(
+                            int(progress.get("total") or 0)
+                            - int(progress.get("processed") or 0),
+                            0,
+                        )
+                elif event == "supplement_infer_done":
+                    index = fields.get("line_index")
+                    total = fields.get("line_total")
+                    if total:
+                        progress["phase"] = "infer"
+                        progress["total"] = max(int(total), int(progress.get("total") or 0))
+                        if str(fields.get("status") or "") == "ok":
+                            progress["completed"] = int(progress.get("completed") or 0) + 1
+                        else:
+                            progress["failed"] = int(progress.get("failed") or 0) + 1
+                        processed = (
+                            int(progress.get("completed") or 0)
+                            + int(progress.get("failed") or 0)
+                        )
+                        progress["processed"] = processed
+                        progress["pending"] = max(
+                            int(progress.get("total") or 0) - processed, 0
+                        )
+                        total_i = max(int(progress.get("total") or 0), 1)
+                        progress["percent"] = round(processed / total_i * 100, 1)
+                        if index is not None:
+                            progress["current_line"] = min(
+                                int(index) + 2,
+                                int(progress.get("total") or 0),
+                            )
                 updated = TaskRepository.persist_runtime_state(
                     record.task_id,
                     self.owner_id,
@@ -1822,6 +1898,9 @@ class ProductionRuntime:
                     record.task_type,
                     exc.summary,
                 )
+        finally:
+            _hb_stop.set()
+            _hb_thread.join(timeout=1.0)
 
     def _progress(self, state: SynthesisState, record: TaskRecord) -> dict[str, Any]:
         total = max(int(state.total or record.progress.get("total", 0) or 0), 0)
@@ -2112,20 +2191,26 @@ class ProductionRuntimeClient:
             cfg_path = os.path.join(venv_dir, "pyvenv.cfg")
             if not os.path.isfile(cfg_path):
                 return [sys.executable, "-m", "services.production_runtime", "--serve"], {}
-            try:
-                stub_size = os.path.getsize(sys.executable)
-            except OSError:
-                stub_size = 0
-            if stub_size and stub_size > 100 * 1024:
-                # 真实解释器（非 uv stub）：DETACHED 直接生效，无需绕行。
-                return [sys.executable, "-m", "services.production_runtime", "--serve"], {}
+            # uv-managed venv 的 <venv>/Scripts/python.exe 是 launcher stub：即使
+            # 尺寸很大（实测 uv 0.12.x 的 stub 为 256KB，超过旧的 100KB 阈值），
+            # 它仍会在 DETACHED 下重派生真实解释器并丢失 creation flags → 黑框。
+            # 可靠判据：pyvenv.cfg 存在 ``uv = <version>`` 字段 → 必为 uv stub，
+            # 必须绕行到 home 下的真实解释器 + site.addsitedir 引导 venv 包。
+            is_uv_stub = False
             home = ""
             with open(cfg_path, encoding="utf-8", errors="ignore") as fh:
                 for line in fh:
                     key, _, value = line.partition("=")
-                    if key.strip() == "home":
-                        home = value.strip().strip('"')
-                        break
+                    key = key.strip()
+                    value = value.strip().strip('"')
+                    if key == "home":
+                        home = value
+                    elif key == "uv":
+                        is_uv_stub = True
+            if not is_uv_stub:
+                # 标准 venv（python -m venv）的 python.exe 是真实解释器副本，
+                # DETACHED 直接生效，无需绕行。
+                return [sys.executable, "-m", "services.production_runtime", "--serve"], {}
             base_python = os.path.join(home, "python.exe")
             venv_site = os.path.join(venv_dir, "Lib", "site-packages")
             if not home or not os.path.isfile(base_python) or not os.path.isdir(venv_site):
@@ -2137,7 +2222,7 @@ class ProductionRuntimeClient:
                 "runpy.run_module('services.production_runtime', run_name='__main__')"
             ) % venv_site
             logger.info(
-                "runtime_event=runtime_launch_resolved interpreter=%s venv_site=%s",
+                "runtime_event=runtime_launch_resolved interpreter=%s venv_site=%s is_uv_stub=true",
                 base_python,
                 venv_site,
             )
@@ -2190,6 +2275,13 @@ class ProductionRuntimeClient:
         probe.release()
         environment = dict(os.environ)
         environment["AUDIOBOOK_STUDIO_RUNTIME_MODE"] = "serve"
+        # Windows 编码加固（incident 2026-08-16）：runtime 内第三方库
+        # （modelscope / transformers / whisper）以 ``text=True`` 读取子进程
+        # 输出时默认用 locale 编码（中文 Windows = GBK），遇到 UTF-8 tqdm
+        # 块字符即 ``UnicodeDecodeError``（subprocess _readerthread 崩溃）。
+        # 强制 UTF-8 模式让所有 text-mode subprocess 使用 UTF-8 解码。
+        environment["PYTHONUTF8"] = "1"
+        environment["PYTHONIOENCODING"] = "utf-8"
         command, extra_env = cls._resolve_runtime_launch()
         environment.update(extra_env)
         bootstrap = _open_bootstrap_log()

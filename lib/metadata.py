@@ -106,6 +106,7 @@ def write_m4b_chapters(path: str, title: str, author: str,
                 [ff, "-y", "-i", path, "-i", tmp_meta,
                  "-map", "0", "-map_chapters", "1", "-c", "copy", tmp_out],
                 check=True, capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
             )
             if os.path.isfile(tmp_out) and os.path.getsize(tmp_out) > 0:
                 os.replace(tmp_out, path)
