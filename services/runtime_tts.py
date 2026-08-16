@@ -74,9 +74,16 @@ def _latest_progress_phase(record: TaskRecord) -> tuple[str, str] | None:
         completed = int(progress.get("completed") or 0)
         failed = int(progress.get("failed") or 0)
         current = int(progress.get("current_line") or 0)
+        pending = int(progress.get("pending") or 0)
         percent = float(progress.get("percent") or 0.0)
         if total > 0:
-            line = f"正在生成第 {current}/{total} 句 · 已完成 {completed} · 失败 {failed} · 进度 {percent:.1f}%"
+            if pending <= 0:
+                line = f"完成 {total}/{total} 句 · 已完成 {completed} · 失败 {failed}"
+            else:
+                line = (
+                    f"正在生成第 {current}/{total} 句 · 已完成 {completed} · "
+                    f"失败 {failed} · 剩余 {pending} · 进度 {percent:.1f}%"
+                )
             return "infer", line
     lines = list(getattr(record, "log_lines", None) or [])
     if not lines:

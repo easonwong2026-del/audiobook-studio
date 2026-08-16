@@ -17,11 +17,9 @@ H. Windows UTF-8 subprocess output (tqdm block chars) no longer crashes
 """
 from __future__ import annotations
 
-import io
-import json
 import os
-import sys
 import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -29,11 +27,8 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from repositories.task_repo import TaskRecord, TaskRepository  # noqa: E402
-from services import prewarm as prewarm_mod  # noqa: E402
 from services.prewarm import PrewarmService  # noqa: E402
 from services.runtime_tts import (  # noqa: E402
-    RuntimeLostError,
-    RuntimeTTSError,
     RuntimeTTSService,
     _mark_interrupted,
 )
@@ -129,10 +124,21 @@ class TestSupplementDurableProgress:
         assert percent == 50.0
         progress = {
             "phase": "infer", "total": 12, "completed": 5, "failed": 1,
-            "pending": 6, "percent": percent,
+            "pending": 6, "processed": processed, "percent": percent,
         }
         assert progress["percent"] == 50.0
         assert progress["pending"] == 6
+        assert progress["processed"] == 6
+
+    def test_progress_contains_processed_field(self):
+        # spec C: progress_json must carry `processed` (completed+failed).
+        progress = {
+            "phase": "infer", "total": 12, "completed": 3, "failed": 0,
+            "pending": 9, "processed": 3, "percent": 25.0, "current_line": 4,
+        }
+        assert progress["processed"] == progress["completed"] + progress["failed"]
+        assert progress["processed"] == 3
+        assert progress["percent"] == 25.0
 
 
 # ───────────────────────────── C/D: stale watchdog ──────────────────────────
@@ -283,3 +289,117 @@ class TestWindowsSubprocessEncoding:
         # degrades gracefully (no exception) — the assertion below guards the
         # contract that _mark_interrupted never raises.
         assert True
+
+
+# ───────────── I: Windows startup process flags regression ──────────────
+
+
+class TestWindowsStartupFlags:
+    """Regression: uv-managed venv stub must be routed through the real
+    interpreter (``pyvenv.cfg`` ``uv =`` field), otherwise DETACHED flags are
+    lost on re-exec → visible black console on startup.  Size alone is NOT a
+    reliable stub detector (uv 0.12.x stubs are 256KB)."""
+
+    def test_uv_stub_large_size_still_routes_to_home_interpreter(self, monkeypatch, tmp_path):
+        from services.production_runtime import ProductionRuntimeClient
+
+        monkeypatch.setattr("services.production_runtime._is_windows", lambda: True)
+        venv_dir = tmp_path / "venv"
+        scripts = venv_dir / "Scripts"
+        scripts.mkdir(parents=True)
+        (venv_dir / "Lib" / "site-packages").mkdir(parents=True)
+        stub = scripts / "python.exe"
+        stub.write_bytes(b"x" * 262144)  # uv stub 特征尺寸（>100KB）
+        base_dir = tmp_path / "base_python"
+        base_dir.mkdir()
+        base_py = base_dir / "python.exe"
+        base_py.write_bytes(b"x" * 200000)
+        (venv_dir / "pyvenv.cfg").write_text(
+            "home = %s\nimplementation = CPython\nuv = 0.12.3\n" % str(base_dir),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "services.production_runtime.sys.executable",
+            str(stub),
+        )
+        command, _env = ProductionRuntimeClient._resolve_runtime_launch()
+        assert command[0] == str(base_py)
+        assert command[1] == "-c"
+        assert "runpy.run_module('services.production_runtime'" in command[2]
+
+    def test_standard_venv_no_uv_field_keeps_venv_python(self, monkeypatch, tmp_path):
+        from services.production_runtime import ProductionRuntimeClient
+
+        monkeypatch.setattr("services.production_runtime._is_windows", lambda: True)
+        venv_dir = tmp_path / "venv"
+        scripts = venv_dir / "Scripts"
+        scripts.mkdir(parents=True)
+        real_py = scripts / "python.exe"
+        real_py.write_bytes(b"x" * 300000)
+        (venv_dir / "pyvenv.cfg").write_text(
+            "home = %s\nimplementation = CPython\n" % str(tmp_path),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "services.production_runtime.sys.executable",
+            str(real_py),
+        )
+        command, _env = ProductionRuntimeClient._resolve_runtime_launch()
+        assert command[0] == str(real_py)
+        assert command[1:] == ["-m", "services.production_runtime", "--serve"]
+
+    def test_no_pyvenv_cfg_falls_back_to_default(self, monkeypatch, tmp_path):
+        from services.production_runtime import ProductionRuntimeClient
+
+        monkeypatch.setattr("services.production_runtime._is_windows", lambda: True)
+        fake = tmp_path / "python.exe"
+        fake.write_bytes(b"x" * 262144)
+        monkeypatch.setattr(
+            "services.production_runtime.sys.executable",
+            str(fake),
+        )
+        command, _env = ProductionRuntimeClient._resolve_runtime_launch()
+        assert command[0] == str(fake)
+        assert command[1:] == ["-m", "services.production_runtime", "--serve"]
+
+    def test_runtime_spawn_uses_detached_flags_not_create_no_window(self, monkeypatch, tmp_path):
+        # The runtime subprocess must keep DETACHED_PROCESS and must NOT stack
+        # CREATE_NO_WINDOW (mutually exclusive / ignored by Windows).
+        import subprocess as _sp
+        from types import SimpleNamespace as _NS
+
+        from services.production_runtime import ProductionRuntimeClient
+
+        calls: list[dict] = []
+
+        def fake_popen(command, **kwargs):
+            calls.append(kwargs)
+            return _NS(pid=12345)
+
+        monkeypatch.setattr(
+            "services.production_runtime.subprocess.Popen", fake_popen
+        )
+        monkeypatch.setattr(
+            "services.production_runtime._open_bootstrap_log", lambda: None
+        )
+        monkeypatch.setattr(
+            "services.runtime_lock.ProcessFileLock",
+            lambda: _NS(acquire=lambda blocking=False: True, release=lambda: None),
+        )
+        monkeypatch.setattr(
+            "services.production_runtime.ProductionRuntimeClient._resolve_runtime_launch",
+            staticmethod(lambda: (
+                [sys.executable, "-m", "services.production_runtime", "--serve"], {},
+            )),
+        )
+        monkeypatch.setattr(
+            "services.production_runtime.ProductionRuntimeClient.mode",
+            staticmethod(lambda: "process"),
+        )
+        pid = ProductionRuntimeClient.ensure_running()
+        assert pid == 12345
+        kwargs = calls[0]
+        flags = int(kwargs.get("creationflags") or 0)
+        assert flags & getattr(_sp, "DETACHED_PROCESS", 0)
+        assert flags & getattr(_sp, "CREATE_NEW_PROCESS_GROUP", 0)
+        assert not (flags & getattr(_sp, "CREATE_NO_WINDOW", 0))

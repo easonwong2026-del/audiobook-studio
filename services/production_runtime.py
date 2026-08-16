@@ -1733,10 +1733,13 @@ class ProductionRuntime:
                         progress["current_line"] = int(index) + 1
                         progress.setdefault("completed", 0)
                         progress.setdefault("failed", 0)
+                        progress["processed"] = (
+                            int(progress.get("completed") or 0)
+                            + int(progress.get("failed") or 0)
+                        )
                         progress["pending"] = max(
                             int(progress.get("total") or 0)
-                            - int(progress.get("completed") or 0)
-                            - int(progress.get("failed") or 0),
+                            - int(progress.get("processed") or 0),
                             0,
                         )
                 elif event == "supplement_infer_done":
@@ -1753,6 +1756,7 @@ class ProductionRuntime:
                             int(progress.get("completed") or 0)
                             + int(progress.get("failed") or 0)
                         )
+                        progress["processed"] = processed
                         progress["pending"] = max(
                             int(progress.get("total") or 0) - processed, 0
                         )
@@ -2187,20 +2191,26 @@ class ProductionRuntimeClient:
             cfg_path = os.path.join(venv_dir, "pyvenv.cfg")
             if not os.path.isfile(cfg_path):
                 return [sys.executable, "-m", "services.production_runtime", "--serve"], {}
-            try:
-                stub_size = os.path.getsize(sys.executable)
-            except OSError:
-                stub_size = 0
-            if stub_size and stub_size > 100 * 1024:
-                # 真实解释器（非 uv stub）：DETACHED 直接生效，无需绕行。
-                return [sys.executable, "-m", "services.production_runtime", "--serve"], {}
+            # uv-managed venv 的 <venv>/Scripts/python.exe 是 launcher stub：即使
+            # 尺寸很大（实测 uv 0.12.x 的 stub 为 256KB，超过旧的 100KB 阈值），
+            # 它仍会在 DETACHED 下重派生真实解释器并丢失 creation flags → 黑框。
+            # 可靠判据：pyvenv.cfg 存在 ``uv = <version>`` 字段 → 必为 uv stub，
+            # 必须绕行到 home 下的真实解释器 + site.addsitedir 引导 venv 包。
+            is_uv_stub = False
             home = ""
             with open(cfg_path, encoding="utf-8", errors="ignore") as fh:
                 for line in fh:
                     key, _, value = line.partition("=")
-                    if key.strip() == "home":
-                        home = value.strip().strip('"')
-                        break
+                    key = key.strip()
+                    value = value.strip().strip('"')
+                    if key == "home":
+                        home = value
+                    elif key == "uv":
+                        is_uv_stub = True
+            if not is_uv_stub:
+                # 标准 venv（python -m venv）的 python.exe 是真实解释器副本，
+                # DETACHED 直接生效，无需绕行。
+                return [sys.executable, "-m", "services.production_runtime", "--serve"], {}
             base_python = os.path.join(home, "python.exe")
             venv_site = os.path.join(venv_dir, "Lib", "site-packages")
             if not home or not os.path.isfile(base_python) or not os.path.isdir(venv_site):
@@ -2212,7 +2222,7 @@ class ProductionRuntimeClient:
                 "runpy.run_module('services.production_runtime', run_name='__main__')"
             ) % venv_site
             logger.info(
-                "runtime_event=runtime_launch_resolved interpreter=%s venv_site=%s",
+                "runtime_event=runtime_launch_resolved interpreter=%s venv_site=%s is_uv_stub=true",
                 base_python,
                 venv_site,
             )
