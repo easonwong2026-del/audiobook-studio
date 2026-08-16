@@ -2,11 +2,9 @@
 from __future__ import annotations
 
 import os
-import subprocess
-import sys
 from typing import Any
 
-from lib import project_paths
+from lib import project_paths, procutil
 from repositories.project_repo import ProjectRepository
 from repositories.project_storage_repo import ProjectStorageRepository, ProjectStorageSummary
 
@@ -66,16 +64,21 @@ class ProjectStorageService:
 
     @staticmethod
     def open_directory(name: str) -> tuple[bool, str]:
+        """在资源管理器中打开项目目录（Windows 无黑框，复用 procutil）。
+
+        Args:
+            name: 项目名。
+
+        Returns:
+            ``(ok, message)`` 元组。
+        """
         try:
             _safe_name, project_dir = ProjectStorageRepository._resolve_project(name)
             if not os.path.isdir(project_dir) or os.path.islink(project_dir):
                 return False, "项目目录不存在或不安全。"
-            if sys.platform == "win32":
-                os.startfile(project_dir)
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", project_dir])
-            else:
-                subprocess.Popen(["xdg-open", project_dir])
+            ok = procutil.open_in_folder(project_dir)
+            if not ok:
+                return False, "打开项目目录失败（目录已存在，但系统无法打开）。"
             return True, f"已打开项目目录：`{project_dir}`"
         except (OSError, ValueError) as exc:
             return False, f"打开项目目录失败：{exc}"

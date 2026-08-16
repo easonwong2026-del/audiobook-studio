@@ -17,6 +17,7 @@ from lib.snapshot import ProjectSnapshot
 from .export import ExportPlanError, ExportService
 from .project import ProjectService
 from .project_backup import ProjectBackupService
+from .project_catalog import ProjectCatalogService
 from .project_storage import ProjectStorageService
 from .quick_tts import QuickTTSBusyError, QuickTTSService
 from .production_jobs import (
@@ -51,6 +52,7 @@ __all__ = [
     "ExportPlanError",
     "ProjectService",
     "ProjectBackupService",
+    "ProjectCatalogService",
     "ProjectStorageService",
     "QuickTTSBusyError",
     "QuickTTSService",

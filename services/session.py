@@ -10,9 +10,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from lib.snapshot import ProjectSnapshot
+
+if TYPE_CHECKING:  # pragma: no cover - 仅类型检查期导入，避免与 synthesis 循环导入
+    from services.synthesis import SynthesisState
 
 
 @dataclass
@@ -31,6 +34,12 @@ class SessionState:
     bindings: dict[str, str] = field(default_factory=dict)
     synthesis: Optional["SynthesisState"] = None
     project_snapshot: Optional[ProjectSnapshot] = None
+    # 书架「选中」项目（selected ≠ opened）：点选只改这里，不打开项目、
+    # 不加载 structured_script；只有「打开项目」才写 self.project。
+    selected_project: Optional[str] = None
+    # 书架搜索 query 的单一状态来源（导航离开/返回后仍保持过滤；不依赖
+    # Textbox 前端值，避免「搜索框还有词、列表却变回全部」的幽灵状态）。
+    catalog_query: str = ""
 
     def set_project(self, name: str, script: Any, bindings: dict[str, str]) -> None:
         """写入当前项目，原地更新字段（不新建对象，保持 ``gr.State`` 引用稳定）。
@@ -43,6 +52,18 @@ class SessionState:
         self.project = name
         self.script = script
         self.bindings = bindings
+
+    def set_selected(self, name: Optional[str]) -> None:
+        """写入书架选中项目（不打开项目、不加载剧本）。"""
+        self.selected_project = str(name) if name else None
+
+    def clear_selected(self) -> None:
+        """清空书架选中项目。"""
+        self.selected_project = None
+
+    def set_catalog_query(self, query: Optional[str]) -> None:
+        """写入书架搜索 query（导航返回时作为单一过滤来源）。"""
+        self.catalog_query = str(query or "")
 
     def set_snapshot(self, snapshot: Optional[ProjectSnapshot]) -> None:
         """写入当前项目快照（``ProjectSnapshot``），原地更新字段。"""

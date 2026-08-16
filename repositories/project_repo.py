@@ -20,7 +20,7 @@ from typing import ClassVar, Optional, TextIO
 
 from lib import script_loader
 from lib import chapter_identity, project_paths
-from lib.types import ProjectMeta
+from lib.types import ProjectMeta, ProjectSummary
 from lib.snapshot import ProjectSnapshot
 
 from ._atomic import atomic_write as _atomic_write
@@ -943,6 +943,87 @@ class ProjectRepository:
                 "status": status,
             })
         return summaries
+
+    @staticmethod
+    def list_project_summaries() -> list[ProjectSummary]:
+        """扫描全部项目并产出统一轻量摘要（书架 / Dropdown / 搜索共用）。
+
+        只做**一次** ``scan_projects()``；逐项目读 ``project.json`` meta 与
+        ``structured_script.json`` 的 ``meta``（只取 title/author，不解析章节结构）。
+        单项目异常以占位字段继续，坏项目不拖垮整个书架（对齐
+        ``ProjectService.list_project_summaries`` 的容错惯例）。
+
+        Returns:
+            ``ProjectSummary`` 列表，按项目名排序。
+        """
+        from datetime import datetime
+
+        summaries: list[ProjectSummary] = []
+        for name in ProjectRepository.scan_projects():
+            try:
+                project_dir = ProjectRepository._resolve_dir(name)
+                meta = ProjectRepository._load_meta(project_dir)
+                title, author = ProjectRepository._script_meta(project_dir, name)
+                modified_at: str | None = None
+                try:
+                    modified_at = datetime.fromtimestamp(
+                        os.path.getmtime(project_dir)
+                    ).isoformat(timespec="seconds")
+                except OSError:
+                    pass
+                total = int(getattr(meta, "total_segments", 0) or 0)
+                done = int(getattr(meta, "completed_count", 0) or 0)
+                failed = int(getattr(meta, "failed_count", 0) or 0)
+                status = ProjectRepository._project_status(total, done, failed)
+                progress = (done / total) if total else 0.0
+                summaries.append(ProjectSummary(
+                    project_name=name,
+                    title=title,
+                    author=author,
+                    chapters=int(getattr(meta, "total_chapters", 0) or 0),
+                    segments=total,
+                    completed=done,
+                    modified_at=modified_at,
+                    failed=failed,
+                    status=status,
+                    progress=progress,
+                ))
+            except Exception as exc:
+                logger.warning("list_project_summaries 读 %s 失败: %s", name, exc)
+                summaries.append(ProjectSummary(
+                    project_name=name,
+                    title=name,
+                    author="未填写",
+                    chapters=0,
+                    segments=0,
+                    completed=0,
+                    modified_at=None,
+                ))
+        return summaries
+
+    @staticmethod
+    def _script_meta(project_dir: str, fallback_name: str) -> tuple[str, str]:
+        """从 ``structured_script.json`` 读取 ``meta.title/author``（只取 meta）。
+
+        文件缺失 / JSON 损坏 / 结构异常一律回退：title → ``fallback_name``，
+        author → ``"未填写"``；不解析 chapters/segments，保持轻量。
+
+        Returns:
+            ``(title, author)`` 元组。
+        """
+        title = fallback_name
+        author = "未填写"
+        script_path = os.path.join(project_dir, "structured_script.json")
+        try:
+            with open(script_path, encoding="utf-8") as file:
+                data = json.load(file)
+            meta = data.get("meta") if isinstance(data, dict) else None
+            if isinstance(meta, dict):
+                title = str(meta.get("title") or title)
+                author = str(meta.get("author") or "未填写")
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+            pass
+        return title, author
 
     @staticmethod
     def _project_status(total: int, done: int, failed: int) -> str:

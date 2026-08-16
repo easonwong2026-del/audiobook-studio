@@ -36,6 +36,7 @@ from services import (
     ProductionJobError,
     ProductionJobService,
     ProjectBackupService,
+    ProjectCatalogService,
     get_application_lifecycle,
     ProjectService,
     ProjectStorageService,
@@ -57,6 +58,7 @@ from services.review_audio import ReviewAudioService
 from services.session import SessionState
 from services.synthesis import SynthesisState
 from ui import create_project_handlers as create_ui
+from ui import project_catalog_handlers as catalog_ui
 from ui.components import (
     build_role_management_choices,
     create_production_navigation,
@@ -80,6 +82,7 @@ from ui.pages import (
 )
 from ui.shared import create_status_bar
 from ui.theme import LIGHT_CSS, THEME
+from ui.wiring.project_catalog_wiring import wire_project_catalog
 from ui.wiring.settings_wiring import wire_settings_page
 from ui.wiring.voice_wiring import wire_voice_page
 
@@ -3000,13 +3003,21 @@ def _dashboard_snapshot(ss):
 
 
 def refresh_overview(ss):
-    """刷新工作台的项目状态、生产摘要、待办和项目书架。"""
-    return (*_dashboard_snapshot(ss), refresh_bookshelf())
+    """刷新工作台的项目状态、生产摘要、待办和项目书架。
+
+    书架输出走 **catalog 数据源 + ``ss.catalog_query`` 过滤**（单一状态来源），
+    绝不使用 legacy ``refresh_bookshelf`` 覆盖——否则导航离开/返回时会把
+    搜索结果刷成全部项目（幽灵状态回归）。
+    """
+    query = (ss.catalog_query if ss is not None else "") or ""
+    return (*_dashboard_snapshot(ss), catalog_ui.render_bookshelf_rows(query))
 
 
 def refresh_p_sel(name):
-    """刷新项目下拉选项（确保选中项在 choices 内）。"""
-    return gr.update(choices=ProjectService.scan_projects(), value=name)
+    """刷新项目下拉选项（catalog 数据源；选中项不在新 catalog 中则清空）。"""
+    choices = [s.project_name for s in ProjectCatalogService.scan()]
+    value = name if name in choices else None
+    return gr.update(choices=choices, value=value)
 
 
 def _review_outputs():
@@ -3115,6 +3126,31 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             ov_voices = ov_page["ov_voices"]
             ov_synth = ov_page["ov_synth"]
             ov_export = ov_page["ov_export"]
+            bookshelf_search = ov_page["bookshelf_search"]
+            bookshelf_selected_proj = ov_page["bookshelf_selected_proj"]
+            bookshelf_selected = ov_page["bookshelf_selected"]
+            bookshelf_open = ov_page["bookshelf_open"]
+            bookshelf_open_dir = ov_page["bookshelf_open_dir"]
+            bookshelf_backup = ov_page["bookshelf_backup"]
+            bookshelf_backup_dir = ov_page["bookshelf_backup_dir"]
+            bookshelf_cleanup = ov_page["bookshelf_cleanup"]
+            bookshelf_cleanup_confirm = ov_page["bookshelf_cleanup_confirm"]
+            bookshelf_cleanup_cancel = ov_page["bookshelf_cleanup_cancel"]
+            bookshelf_cleanup_token = ov_page["bookshelf_cleanup_token"]
+            bookshelf_integrity = ov_page["bookshelf_integrity"]
+            bookshelf_integrity_repair = ov_page["bookshelf_integrity_repair"]
+            bookshelf_archive = ov_page["bookshelf_archive"]
+            bookshelf_archive_confirm = ov_page["bookshelf_archive_confirm"]
+            bookshelf_msg = ov_page["bookshelf_msg"]
+            bookshelf_restore_file = ov_page["bookshelf_restore_file"]
+            bookshelf_restore = ov_page["bookshelf_restore"]
+            bookshelf_trash_table = ov_page["bookshelf_trash_table"]
+            bookshelf_trash_sel = ov_page["bookshelf_trash_sel"]
+            bookshelf_trash_refresh = ov_page["bookshelf_trash_refresh"]
+            bookshelf_trash_restore = ov_page["bookshelf_trash_restore"]
+            bookshelf_trash_confirm = ov_page["bookshelf_trash_confirm"]
+            bookshelf_trash_delete = ov_page["bookshelf_trash_delete"]
+            bookshelf_trash_status = ov_page["bookshelf_trash_status"]
 
             # ───────── 新建项目 ─────────
             cr_page = create_create_project_page()
@@ -3134,31 +3170,10 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             p_sel = prj_page["p_sel"]
             p_refresh = prj_page["p_refresh"]
             p_open = prj_page["p_open"]
-            p_open_dir = prj_page["p_open_dir"]
-            p_archive = prj_page["p_archive"]
             p_open_msg = prj_page["p_open_msg"]
             p_summary = prj_page["p_summary"]
             p_chapter_tree = prj_page["p_chapter_tree"]
             p_storage = prj_page["p_storage"]
-            p_cleanup = prj_page["p_cleanup"]
-            p_cleanup_msg = prj_page["p_cleanup_msg"]
-            p_cleanup_cancel = prj_page["p_cleanup_cancel"]
-            p_cleanup_confirm = prj_page["p_cleanup_confirm"]
-            p_cleanup_token = prj_page["p_cleanup_token"]
-            p_integrity = prj_page["p_integrity"]
-            p_integrity_repair = prj_page["p_integrity_repair"]
-            p_integrity_msg = prj_page["p_integrity_msg"]
-            p_backup_dir = prj_page["p_backup_dir"]
-            p_backup = prj_page["p_backup"]
-            p_restore_file = prj_page["p_restore_file"]
-            p_restore = prj_page["p_restore"]
-            p_trash_table = prj_page["p_trash_table"]
-            p_trash_sel = prj_page["p_trash_sel"]
-            p_trash_refresh = prj_page["p_trash_refresh"]
-            p_trash_restore = prj_page["p_trash_restore"]
-            p_trash_confirm = prj_page["p_trash_confirm"]
-            p_trash_delete = prj_page["p_trash_delete"]
-            p_trash_msg = prj_page["p_trash_msg"]
 
             # ───────── 音色资产 ─────────
             vce_page = create_voice_page()
@@ -3430,13 +3445,11 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         [e_quality_summary, e_seg_preview_sel, e_seg_regen_sel, e_segment_quality],
     )
 
-    # ── 概览页：书架点选 → 回填 p_sel → open_project 首步 → 打开链刷新 → 切页 ──
-    chain = ov_bookshelf.select(
-        select_project_from_bookshelf, [ov_bookshelf], [p_sel]
-    ).then(open_project, [p_sel, ss], [p_summary, v_table, v_role, v_role_title, v_lib, s_log, v_status])
-    _open_chain_rest(chain).then(
-        lambda: _goto("project"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-project')?.classList.add('active'); }"
+    # ── 概览页：书架点选 → 只设 ss.selected_project（选择≠打开；打开需点按钮） ──
+    ov_bookshelf.select(
+        catalog_ui.select_bookshelf_row,
+        [ov_bookshelf, ss],
+        [bookshelf_selected_proj, bookshelf_selected, p_sel],
     )
 
     # ── 概览页快捷操作：「打开项目」切页 → open_project 首步 → 打开链刷新 ──
@@ -3523,9 +3536,22 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     voice_create_chain.then(
         refresh_role_list, [v_role_search, v_role, ss], [v_table],
     )
+    # 创建项目成功后统一刷新目录类组件（书架 / p_sel / 回收站）
+    voice_create_chain.then(
+        catalog_ui.refresh_project_catalog,
+        [bookshelf_search, p_sel],
+        [ov_bookshelf, p_sel, bookshelf_trash_table, bookshelf_trash_sel, bookshelf_trash_status],
+    )
 
     # ═══════════ 设置页面 ═══════════
-    wire_settings_page(set_page)
+    wire_settings_page(
+        set_page,
+        catalog_refresh=(
+            catalog_ui.refresh_project_catalog,
+            [bookshelf_search, p_sel],
+            [ov_bookshelf, p_sel, bookshelf_trash_table, bookshelf_trash_sel, bookshelf_trash_status],
+        ),
+    )
 
     # ═══════════ 角色与声音页面 ═══════════
     wire_voice_page(
@@ -3550,53 +3576,36 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         },
     )
 
+    # ═══════════ 项目书架（概览页）：搜索 / 选择隔离 / 管理动作 / 全局恢复与回收站 ═══════════
+    # 书架点选只写 ss.selected_project；「打开项目」是唯一打开入口（委托 app.open_project）。
+    catalog_ui.bind_open_project(open_project)
+    wire_project_catalog(
+        ov_page,
+        {
+            "session": ss,
+            "project_sel": p_sel,
+            "groups": _GROUPS,
+            "catalog_outputs": [
+                ov_bookshelf,
+                p_sel,
+                bookshelf_trash_table,
+                bookshelf_trash_sel,
+                bookshelf_trash_status,
+            ],
+            "callbacks": {
+                "open_project": open_project,
+                "open_project_outputs": [
+                    p_summary, v_table, v_role, v_role_title, v_lib, s_log, v_status,
+                ],
+                "open_chain_rest": _open_chain_rest,
+                "goto_project": lambda: _goto("project"),
+            },
+        },
+    )
+
     p_refresh.click(refresh_projects_full, [], [p_sel])
     chain = p_open.click(open_project, [p_sel, ss], [p_summary, v_table, v_role, v_role_title, v_lib, s_log, v_status])
     _open_chain_rest(chain)
-    p_open_dir.click(open_project_folder, [ss], [p_open_msg])
-    p_archive.click(delete_project, [p_sel, ss], [p_sel, p_open_msg]).then(
-        clear_project_view, [], [p_summary, p_storage, p_chapter_tree]
-    ).then(
-        refresh_archived_projects, [], [p_trash_table, p_trash_sel, p_trash_msg]
-    )
-    p_cleanup.click(scan_project_cleanup, [ss], [p_cleanup_msg, p_cleanup_token, p_cleanup_confirm])
-    p_cleanup_confirm.click(
-        execute_project_cleanup,
-        [ss, p_cleanup_token],
-        [p_cleanup_msg, p_cleanup_token, p_cleanup_confirm],
-    ).then(refresh_project_storage, [ss], [p_storage])
-    p_cleanup_cancel.click(
-        cancel_project_cleanup,
-        [],
-        [p_cleanup_msg, p_cleanup_token, p_cleanup_confirm],
-    )
-    p_integrity.click(check_project_integrity, [ss], [p_integrity_msg, p_integrity_repair])
-    p_integrity_repair.click(repair_project_integrity, [ss], [p_integrity_msg, p_integrity_repair]).then(
-        refresh_project_storage, [ss], [p_storage]
-    )
-    p_backup.click(create_project_backup, [ss, p_backup_dir], [p_integrity_msg])
-    p_restore.click(restore_project_backup, [p_restore_file], [p_integrity_msg]).then(
-        refresh_projects_full, [], [p_sel]
-    )
-    p_trash_refresh.click(
-        refresh_archived_projects,
-        [],
-        [p_trash_table, p_trash_sel, p_trash_msg],
-    )
-    p_trash_restore.click(
-        restore_archived_project,
-        [p_trash_sel, ss],
-        [p_sel, p_trash_msg, p_trash_table, p_trash_sel],
-    )
-    p_trash_delete.click(
-        permanently_delete_archived_project,
-        [p_trash_sel, p_trash_confirm],
-        [p_trash_table, p_trash_sel, p_trash_msg],
-    ).then(
-        lambda: gr.update(value=False),
-        [],
-        [p_trash_confirm],
-    )
     s_scope_mode.change(
         update_scope_visibility,
         [s_scope_mode],
