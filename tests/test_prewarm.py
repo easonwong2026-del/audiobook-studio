@@ -6,18 +6,31 @@
 3. runtime 已 Ready 且 profile 匹配 → 不重复 init（幂等）；
 4. Settings 切 v2 且 runtime idle → 预热 target 变 v2；
 5. 有活动 TTS 任务 → 不抢占预热。
+
+PR #44 竞态修复（UI-ready one-shot prewarm）回归：
+6. UI load 未发生 → prewarm 不调用；
+7. 第一次 UI load → prewarm request 一次；
+8. 重复 UI load / 多次 callback → 仍只 request 一次（single-flight）；
+9. lifecycle 已 shutting_down / stopped → prewarm 不调用 ProductionRuntimeClient；
+10. UI-ready 已排队 → 随后 application shutdown → worker 执行 → 不得
+    ensure_running / request_engine_recycle；
+11. 正常：lifecycle running + enabled → 后台 request，callback 本身快速返回。
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import sys
+import threading
+import time
 import types
 
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import services.prewarm as prewarm_mod  # noqa: E402
 from services.prewarm import PrewarmService  # noqa: E402
 
 
@@ -233,3 +246,247 @@ def test_prewarm_skips_when_active_tasks(
     ))
     assert PrewarmService.has_active_tts_tasks() is True
     assert PrewarmService.should_prewarm() is False
+
+
+# ═══════════ PR #44：UI-ready one-shot prewarm（竞态修复）═══════════════
+
+def _wait_until(predicate, timeout: float = 5.0, interval: float = 0.01) -> bool:
+    """轮询等待后台 daemon worker 达成条件（避免固定 sleep）。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return predicate()
+
+
+@pytest.fixture(autouse=True)
+def _reset_prewarm_gate():
+    """每个测试前后重置 one-shot 闸门状态，避免跨测试污染。"""
+    prewarm_mod.reset_prewarm_state()
+    yield
+    prewarm_mod.reset_prewarm_state()
+
+
+@pytest.fixture
+def lifecycle_running(monkeypatch):
+    """Fresh application lifecycle singleton (running) + hermetic runtime stub.
+
+    The stub records ``request_engine_recycle`` / ``ensure_running`` calls so
+    tests can prove prewarm never starts a runtime after shutdown, and it
+    provides ``request_shutdown`` so lifecycle transitions never touch a real
+    runtime in tests.
+    """
+    from services.application_lifecycle import (
+        get_application_lifecycle,
+        reset_application_lifecycle,
+    )
+
+    reset_application_lifecycle()
+    lifecycle = get_application_lifecycle()
+    calls: dict = {
+        "request_shutdown": 0,
+        "request_engine_recycle": [],
+        "ensure_running": 0,
+    }
+
+    class _FakeClient:
+        @classmethod
+        def request_shutdown(cls, reason="application_shutdown", timeout=30.0, terminate_timeout=10.0):
+            calls["request_shutdown"] += 1
+            return True
+
+        @classmethod
+        def request_engine_recycle(cls, engine_id: str) -> bool:
+            # Mirror the real ProductionRuntimeClient contract: the request
+            # path also ensures the runtime process is up.
+            calls["request_engine_recycle"].append(engine_id)
+            calls["ensure_running"] += 1
+            return True
+
+        @classmethod
+        def ensure_running(cls):
+            calls["ensure_running"] += 1
+            return None
+
+    module = types.ModuleType("services.production_runtime")
+    module.ProductionRuntimeClient = _FakeClient
+    monkeypatch.setitem(sys.modules, "services.production_runtime", module)
+    try:
+        yield lifecycle, calls
+    finally:
+        reset_application_lifecycle()
+
+
+# ── 6. UI load 未发生 → prewarm 不调用 ─────────────────────────────────
+def test_prewarm_not_requested_before_ui_load(lifecycle_running):
+    """UI-ready 事件发生前，prewarm 不得触碰 runtime client。"""
+    _lifecycle, calls = lifecycle_running
+    assert prewarm_mod._prewarm_state == "not_started"
+    assert calls["request_engine_recycle"] == []
+    assert calls["ensure_running"] == 0
+
+
+# ── 7. 第一次 UI load → prewarm request 一次 ────────────────────────────
+def test_first_ui_load_requests_once(
+    prewarm_config, settings_default_v25, no_active_tasks, lifecycle_running,
+):
+    prewarm_config({"prewarm_default_engine": True})
+    _lifecycle, calls = lifecycle_running
+
+    result = prewarm_mod.PrewarmService.request_ui_prewarm()
+
+    assert result == "prewarm_requested"
+    assert prewarm_mod._prewarm_state == "requested"
+    # worker 是 daemon 线程：等后台真正发出 request
+    assert _wait_until(lambda: len(calls["request_engine_recycle"]) == 1)
+    assert calls["request_engine_recycle"] == ["indextts25"]
+    assert calls["ensure_running"] == 1
+
+
+# ── 8. 重复 UI load / 多次 callback → 仍只 request 一次（single-flight） ─
+def test_repeated_ui_load_single_flight(
+    prewarm_config, settings_default_v25, no_active_tasks, lifecycle_running,
+):
+    prewarm_config({"prewarm_default_engine": True})
+    _lifecycle, calls = lifecycle_running
+
+    first = prewarm_mod.PrewarmService.request_ui_prewarm()
+    assert first == "prewarm_requested"
+    for _ in range(4):  # 浏览器刷新 / 多标签 / 多次 app.load
+        duplicate = prewarm_mod.PrewarmService.request_ui_prewarm()
+        assert duplicate == "prewarm_skipped=duplicate"
+
+    assert _wait_until(lambda: len(calls["request_engine_recycle"]) == 1)
+    assert calls["request_engine_recycle"] == ["indextts25"]
+    assert calls["ensure_running"] == 1, "single-flight：ensure_running 只允许一次"
+
+
+# ── 9. lifecycle 已 shutting_down / stopped → prewarm 不调用 ────────────
+def test_lifecycle_stopped_skips_prewarm(
+    prewarm_config, settings_default_v25, lifecycle_running,
+):
+    prewarm_config({"prewarm_default_engine": True})
+    lifecycle, calls = lifecycle_running
+
+    assert lifecycle.request_application_shutdown("test_shutdown") is True
+    assert lifecycle.state == "stopped"
+
+    result = prewarm_mod.PrewarmService.request_ui_prewarm()
+
+    assert result == "prewarm_skipped=application_shutdown"
+    assert calls["request_engine_recycle"] == []
+    assert calls["ensure_running"] == 0
+
+
+def test_lifecycle_shutting_down_intermediate_also_skips(
+    prewarm_config, settings_default_v25, lifecycle_running,
+):
+    """shutdown 序列进行中（shutting_down，尚未 stopped）同样拒绝 prewarm。"""
+    prewarm_config({"prewarm_default_engine": True})
+    lifecycle, calls = lifecycle_running
+
+    # white-box：模拟 shutdown 已开始但尚未完成的状态
+    with lifecycle._lock:
+        lifecycle._state = "shutting_down"
+    assert lifecycle.is_shutting_down() is True
+
+    result = prewarm_mod.PrewarmService.request_ui_prewarm()
+
+    assert result == "prewarm_skipped=application_shutdown"
+    assert calls["request_engine_recycle"] == []
+    assert calls["ensure_running"] == 0
+
+
+# ── 10. UI-ready 已排队 → 随后 shutdown → worker 执行 → 不得启动 runtime ─
+def test_worker_after_shutdown_never_starts_runtime(
+    prewarm_config, settings_default_v25, lifecycle_running, monkeypatch,
+):
+    """竞态核心路径：callback 已排队后 shutdown 先发生，worker 必须放弃。"""
+    prewarm_config({"prewarm_default_engine": True})
+    lifecycle, calls = lifecycle_running
+
+    release = threading.Event()
+    worker_done = threading.Event()
+    original_worker = prewarm_mod.PrewarmService._prewarm_worker
+
+    def gated_worker(cls):  # noqa: ANN001 - classmethod 绑定后首参为 cls
+        release.wait(timeout=10.0)
+        try:
+            original_worker()
+        finally:
+            worker_done.set()
+
+    monkeypatch.setattr(
+        prewarm_mod.PrewarmService,
+        "_prewarm_worker",
+        classmethod(gated_worker),
+    )
+
+    # UI-ready callback 已排队（worker 被 gate 挡住，尚未执行）
+    result = prewarm_mod.PrewarmService.request_ui_prewarm()
+    assert result == "prewarm_requested"
+
+    # 随后 launch 失败 → finally → application shutdown 先完成
+    assert lifecycle.request_application_shutdown("test_shutdown") is True
+    release.set()
+
+    assert worker_done.wait(timeout=10.0) is True
+    assert calls["request_engine_recycle"] == []
+    assert calls["ensure_running"] == 0, "shutdown 后 worker 不得重启 runtime"
+
+
+# ── 11. 正常：running + enabled → 后台 request，callback 快速返回 ───────
+def test_ui_ready_callback_returns_fast_and_requests_in_background(
+    prewarm_config, settings_default_v25, no_active_tasks, lifecycle_running,
+):
+    prewarm_config({"prewarm_default_engine": True})
+    _lifecycle, calls = lifecycle_running
+
+    started = time.monotonic()
+    result = prewarm_mod.PrewarmService.request_ui_prewarm()
+    elapsed = time.monotonic() - started
+
+    assert result == "prewarm_requested"
+    assert elapsed < 0.5, f"app.load callback 应快速返回，实际 {elapsed:.3f}s"
+    # 真正模型请求发生在后台 worker（不阻塞 callback）
+    assert _wait_until(lambda: len(calls["request_engine_recycle"]) == 1)
+    assert calls["request_engine_recycle"] == ["indextts25"]
+    assert calls["ensure_running"] == 1
+
+
+# ── AST：app.py 接线（UI-ready one-shot prewarm，替代 sleep 线程）────────
+_APP_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.py"
+)
+with open(_APP_PATH, encoding="utf-8") as _app_fh:
+    _APP_SRC = _app_fh.read()
+_APP_TREE = ast.parse(_APP_SRC)
+
+
+def test_app_load_wires_ui_ready_prewarm():
+    """app.py 用 app.load(_on_ui_ready_prewarm) 接线，且旧 sleep 线程方案已移除。"""
+    assert "def _on_ui_ready_prewarm" in _APP_SRC, "缺少 UI-ready prewarm callback"
+    assert "app.load(_on_ui_ready_prewarm)" in _APP_SRC, "app.load 未接线"
+    assert "_start_background_prewarm" not in _APP_SRC, (
+        "旧「线程+sleep(2s) 猜 UI Ready」方案必须移除"
+    )
+    assert "time.sleep(2.0)" not in _APP_SRC.split("def _on_ui_ready_prewarm")[0]
+
+
+def test_app_main_keeps_finally_shutdown_guard():
+    """__main__ 仍保留 try/finally request_application_shutdown（最可靠退出边）。"""
+    main_block = next(
+        node
+        for node in _APP_TREE.body
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.Compare)
+        and any(
+            isinstance(comp, ast.Name) and comp.id == "__name__"
+            for comp in ast.walk(node.test)
+        )
+    )
+    source = ast.get_source_segment(_APP_SRC, main_block) or ""
+    assert "app.queue().launch(" in source
+    assert "request_application_shutdown" in source
+    assert "_start_background_prewarm()" not in source

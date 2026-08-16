@@ -2266,33 +2266,27 @@ def open_quick_tts_folder():
     return f"✅ 已打开导出目录：`{out_dir}`" if ok else f"❌ 打开目录失败：`{out_dir}`"
 
 
-def _start_background_prewarm():
-    """UI Ready 后后台预热 Settings 默认 TTS 引擎（不阻塞首屏）。
+def _on_ui_ready_prewarm():
+    """Gradio ``app.load`` callback: one-shot background prewarm (fast).
 
-    顺序必须 UI Ready → 后台 warmup：本函数在 ``app.launch()`` 之前以守护线程
-    启动，短暂等待后调用 ``PrewarmService.prewarm()`` —— 它只写 engine command
-    + spawn runtime（毫秒级返回），真正的多分钟模型加载发生在 runtime 进程内，
-    不会阻塞 Gradio 界面。幂等：runtime 已 ready 且 profile 匹配时不重复加载。
+    Gradio fires ``app.load`` only after the UI/server is confirmed usable,
+    so prewarm can never race a launch failure (port busy / server startup
+    error).  The callback only registers the one-shot request and spawns a
+    daemon worker -- it returns immediately and never blocks on the model
+    load (the multi-minute load stays inside the runtime process).  A second
+    shutdown guard inside the worker guarantees prewarm is skipped when the
+    application lifecycle already moved to shutting_down / stopped
+    (``prewarm_skipped=application_shutdown``).
     """
-    import threading
+    from services.prewarm import PrewarmService
 
-    def _run() -> None:
-        try:
-            time.sleep(2.0)  # 让 UI 先出现，再后台预热
-            from services.prewarm import PrewarmService
-
-            if PrewarmService.should_prewarm():
-                message = PrewarmService.prewarm()
-                logger.info("prewarm_event=%s", message)
-            else:
-                logger.info("prewarm_event=skipped (disabled / no default / busy)")
-        except Exception:  # pragma: no cover - prewarm is best effort
-            logger.exception("后台预热失败")
-
-    thread = threading.Thread(
-        target=_run, daemon=True, name="audiobook-prewarm"
-    )
-    thread.start()
+    try:
+        message = PrewarmService.request_ui_prewarm()
+    except Exception:  # pragma: no cover - prewarm is best effort
+        logger.exception("prewarm_event=request_failed")
+        return None
+    logger.info("prewarm_event=%s", message)
+    return None
 
 
 def play_supplement_preview(which, sup_wavs, ss):
@@ -3737,6 +3731,13 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
                     [qt_out, qt_path])
     qt_open_folder.click(open_quick_tts_folder, [], [qt_path])
 
+    # ── 后台预热：UI-ready 一次性事件（Gradio app.load）──
+    # 只有 Gradio 确认 UI/server 可用后才触发，杜绝「线程+sleep(2s) 猜 UI Ready」
+    # 与 launch 快速失败竞态；callback 只做 single-flight 登记 + 启动后台 daemon
+    # worker 并立即返回（不阻塞首屏、不加载模型）。worker 执行前再查 application
+    # lifecycle guard，确保 shutting_down / stopped 后绝不重启 detached runtime。
+    app.load(_on_ui_ready_prewarm)
+
 if __name__ == "__main__":
     os.chdir(BASE)
     from lib.logging_setup import setup_logging
@@ -3754,8 +3755,6 @@ if __name__ == "__main__":
     # 合成产物、导出）已全部外置到 config.get_data_dir()（如 D:\AudiobookStudio），
     # 不在 cwd 内，返回其下音频路径给 Audio/File 组件会在序列化阶段触发 InvalidPathError
     # 导致前端显示「错误」。将其加入 allowed_paths 白名单，递归放行其下所有子目录。
-    # 后台预热：UI Ready 后加载 Settings 默认 TTS 引擎（不阻塞首屏，不重复加载）。
-    _start_background_prewarm()
     try:
         app.queue().launch(server_name="0.0.0.0", server_port=7862, share=False, inbrowser=True,
                            allowed_paths=[config.get_data_dir()])
