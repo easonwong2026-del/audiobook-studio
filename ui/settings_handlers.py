@@ -49,6 +49,7 @@ _TASK_TYPE_LABELS = {
     "voice_preview": "试听",
     "preview": "试听",
     "supplement": "补录",
+    "quick_tts": "临时配音",
     "export": "导出",
 }
 _TASK_REJECTION_MESSAGES = {
@@ -56,8 +57,26 @@ _TASK_REJECTION_MESSAGES = {
     "voice_preview": "当前有试听任务正在运行，请等待试听结束或取消后再切换 TTS 引擎。",
     "preview": "当前有试听任务正在运行，请等待试听结束或取消后再切换 TTS 引擎。",
     "supplement": "当前有补录任务正在运行，请等待补录结束或取消后再切换 TTS 引擎。",
+    "quick_tts": "当前有临时配音任务正在运行，请等待结束后再切换 TTS 引擎。",
     "export": "当前有导出任务正在运行，请等待导出结束或取消后再切换 TTS 引擎。",
 }
+
+_PREWARM_CONFIG_KEY = "prewarm_default_engine"
+
+
+def get_prewarm_setting() -> bool:
+    """Read the「启动后预热默认 TTS 引擎」toggle (default enabled)."""
+    raw = _read_raw_config().get(_PREWARM_CONFIG_KEY, True)
+    return bool(raw) if isinstance(raw, (bool, int)) else True
+
+
+def apply_prewarm_setting(enabled: bool) -> str:
+    """Persist the prewarm toggle; returns a user-facing message."""
+    data = _read_raw_config()
+    data[_PREWARM_CONFIG_KEY] = bool(enabled)
+    atomic_write(_config_path(), data)
+    state = "开启" if bool(enabled) else "关闭"
+    return f"✅ 已{state}「启动后预热默认 TTS 引擎」；{state}后下次启动生效。"
 
 
 def _first(*values: Any) -> Any:

@@ -33,8 +33,16 @@ _RUNTIME_TASK_TYPES = frozenset({
     "synthesis",
     "supplement",
     "voice_preview",
+    "quick_tts",
     "export",
 })
+
+# Quick TTS（无项目临时配音）使用的正式 global utility context。
+# 任务行落在 ``<data_dir>/runtime/utility_tasks.sqlite3``（独立于项目库），
+# 因此不会出现在 ``ProjectRepository.scan_projects()`` / 项目书架，也不创建
+# ``project.json`` / ``structured_script.json``。
+QUICK_TTS_CONTEXT = "__quick_tts__"
+_UTILITY_DB_FILENAME = "utility_tasks.sqlite3"
 _ACTIVE_STATES = ("pending", "running", "pausing", "paused", "recovering", "cancelling")
 _TERMINAL_STATES = ("cancelled", "done", "error", "interrupted", "needs_attention")
 
@@ -377,11 +385,33 @@ class TaskRepository:
         )
 
     @staticmethod
+    def is_utility_context(project: str) -> bool:
+        """Whether ``project`` names the global Quick TTS utility context."""
+        return str(project or "").strip() == QUICK_TTS_CONTEXT
+
+    @staticmethod
+    def get_utility_database_path(*, create: bool = False) -> str:
+        """Return the global utility task database path (Quick TTS etc.).
+
+        Lives under ``<data_dir>/runtime/`` — deliberately **not** inside any
+        project directory, so ``ProjectRepository.scan_projects()`` and the
+        bookshelf never see it as a user project.
+        """
+        from lib import config as _cfg
+
+        runtime_dir = os.path.join(_cfg.get_data_dir(), "runtime")
+        if create:
+            os.makedirs(runtime_dir, exist_ok=True)
+        return os.path.join(runtime_dir, _UTILITY_DB_FILENAME)
+
+    @staticmethod
     def get_database_path(project: str, *, create: bool = False) -> str | None:
         """Return the project-local production database path."""
         name = str(project or "").strip()
         if not name:
             return None
+        if TaskRepository.is_utility_context(name):
+            return TaskRepository.get_utility_database_path(create=create)
         try:
             project_dir = ProjectRepository.get_project_dir(name)
         except Exception:
@@ -692,6 +722,13 @@ class TaskRepository:
                         names.add(entry.name)
         except OSError:
             pass
+        # Global utility context (Quick TTS) becomes claimable only after its
+        # task database exists — so an idle installation never creates or scans
+        # the utility DB during unrelated heartbeat/task scans.  Once a Quick
+        # TTS task has been created the DB file exists and this context is
+        # always included (claim / load / heartbeat / busy-guard all see it).
+        if os.path.isfile(TaskRepository.get_utility_database_path(create=False)):
+            names.add(QUICK_TTS_CONTEXT)
         return sorted(names)
 
     @staticmethod
@@ -828,8 +865,8 @@ class TaskRepository:
             raise ValueError(f"不支持的 runtime task_type: {record.task_type}")
         # Preview/supplement are TTS tasks too: freeze the profile before the
         # row becomes claimable, so a later global setting change cannot alter
-        # a queued utility task.
-        if record.task_type in {"voice_preview", "preview", "supplement"}:
+        # a queued utility task.  Quick TTS freezes its snapshot identically.
+        if record.task_type in {"voice_preview", "preview", "supplement", "quick_tts"}:
             try:
                 from lib.tts_profile import resolve_profile
 

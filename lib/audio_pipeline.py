@@ -36,6 +36,21 @@ def _ffmpeg_executable() -> str:
     return str(config.get_ffmpeg_path() or "ffmpeg")
 
 
+def _remove_best_effort(path: str) -> None:
+    """Delete an intermediate file without failing an already-successful export.
+
+    The final mp3/m4b artifact has already been produced by the time the
+    intermediate WAV is cleaned up; a cleanup failure (e.g. sandboxed recycle
+    bin unavailable, anti-virus lock) must not turn a successful export into
+    an error.  Logs and keeps going.
+    """
+    try:
+        if path and os.path.isfile(path):
+            os.remove(path)
+    except OSError as exc:
+        logger.warning("清理中间 WAV 失败（不影响导出产物）: %s", exc)
+
+
 def _uses_director_timing(script: dict) -> bool:
     """v3 段音频已内嵌导演停顿，导出时不得重复插入固定静音。"""
     return str(script.get("version") or "").startswith("3")
@@ -174,8 +189,7 @@ def export_book(project_dir: str, format: str = "mp3", bitrate: str = "192k",
             _write_tags(format, out_path, script, project_dir, chapter_markers, rate, logger)
             if atomic_publish:
                 os.replace(out_path, final_out_path)
-            if os.path.isfile(wav_path):
-                os.remove(wav_path)  # cleanup intermediate wav
+            _remove_best_effort(wav_path)  # 清理中间 wav
         except FileNotFoundError as e:
             # R2：ffmpeg 未安装 / 未加入 PATH —— 显式报错，不再静默回退 WAV
             raise ExportError(
@@ -736,8 +750,7 @@ def export_supplement(paths: list, out_path: str, format: str = "mp3", bitrate: 
             )
             # best-effort 写标签：失败不破坏音频导出
             _write_supplement_tags(format, out_path_real, title, artist, album, cover_path, logger)
-            if os.path.isfile(wav_path):
-                os.remove(wav_path)  # 清理中间 wav
+            _remove_best_effort(wav_path)  # 清理中间 wav
         except FileNotFoundError as e:
             raise ExportError(
                 "❌ 导出失败：未检测到 ffmpeg（系统未安装或未加入 PATH）。\n"

@@ -353,7 +353,9 @@ class ProductionRuntime:
             "active", "pending", "queued", "starting", "preparing", "submitting",
             "running", "pausing", "paused", "recovering", "cancelling",
         }
-        task_types = {"synthesis", "voice_preview", "preview", "supplement", "export"}
+        task_types = {
+            "synthesis", "voice_preview", "preview", "supplement", "quick_tts", "export",
+        }
         try:
             return any(
                 str(getattr(record, "task_type", "")) in task_types
@@ -667,7 +669,7 @@ class ProductionRuntime:
                     and not self._shutdown_requested
                 ):
                     utility_record = self._claim_pending(
-                        "utility", {"supplement", "voice_preview"}, force_claim
+                        "utility", {"supplement", "voice_preview", "quick_tts"}, force_claim
                     )
                     if utility_record is not None:
                         self._note_task_claim(utility_record)
@@ -1521,9 +1523,121 @@ class ProductionRuntime:
         tts_engine.empty_cache()
         return results
 
+    def run_quick_tts_direct(
+        self,
+        payload: dict[str, Any],
+        artifact_dir: str,
+        *,
+        heartbeat: Any = None,
+        validate_output: bool = False,
+        engine_profile: dict[str, Any] | None = None,
+        progress_cb: Any = None,
+    ) -> dict[str, Any]:
+        """Runtime-owned Quick TTS (no-project) worker: one text → one WAV.
+
+        Uses the same singleton engine lifecycle as supplement/preview
+        (``self._engine.ensure_ready``), so a warm runtime is reused and the
+        engine is never double-loaded by this service itself.
+        """
+        self._engine.ensure_ready(engine_profile, progress_cb=progress_cb)
+        from lib import config
+
+        destination = artifact_dir or os.path.join(
+            config.get_data_dir(),
+            "quick_tts",
+            "cache",
+            uuid.uuid4().hex,
+        )
+        os.makedirs(destination, exist_ok=True)
+        from lib import tts_engine
+
+        if callable(heartbeat):
+            heartbeat()
+        text = str(payload.get("text") or "").strip()
+        speaker_audio = str(payload.get("speaker_audio") or "")
+        try:
+            beams = max(int(payload.get("num_beams", 2) or 2), 1)
+        except (TypeError, ValueError):
+            beams = 2
+        if not text:
+            return {
+                "text": "",
+                "wav_path": None,
+                "status": "failed",
+                "error": "❌ 文本为空",
+            }
+        if progress_cb is not None:
+            progress_cb("supplement_infer_start", line_index=0, line_total=1)
+        output = os.path.join(destination, "001.wav")
+        temporary = os.path.join(
+            destination,
+            f".001.{uuid.uuid4().hex}.part.wav",
+        )
+        started = time.monotonic()
+        try:
+            generated = tts_engine.synthesize_segment(
+                text=text,
+                speaker_audio=speaker_audio,
+                emotion="neutral",
+                emo_alpha=1.0,
+                speech_rate=1.0,
+                output_path=temporary,
+                num_beams=beams,
+            )
+            if validate_output:
+                ProductionRuntime._validate_wav(temporary)
+            if os.path.isfile(temporary):
+                os.replace(temporary, output)
+                generated = output
+            if progress_cb is not None:
+                progress_cb(
+                    "supplement_infer_done",
+                    line_index=0,
+                    line_total=1,
+                    status="ok",
+                    elapsed_ms=int((time.monotonic() - started) * 1000),
+                )
+            return {
+                "text": text,
+                "wav_path": str(generated or output),
+                "status": "ok",
+                "error": "",
+            }
+        except Exception as exc:  # pylint: disable=broad-except
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
+            if progress_cb is not None:
+                progress_cb(
+                    "supplement_infer_done",
+                    line_index=0,
+                    line_total=1,
+                    status="failed",
+                    elapsed_ms=int((time.monotonic() - started) * 1000),
+                )
+            return {
+                "text": text,
+                "wav_path": None,
+                "status": "failed",
+                "error": f"❌ {str(exc)[:120]}",
+            }
+        finally:
+            tts_engine.empty_cache()
+
     def _run_utility_task(self, record: TaskRecord) -> None:
-        """Execute one preview/supplement command synchronously under the OS lock."""
-        project_dir = ProjectRepository.get_project_dir(record.project)
+        """Execute one preview/supplement/quick-tts command synchronously under the OS lock."""
+        from repositories.task_repo import QUICK_TTS_CONTEXT
+
+        if record.project == QUICK_TTS_CONTEXT:
+            # Global utility context: artifact_dir lives under <data_dir>/quick_tts
+            # (never a project directory / bookshelf entry).
+            from lib import config as _cfg
+
+            project_dir = os.path.join(_cfg.get_data_dir(), "quick_tts")
+            os.makedirs(project_dir, exist_ok=True)
+        else:
+            project_dir = ProjectRepository.get_project_dir(record.project)
         artifact_dir = os.path.abspath(record.artifact_dir)
         try:
             if os.path.commonpath([artifact_dir, project_dir]) != os.path.abspath(
@@ -1647,6 +1761,24 @@ class ProductionRuntime:
                         "补录合成全部失败：" + "; ".join(
                             str(item.get("error") or "") for item in items[:3]
                         )
+                    )
+            elif record.task_type == "quick_tts":
+                quick = self.run_quick_tts_direct(
+                    record.options,
+                    artifact_dir,
+                    heartbeat=lambda: TaskRepository.update_runtime_heartbeat(
+                        self.owner_id, projects=[record.project]
+                    ),
+                    validate_output=True,
+                    engine_profile=record.options.get("engine_snapshot") if isinstance(record.options, dict) else None,
+                    progress_cb=_task_progress,
+                )
+                result = {"wav_path": quick.get("wav_path") or "", "status": quick.get("status") or "failed"}
+                completed = 1 if quick.get("status") == "ok" else 0
+                failed = 0 if completed else 1
+                if not completed:
+                    raise RuntimeError(
+                        "临时配音合成失败：" + str(quick.get("error") or "")
                     )
             else:
                 raise RuntimeError(f"未知 runtime task_type: {record.task_type}")
@@ -2070,6 +2202,17 @@ class ProductionRuntimeClient:
             "close_fds": True,
         }
         if _is_windows():
+            # Windows 黑框语义（PR B 修复 2，基于真实进程树观测）：
+            # - DETACHED_PROCESS 已让 runtime 自身无 console（黑框根因是 uv stub
+            #   在 DETACHED 下重派生出不带 flags 的 console 子进程 —— 已由
+            #   ``_resolve_runtime_launch`` 绕行到真实解释器修复）。
+            # - CREATE_NO_WINDOW 与 DETACHED_PROCESS / CREATE_NEW_CONSOLE 互斥：
+            #   官方文档明确「CREATE_NO_WINDOW is ignored if DETACHED_PROCESS or
+            #   CREATE_NEW_CONSOLE is specified」，因此这里**不**叠加
+            #   CREATE_NO_WINDOW（叠加会被 Windows 忽略，纯误导）。
+            # - runtime 内部再 spawn 的 ffmpeg/ffprobe 等控制台程序统一走
+            #   ``lib.procutil.run_no_window/popen_no_window``（CREATE_NO_WINDOW），
+            #   不会再为它们新建可见控制台。
             kwargs["creationflags"] = (
                 getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
                 | getattr(subprocess, "DETACHED_PROCESS", 0)
