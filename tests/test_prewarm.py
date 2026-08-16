@@ -25,6 +25,7 @@ import sys
 import threading
 import time
 import types
+from datetime import datetime, timezone
 
 import pytest
 
@@ -234,12 +235,14 @@ def test_prewarm_skips_when_active_tasks(
     assert PrewarmService.has_active_tts_tasks() is False
     assert PrewarmService.should_prewarm() is True
 
-    now = "2026-08-16T00:00:00Z"
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     TaskRepository.create_runtime_task(TaskRecord(
         task_id="task_active_prewarm",
         task_type="supplement",
         project=QUICK_TTS_CONTEXT,
         status="running",
+        owner_id="runtime_live_prewarm",
+        heartbeat_at=now,
         idempotency_key="prewarm-active",
         created_at=now,
         updated_at=now,

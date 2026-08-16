@@ -425,7 +425,9 @@ class TestRuntimeStartup:
         assert command[1:] == ["-m", "services.production_runtime", "--serve"]
         assert env == {}
 
-    def test_resolve_runtime_launch_uses_real_interpreter_for_stub(self, monkeypatch, tmp_path):
+    def test_resolve_runtime_launch_uses_real_interpreter_for_uv_stub(self, monkeypatch, tmp_path):
+        # uv-managed venv stub：即使尺寸 >100KB（实测 uv 0.12.x stub 为 256KB），
+        # pyvenv.cfg 存在 ``uv =`` 字段 → 判定为 uv stub → 绕行到 home 真实解释器。
         monkeypatch.setattr("services.production_runtime._is_windows", lambda: True)
         venv_dir = tmp_path / "venv"
         scripts = venv_dir / "Scripts"
@@ -433,13 +435,13 @@ class TestRuntimeStartup:
         site_pkgs = venv_dir / "Lib" / "site-packages"
         site_pkgs.mkdir(parents=True)
         stub = scripts / "python.exe"
-        stub.write_bytes(b"x" * 40960)  # <=100KB → 判定为 uv stub
+        stub.write_bytes(b"x" * 262144)  # uv stub 特征尺寸（>100KB 仍须绕行）
         base_dir = tmp_path / "base_python"
         base_dir.mkdir()
         base_py = base_dir / "python.exe"
         base_py.write_bytes(b"x" * 200000)
         (venv_dir / "pyvenv.cfg").write_text(
-            "home = %s\nimplementation = CPython\nuv = 0.11.25\n" % str(base_dir),
+            "home = %s\nimplementation = CPython\nuv = 0.12.3\n" % str(base_dir),
             encoding="utf-8",
         )
         monkeypatch.setattr(
@@ -453,13 +455,19 @@ class TestRuntimeStartup:
         assert "site-packages" in command[2]
         assert env == {}
 
-    def test_resolve_runtime_launch_keeps_venv_python_for_real_interpreter(self, monkeypatch, tmp_path):
+    def test_resolve_runtime_launch_keeps_venv_python_for_standard_venv(self, monkeypatch, tmp_path):
+        # 标准 venv（python -m venv，pyvenv.cfg 无 ``uv`` 字段）→ 真实解释器副本，
+        # 即使尺寸 >100KB 也直接用，DETACHED 生效，不绕行。
         monkeypatch.setattr("services.production_runtime._is_windows", lambda: True)
         venv_dir = tmp_path / "venv"
         scripts = venv_dir / "Scripts"
         scripts.mkdir(parents=True)
         real_py = scripts / "python.exe"
-        real_py.write_bytes(b"x" * 200000)  # >100KB → 真实解释器
+        real_py.write_bytes(b"x" * 200000)  # >100KB
+        (venv_dir / "pyvenv.cfg").write_text(
+            "home = %s\nimplementation = CPython\n" % str(tmp_path),
+            encoding="utf-8",
+        )
         monkeypatch.setattr(
             "services.production_runtime.sys.executable",
             str(real_py),

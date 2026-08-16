@@ -183,7 +183,8 @@ def export_book(project_dir: str, format: str = "mp3", bitrate: str = "192k",
         try:
             run_no_window(
                 [_ffmpeg_executable(), "-y", "-i", wav_path, "-b:a", bitrate, "-codec:a", codec, out_path],
-                check=True, capture_output=True, text=True
+                check=True, capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
             )
             # D2 写标签（best-effort：标签失败不破坏音频导出）
             _write_tags(format, out_path, script, project_dir, chapter_markers, rate, logger)
@@ -746,7 +747,8 @@ def export_supplement(paths: list, out_path: str, format: str = "mp3", bitrate: 
         try:
             run_no_window(
                 [_ffmpeg_executable(), "-y", "-i", wav_path, "-b:a", bitrate, "-codec:a", codec, out_path_real],
-                check=True, capture_output=True, text=True
+                check=True, capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
             )
             # best-effort 写标签：失败不破坏音频导出
             _write_supplement_tags(format, out_path_real, title, artist, album, cover_path, logger)

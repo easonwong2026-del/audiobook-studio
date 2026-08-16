@@ -257,6 +257,7 @@ def run_environment_diagnostics() -> dict[str, Any]:
             }
         proc = run_no_window(
             [found, "-version"], capture_output=True, text=True, timeout=5, check=False,
+            encoding="utf-8", errors="replace",
         )
         first = (proc.stdout or proc.stderr).splitlines()[0] if (proc.stdout or proc.stderr) else ""
         return {
@@ -283,6 +284,7 @@ def run_environment_diagnostics() -> dict[str, Any]:
         proc = run_no_window(
             [binary, "--query-gpu=name", "--format=csv,noheader"],
             capture_output=True, text=True, timeout=8, check=False,
+            encoding="utf-8", errors="replace",
         )
         names = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
         return {
