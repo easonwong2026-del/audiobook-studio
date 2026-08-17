@@ -58,9 +58,12 @@ class ProjectMeta:
     failed_count: int = 0
     pending_count: int = 0
     segments_status: dict[str, str] = field(default_factory=dict)
+    # v2 起 voice_bindings.json 已固定为根/配置目录名；该字段保留为历史兼容值，
+    # v3 项目绑定文件一律经 lib.project_paths 解析，不再依赖本字段。
     voice_bindings_path: str = "voice_bindings.json"
     # Storage metadata was added in V3.3.3.  Defaults keep old project.json
-    # files loadable without a migration step.
+    # files loadable without a migration step.  v3 项目为 3；打开项目不自动迁移，
+    # 版本判定唯一入口为 lib.project_paths.detect_storage_version。
     storage_version: int = 1
     directories: dict[str, str] = field(default_factory=dict)
     source_file: str = ""

@@ -681,7 +681,9 @@ def bind_voice(role, audio_file, from_lib, ss):
     # when the UI choice comes from the global library.  Direct uploads retain
     # the established manual-binding path for backwards compatibility.
     project_dir = ProjectService.get_project_dir(ss.project)
-    if from_lib and os.path.isfile(os.path.join(project_dir, "character_roster.json")):
+    if from_lib and os.path.isfile(
+        project_paths.project_file(project_dir, "character_roster")
+    ):
         try:
             resolved = VoiceCastResolver.resolve_role(ss.project, {"role": role})
             asset_id = VoiceAssetService.asset_id_for_path(src)
@@ -1969,15 +1971,15 @@ def do_supplement_synth(sup_role, sup_mode, sup_text, sup_json_role, sup_json_li
     num_beams = int(sup_quality) if sup_quality else 2
 
     # 5.3：任务隔离——每次补录独立目录（task_id 用 uuid，非秒级时间戳），互不覆盖。
-    # 产物落在项目 cache/supplement_tasks/<task_id>/，随项目备份与迁移。
+    # v3 产物落在 02_生成音频/补录音频/<task_id>/，随项目备份与迁移；
+    # v2/v1 项目由 resolver 解析到 cache/supplement_tasks/<task_id>/（历史行为）。
     import uuid as _uuid
 
     from lib import audio_format as _af
     task_id = _uuid.uuid4().hex
     project_dir = ProjectService.get_project_dir(ss.project)
     task_dir = os.path.join(
-        project_paths.project_dir(project_dir, "cache", create=True),
-        "supplement_tasks",
+        project_paths.project_dir(project_dir, "supplement_audio", create=True),
         task_id,
     )
     os.makedirs(task_dir, exist_ok=True)
@@ -2138,7 +2140,7 @@ def do_supplement_export(sup_format, sup_bitrate, sup_export_name, sup_wavs, sup
         return None, "❌ 没有可导出的补录音频（请先逐句补合成）"
     role = sup_role or "角色"
     project_dir = ProjectService.get_project_dir(ss.project)
-    out_dir = project_paths.project_dir(project_dir, "exports", create=True)
+    out_dir = project_paths.project_dir(project_dir, "delivery_supplement", create=True)
     name = sup_export_name or f"supplement_{_safe_name(role)}"
     from services.export_naming import build_export_path, unique_path
 
@@ -2162,11 +2164,11 @@ def do_supplement_export(sup_format, sup_bitrate, sup_export_name, sup_wavs, sup
 
 
 def refresh_supplement_export_hint(ss):
-    """导出前显示项目补录的保存位置（<project_dir>/exports）。"""
+    """导出前显示项目补录的保存位置（v3 → <project_dir>/03_导出成品/补录）。"""
     if not ss or not ss.project:
         return "打开项目后将在此显示导出保存位置。"
     project_dir = ProjectService.get_project_dir(ss.project)
-    out_dir = project_paths.project_dir(project_dir, "exports", create=True)
+    out_dir = project_paths.project_dir(project_dir, "delivery_supplement", create=True)
     return f"**保存位置：** `{out_dir}`"
 
 
@@ -2175,7 +2177,7 @@ def open_supplement_folder(sup_wavs, ss):
     if not ss or not ss.project:
         return "请先打开项目"
     project_dir = ProjectService.get_project_dir(ss.project)
-    out_dir = project_paths.project_dir(project_dir, "exports", create=True)
+    out_dir = project_paths.project_dir(project_dir, "delivery_supplement", create=True)
     from lib.procutil import open_in_folder
 
     ok = open_in_folder(out_dir)
@@ -2403,18 +2405,10 @@ def open_segments_folder(ss):
     if not ss.project: return "请先打开项目"
     d = ProjectService.get_project_dir(ss.project)
     sd = project_paths.project_dir(d, "segments", create=True)
-    try:
-        if sys.platform == "win32":
-            os.startfile(sd)
-        elif sys.platform == "darwin":
-            import subprocess
-            subprocess.Popen(["open", sd])
-        else:
-            import subprocess
-            subprocess.Popen(["xdg-open", sd])
-        return f"✅ 已打开分段音频目录：`{sd}`"
-    except OSError as exc:
-        return f"❌ 打开目录失败：{exc}"
+    from lib.procutil import open_in_folder
+
+    ok = open_in_folder(sd)
+    return f"✅ 已打开分段音频目录：`{sd}`" if ok else f"❌ 打开目录失败：`{sd}`"
 
 
 def refresh_project_storage(ss):
@@ -3131,12 +3125,18 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             bookshelf_selected = ov_page["bookshelf_selected"]
             bookshelf_open = ov_page["bookshelf_open"]
             bookshelf_open_dir = ov_page["bookshelf_open_dir"]
+            bookshelf_open_audio = ov_page["bookshelf_open_audio"]
+            bookshelf_open_delivery = ov_page["bookshelf_open_delivery"]
             bookshelf_backup = ov_page["bookshelf_backup"]
             bookshelf_backup_dir = ov_page["bookshelf_backup_dir"]
             bookshelf_cleanup = ov_page["bookshelf_cleanup"]
             bookshelf_cleanup_confirm = ov_page["bookshelf_cleanup_confirm"]
             bookshelf_cleanup_cancel = ov_page["bookshelf_cleanup_cancel"]
             bookshelf_cleanup_token = ov_page["bookshelf_cleanup_token"]
+            bookshelf_storage = ov_page["bookshelf_storage"]
+            bookshelf_storage_token = ov_page["bookshelf_storage_token"]
+            bookshelf_storage_confirm = ov_page["bookshelf_storage_confirm"]
+            bookshelf_storage_cancel = ov_page["bookshelf_storage_cancel"]
             bookshelf_integrity = ov_page["bookshelf_integrity"]
             bookshelf_integrity_repair = ov_page["bookshelf_integrity_repair"]
             bookshelf_archive = ov_page["bookshelf_archive"]

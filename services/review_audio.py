@@ -111,7 +111,7 @@ def _segment_audio(project_name: str, project_dir: str, segment: dict[str, Any])
     """
     seg_dir = project_paths.project_dir(project_dir, "segments")
     speaker_fingerprint = None
-    if os.path.isfile(os.path.join(project_dir, "voice_cast.json")):
+    if os.path.isfile(project_paths.project_file(project_dir, "voice_cast")):
         try:
             from repositories.project_repo import ProjectRepository
 
@@ -128,7 +128,10 @@ def _segment_audio(project_name: str, project_dir: str, segment: dict[str, Any])
             if isinstance(role_binding, dict):
                 path = str(role_binding.get("project_voice_path") or "")
                 if path and not os.path.isabs(path):
-                    path = os.path.join(project_dir, path)
+                    try:
+                        path = project_paths.resolve_relative(project_dir, path)
+                    except ValueError:
+                        path = os.path.join(project_dir, path)
                 speaker_fingerprint = segment_cache.speaker_fingerprint_for_path(path)
         except Exception:
             speaker_fingerprint = None

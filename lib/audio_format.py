@@ -15,7 +15,6 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import Union
 
 import numpy as np
 from scipy.io import wavfile

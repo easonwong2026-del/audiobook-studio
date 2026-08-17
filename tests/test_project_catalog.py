@@ -122,8 +122,9 @@ def test_bad_project_does_not_break_bookshelf(catalog_workspace):
     ProjectRepository.create_project(
         "bad_book", str(_script_file(catalog_workspace, title="坏书"))
     )
-    meta_path = os.path.join(
-        catalog_workspace, "projects", "bad_book", "project.json"
+    from lib import project_paths
+    meta_path = project_paths.project_file(
+        os.path.join(catalog_workspace, "projects", "bad_book"), "project_meta"
     )
     with open(meta_path, "w", encoding="utf-8") as file:
         file.write("{ this is not valid json")
@@ -142,8 +143,9 @@ def test_bad_script_meta_falls_back(catalog_workspace):
     ProjectRepository.create_project(
         "scriptless", str(_script_file(catalog_workspace))
     )
-    script_path = os.path.join(
-        catalog_workspace, "projects", "scriptless", "structured_script.json"
+    from lib import project_paths
+    script_path = project_paths.project_file(
+        os.path.join(catalog_workspace, "projects", "scriptless"), "structured_script"
     )
     with open(script_path, "w", encoding="utf-8") as file:
         file.write("{ broken")

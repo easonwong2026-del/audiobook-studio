@@ -57,11 +57,12 @@ class ProjectSnapshot:
         """检测磁盘关键文件是否在加载后发生变更（任一文件 mtime 晚于 loaded_at 即视为脏）。"""
         if not self.project_dir or not os.path.isdir(self.project_dir):
             return True
-        for fn in (
-            "project.json", "structured_script.json", "voice_bindings.json",
-            "character_roster.json", "voice_cast.json",
+        from lib import project_paths
+        for key in (
+            "project_meta", "structured_script", "voice_bindings",
+            "character_roster", "voice_cast",
         ):
-            p = os.path.join(self.project_dir, fn)
+            p = project_paths.project_file(self.project_dir, key)
             if os.path.isfile(p) and os.path.getmtime(p) > self.loaded_at:
                 return True
         return False

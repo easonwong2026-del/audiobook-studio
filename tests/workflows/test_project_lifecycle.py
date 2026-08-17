@@ -1,3 +1,5 @@
+from lib import project_paths
+from pathlib import Path
 """工作流测试：项目全生命周期（§10.3 1-10）
 
 验证：
@@ -125,14 +127,14 @@ def _write_meta(project_dir: str, meta: ProjectMeta):
         "segments_status": meta.segments_status,
         "voice_bindings_path": meta.voice_bindings_path,
     }
-    path = os.path.join(project_dir, "project.json")
+    path = project_paths.project_file(project_dir, "project_meta")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
 def _load_meta(project_dir: str) -> ProjectMeta:
     """从 project.json 加载 meta。"""
-    with open(os.path.join(project_dir, "project.json"), encoding="utf-8") as f:
+    with open(project_paths.project_file(project_dir, "project_meta"), encoding="utf-8") as f:
         data = json.load(f)
     return ProjectMeta(**data)
 
@@ -161,15 +163,14 @@ class TestProjectLifecycle:
         names = ProjectRepository.scan_projects()
         assert "my_new_book" in names
 
-        # 验证项目目录结构
+        # 验证项目目录结构（v3 纯布局）
         proj_dir = tmp_path / "projects" / "my_new_book"
-        assert os.path.isdir(str(proj_dir / "voices"))
-        assert os.path.isdir(str(proj_dir / "segments"))
-        assert os.path.isdir(str(proj_dir / "chapters"))
-        assert os.path.isdir(str(proj_dir / "output"))
-        assert os.path.isfile(str(proj_dir / "structured_script.json"))
-        assert os.path.isfile(str(proj_dir / "voice_bindings.json"))
-        assert os.path.isfile(str(proj_dir / "project.json"))
+        assert set(os.listdir(proj_dir)) == {"01_原始资料", "02_生成音频", "03_导出成品", "99_系统数据"}
+        assert os.path.isdir(str(proj_dir / "01_原始资料" / "项目音色"))
+        assert os.path.isdir(str(proj_dir / "02_生成音频" / "分段音频"))
+        assert os.path.isfile(project_paths.project_file(str(proj_dir), "structured_script"))
+        assert os.path.isfile(project_paths.project_file(str(proj_dir), "voice_bindings"))
+        assert os.path.isfile(project_paths.project_file(str(proj_dir), "project_meta"))
 
     def test_open_project(self, tmp_path, monkeypatch):
         """打开已有项目 → ProjectSnapshot 含正确的 name/meta/script/bindings。"""
@@ -221,7 +222,7 @@ class TestProjectLifecycle:
 
         # 读当前 bindings 并写入
         proj_dir = tmp_path / "projects" / "bind_test"
-        bindings_path = proj_dir / "voice_bindings.json"
+        bindings_path = Path(project_paths.project_file(str(proj_dir), "voice_bindings"))
         with open(bindings_path, encoding="utf-8") as f:
             bd = json.load(f)
         bd["bindings"]["旁白"] = str(ref_wav)

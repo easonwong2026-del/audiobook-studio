@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +110,9 @@ class BindingRepository:
             缺失的音频路径列表（空列表表示全部存在）。
         """
         missing: list[str] = []
-        bindings_path = os.path.join(project_dir, "voice_bindings.json")
+        from lib import project_paths
+
+        bindings_path = project_paths.project_file(project_dir, "voice_bindings")
         if not os.path.isfile(bindings_path):
             return ["voice_bindings.json 不存在"]
         import json
@@ -127,7 +128,10 @@ class BindingRepository:
                 continue
             abs_path = path
             if not os.path.isabs(abs_path):
-                abs_path = os.path.join(project_dir, abs_path)
+                try:
+                    abs_path = project_paths.resolve_relative(project_dir, abs_path)
+                except ValueError:
+                    abs_path = os.path.join(project_dir, abs_path)
             if not os.path.isfile(abs_path):
                 missing.append(abs_path)
         return missing
@@ -145,4 +149,9 @@ class BindingRepository:
         """
         if os.path.isabs(path):
             return os.path.normpath(path)
-        return os.path.normpath(os.path.join(project_dir, path))
+        from lib import project_paths
+
+        try:
+            return os.path.normpath(project_paths.resolve_relative(project_dir, path))
+        except ValueError:
+            return os.path.normpath(os.path.join(project_dir, path))

@@ -1,5 +1,6 @@
 """Phase-3 ProductionJobService contract tests."""
 from __future__ import annotations
+from lib import project_paths
 
 import json
 import os
@@ -51,11 +52,11 @@ def production_project(tmp_path, monkeypatch):
     )
     ProjectService.create_project_from_data("production", SCRIPT)
     project_dir = ProjectRepository.get_project_dir("production")
-    voice_path = os.path.join(project_dir, "voices", "narrator.wav")
+    voice_path = os.path.join(project_paths.project_dir(project_dir, "project_voices", create=True), "narrator.wav")
     os.makedirs(os.path.dirname(voice_path), exist_ok=True)
     with open(voice_path, "wb") as file:
         file.write(b"voice")
-    bindings_path = os.path.join(project_dir, "voice_bindings.json")
+    bindings_path = project_paths.project_file(project_dir, "voice_bindings")
     with open(bindings_path, encoding="utf-8") as file:
         bindings = json.load(file)
     bindings["bindings"]["旁白"] = voice_path

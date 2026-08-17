@@ -208,7 +208,10 @@ class ProjectService:
             value = binding_values.get(role)
             path = str(value) if value else None
             if path and not os.path.isabs(path):
-                path = os.path.join(project_dir, path)
+                try:
+                    path = project_paths.resolve_relative(project_dir, path)
+                except ValueError:
+                    path = os.path.join(project_dir, path)
             relative_path = None
             if path:
                 try:
@@ -327,7 +330,7 @@ class ProjectService:
             raise ValueError("bind_voice 需要 project / role / audio_path 均非空")
         ensure_project_mutation_allowed(project, "bind_voice")
         d = ProjectRepository.get_project_dir(project)
-        vd = project_paths.project_dir(d, "voices", create=True)
+        vd = project_paths.project_dir(d, "project_voices", create=True)
         os.makedirs(vd, exist_ok=True)
         ext = os.path.splitext(audio_path)[1] or ".wav"
         dest = os.path.join(vd, f"{_safe_name(role)}{ext}")
@@ -341,13 +344,15 @@ class ProjectService:
         bd.setdefault("role_categories", {})[role] = category
         bd["bound_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
         ProjectRepository.save_bindings(d, bd)
-        try:
-            shutil.copy2(
-                os.path.join(d, "voice_bindings.json"),
-                os.path.join(vd, "voice_bindings.json"),
-            )
-        except OSError as exc:
-            logger.warning("同步角色声音配置副本失败: %s", exc)
+        # v2 项目保留 04_角色与声音/voice_bindings.json 镜像；v3 无 legacy 目录。
+        if project_paths.detect_storage_version(d) < 3:
+            try:
+                shutil.copy2(
+                    project_paths.project_file(d, "voice_bindings"),
+                    os.path.join(vd, "voice_bindings.json"),
+                )
+            except OSError as exc:
+                logger.warning("同步角色声音配置副本失败: %s", exc)
         return dest
 
     @staticmethod

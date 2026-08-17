@@ -15,6 +15,7 @@ heartbeat 新鲜 / 任务已被 claim / 精确 spawn 的 Popen 仍 alive 且 sta
 等待 ``engine_state=ready`` —— IndexTTS 2.5 冷加载数分钟不能被误判为启动失败。
 """
 from __future__ import annotations
+from lib import project_paths
 
 import json
 import os
@@ -166,7 +167,7 @@ def test_submit_waits_normally_when_spawn_confirmed(
         return _done_record(task_id)
 
     monkeypatch.setattr(RuntimeTTSService, "_wait", classmethod(_fake_wait))
-    artifact_dir = os.path.join(ProjectRepository.get_project_dir("book"), "cache", "sup")
+    artifact_dir = os.path.join(project_paths.project_dir(ProjectRepository.get_project_dir("book"), "cache", create=True), "sup")
     result = RuntimeTTSService._submit(
         project_name="book", task_type="supplement", artifact_dir=artifact_dir,
         options={"lines": ["甲"]}, total=1, timeout=30,
@@ -205,7 +206,7 @@ def test_submit_fails_fast_with_runtime_start_failed(
     monkeypatch.setattr(
         ProductionRuntimeClient, "ensure_running", staticmethod(lambda: 9101)
     )
-    artifact_dir = os.path.join(ProjectRepository.get_project_dir("book"), "cache", "sup")
+    artifact_dir = os.path.join(project_paths.project_dir(ProjectRepository.get_project_dir("book"), "cache", create=True), "sup")
     started = time.monotonic()
     with pytest.raises(RuntimeStartFailedError) as captured:
         RuntimeTTSService._submit(
@@ -237,7 +238,7 @@ def test_submit_skips_confirmation_when_runtime_already_running(
         return _done_record(task_id)
 
     monkeypatch.setattr(RuntimeTTSService, "_wait", classmethod(_fake_wait))
-    artifact_dir = os.path.join(ProjectRepository.get_project_dir("book"), "cache", "sup")
+    artifact_dir = os.path.join(project_paths.project_dir(ProjectRepository.get_project_dir("book"), "cache", create=True), "sup")
     result = RuntimeTTSService._submit(
         project_name="book", task_type="supplement", artifact_dir=artifact_dir,
         options={"lines": ["甲"]}, total=1, timeout=30,

@@ -12,6 +12,7 @@
 6. 移入回收站两步确认契约。
 """
 from __future__ import annotations
+from lib import project_paths
 
 import json
 import os
@@ -115,9 +116,9 @@ def test_archive_opened_project_resets_session(safety_workspace):
 
 def test_cleanup_keeps_durable_artifacts(safety_workspace):
     project_dir = os.path.join(safety_workspace, "projects", "safety_book")
-    segment_dir = os.path.join(project_dir, "05_分段音频")
+    segment_dir = project_paths.project_dir(project_dir, "segments", create=True)
     os.makedirs(segment_dir, exist_ok=True)
-    exports_dir = os.path.join(project_dir, "09_导出文件")
+    exports_dir = project_paths.project_dir(project_dir, "delivery_official", create=True)
     os.makedirs(exports_dir, exist_ok=True)
 
     # durable 产物：task provenance / quality / Voice Cast / 正式 wav / exports
@@ -133,7 +134,7 @@ def test_cleanup_keeps_durable_artifacts(safety_workspace):
     QualityRepository.create_history_record(
         "safety_book", "repair_history", "repair", {"status": "done"}
     )
-    roster_path = os.path.join(project_dir, "character_roster.json")
+    roster_path = project_paths.project_file(project_dir, "character_roster")
     with open(roster_path, "w", encoding="utf-8") as file:
         json.dump({"mode": "voice_cast", "roles": []}, file, ensure_ascii=False)
     formal_wav = os.path.join(segment_dir, "1-001.wav")
@@ -142,7 +143,7 @@ def test_cleanup_keeps_durable_artifacts(safety_workspace):
     export_file = os.path.join(exports_dir, "book.mp3")
     with open(export_file, "wb") as file:
         file.write(b"ID3-export")
-    script_path = os.path.join(project_dir, "structured_script.json")
+    script_path = project_paths.project_file(project_dir, "structured_script")
     assert os.path.isfile(script_path)
 
     # 同时制造一个可清理的空段音频

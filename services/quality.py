@@ -52,28 +52,12 @@ class QualityService:
     @staticmethod
     def _project_relative(project_name: str, path: str) -> str:
         project_dir = os.path.realpath(ProjectRepository.get_project_dir(project_name))
-        absolute = os.path.realpath(os.path.abspath(path))
-        try:
-            inside = os.path.commonpath([project_dir, absolute]) == project_dir
-        except ValueError:
-            inside = False
-        if not inside:
-            raise ValueError("质量记录只能引用项目目录内的音频")
-        return os.path.relpath(absolute, project_dir).replace(os.sep, "/")
+        return project_paths.make_relative(project_dir, path)
 
     @staticmethod
     def _absolute(project_name: str, relative_path: str) -> str:
         project_dir = os.path.realpath(ProjectRepository.get_project_dir(project_name))
-        path = os.path.realpath(
-            os.path.join(project_dir, *str(relative_path or "").replace("\\", "/").split("/"))
-        )
-        try:
-            inside = os.path.commonpath([project_dir, path]) == project_dir
-        except ValueError:
-            inside = False
-        if not inside:
-            raise ValueError("质量记录中的音频路径越界")
-        return path
+        return project_paths.resolve_relative(project_dir, relative_path)
 
     @staticmethod
     def _segment(project_name: str, segment_id: str) -> tuple[Any, dict[str, Any], dict[str, Any]]:
@@ -114,7 +98,10 @@ class QualityService:
                 ) or ""
             )
         if path and not os.path.isabs(path):
-            path = os.path.join(project_dir, path)
+            try:
+                path = project_paths.resolve_relative(project_dir, path)
+            except ValueError:
+                path = os.path.join(project_dir, path)
         return path
 
     @classmethod
@@ -152,7 +139,9 @@ class QualityService:
         )
         fingerprint = segment_cache.speaker_fingerprint_for_path(speaker) or ""
         cast_active = os.path.isfile(
-            os.path.join(ProjectRepository.get_project_dir(project_name), "voice_cast.json")
+            project_paths.project_file(
+                ProjectRepository.get_project_dir(project_name), "voice_cast"
+            )
         )
         cache_identity = segment_cache.segment_cache_key(
             str(segment.get("id")),
@@ -203,7 +192,7 @@ class QualityService:
             return path, cache_identity, fingerprint, effective
         project_dir = ProjectRepository.get_project_dir(project_name)
         cast_active = os.path.isfile(
-            os.path.join(project_dir, "voice_cast.json")
+            project_paths.project_file(project_dir, "voice_cast")
         )
         artifact = segment_cache.resolve_segment_artifact(
             segments_dir=project_paths.project_dir(project_dir, "segments"),
@@ -992,7 +981,9 @@ class QualityService:
         state = QualityRepository.load(project_name)
         project_dir = ProjectRepository.get_project_dir(project_name)
         segments_dir = project_paths.project_dir(project_dir, "segments")
-        cast_active = os.path.isfile(os.path.join(project_dir, "voice_cast.json"))
+        cast_active = os.path.isfile(
+            project_paths.project_file(project_dir, "voice_cast")
+        )
         fingerprint_cache: dict[str, str] = {}
         candidates: list[dict[str, Any]] = []
         for segment_id, segment in segments.items():

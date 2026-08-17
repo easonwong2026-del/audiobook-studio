@@ -1,3 +1,4 @@
+from lib import project_paths
 """单元测试：services.session.SessionState 的快照挂载方法 + 未 import gradio。
 
 验证：
@@ -9,7 +10,6 @@ import sys
 import os
 import json
 
-import pytest
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
@@ -59,7 +59,7 @@ def test_ensure_snapshot_rebuilds_when_dirty(tmp_path, monkeypatch):
     snap = pm.load_snapshot("rebook")
     ss.set_snapshot(snap)
     # 让 project.json 变新 → 脏
-    p = os.path.join(pm.get_project_dir("rebook"), "project.json")
+    p = project_paths.project_file(pm.get_project_dir("rebook"), "project_meta")
     t = snap.loaded_at + 10
     os.utime(p, (t, t))
     got = ss.ensure_snapshot()

@@ -86,12 +86,12 @@ def export_book(project_dir: str, format: str = "mp3", bitrate: str = "192k",
     """
     import json
 
-    script_path = os.path.join(project_dir, "structured_script.json")
+    script_path = project_paths.project_file(project_dir, "structured_script")
     with open(script_path, encoding="utf-8") as f:
         script = json.load(f)
 
     segments_dir = project_paths.project_dir(project_dir, "segments")
-    out_dir = output_dir if output_dir else project_paths.project_dir(project_dir, "exports", create=True)
+    out_dir = output_dir if output_dir else project_paths.project_dir(project_dir, "delivery_official", create=True)
     os.makedirs(out_dir, exist_ok=True)
 
     # 导出文件名使用「项目名」（导入项目时的名称+章节范围，如 补乔欣-121-130），
@@ -373,12 +373,12 @@ def _find_segment(segments_dir: str, seg_id: str, text: str, role: str, emotion:
 
 def _cast_speaker_fingerprint(project_dir: str, segment: dict[str, Any]) -> str | None:
     """Resolve the active project's speaker identity for strict cache lookup."""
-    if not os.path.isfile(os.path.join(project_dir, "voice_cast.json")):
+    if not os.path.isfile(project_paths.project_file(project_dir, "voice_cast")):
         return None
     try:
         import json
 
-        with open(os.path.join(project_dir, "voice_bindings.json"), encoding="utf-8") as file:
+        with open(project_paths.project_file(project_dir, "voice_bindings"), encoding="utf-8") as file:
             bindings = json.load(file)
         role_bindings = bindings.get("role_bindings", {}) if isinstance(bindings, dict) else {}
         role_binding = role_bindings.get(str(segment.get("role_id") or ""))
@@ -392,8 +392,11 @@ def _cast_speaker_fingerprint(project_dir: str, segment: dict[str, Any]) -> str 
         if not isinstance(role_binding, dict):
             return None
         path = str(role_binding.get("project_voice_path") or "")
-        if not os.path.isabs(path):
-            path = os.path.join(project_dir, path)
+        if path and not os.path.isabs(path):
+            try:
+                path = project_paths.resolve_relative(project_dir, path)
+            except ValueError:
+                path = os.path.join(project_dir, path)
         return segment_cache.speaker_fingerprint_for_path(path)
     except (OSError, ValueError, TypeError):
         return None
@@ -428,14 +431,14 @@ def generate_subtitles(
     if not formats:
         return []
 
-    script_path = os.path.join(project_dir, "structured_script.json")
+    script_path = project_paths.project_file(project_dir, "structured_script")
     if not os.path.isfile(script_path):
         return []
     with open(script_path, encoding="utf-8") as f:
         script = json.load(f)
 
     segments_dir = project_paths.project_dir(project_dir, "segments")
-    out_dir = output_dir if output_dir else project_paths.project_dir(project_dir, "exports", create=True)
+    out_dir = output_dir if output_dir else project_paths.project_dir(project_dir, "delivery_official", create=True)
     os.makedirs(out_dir, exist_ok=True)
 
     title = script.get("meta", {}).get("title", "audiobook")
@@ -586,7 +589,7 @@ def concat_for_preview(project_dir: str, chapter_id, output_path: str) -> str | 
 
     output_path = os.path.normpath(os.path.abspath(output_path))
 
-    script_path = os.path.join(project_dir, "structured_script.json")
+    script_path = project_paths.project_file(project_dir, "structured_script")
     if not os.path.isfile(script_path):
         return None
     with open(script_path, encoding="utf-8") as f:

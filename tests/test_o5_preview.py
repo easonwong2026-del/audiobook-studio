@@ -1,3 +1,4 @@
+from lib import project_paths  # noqa: E402
 """O5 合成前分段预览 + 勾选透传 + 跳过逻辑：纯函数 + FakeEngine 集成（无 GPU）。
 
 验证（设计 §6 O5 / §12.3）：
@@ -37,7 +38,6 @@ sys.modules.setdefault("torch", _fake_torch)
 
 import lib.project_manager as pm  # noqa: E402
 from lib import progress as prog  # noqa: E402
-from lib import project_paths  # noqa: E402
 import lib.queue as synth_queue  # noqa: E402
 import lib.tts_engine as tts_engine  # noqa: E402
 
@@ -84,7 +84,7 @@ def project(tmp_path, monkeypatch):
     d = pm.get_project_dir("o5")
     vo = os.path.join(project_paths.project_dir(d, "voices", create=True), "ref.wav")
     _dummy_wav(vo)
-    bp = os.path.join(d, "voice_bindings.json")
+    bp = project_paths.project_file(d, "voice_bindings")
     with open(bp, encoding="utf-8") as f:
         bd = json.load(f)
     bd["bindings"]["旁白"] = vo

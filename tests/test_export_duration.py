@@ -1,5 +1,6 @@
 """Formal delivery duration metadata regressions."""
 from __future__ import annotations
+from lib import project_paths
 
 import json
 import os
@@ -26,8 +27,7 @@ def test_artifact_duration_reads_final_wav_metadata(tmp_path):
 
 def test_timed_duration_fallback_includes_segment_and_chapter_silence(tmp_path):
     project_dir = str(tmp_path / "project")
-    segments = os.path.join(project_dir, "segments")
-    os.makedirs(segments)
+    segments = project_paths.project_dir(project_dir, "segments", create=True)
     script = {
         "version": "2.0",
         "chapters": [
@@ -41,7 +41,7 @@ def test_timed_duration_fallback_includes_segment_and_chapter_silence(tmp_path):
             {"id": "002", "segments": [{"id": "002-001"}]},
         ],
     }
-    with open(os.path.join(project_dir, "structured_script.json"), "w", encoding="utf-8") as file:
+    with open(project_paths.project_file(project_dir, "structured_script"), "w", encoding="utf-8") as file:
         json.dump(script, file)
     paths = {}
     for segment_id, duration in (

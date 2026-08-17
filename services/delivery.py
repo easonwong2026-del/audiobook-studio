@@ -24,6 +24,7 @@ from typing import Any
 from repositories.project_repo import ProjectRepository
 from repositories.quality_repo import QualityRepository
 from repositories.voice_cast_repo import VoiceCastRepository
+from lib import project_paths
 from lib.tts_profile import public_profile, resolve_profile
 
 
@@ -85,11 +86,21 @@ def _file_sha256(path: str) -> str:
 
 
 def _project_relative(project_dir: str, relative_path: Any) -> str:
-    """Normalize a revision path without allowing absolute path leakage."""
+    """Normalize a revision path without allowing absolute path leakage.
+
+    v3 项目上旧前缀（``voices/ exports/ 05_分段音频/ …``）经
+    ``project_paths.resolve_relative`` 归一为 v3 相对路径后再计算相对值，保证
+    delivery snapshot 的 hash 在迁移前后稳定；无法解析的记录沿用旧的清洗逻辑。
+    """
 
     raw = str(relative_path or "").replace("\\", "/")
     if not raw:
         return ""
+    try:
+        resolved = project_paths.resolve_relative(project_dir, raw)
+        return project_paths.make_relative(project_dir, resolved)
+    except ValueError:
+        pass
     # Revision paths are persisted as project-relative paths.  For old data
     # that accidentally contains an absolute path, retain only the path's
     # relative representation when it is inside the project; otherwise leave
@@ -119,14 +130,17 @@ def _project_relative(project_dir: str, relative_path: Any) -> str:
 def _absolute_project_path(project_dir: str, relative_path: str) -> str:
     if not relative_path:
         return ""
-    path = os.path.join(project_dir, *relative_path.split("/"))
     try:
-        root = os.path.realpath(project_dir)
-        if os.path.commonpath((os.path.realpath(path), root)) != root:
+        return project_paths.resolve_relative(project_dir, relative_path)
+    except ValueError:
+        path = os.path.join(project_dir, *relative_path.split("/"))
+        try:
+            root = os.path.realpath(project_dir)
+            if os.path.commonpath((os.path.realpath(path), root)) != root:
+                return ""
+        except (OSError, ValueError):
             return ""
-    except (OSError, ValueError):
-        return ""
-    return path
+        return path
 
 
 def _public_engine_snapshot(value: Any) -> dict[str, Any]:

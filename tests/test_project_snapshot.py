@@ -93,8 +93,9 @@ def test_reload_if_stale_clean_returns_self(tmp_path):
 
 
 def test_reload_if_stale_dirty_rebuilds(project):
+    from lib import project_paths
     snap = pm.load_snapshot(project)
-    p = os.path.join(pm.get_project_dir(project), "project.json")
+    p = project_paths.project_file(pm.get_project_dir(project), "project_meta")
     t = snap.loaded_at + 10
     os.utime(p, (t, t))
     fresh = snap.reload_if_stale()

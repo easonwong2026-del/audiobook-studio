@@ -41,7 +41,7 @@ def repair_project(tmp_path):
     ProjectRepository.create_project_from_data("repair", SCRIPT)
     project_dir = ProjectRepository.get_project_dir("repair")
     voice = os.path.join(
-        project_paths.project_dir(project_dir, "voices", create=True),
+        project_paths.project_dir(project_dir, "project_voices", create=True),
         "narrator.wav",
     )
     wavfile.write(voice, 22050, np.ones(2205, dtype=np.int16))
@@ -171,4 +171,4 @@ def test_repair_copies_temporary_voice_and_routes_it_per_segment(
     assert result["status"] == "done"
     relative = captured["voice_overrides"]["001-001"]
     assert not os.path.isabs(relative)
-    assert relative.startswith("08_质检记录/")
+    assert relative.startswith("99_系统数据/质检/")

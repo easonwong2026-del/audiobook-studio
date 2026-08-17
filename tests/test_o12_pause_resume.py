@@ -1,3 +1,4 @@
+from lib import project_paths
 """O12 集成：段落级暂停 / 恢复（手动驱动生成器，段边界挂起，不杀进行中进程）。
 
 monkeypatch tts_engine.synthesize_segment 为带 sleep 的桩（仿 test_synthesis_service._fake_segment_slow）；
@@ -52,9 +53,9 @@ def project(tmp_path, monkeypatch):
     sp.write_text(json.dumps(SCRIPT, ensure_ascii=False), encoding="utf-8")
     pm.create_project("pr", str(sp))
     d = pm.get_project_dir("pr")
-    vo = os.path.join(d, "voices", "ref.wav")
+    vo = os.path.join(project_paths.project_dir(d, "project_voices", create=True), "ref.wav")
     _dummy(vo)
-    bp = os.path.join(d, "voice_bindings.json")
+    bp = project_paths.project_file(d, "voice_bindings")
     with open(bp, encoding="utf-8") as f:
         bd = json.load(f)
     bd["bindings"]["旁白"] = vo
@@ -74,7 +75,7 @@ def _fake_segment_slow(output_path, **kwargs):
 
 
 def _bindings(proj_dir: str) -> dict:
-    return {"旁白": os.path.join(proj_dir, "voices", "ref.wav")}
+    return {"旁白": os.path.join(project_paths.project_dir(proj_dir, "project_voices", create=True), "ref.wav")}
 
 
 def test_pause_resume_full_cycle(project, monkeypatch):

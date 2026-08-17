@@ -220,7 +220,10 @@ class ProjectStorageRepository:
     def _archive_name(path: str, archive_id: str) -> str:
         """Read the original name, falling back to the archive suffix format."""
         try:
-            with open(os.path.join(path, "project.json"), encoding="utf-8") as file:
+            with open(
+                project_paths.project_file(path, "project_meta"),
+                encoding="utf-8",
+            ) as file:
                 meta = json.load(file)
             candidate = meta.get("project_name") if isinstance(meta, dict) else None
             if candidate:
@@ -287,19 +290,24 @@ class ProjectStorageRepository:
         )
 
         category_sizes: dict[str, int] = {}
-        for key in ("source", "chapter_text", "voices", "segments", "chapter_audio", "merged_audio", "exports"):
+        version = project_paths.detect_storage_version(project_dir)
+        audio_keys = ("segments", "chapter_audio", "merged_audio")
+        source_keys = ("source_book", "chapter_data") if version >= 3 else ("source", "chapter_text")
+        voices_key = "project_voices" if version >= 3 else "voices"
+        output_keys = ("delivery_official", "delivery_supplement") if version >= 3 else ("exports",)
+        for key in (*audio_keys, *source_keys, voices_key, *output_keys):
             category_sizes[key] = ProjectStorageRepository._measure_category(project_dir, key)[0]
 
         return ProjectStorageSummary(
             project_name=safe_name,
             project_dir=os.path.normpath(project_dir),
             total_bytes=root_bytes + preview_bytes,
-            source_bytes=category_sizes["source"] + category_sizes["chapter_text"],
-            voices_bytes=category_sizes["voices"],
-            segments_bytes=category_sizes["segments"],
-            chapter_audio_bytes=category_sizes["chapter_audio"],
-            merged_audio_bytes=category_sizes["merged_audio"],
-            output_bytes=category_sizes["exports"],
+            source_bytes=sum(category_sizes.get(key, 0) for key in source_keys),
+            voices_bytes=category_sizes.get(voices_key, 0),
+            segments_bytes=category_sizes.get("segments", 0),
+            chapter_audio_bytes=category_sizes.get("chapter_audio", 0),
+            merged_audio_bytes=category_sizes.get("merged_audio", 0),
+            output_bytes=sum(category_sizes.get(key, 0) for key in output_keys),
             preview_bytes=preview_bytes,
             file_count=root_count + preview_count,
             modified_at=max(root_mtime or 0.0, preview_mtime or 0.0) or None,
@@ -322,7 +330,10 @@ class ProjectStorageRepository:
             logger.info("项目不支持原子归档，改用安全复制: %s", exc)
             try:
                 shutil.copytree(project_dir, target, symlinks=True)
-                if not all(os.path.isfile(os.path.join(target, marker)) for marker in ("project.json", "structured_script.json")):
+                if not all(
+                    os.path.isfile(project_paths.project_file(target, key))
+                    for key in ("project_meta", "structured_script")
+                ):
                     raise OSError("归档副本缺少项目核心文件")
                 shutil.rmtree(project_dir)
             except Exception:
@@ -480,7 +491,7 @@ class ProjectStorageRepository:
 
     @staticmethod
     def _current_segment_ids(project_dir: str) -> set[str]:
-        script_path = os.path.join(project_dir, "structured_script.json")
+        script_path = project_paths.project_file(project_dir, "structured_script")
         try:
             with open(script_path, encoding="utf-8") as file:
                 raw = script_loader.canonicalize_collections(json.load(file))
@@ -612,9 +623,9 @@ class ProjectStorageRepository:
             })
 
         parsed_meta: dict[str, Any] = {}
-        meta_path = os.path.join(project_dir, "project.json")
-        script_path = os.path.join(project_dir, "structured_script.json")
-        bindings_path = os.path.join(project_dir, "voice_bindings.json")
+        meta_path = project_paths.project_file(project_dir, "project_meta")
+        script_path = project_paths.project_file(project_dir, "structured_script")
+        bindings_path = project_paths.project_file(project_dir, "voice_bindings")
         for path in (meta_path, script_path, bindings_path):
             if not os.path.isfile(path):
                 add_issue("missing_file", f"缺少项目核心文件：{os.path.basename(path)}", path=path, repairable=False)
@@ -675,7 +686,10 @@ class ProjectStorageRepository:
                             continue
                         binding_path = str(value)
                         if not os.path.isabs(binding_path):
-                            binding_path = os.path.join(project_dir, binding_path)
+                            try:
+                                binding_path = project_paths.resolve_relative(project_dir, binding_path)
+                            except ValueError:
+                                binding_path = os.path.join(project_dir, binding_path)
                         if not os.path.isfile(binding_path):
                             add_issue("missing_voice_binding", f"角色「{role}」的参考音频不存在", path=binding_path)
             except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -699,10 +713,15 @@ class ProjectStorageRepository:
                         segment_id=sid,
                     )
 
-        for key in ("segments", "chapter_audio", "merged_audio", "exports"):
+        version = project_paths.detect_storage_version(project_dir)
+        if version >= 3:
+            directory_keys = ("segments", "chapter_audio", "merged_audio", "delivery_official", "delivery_supplement")
+        else:
+            directory_keys = ("segments", "chapter_audio", "merged_audio", "exports")
+        for key in directory_keys:
             directory = project_paths.project_dir(project_dir, key)
             if project_paths.is_v2_project(project_dir) and not os.path.isdir(directory):
-                add_issue("missing_directory", f"缺少项目目录：{project_paths.CANONICAL_DIRS[key]}", path=directory, repairable=True)
+                add_issue("missing_directory", f"缺少项目目录：{key}", path=directory, repairable=True)
             if os.path.isdir(directory) and not os.path.islink(directory):
                 for root, dirs, files in os.walk(directory, followlinks=False):
                     dirs[:] = [entry for entry in dirs if not os.path.islink(os.path.join(root, entry))]
@@ -711,7 +730,7 @@ class ProjectStorageRepository:
                         if os.path.islink(path):
                             continue
                         try:
-                            if os.path.getsize(path) == 0 and key in {"chapter_audio", "merged_audio", "exports"}:
+                            if os.path.getsize(path) == 0 and key in {"chapter_audio", "merged_audio", "delivery_official", "delivery_supplement", "exports"}:
                                 add_issue("empty_output", f"发现空的输出文件：{filename}", path=path, repairable=True)
                         except OSError:
                             continue

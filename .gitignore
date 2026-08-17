@@ -49,3 +49,6 @@ tests/__test_ws*/
 # 本地交付物 / 原型（不入库）
 prototype/
 deliverables/
+
+# WorkBuddy 工作数据（artifacts / 快照，不入库）
+.workbuddy/

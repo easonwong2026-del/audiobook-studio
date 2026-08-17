@@ -1,3 +1,4 @@
+from lib import project_paths
 """单元测试：lib/project_manager.py + lib/script_loader.py
 
 验证：
@@ -83,7 +84,7 @@ def test_update_status_done_and_failed(project):
 
 def test_get_remaining_resets_missing_done(project, tmp_path):
     pm.update_segment_status(project, "1-001", "done")
-    seg_dir = os.path.join(pm.get_project_dir(project), "segments")
+    seg_dir = project_paths.project_dir(pm.get_project_dir(project), "segments", create=True)
     os.makedirs(seg_dir, exist_ok=True)
     wav_path = os.path.join(seg_dir, "1-001.wav")
     with open(wav_path, "w", encoding="utf-8") as f:
@@ -143,7 +144,7 @@ def test_get_synthesis_overrides_missing_returns_empty(project):
 
 def test_get_synthesis_overrides_corrupt_file_returns_empty(project):
     """覆盖文件损坏（非法 JSON）时安全回退为 {}。"""
-    ov_path = os.path.join(pm.get_project_dir(project), "synthesis_overrides.json")
+    ov_path = project_paths.project_file(pm.get_project_dir(project), "synthesis_overrides")
     with open(ov_path, "w", encoding="utf-8") as f:
         f.write("{not valid json")
     assert pm.get_synthesis_overrides(project) == {}
@@ -151,10 +152,10 @@ def test_get_synthesis_overrides_corrupt_file_returns_empty(project):
 
 def test_set_synthesis_overrides_non_destructive(project):
     """set 仅写独立覆盖文件，不改动 structured_script.json 源剧本。"""
-    script_path = os.path.join(pm.get_project_dir(project), "structured_script.json")
+    script_path = project_paths.project_file(pm.get_project_dir(project), "structured_script")
     before = open(script_path, encoding="utf-8").read()
     pm.set_synthesis_overrides(project, {"emotion": "sad"})
     after = open(script_path, encoding="utf-8").read()
     assert before == after, "set_synthesis_overrides 不应改动 structured_script.json"
-    ov_path = os.path.join(pm.get_project_dir(project), "synthesis_overrides.json")
+    ov_path = project_paths.project_file(pm.get_project_dir(project), "synthesis_overrides")
     assert os.path.isfile(ov_path), "覆盖应写入独立的 synthesis_overrides.json"

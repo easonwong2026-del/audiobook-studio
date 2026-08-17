@@ -1,3 +1,4 @@
+from lib import project_paths
 """ProjectService 单测（纯 Python，假 ffmpeg / 假引擎无关，仅用 lib.project_manager）。
 
 沿用 ``test_queue_b7.py`` 的范式：用 ``tmp_path`` 作 ``WORKSPACE_ROOT``，验证
@@ -79,11 +80,11 @@ def test_validate_script_file_ok(project, tmp_path):
 
 def test_bind_voice_mutates_json_and_returns_path(project):
     d = pm.get_project_dir("t1")
-    vo = os.path.join(d, "voices", "ref.wav")
+    vo = os.path.join(project_paths.project_dir(d, "project_voices", create=True), "ref.wav")
     _dummy(vo)
     dest = ProjectService.bind_voice("t1", "旁白", vo)
     assert os.path.isfile(dest)
-    with open(os.path.join(d, "voice_bindings.json"), encoding="utf-8") as f:
+    with open(project_paths.project_file(d, "voice_bindings"), encoding="utf-8") as f:
         bd = json.load(f)
     assert bd["bindings"]["旁白"] == dest
 

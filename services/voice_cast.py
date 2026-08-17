@@ -236,10 +236,28 @@ def _mark_cast_changed(document: dict[str, Any], role_ids: list[str] | None = No
     document["changed_roles"] = changed
 
 
-def _relative_project_voice_path(filename: str) -> str:
-    # Keep the public project contract stable even when v2 stores the actual
-    # file under 04_角色与声音 or exposes voices/ as a junction/symlink.
+def _relative_project_voice_path(project_dir: str, filename: str) -> str:
+    # v3 项目音色拷贝落在 01_原始资料/项目音色/；v2/v1 保持 voices/ 逻辑路径。
+    if project_paths.detect_storage_version(project_dir) >= 3:
+        return os.path.join(project_paths.V3_DIRS["project_voices"], filename).replace(os.sep, "/")
     return os.path.join("voices", filename).replace(os.sep, "/")
+
+
+def _project_abs(project_dir: str, candidate: str) -> str:
+    """Resolve a persisted project_voice_path to an absolute path.
+
+    v3 项目上旧记录（``voices/...``）经 ``resolve_relative`` 兜底映射；
+    未知前缀回退为直接 join（保持旧行为）。
+    """
+    candidate = str(candidate or "")
+    if not candidate:
+        return ""
+    if os.path.isabs(candidate):
+        return candidate
+    try:
+        return project_paths.resolve_relative(project_dir, candidate)
+    except ValueError:
+        return os.path.join(project_dir, candidate)
 
 
 def _safe_component(value: str) -> str:
@@ -257,7 +275,7 @@ def _snapshot_record(project_name: str, role_id: str, voice_asset_id: str) -> di
     project_path = str(role_binding.get("project_voice_path") or "")
     if not project_path:
         return None
-    path = project_path if os.path.isabs(project_path) else os.path.join(project_dir, project_path)
+    path = _project_abs(project_dir, project_path)
     if not os.path.isfile(path):
         return None
     digest = segment_cache.speaker_fingerprint_for_path(path)
@@ -311,7 +329,7 @@ def _project_voice_snapshot_path(
             candidate = str(runtime_binding.get("project_voice_path") or "").strip()
     if not candidate:
         return ""
-    return candidate if os.path.isabs(candidate) else os.path.join(project_dir, candidate)
+    return _project_abs(project_dir, candidate)
 
 
 def _read_roster(project_name: str) -> dict[str, Any] | None:
@@ -436,7 +454,7 @@ class VoiceCastResolver:
         _guard_mutation(project_name, "set_character_roster")
         project_dir = _project_dir(project_name)
         if VoiceCastRepository.load_roster(project_dir) is not None or os.path.isfile(
-            os.path.join(project_dir, VoiceCastRepository.ROSTER_FILE)
+            project_paths.project_file(project_dir, "character_roster")
         ):
             raise VoiceCastError("ROSTER_EXISTS", "Character Roster 已存在，请使用 add 或 update")
         supplied = roster if roster is not None else roles
@@ -584,7 +602,7 @@ class VoiceCastResolver:
         of being reported as remaining / retryable.
         """
         project_dir = _project_dir(project_name)
-        if not os.path.isfile(os.path.join(project_dir, "voice_cast.json")):
+        if not os.path.isfile(project_paths.project_file(project_dir, "voice_cast")):
             return None
         segment = segment if isinstance(segment, dict) else {}
         requested_id = str(
@@ -609,7 +627,7 @@ class VoiceCastResolver:
         if not path:
             return None
         if not os.path.isabs(path):
-            path = os.path.join(project_dir, path)
+            path = _project_abs(project_dir, path)
         return segment_cache.speaker_fingerprint_for_path(path)
 
     @classmethod
@@ -733,7 +751,7 @@ class VoiceCastResolver:
     def set_voice_cast(cls, project_name: str, cast: Any = None, roles: Any = None) -> dict[str, Any]:
         _guard_mutation(project_name, "set_voice_cast")
         project_dir = _project_dir(project_name)
-        if os.path.isfile(os.path.join(project_dir, VoiceCastRepository.CAST_FILE)):
+        if os.path.isfile(project_paths.project_file(project_dir, "voice_cast")):
             raise VoiceCastError("CAST_EXISTS", "Voice Cast 已存在，请使用 bind_cast_role 或 update 流程")
         supplied = cast if cast is not None else roles
         validation = cls.validate_voice_cast(project_name, supplied)
@@ -753,8 +771,8 @@ class VoiceCastResolver:
                     old_runtime = (old_runtime_bindings.get("role_bindings", {})
                                    if isinstance(old_runtime_bindings, dict) else {}).get(role_id, {})
                     old_path = str(old_runtime.get("project_voice_path") or "") if isinstance(old_runtime, dict) else ""
-                    if old_path and not os.path.isabs(old_path):
-                        old_path = os.path.join(project_dir, old_path)
+                    if old_path:
+                        old_path = _project_abs(project_dir, old_path)
                     old_fingerprint = segment_cache.speaker_fingerprint_for_path(old_path)
                     if old_fingerprint != binding.get("voice_sha256"):
                         segments_to_invalidate.extend(affected)
@@ -780,8 +798,11 @@ class VoiceCastResolver:
         bindings.setdefault("role_categories", {})
         applied_roles: list[str] = []
         now = time.strftime("%Y-%m-%dT%H:%M:%S")
-        voice_dir = project_paths.project_dir(project_dir, "voices", create=True)
-        compatibility_voice_dir = os.path.join(project_dir, "voices")
+        voice_dir = project_paths.project_dir(project_dir, "project_voices", create=True)
+        version = project_paths.detect_storage_version(project_dir)
+        compatibility_voice_dir = (
+            os.path.join(project_dir, "voices") if version < 3 else None
+        )
         for role_id, binding in document["roles"].items():
             if role_id not in selected or not binding.get("voice_asset_id") or role_id not in roster:
                 continue
@@ -792,14 +813,14 @@ class VoiceCastResolver:
             if os.path.abspath(source) != os.path.abspath(destination):
                 if not os.path.isfile(destination) or segment_cache.speaker_fingerprint_for_path(destination) != asset["sha256"]:
                     shutil.copy2(source, destination)
-            # Windows may have a real compatibility directory instead of a
-            # junction.  Keep the documented project/voices path usable too.
-            logical_destination = os.path.join(compatibility_voice_dir, filename)
-            if os.path.realpath(logical_destination) != os.path.realpath(destination):
-                os.makedirs(compatibility_voice_dir, exist_ok=True)
-                if not os.path.isfile(logical_destination) or segment_cache.speaker_fingerprint_for_path(logical_destination) != asset["sha256"]:
-                    shutil.copy2(source, logical_destination)
-            project_relative = _relative_project_voice_path(filename)
+            # v2 项目可能有一个真实的 voices/ 兼容目录（或 junction）；v3 不再创建。
+            if compatibility_voice_dir is not None:
+                logical_destination = os.path.join(compatibility_voice_dir, filename)
+                if os.path.realpath(logical_destination) != os.path.realpath(destination):
+                    os.makedirs(compatibility_voice_dir, exist_ok=True)
+                    if not os.path.isfile(logical_destination) or segment_cache.speaker_fingerprint_for_path(logical_destination) != asset["sha256"]:
+                        shutil.copy2(source, logical_destination)
+            project_relative = _relative_project_voice_path(project_dir, filename)
             binding.update({
                 "name": roster[role_id]["name"],
                 "voice_asset_id": asset["voice_asset_id"],
@@ -821,13 +842,14 @@ class VoiceCastResolver:
             applied_roles.append(role_id)
         bindings["bound_at"] = now
         ProjectRepository.save_bindings(project_dir, bindings)
-        try:
-            shutil.copy2(
-                os.path.join(project_dir, "voice_bindings.json"),
-                os.path.join(voice_dir, "voice_bindings.json"),
-            )
-        except OSError:
-            pass
+        if version < 3:
+            try:
+                shutil.copy2(
+                    project_paths.project_file(project_dir, "voice_bindings"),
+                    os.path.join(voice_dir, "voice_bindings.json"),
+                )
+            except OSError:
+                pass
         document["roles"] = {key: value for key, value in document["roles"].items()}
         VoiceCastRepository.save_cast(project_dir, document)
         return {"success": True, "cast": document, "applied_roles": applied_roles}
@@ -843,7 +865,7 @@ class VoiceCastResolver:
         role_binding = old_bindings.get("role_bindings", {}).get(role_id) if isinstance(old_bindings, dict) else None
         if isinstance(role_binding, dict):
             candidate = str(role_binding.get("project_voice_path") or "")
-            old_path = candidate if os.path.isabs(candidate) else os.path.join(project_dir, candidate)
+            old_path = _project_abs(project_dir, candidate)
         _, chapters = script_loader.resolve_collections(script)
         for chapter in chapters:
             if not isinstance(chapter, dict):

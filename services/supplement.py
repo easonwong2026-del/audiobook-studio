@@ -475,12 +475,16 @@ class SupplementService:
 
     @staticmethod
     def build_output_path(project_dir: str, role: str, ext: str) -> str:
-        """生成补录产物路径：<project_dir>/output/supplement_{role}_{时间戳}.{ext}。
+        """生成补录产物路径：<project_dir>/03_导出成品/补录/supplement_{role}_{时间戳}.{ext}。
+
+        v3 项目补录导出成品落 ``03_导出成品/补录/``（逻辑 key ``delivery_supplement``）；
+        v2/v1 项目由 resolver 解析到对应的历史导出目录（``09_导出文件`` / ``output``）。
+        不再创建 legacy ``output/`` junction（v3 默认不建兼容目录）。
 
         时间戳后缀避免覆盖既有产物；不做用户自定义前缀。
 
         Args:
-            project_dir: 项目目录（落在其 ``output/`` 子目录下）。
+            project_dir: 项目目录（落在其 ``delivery_supplement`` 目录下）。
             role: 角色名（用于文件名，做文件系统非法字符清洗）。
             ext: 扩展名（不含点，如 ``wav`` / ``mp3`` / ``m4b``）。
 
@@ -488,18 +492,8 @@ class SupplementService:
             最终产物绝对路径。
         """
         from lib import project_paths
-        out_dir = project_paths.project_dir(project_dir, "exports", create=True)
+        out_dir = project_paths.project_dir(project_dir, "delivery_supplement", create=True)
         os.makedirs(out_dir, exist_ok=True)
-        # Keep the pre-3.3 ``output/`` path discoverable for old integrations
-        # and test fixtures that do not have a project manifest yet.  New
-        # writes stay in the canonical ``09_导出文件`` directory; on Windows
-        # without link privileges a plain compatibility directory is enough.
-        legacy_output = os.path.join(project_dir, "output")
-        if os.path.abspath(legacy_output) != os.path.abspath(out_dir) and not os.path.lexists(legacy_output):
-            try:
-                os.symlink(os.path.basename(out_dir), legacy_output, target_is_directory=True)
-            except OSError:
-                os.makedirs(legacy_output, exist_ok=True)
         ts = time.strftime("%Y%m%d_%H%M%S")
         safe_role = re.sub(r'[\\/:*?"<>|]', '_', str(role))
         return os.path.join(out_dir, f"supplement_{safe_role}_{ts}.{ext}")
