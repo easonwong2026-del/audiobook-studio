@@ -256,6 +256,7 @@ class TestMigration:
         }
         # version 切换
         assert project_paths.detect_storage_version(str(project_dir)) == 3
+        assert (project_dir / "03_导出成品" / "正式导出" / "t1" / "book.mp3").is_file()
         # unknown 保留
         preserved = project_dir / "99_系统数据" / "迁移保留" / "user_note.txt"
         assert preserved.is_file()

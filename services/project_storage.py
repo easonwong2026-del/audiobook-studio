@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 import sqlite3
+import stat
 import time
 from typing import Any
 
@@ -1169,7 +1170,14 @@ class ProjectStorageService:
 
     @staticmethod
     def _remove_legacy_empty_dirs(project_dir: str, from_version: int) -> None:
-        """删除 v1/v2 遗留空目录与 legacy junction；非空目录保留并告警。"""
+        """删除 v1/v2 遗留空目录与 legacy junction；非空目录保留并告警。
+
+        ``shutil.move`` only moves the entries inside a source directory.  A
+        nested legacy tree such as ``09_导出文件/exports/t1`` can therefore be
+        empty after its files are moved while still preventing the root from
+        being removed by a single ``os.rmdir``.  Prune directories bottom-up,
+        without ever deleting a file or following a symlink/junction.
+        """
         legacy_names: set[str]
         if from_version >= 2:
             legacy_names = {
@@ -1187,18 +1195,54 @@ class ProjectStorageService:
             path = os.path.join(project_dir, name)
             if not os.path.lexists(path):
                 continue
-            if os.path.islink(path):
+            if ProjectStorageService._is_directory_reparse_point(path):
                 try:
-                    os.unlink(path)
+                    if os.path.islink(path):
+                        os.unlink(path)
+                    else:
+                        # Windows junctions are removed with rmdir; this does
+                        # not touch the directory the junction targets.
+                        os.rmdir(path)
                 except OSError:
                     pass
                 continue
             if not os.path.isdir(path):
                 continue
+            for root, dirs, _files in os.walk(path, topdown=False, followlinks=False):
+                for child_name in dirs:
+                    child = os.path.join(root, child_name)
+                    if ProjectStorageService._is_directory_reparse_point(child):
+                        continue
+                    try:
+                        os.rmdir(child)
+                    except OSError:
+                        # A non-empty directory (including one containing a
+                        # user file) is deliberately preserved.
+                        pass
             try:
                 os.rmdir(path)  # 只删空目录
             except OSError:
                 logger.info("遗留目录非空，保留（用户文件不删除）：%s", path)
+
+    @staticmethod
+    def _is_directory_reparse_point(path: str) -> bool:
+        """Return whether ``path`` is a link/junction that must not be walked."""
+        if os.path.islink(path):
+            return True
+        isjunction = getattr(os.path, "isjunction", None)
+        if callable(isjunction):
+            try:
+                if isjunction(path):
+                    return True
+            except OSError:
+                return False
+        if os.name != "nt":
+            return False
+        try:
+            attributes = os.lstat(path).st_file_attributes
+        except (AttributeError, OSError):
+            return False
+        return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
 
     @staticmethod
     def _rewrite_persisted_paths(project_dir: str, from_version: int) -> None:
