@@ -9,7 +9,9 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 import time
+import weakref
 from html import escape
 from typing import Any
 
@@ -1853,7 +1855,7 @@ def _segment_quality_markdown(item):
     return "\n".join(lines)
 
 
-def _review_segment_choices(ss, status_filter="all", chapter_id=None):
+def _review_segment_choices(ss, status_filter="all", chapter_id=None, *, include_missing=False):
     if not ss or not ss.project:
         return [], {}, {}
     snapshot = _snap(ss)
@@ -1879,7 +1881,7 @@ def _review_segment_choices(ss, status_filter="all", chapter_id=None):
                 os.path.join(project_dir, *relative_path.split("/"))
                 if relative_path else ""
             )
-            if not audio_path or not os.path.isfile(audio_path):
+            if not include_missing and (not audio_path or not os.path.isfile(audio_path)):
                 continue
             text = " ".join(str(segment.get("text") or "").split())
             label = (
@@ -1890,18 +1892,316 @@ def _review_segment_choices(ss, status_filter="all", chapter_id=None):
     return choices, quality_by_id, report
 
 
+_REVIEW_REPAIR_ACTIVE_STATES = frozenset({
+    "pending", "running", "pausing", "paused", "recovering", "cancelling",
+})
+_REVIEW_REPAIR_TERMINAL_STATES = frozenset({
+    "done", "error", "cancelled", "interrupted", "needs_attention", "partial",
+})
+_REVIEW_REPAIR_STATUS_LABELS = {
+    "pending": "等待运行",
+    "running": "重合成中",
+    "pausing": "正在暂停",
+    "paused": "已暂停",
+    "recovering": "运行时恢复中",
+    "cancelling": "正在取消",
+}
+_REVIEW_REPAIR_OUTPUT_COUNT = 11
+_REVIEW_REPAIR_RECOVERY_OUTPUT_COUNT = 4
+
+# Gradio event inputs are invocation-time snapshots.  Keep a tiny server-side
+# fence per SessionState object so a late timer callback can compare itself
+# with the newest review repair even while another callback is in flight.
+_REVIEW_REPAIR_FENCE_LOCK = threading.RLock()
+_REVIEW_REPAIR_FENCES: dict[
+    int, tuple[Any, int, str, str, str]
+] = {}
+
+
+def _review_repair_fence_cleanup(key, owner_ref):
+    with _REVIEW_REPAIR_FENCE_LOCK:
+        current = _REVIEW_REPAIR_FENCES.get(key)
+        if current is not None and current[0] is owner_ref:
+            _REVIEW_REPAIR_FENCES.pop(key, None)
+
+
+def _review_repair_fence_owner(owner_ref):
+    return owner_ref() if isinstance(owner_ref, weakref.ReferenceType) else owner_ref
+
+
+def _review_repair_fence_entry_locked(ss):
+    if ss is None:
+        return None
+    key = id(ss)
+    current = _REVIEW_REPAIR_FENCES.get(key)
+    if current is None:
+        return None
+    if _review_repair_fence_owner(current[0]) is not ss:
+        _REVIEW_REPAIR_FENCES.pop(key, None)
+        return None
+    return current[1:]
+
+
+def _review_repair_fence_store_locked(ss, generation, project, repair_id, task_id):
+    key = id(ss)
+    current = _REVIEW_REPAIR_FENCES.get(key)
+    owner_ref = (
+        current[0]
+        if current is not None and _review_repair_fence_owner(current[0]) is ss
+        else None
+    )
+    if owner_ref is None:
+        try:
+            owner_ref = weakref.ref(
+                ss,
+                lambda ref, fence_key=key: _review_repair_fence_cleanup(fence_key, ref),
+            )
+        except TypeError:
+            # SimpleNamespace-style direct-call test doubles cannot be weakly
+            # referenced; production SessionState uses the weak-ref path.
+            owner_ref = ss
+    entry = (
+        owner_ref,
+        int(generation),
+        str(project or ""),
+        str(repair_id or ""),
+        str(task_id or ""),
+    )
+    _REVIEW_REPAIR_FENCES[key] = entry
+    return entry[1:]
+
+
+def _review_repair_fence_set(
+    ss,
+    project,
+    repair_id,
+    task_id,
+    *,
+    force=False,
+):
+    """Set the current session's UI identity and advance only on change."""
+    if ss is None:
+        return None
+    identity = (
+        str(project or ""),
+        str(repair_id or ""),
+        str(task_id or ""),
+    )
+    with _REVIEW_REPAIR_FENCE_LOCK:
+        current = _review_repair_fence_entry_locked(ss)
+        if current is not None and not force and current[1:] == identity:
+            return current
+        generation = (current[0] + 1) if current is not None else 1
+        return _review_repair_fence_store_locked(
+            ss, generation, project, repair_id, task_id
+        )
+
+
+def _review_repair_fence_reserve(ss, project):
+    """Reserve a new observer generation before submitting a replacement."""
+    return _review_repair_fence_set(
+        ss, project, "", "", force=True
+    )
+
+
+def _review_repair_fence_transition(
+    ss,
+    expected,
+    project,
+    repair_id,
+    task_id,
+):
+    """Advance identity only when no newer callback has claimed the session."""
+    if ss is None or expected is None:
+        return None
+    with _REVIEW_REPAIR_FENCE_LOCK:
+        current = _review_repair_fence_entry_locked(ss)
+        if current != expected:
+            return None
+        return _review_repair_fence_store_locked(
+            ss,
+            current[0] + 1,
+            project,
+            repair_id,
+            task_id,
+        )
+
+
+def _review_repair_fence_for_callback(ss, project, repair_id, task_id):
+    """Capture a callback fence, bootstrapping only isolated test/direct calls."""
+    if ss is None:
+        return None
+    identity = (
+        str(project or ""),
+        str(repair_id or ""),
+        str(task_id or ""),
+    )
+    with _REVIEW_REPAIR_FENCE_LOCK:
+        current = _review_repair_fence_entry_locked(ss)
+        if current is None:
+            return _review_repair_fence_store_locked(
+                ss, 1, project, repair_id, task_id
+            )
+        return current if current[1:] == identity else None
+
+
+def _review_repair_fence_snapshot(ss):
+    """Capture the complete current fence for a slow recovery callback."""
+    if ss is None:
+        return None
+    with _REVIEW_REPAIR_FENCE_LOCK:
+        return _review_repair_fence_entry_locked(ss)
+
+
+def _review_repair_fence_compare_and_set(
+    ss,
+    expected,
+    project,
+    repair_id,
+    task_id,
+):
+    """Write recovery identity only when the full captured fence is unchanged."""
+    if ss is None:
+        return None
+    identity = (
+        str(project or ""),
+        str(repair_id or ""),
+        str(task_id or ""),
+    )
+    with _REVIEW_REPAIR_FENCE_LOCK:
+        current_project = str(getattr(ss, "project", None) or "")
+        if current_project != identity[0]:
+            return None
+        current = _review_repair_fence_entry_locked(ss)
+        if current != expected:
+            return None
+        if current is not None and current[1:] == identity:
+            return current
+        generation = (current[0] + 1) if current is not None else 1
+        return _review_repair_fence_store_locked(
+            ss, generation, project, repair_id, task_id
+        )
+
+
+def _review_repair_fence_is_current(ss, expected):
+    if ss is None or expected is None:
+        return False
+    with _REVIEW_REPAIR_FENCE_LOCK:
+        return _review_repair_fence_entry_locked(ss) == expected
+
+
+def _review_repair_stale_outputs():
+    """Leave every Gradio output untouched when a callback is stale."""
+    return (gr.skip(),) * _REVIEW_REPAIR_OUTPUT_COUNT
+
+
+def _review_repair_stale_recovery_outputs():
+    """Leave recovery outputs untouched when a slower recovery is stale."""
+    return (gr.skip(),) * _REVIEW_REPAIR_RECOVERY_OUTPUT_COUNT
+
+
+def _review_selection_ids(selected, script):
+    """Return valid current-project ids plus invalid selections, preserving order."""
+    values = selected if isinstance(selected, list) else [selected]
+    known = {
+        str(segment.get("id") or "")
+        for chapter in (script or {}).get("chapters", [])
+        if isinstance(chapter, dict)
+        for segment in chapter.get("segments", [])
+        if isinstance(segment, dict) and str(segment.get("id") or "")
+    }
+    ids: list[str] = []
+    invalid: list[str] = []
+    seen: set[str] = set()
+    for choice in values:
+        segment_id = _selected_segment_id(choice, script or {})
+        if not segment_id:
+            continue
+        if segment_id not in known:
+            invalid.append(segment_id)
+        elif segment_id not in seen:
+            ids.append(segment_id)
+            seen.add(segment_id)
+    return ids, invalid
+
+
+def _review_workspace_values(ss, status_filter="all", chapter_id=None, preferred=None):
+    """Build the four review workspace outputs from the current project only."""
+    choices, quality_by_id, report = _review_segment_choices(
+        ss, status_filter or "all", chapter_id
+    )
+    batch_choices, _batch_quality, _batch_report = _review_segment_choices(
+        ss, status_filter or "all", chapter_id, include_missing=True
+    )
+    preview_values = [value for _label, value in choices]
+    batch_values = [value for _label, value in batch_choices]
+    preferred_ids = [str(item) for item in (preferred or []) if str(item)]
+    selected = next(
+        (item for item in preferred_ids if item in preview_values),
+        preview_values[0] if preview_values else None,
+    )
+    selected_for_batch = [item for item in preferred_ids if item in batch_values]
+    return (
+        _quality_summary_markdown(report, ss.project if ss else None),
+        gr.update(choices=choices, value=selected),
+        gr.update(choices=batch_choices, value=selected_for_batch),
+        _segment_quality_markdown(quality_by_id.get(str(selected)) if selected else None),
+    )
+
+
+def _batch_qa_line(result):
+    """Render one durable technical-QA result with an actionable outcome."""
+    segment_id = str(result.get("segment_id") or "?")
+    outcome = str(result.get("outcome") or "error")
+    checks = [item for item in (result.get("checks") or []) if isinstance(item, dict)]
+    first_error = next((item for item in checks if item.get("severity") == "error"), None)
+    if outcome == "pass":
+        return f"{segment_id}  technical pass"
+    if outcome == "warning":
+        codes = "、".join(str(item.get("code") or "warning") for item in checks[:3])
+        return f"{segment_id}  technical warning" + (f": {codes}" if codes else "")
+    if first_error:
+        code = str(first_error.get("code") or "technical failure")
+        detail = {
+            "AUDIO_MISSING": "audio missing",
+            "AUDIO_EMPTY": "audio empty",
+            "QA_ITEM_ERROR": str(result.get("error") or first_error.get("message") or "analysis error"),
+        }.get(code, str(first_error.get("message") or code))
+        return f"{segment_id}  error: {detail}"
+    return f"{segment_id}  technical fail"
+
+
+def _review_batch_error(message, ss, status_filter="all", chapter_id=None):
+    try:
+        workspace = _review_workspace_values(ss, status_filter, chapter_id)
+    except Exception:
+        workspace = (
+            "#### 质量状态",
+            gr.update(),
+            gr.update(),
+            "选择段落后显示技术 QA 与人工 Review。",
+        )
+    return (message, *workspace)
+
+
 def refresh_quality_workspace(status_filter, chapter_id, ss):
     """Refresh QA filters from one project snapshot and one quality report."""
     try:
         choices, quality_by_id, report = _review_segment_choices(
             ss, status_filter or "all", chapter_id
         )
+        batch_choices, _batch_quality_by_id, _batch_report = _review_segment_choices(
+            ss,
+            status_filter or "all",
+            chapter_id,
+            include_missing=True,
+        )
         selected = choices[0][1] if choices else None
         item = quality_by_id.get(str(selected)) if selected else None
         return (
             _quality_summary_markdown(report, ss.project),
             gr.update(choices=choices, value=selected),
-            gr.update(choices=choices, value=[]),
+            gr.update(choices=batch_choices, value=[]),
             _segment_quality_markdown(item),
         )
     except Exception as exc:
@@ -1933,6 +2233,70 @@ def run_selected_technical_qa(choice, ss):
         return _segment_quality_markdown(item), _quality_summary_markdown(report, ss.project)
     except Exception as exc:
         return f"❌ 技术 QA 失败：{exc}", "#### 质量状态"
+
+
+def select_review_segments(mode, status_filter, chapter_id, ss):
+    """Select the current chapter or current filtered review result."""
+    if not ss or not ss.project:
+        return gr.update(choices=[], value=[])
+    if mode == "chapter" and not chapter_id:
+        return gr.update(choices=[], value=[])
+    effective_filter = "all" if mode == "chapter" else (status_filter or "all")
+    choices, _quality_by_id, _report = _review_segment_choices(
+        ss, effective_filter, chapter_id, include_missing=True
+    )
+    return gr.update(choices=choices, value=[value for _label, value in choices])
+
+
+def clear_review_segment_selection(status_filter, chapter_id, ss):
+    """Clear only the current project's review selection."""
+    if not ss or not ss.project:
+        return gr.update(choices=[], value=[])
+    choices, _quality_by_id, _report = _review_segment_choices(
+        ss, status_filter or "all", chapter_id, include_missing=True
+    )
+    return gr.update(choices=choices, value=[])
+
+
+def batch_technical_qa(selected, status_filter, chapter_id, ss):
+    """Run the existing batch QA API and render one result line per segment."""
+    if not ss or not ss.project:
+        return _review_batch_error("❌ 请先打开项目。", ss, status_filter, chapter_id)
+    script = _snap(ss).script
+    segment_ids, invalid = _review_selection_ids(selected, script)
+    if invalid:
+        details = "、".join(f"{item}: 段落不存在" for item in invalid)
+        return _review_batch_error(
+            f"❌ 批量 technical QA 未提交：{details}",
+            ss,
+            status_filter,
+            chapter_id,
+        )
+    if not segment_ids:
+        return _review_batch_error(
+            "请选择至少一个段落后运行批量 technical QA。",
+            ss,
+            status_filter,
+            chapter_id,
+        )
+    try:
+        results = QualityService.run_technical_qa_batch(ss.project, segment_ids)
+        lines = [f"### 批量 technical QA（{len(results)} 项）"]
+        lines.extend(f"- {_batch_qa_line(result)}" for result in results)
+        workspace = _review_workspace_values(
+            ss,
+            status_filter or "all",
+            chapter_id,
+            preferred=segment_ids,
+        )
+        return ("\n".join(lines), *workspace)
+    except Exception as exc:
+        return _review_batch_error(
+            f"❌ 批量 technical QA 失败：{exc}",
+            ss,
+            status_filter,
+            chapter_id,
+        )
 
 
 def _next_review_value(choices, current, quality_by_id):
@@ -2015,38 +2379,64 @@ def navigate_review_segment(direction, choice, status_filter, chapter_id, ss):
     )
 
 
-def bulk_pass_technical_qa(chapter_id, status_filter, ss):
-    """Explicitly pass technically clean segments in the selected chapter."""
-    if not ss or not ss.project or not chapter_id:
-        return "请选择章节后再批量通过。", "#### 质量状态", gr.update()
+def bulk_pass_technical_qa(chapter_id, status_filter, ss, selected=None):
+    """Pass selected/current-chapter segments whose technical QA is ``pass``."""
+    if not ss or not ss.project:
+        return _review_batch_error("❌ 请先打开项目。", ss, status_filter, chapter_id)
     snapshot = _snap(ss)
-    segment_ids = [
-        str(segment.get("id") or "")
-        for chapter in snapshot.script.get("chapters", [])
-        if str(chapter.get("id") or "") == str(chapter_id)
-        for segment in chapter.get("segments", [])
-        if isinstance(segment, dict)
-    ]
+    if selected:
+        segment_ids, invalid = _review_selection_ids(selected, snapshot.script)
+        if invalid:
+            details = "、".join(f"{item}: 段落不存在" for item in invalid)
+            return _review_batch_error(
+                f"❌ 批量通过未提交：{details}",
+                ss,
+                status_filter,
+                chapter_id,
+            )
+    else:
+        if not chapter_id:
+            return _review_batch_error(
+                "请选择章节或先选择段落后再批量通过。",
+                ss,
+                status_filter,
+                chapter_id,
+            )
+        segment_ids = [
+            str(segment.get("id") or "")
+            for chapter in snapshot.script.get("chapters", [])
+            if str(chapter.get("id") or "") == str(chapter_id)
+            for segment in chapter.get("segments", [])
+            if isinstance(segment, dict)
+        ]
     try:
         result = QualityService.pass_technically_clean(
             ss.project,
             segment_ids,
             reviewed_by="web_bulk",
         )
-        choices, _quality_by_id, report = _review_segment_choices(
+        skipped_ids = result.get("skipped_segment_ids") or []
+        scope_label = "所选" if selected else "本章"
+        message = (
+            f"✅ 已批量通过 {scope_label} **{result['passed']}** 段；"
+            f"跳过 **{result['skipped']}** 段（技术 QA 未 pass 或已通过）。"
+        )
+        if skipped_ids:
+            message += "\n- 跳过：" + "、".join(skipped_ids)
+        workspace = _review_workspace_values(
             ss,
             status_filter or "all",
             chapter_id,
+            preferred=result.get("segment_ids") or segment_ids,
         )
-        selected = choices[0][1] if choices else None
-        return (
-            f"✅ 已批量通过 **{result['passed']}** 段；"
-            f"跳过 **{result['skipped']}** 段（技术 QA 未 pass 或已通过）。",
-            _quality_summary_markdown(report, ss.project),
-            gr.update(choices=choices, value=selected),
-        )
+        return (message, *workspace)
     except Exception as exc:
-        return f"❌ 批量通过失败：{exc}", "#### 质量状态", gr.update()
+        return _review_batch_error(
+            f"❌ 批量通过失败：{exc}",
+            ss,
+            status_filter,
+            chapter_id,
+        )
 
 
 def initialize_review_page(ss):
@@ -2096,15 +2486,396 @@ def play_segment(choices, ss):
     )
     yield _audio_update(result.path), result.status
 
-def regenerate_segment(choices, emotion, emo_alpha, speech_rate, voice_choice, ss):
-    """Submit revision-safe repair through the single Production Runtime."""
-    if not ss or not ss.project or not choices:
-        yield _audio_update(None), "请选择段落", "⚪ 尚未开始重合成。"
-        return
-    selected = choices if isinstance(choices, list) else [choices]
-    script = _snap(ss).script
-    segment_ids = [_selected_segment_id(choice, script) for choice in selected]
+def _review_repair_message(repair, snapshot=None):
+    repair_id = str((repair or {}).get("repair_id") or "")
+    status = str((repair or {}).get("status") or (snapshot or {}).get("status") or "unknown")
+    label = _REVIEW_REPAIR_STATUS_LABELS.get(status, status)
+    progress = (repair or {}).get("result", {}).get("progress", {})
+    if not isinstance(progress, dict):
+        progress = (snapshot or {}).get("progress", {}) or {}
+    completed = progress.get("completed")
+    total = progress.get("total")
+    suffix = f"（{completed}/{total}）" if completed is not None and total else ""
+    if status in _REVIEW_REPAIR_ACTIVE_STATES or status in {"preparing", "submitting"}:
+        return f"⏳ Repair {repair_id}：{label}{suffix}"
+    if status == "done":
+        return f"✅ Repair {repair_id} 完成"
+    if status == "partial":
+        return f"⚠ Repair {repair_id} 部分完成"
+    return f"⚠ Repair {repair_id}：{status}"
+
+
+def _review_repair_clear_outputs(
+    message,
+    ss,
+    status_filter="all",
+    chapter_id=None,
+    *,
+    fence=None,
+):
+    settled_fence = fence
+    if fence is not None:
+        settled_fence = _review_repair_fence_transition(
+            ss,
+            fence,
+            getattr(ss, "project", None) if ss else "",
+            "",
+            "",
+        )
+        if settled_fence is None:
+            return _review_repair_stale_outputs()
     try:
+        workspace = _review_workspace_values(ss, status_filter, chapter_id)
+    except Exception as exc:
+        workspace = (
+            f"#### 质量状态\n❌ 刷新失败：{exc}",
+            gr.update(choices=[], value=None),
+            gr.update(choices=[], value=[]),
+            "无法读取段落质量状态。",
+        )
+    if settled_fence is not None and not _review_repair_fence_is_current(
+        ss, settled_fence
+    ):
+        return _review_repair_stale_outputs()
+    return (
+        *workspace,
+        _audio_update(None),
+        "当前段落试听将在 repair 终态后刷新。",
+        message,
+        "",
+        "",
+        "",
+        gr.Timer(active=False),
+    )
+
+
+def _review_repair_active_outputs(
+    repair,
+    ss,
+    status_filter,
+    chapter_id,
+    *,
+    fence,
+    message,
+):
+    if not _review_repair_fence_is_current(ss, fence):
+        return _review_repair_stale_outputs()
+    project = str(getattr(ss, "project", None) or "") if ss else ""
+    repair_identifier = str((repair or {}).get("repair_id") or "")
+    task_identifier = str((repair or {}).get("task_id") or "")
+    preferred = (repair or {}).get("segment_ids") or []
+    workspace = _review_workspace_values(
+        ss, status_filter or "all", chapter_id, preferred=preferred
+    )
+    if not _review_repair_fence_is_current(ss, fence):
+        return _review_repair_stale_outputs()
+    return (
+        *workspace,
+        _audio_update(None),
+        "重合成进行中，终态后将刷新段落试听。",
+        message,
+        repair_identifier,
+        task_identifier,
+        project,
+        gr.Timer(active=True),
+    )
+
+
+def _review_repair_terminal_outputs(
+    repair,
+    snapshot,
+    preview_choice,
+    ss,
+    status_filter,
+    chapter_id,
+    *,
+    fence,
+):
+    """Reconcile one terminal repair for both timer and submit callbacks."""
+    project = str(getattr(ss, "project", None) or "") if ss else ""
+    settled_fence = _review_repair_fence_transition(
+        ss, fence, project, "", ""
+    )
+    if settled_fence is None:
+        return _review_repair_stale_outputs()
+    if ss:
+        ss.invalidate_snapshot()
+    preferred = (repair or {}).get("segment_ids") or []
+    workspace = _review_workspace_values(
+        ss, status_filter or "all", chapter_id, preferred=preferred
+    )
+    audio, audio_status = _review_repair_audio(preview_choice, ss)
+    if not _review_repair_fence_is_current(ss, settled_fence):
+        return _review_repair_stale_outputs()
+    detail = str(
+        (repair or {}).get("error")
+        or "新 audio revision 已进入技术 QA，旧 revision 已保留。"
+    )
+    return (
+        *workspace,
+        audio,
+        audio_status,
+        _review_repair_message(repair, snapshot) + f"\n{detail}",
+        "",
+        "",
+        "",
+        gr.Timer(active=False),
+    )
+
+
+def _review_repair_audio(choice, ss):
+    if not ss or not ss.project or not choice:
+        return _audio_update(None), "请选择已生成音频的段落。"
+    try:
+        snapshot = _snap(ss)
+        result = ReviewAudioService.play_segment(
+            ss.project,
+            ProjectService.get_project_dir(ss.project),
+            snapshot.script,
+            _selected_segment_id(choice, snapshot.script),
+        )
+        return _audio_update(result.path), result.status
+    except Exception as exc:
+        return _audio_update(None), f"⚠ 刷新段落试听失败：{exc}"
+
+
+def recover_review_repair(ss):
+    """Restore an active repair observer from durable history on page entry."""
+    recovery_fence = _review_repair_fence_snapshot(ss)
+    project = str(getattr(ss, "project", None) or "") if ss else ""
+    if not project:
+        settled = _review_repair_fence_compare_and_set(
+            ss, recovery_fence, "", "", ""
+        )
+        if ss is not None and settled is None:
+            return _review_repair_stale_recovery_outputs()
+        return "", "", "", gr.Timer(active=False)
+    try:
+        active = RepairService.find_active(project)
+    except Exception as exc:
+        logger.warning("恢复 review repair observer 失败: %s", exc)
+        active = None
+    if not active:
+        settled = _review_repair_fence_compare_and_set(
+            ss, recovery_fence, project, "", ""
+        )
+        if ss is not None and settled is None:
+            return _review_repair_stale_recovery_outputs()
+        return "", "", "", gr.Timer(active=False)
+    repair_id = str(active.get("repair_id") or "")
+    task_id = str(active.get("task_id") or "")
+    settled = _review_repair_fence_compare_and_set(
+        ss, recovery_fence, project, repair_id, task_id
+    )
+    if ss is not None and settled is None:
+        return _review_repair_stale_recovery_outputs()
+    return (
+        repair_id,
+        task_id,
+        project,
+        gr.Timer(active=True),
+    )
+
+
+def refresh_review_repair_tick(
+    repair_id,
+    task_id,
+    tracked_project,
+    preview_choice,
+    status_filter,
+    chapter_id,
+    ss,
+):
+    """Observe one durable repair task and stop exactly at its terminal state."""
+    current_project = str(getattr(ss, "project", None) or "") if ss else ""
+    tracked = str(tracked_project or "")
+    repair_identifier = str(repair_id or "")
+    task_identifier = str(task_id or "")
+    fence_project = tracked or current_project
+    fence = _review_repair_fence_for_callback(
+        ss,
+        fence_project,
+        repair_identifier,
+        task_identifier,
+    )
+    if fence is None:
+        return _review_repair_stale_outputs()
+    if tracked and tracked != current_project:
+        return _review_repair_stale_outputs()
+    if not current_project:
+        return _review_repair_clear_outputs(
+            "⚪ 请先打开项目。", ss, status_filter, chapter_id, fence=fence
+        )
+
+    if not task_identifier:
+        try:
+            active = RepairService.find_active(current_project)
+        except Exception:
+            active = None
+        if active:
+            resolved_repair_id = str(active.get("repair_id") or "")
+            resolved_task_id = str(active.get("task_id") or "")
+            resolved_fence = _review_repair_fence_transition(
+                ss,
+                fence,
+                current_project,
+                resolved_repair_id,
+                resolved_task_id,
+            )
+            if resolved_fence is None:
+                return _review_repair_stale_outputs()
+            fence = resolved_fence
+            repair_identifier = resolved_repair_id
+            task_identifier = resolved_task_id
+            tracked = current_project
+        else:
+            return _review_repair_clear_outputs(
+                "⚪ 当前没有活动的 repair task。",
+                ss,
+                status_filter,
+                chapter_id,
+                fence=fence,
+            )
+    if not _review_repair_fence_is_current(ss, fence):
+        return _review_repair_stale_outputs()
+    try:
+        snapshot = ProductionJobService.get_task_snapshot(task_identifier)
+    except Exception as exc:
+        return _review_repair_clear_outputs(
+            f"❌ Repair task 状态读取失败：{exc}",
+            ss,
+            status_filter,
+            chapter_id,
+            fence=fence,
+        )
+    if str(snapshot.get("project") or "") != current_project:
+        return _review_repair_clear_outputs(
+            "⚪ 已阻止跨项目显示 repair task。",
+            ss,
+            status_filter,
+            chapter_id,
+            fence=fence,
+        )
+    if not repair_identifier:
+        linked = RepairService.find_by_task(current_project, task_identifier)
+        linked_repair_id = str((linked or {}).get("repair_id") or "")
+        resolved_fence = _review_repair_fence_transition(
+            ss,
+            fence,
+            current_project,
+            linked_repair_id,
+            task_identifier,
+        )
+        if resolved_fence is None:
+            return _review_repair_stale_outputs()
+        fence = resolved_fence
+        repair_identifier = linked_repair_id
+    if not repair_identifier:
+        return _review_repair_clear_outputs(
+            "⚠ 找不到该 task 对应的 repair history，已停止观察。",
+            ss,
+            status_filter,
+            chapter_id,
+            fence=fence,
+        )
+    if not _review_repair_fence_is_current(ss, fence):
+        return _review_repair_stale_outputs()
+    try:
+        current = RepairService.refresh(current_project, repair_identifier)
+    except Exception as exc:
+        return _review_repair_clear_outputs(
+            f"❌ Repair 状态刷新失败：{exc}",
+            ss,
+            status_filter,
+            chapter_id,
+            fence=fence,
+        )
+
+    if not _review_repair_fence_is_current(ss, fence):
+        return _review_repair_stale_outputs()
+    task_status = str(snapshot.get("status") or "")
+    repair_status = str(current.get("status") or task_status)
+    is_terminal = (
+        task_status in _REVIEW_REPAIR_TERMINAL_STATES
+        or repair_status in _REVIEW_REPAIR_TERMINAL_STATES
+    )
+    if not is_terminal:
+        return _review_repair_active_outputs(
+            current,
+            ss,
+            status_filter,
+            chapter_id,
+            fence=fence,
+            message=(
+                "重合成由唯一 Production Runtime 执行，退出页面不会中断任务。"
+            ),
+        )
+    return _review_repair_terminal_outputs(
+        current,
+        snapshot,
+        preview_choice,
+        ss,
+        status_filter,
+        chapter_id,
+        fence=fence,
+    )
+
+
+def regenerate_segment(
+    choices,
+    emotion,
+    emo_alpha,
+    speech_rate,
+    voice_choice,
+    ss,
+    tracked_repair_id="",
+    tracked_task_id="",
+    tracked_project="",
+    status_filter="all",
+    chapter_id=None,
+):
+    """Submit repair and share the timer's terminal reconciliation path."""
+    if not ss or not ss.project or not choices:
+        return _review_repair_clear_outputs(
+            "请选择段落",
+            ss,
+            status_filter,
+            chapter_id,
+        )
+    script = _snap(ss).script
+    segment_ids, invalid = _review_selection_ids(choices, script)
+    if invalid:
+        details = "、".join(f"{item}: 段落不存在" for item in invalid)
+        return _review_repair_clear_outputs(
+            f"❌ 选择无效：{details}",
+            ss,
+            status_filter,
+            chapter_id,
+        )
+    if not segment_ids:
+        return _review_repair_clear_outputs(
+            "请选择至少一个段落。",
+            ss,
+            status_filter,
+            chapter_id,
+        )
+    try:
+        active = RepairService.find_active(ss.project)
+        if active:
+            repair_identifier = str(active.get("repair_id") or tracked_repair_id or "")
+            task_identifier = str(active.get("task_id") or tracked_task_id or "")
+            fence = _review_repair_fence_set(
+                ss, ss.project, repair_identifier, task_identifier
+            )
+            return _review_repair_active_outputs(
+                active,
+                ss,
+                status_filter,
+                chapter_id,
+                fence=fence,
+                message="已有活动 repair task，本次点击未创建重复任务。",
+            )
+        reservation = _review_repair_fence_reserve(ss, ss.project)
         started = RepairService.start(
             ss.project,
             segment_ids,
@@ -2115,38 +2886,49 @@ def regenerate_segment(choices, emotion, emo_alpha, speech_rate, voice_choice, s
             source="web",
             requested_by="web",
         )
-        repair_id = started["repair_id"]
-        current = started
-        while current.get("status") in {
-            "preparing", "submitting", "pending", "running",
-            "pausing", "paused", "cancelling",
-        }:
-            yield (
-                _audio_update(None),
-                f"⏳ Repair {repair_id}：{current.get('status')}",
-                "重合成由唯一 Production Runtime 执行，退出页面不会中断任务。",
+        repair_identifier = str(started.get("repair_id") or "")
+        task_identifier = str(started.get("task_id") or "")
+        fence = _review_repair_fence_transition(
+            ss,
+            reservation,
+            ss.project,
+            repair_identifier,
+            task_identifier,
+        )
+        if fence is None:
+            return _review_repair_stale_outputs()
+        status = str(started.get("status") or "pending")
+        if status in _REVIEW_REPAIR_ACTIVE_STATES or status in {"preparing", "submitting"}:
+            return _review_repair_active_outputs(
+                started,
+                ss,
+                status_filter,
+                chapter_id,
+                fence=fence,
+                message=(
+                    "重合成由唯一 Production Runtime 执行，退出页面不会中断任务。"
+                ),
             )
-            time.sleep(0.5)
-            current = RepairService.refresh(ss.project, repair_id)
-        if current.get("status") not in {"done", "partial"}:
-            yield (
-                _audio_update(None),
-                f"❌ Repair {repair_id}：{current.get('status')}",
-                str(current.get("error") or "重合成未完成"),
-            )
-            return
-        first_audio = QualityService.resolve_active_audio(ss.project, segment_ids[0])
-        ss.invalidate_snapshot()
-        yield (
-            _audio_update(first_audio),
-            f"✅ Repair {repair_id} 完成",
-            "新 audio revision 已进入技术 QA，旧 revision 已保留。",
+        return _review_repair_terminal_outputs(
+            started,
+            started,
+            segment_ids[0],
+            ss,
+            status_filter,
+            chapter_id,
+            fence=fence,
         )
     except (RepairError, ProductionJobError) as exc:
-        yield _audio_update(None), f"❌ {exc}", "重合成未启动。"
+        _review_repair_fence_set(ss, getattr(ss, "project", None), "", "", force=True)
+        return _review_repair_clear_outputs(
+            f"❌ {exc}", ss, status_filter, chapter_id
+        )
     except Exception as exc:
-        logger.exception("段落 Repair 失败")
-        yield _audio_update(None), f"❌ {exc}", "重合成失败。"
+        logger.exception("段落 Repair 提交失败")
+        _review_repair_fence_set(ss, getattr(ss, "project", None), "", "", force=True)
+        return _review_repair_clear_outputs(
+            f"❌ {exc}", ss, status_filter, chapter_id
+        )
 
 # ═══════════ 角色单独补录 / 补合成导出（T1-T4） ═══════════
 
@@ -3492,6 +4274,11 @@ def _open_chain_rest(event):
         [e_quality_filter, e_chapter_sel, ss],
         [e_quality_summary, e_seg_preview_sel, e_seg_regen_sel, e_segment_quality],
     )
+    e = e.then(
+        recover_review_repair,
+        [ss],
+        [e_review_repair_id, e_review_repair_task_id, e_review_repair_project, review_repair_timer],
+    )
     e = e.then(refresh_queue_list, [ss], [s_queue_list])
     e = e.then(refresh_production_task, [ss], [s_task_status])
     e = e.then(render_chapter_tree, [p_sel], [p_chapter_tree])
@@ -3712,6 +4499,11 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             e_prev = review_page["e_prev"]
             e_next = review_page["e_next"]
             e_seg_regen_sel = review_page["e_seg_regen_sel"]
+            e_select_chapter_segments = review_page["e_select_chapter_segments"]
+            e_select_filtered_segments = review_page["e_select_filtered_segments"]
+            e_clear_segment_selection = review_page["e_clear_segment_selection"]
+            e_batch_qa = review_page["e_batch_qa"]
+            e_batch_repair = review_page["e_batch_repair"]
             e_seg_sel = review_page["e_seg_sel"]
             e_emo = review_page["e_emo"]
             e_alpha = review_page["e_alpha"]
@@ -3731,6 +4523,10 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             e_bulk_pass_msg = review_page["e_bulk_pass_msg"]
             e_seg_status = review_page["e_seg_status"]
             e_regenerate_msg = review_page["e_regenerate_msg"]
+            e_review_repair_id = review_page["e_review_repair_id"]
+            e_review_repair_task_id = review_page["e_review_repair_task_id"]
+            e_review_repair_project = review_page["e_review_repair_project"]
+            review_repair_timer = gr.Timer(1.0, active=False)
 
             # ───────── 导出 ─────────
             export_page = create_export_page()
@@ -3836,6 +4632,35 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         ],
     )
 
+    # Review repair observes only the selected durable repair task.  It is
+    # deliberately separate from the Production observer and stops on every
+    # terminal state, including interrupted/needs_attention.
+    review_repair_timer.tick(
+        refresh_review_repair_tick,
+        [
+            e_review_repair_id,
+            e_review_repair_task_id,
+            e_review_repair_project,
+            e_seg_preview_sel,
+            e_quality_filter,
+            e_chapter_sel,
+            ss,
+        ],
+        [
+            e_quality_summary,
+            e_seg_preview_sel,
+            e_seg_regen_sel,
+            e_segment_quality,
+            e_seg_audio,
+            e_seg_audio_status,
+            e_regenerate_msg,
+            e_review_repair_id,
+            e_review_repair_task_id,
+            e_review_repair_project,
+            review_repair_timer,
+        ],
+    )
+
     # 旧的全量刷新契约（22 元组）已移除（阶段三：open_project 首步 + _open_chain_rest 打开链）
 
     nav_overview.click(
@@ -3870,6 +4695,9 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         refresh_quality_workspace,
         [e_quality_filter, e_chapter_sel, ss],
         [e_quality_summary, e_seg_preview_sel, e_seg_regen_sel, e_segment_quality]).then(
+        recover_review_repair,
+        [ss],
+        [e_review_repair_id, e_review_repair_task_id, e_review_repair_project, review_repair_timer]).then(
         refresh_queue_list, [ss], [s_queue_list]).then(
         refresh_production_task, [ss], [s_task_status]).then(
         refresh_production_engine_status, [ss], [s_engine_status]).then(
@@ -3909,6 +4737,10 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         refresh_quality_workspace,
         [e_quality_filter, e_chapter_sel, ss],
         [e_quality_summary, e_seg_preview_sel, e_seg_regen_sel, e_segment_quality],
+    ).then(
+        recover_review_repair,
+        [ss],
+        [e_review_repair_id, e_review_repair_task_id, e_review_repair_project, review_repair_timer],
     )
 
     # ── 概览页：书架点选 → 只设 ss.selected_project（选择≠打开；打开需点按钮） ──
@@ -3942,6 +4774,9 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         refresh_quality_workspace,
         [e_quality_filter, e_chapter_sel, ss],
         [e_quality_summary, e_seg_preview_sel, e_seg_regen_sel, e_segment_quality]).then(
+        recover_review_repair,
+        [ss],
+        [e_review_repair_id, e_review_repair_task_id, e_review_repair_project, review_repair_timer]).then(
         refresh_queue_list, [ss], [s_queue_list]).then(
         refresh_production_task, [ss], [s_task_status]).then(
         refresh_supplement_roles, [ss], [utility_role]).then(
@@ -4161,6 +4996,25 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         [e_quality_filter, e_chapter_sel, ss],
         [e_quality_summary, e_seg_preview_sel, e_seg_regen_sel, e_segment_quality],
     )
+    e_select_chapter_segments.click(
+        lambda status, chapter, state: select_review_segments(
+            "chapter", status, chapter, state
+        ),
+        [e_quality_filter, e_chapter_sel, ss],
+        [e_seg_regen_sel],
+    )
+    e_select_filtered_segments.click(
+        lambda status, chapter, state: select_review_segments(
+            "filtered", status, chapter, state
+        ),
+        [e_quality_filter, e_chapter_sel, ss],
+        [e_seg_regen_sel],
+    )
+    e_clear_segment_selection.click(
+        clear_review_segment_selection,
+        [e_quality_filter, e_chapter_sel, ss],
+        [e_seg_regen_sel],
+    )
     e_prev.click(
         lambda choice, status, chapter, state: navigate_review_segment(
             "previous", choice, status, chapter, state
@@ -4198,20 +5052,58 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     )
     e_bulk_pass.click(
         bulk_pass_technical_qa,
-        [e_chapter_sel, e_quality_filter, ss],
-        [e_bulk_pass_msg, e_quality_summary, e_seg_preview_sel],
+        [e_chapter_sel, e_quality_filter, ss, e_seg_regen_sel],
+        [
+            e_bulk_pass_msg,
+            e_quality_summary,
+            e_seg_preview_sel,
+            e_seg_regen_sel,
+            e_segment_quality,
+        ],
     )
-    e_regenerate.click(
-        regenerate_segment,
-        [e_seg_regen_sel, e_emo, e_alpha, e_rate, e_voice, ss],
-        [e_seg_audio, e_seg_audio_status, e_regenerate_msg],
+    e_batch_qa.click(
+        batch_technical_qa,
+        [e_seg_regen_sel, e_quality_filter, e_chapter_sel, ss],
+        [
+            e_bulk_pass_msg,
+            e_quality_summary,
+            e_seg_preview_sel,
+            e_seg_regen_sel,
+            e_segment_quality,
+        ],
     )
+    for repair_button in (e_regenerate, e_batch_repair):
+        repair_button.click(
+            regenerate_segment,
+            [
+                e_seg_regen_sel, e_emo, e_alpha, e_rate, e_voice, ss,
+                e_review_repair_id, e_review_repair_task_id, e_review_repair_project,
+                e_quality_filter, e_chapter_sel,
+            ],
+            [
+                e_quality_summary,
+                e_seg_preview_sel,
+                e_seg_regen_sel,
+                e_segment_quality,
+                e_seg_audio,
+                e_seg_audio_status,
+                e_regenerate_msg,
+                e_review_repair_id,
+                e_review_repair_task_id,
+                e_review_repair_project,
+                review_repair_timer,
+            ],
+        )
     e_review_refresh.click(
         preview_chapters, [ss], _review_outputs(),
     ).then(preview_chapter_options, [ss], [e_chapter_sel]).then(
         refresh_quality_workspace,
         [e_quality_filter, e_chapter_sel, ss],
         [e_quality_summary, e_seg_preview_sel, e_seg_regen_sel, e_segment_quality],
+    ).then(
+        recover_review_repair,
+        [ss],
+        [e_review_repair_id, e_review_repair_task_id, e_review_repair_project, review_repair_timer],
     )
     e_readiness_refresh.click(
         refresh_export_readiness,

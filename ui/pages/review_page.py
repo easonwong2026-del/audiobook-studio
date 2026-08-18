@@ -53,8 +53,18 @@ def create_review_page() -> dict:
             e_prev = gr.Button("上一段", size="sm", scale=1)
             e_next = gr.Button("下一段", size="sm", scale=1)
         e_seg_regen_sel = gr.Dropdown(
-            label="选择需要重合成的段落", choices=[], interactive=True, multiselect=True, value=[],
+            label="批量选择段落（也用于修复/重合成）",
+            choices=[], interactive=True, multiselect=True, value=[],
         )
+        with gr.Row():
+            e_select_chapter_segments = gr.Button("选择当前章全部", size="sm")
+            e_select_filtered_segments = gr.Button("选择当前筛选结果", size="sm")
+            e_clear_segment_selection = gr.Button("清空选择", size="sm")
+        with gr.Row():
+            e_batch_qa = gr.Button("批量运行技术 QA", size="sm")
+            e_batch_repair = gr.Button(
+                "批量加入修复/重合成", size="sm", variant="primary"
+            )
         e_seg_audio = gr.Audio(label="段落试听", type="filepath", interactive=False)
         e_seg_audio_status = gr.Markdown(
             "请选择已生成音频的段落。",
@@ -87,7 +97,7 @@ def create_review_page() -> dict:
         with gr.Row():
             e_mark_review = gr.Button("保存质检标记")
             e_mark_passed = gr.Button("通过并跳到下一未检", variant="primary")
-            e_bulk_pass = gr.Button("批量通过本章技术 QA=pass 段")
+            e_bulk_pass = gr.Button("批量通过所选/本章技术 QA=pass 段")
         e_bulk_pass_msg = gr.Markdown("")
 
         with gr.Accordion("修复参数", open=False):
@@ -121,6 +131,11 @@ def create_review_page() -> dict:
         "e_prev": e_prev,
         "e_next": e_next,
         "e_seg_regen_sel": e_seg_regen_sel,
+        "e_select_chapter_segments": e_select_chapter_segments,
+        "e_select_filtered_segments": e_select_filtered_segments,
+        "e_clear_segment_selection": e_clear_segment_selection,
+        "e_batch_qa": e_batch_qa,
+        "e_batch_repair": e_batch_repair,
         "e_seg_sel": e_seg_preview_sel,
         "e_emo": e_emo,
         "e_alpha": e_alpha,
@@ -140,4 +155,9 @@ def create_review_page() -> dict:
         "e_bulk_pass_msg": e_bulk_pass_msg,
         "e_seg_status": e_seg_audio_status,
         "e_regenerate_msg": e_regenerate_msg,
+        # Session-local observer pointers; durable task/history remain in the
+        # service/repository layers and can be rediscovered after re-entry.
+        "e_review_repair_id": gr.State(""),
+        "e_review_repair_task_id": gr.State(""),
+        "e_review_repair_project": gr.State(""),
     }

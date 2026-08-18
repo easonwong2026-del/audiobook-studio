@@ -24,9 +24,16 @@ ACTIVE_TASK_STATES = frozenset({
     "running",
     "pausing",
     "paused",
+    "recovering",
     "cancelling",
 })
-TERMINAL_TASK_STATES = frozenset({"done", "error", "cancelled", "interrupted"})
+TERMINAL_TASK_STATES = frozenset({
+    "done",
+    "error",
+    "cancelled",
+    "interrupted",
+    "needs_attention",
+})
 
 
 def _repair_engine_snapshot(project_name: str) -> dict[str, Any]:
@@ -364,7 +371,9 @@ class RepairService:
                 result={"progress": snapshot.get("progress", {})},
             )
             return cls._public(repair)
-        if repair.get("status") in {"done", "partial", "cancelled", "error"} and repair.get("result", {}).get("finalized"):
+        if repair.get("status") in {
+            "done", "partial", "cancelled", "error", "needs_attention"
+        } and repair.get("result", {}).get("finalized"):
             return cls._public(repair)
 
         completed: list[str] = []
@@ -401,6 +410,8 @@ class RepairService:
             final_status = "partial"
         elif task_status in {"cancelled", "interrupted"}:
             final_status = "cancelled"
+        elif task_status == "needs_attention":
+            final_status = "needs_attention"
         else:
             final_status = "error"
         repair = QualityRepository.update_history_record(
@@ -443,6 +454,48 @@ class RepairService:
                 project_name, "repair_history"
             )
         ]
+
+    @classmethod
+    def find_active(cls, project_name: str) -> dict[str, Any] | None:
+        """Find the newest active repair through durable service snapshots.
+
+        The review page uses this only to recover its observer after a project
+        switch or a fresh page entry.  The production task remains the
+        authoritative status source; a stale repair-history row is ignored when
+        its task is already terminal.
+        """
+        project = str(project_name or "").strip()
+        if not project:
+            return None
+        for record in QualityRepository.list_history(project, "repair_history"):
+            task_id = str(record.get("task_id") or "")
+            if not task_id:
+                # A repair-history row is not observable until ProductionJobService
+                # has created its authoritative task record.  A crash between the
+                # preparing/submitting history writes and task creation must not
+                # block the next repair or start an observer for an empty id.
+                continue
+            try:
+                snapshot = ProductionJobService.get_task_snapshot(task_id)
+            except ProductionJobError:
+                continue
+            if str(snapshot.get("project") or "") != project:
+                continue
+            if str(snapshot.get("status") or "") in ACTIVE_TASK_STATES:
+                return cls._public(record)
+        return None
+
+    @classmethod
+    def find_by_task(cls, project_name: str, task_id: str) -> dict[str, Any] | None:
+        """Return the repair history record associated with one task id."""
+        project = str(project_name or "").strip()
+        identifier = str(task_id or "").strip()
+        if not project or not identifier:
+            return None
+        for record in QualityRepository.list_history(project, "repair_history"):
+            if str(record.get("task_id") or "") == identifier:
+                return cls._public(record)
+        return None
 
 
 __all__ = ["RepairError", "RepairService"]
