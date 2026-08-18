@@ -314,7 +314,7 @@ def test_export_mixed_engine_project_succeeds(vc_project, engine_config):
     project_dir = ProjectRepository.get_project_dir(vc_project)
     output = audio_pipeline.export_book(
         project_dir, format="wav",
-        output_dir=os.path.join(project_dir, "exports"),
+        output_dir=project_paths.project_dir(project_dir, "delivery_official", create=True),
     )
     assert os.path.isfile(output)
     assert os.path.getsize(output) > 0

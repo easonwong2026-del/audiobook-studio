@@ -19,6 +19,7 @@ from typing import Any
 
 from repositories.project_repo import ProjectRepository
 from repositories.quality_repo import QualityRepository
+from lib import chapter_identity, project_paths
 from lib.procutil import run_no_window
 from repositories.task_repo import TaskRecord, TaskRepository
 from services.delivery import compute_delivery_input_snapshot
@@ -625,7 +626,7 @@ class ExportService:
         segment_paths: dict[str, str],
     ) -> float:
         """Calculate a timing-aware fallback including export silence rules."""
-        script_path = os.path.join(project_dir, "structured_script.json")
+        script_path = project_paths.project_file(project_dir, "structured_script")
         with open(script_path, encoding="utf-8") as file:
             script = json.load(file)
         from lib import audio_pipeline
@@ -776,6 +777,64 @@ class ExportService:
             raise ExportPlanError(current)
         return current
 
+    @staticmethod
+    def _publish_export_dir(
+        project_dir: str,
+        work_dir: str,
+        produced: list[str],
+    ) -> str:
+        """Atomically publish finished artifacts into a readable delivery dir.
+
+        v3 正式导出发布目录：``03_导出成品/正式导出/<YYYYmmdd_HHMMSS_书名>/``。
+        ``task_id`` 继续保存在系统记录（export_jobs / delivery_manifests /
+        production_tasks），**不作为主用户目录名**。发布为逐文件 ``os.replace``
+        （同盘原子）；任一步失败会把已移动文件移回工作目录，交给调用方清理。
+
+        Returns:
+            发布目录绝对路径（含最终产物）。
+        """
+        title = ""
+        try:
+            script_path = project_paths.project_file(project_dir, "structured_script")
+            with open(script_path, encoding="utf-8") as file:
+                raw = json.load(file)
+            title = str((raw.get("meta") or {}).get("title") or "") if isinstance(raw, dict) else ""
+        except (OSError, UnicodeError, json.JSONDecodeError, AttributeError):
+            title = ""
+        safe_title = chapter_identity.safe_filename(
+            title or os.path.basename(os.path.normpath(project_dir)),
+            "audiobook",
+        )
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        published_root = project_paths.project_dir(
+            project_dir, "delivery_official", create=True
+        )
+        published_dir = os.path.join(published_root, f"{stamp}_{safe_title}")
+        if os.path.lexists(published_dir):
+            published_dir = f"{published_dir}_{uuid.uuid4().hex[:6]}"
+        os.makedirs(published_dir, exist_ok=True)
+        moved: list[str] = []
+        try:
+            for path in produced:
+                if not os.path.isfile(path):
+                    continue
+                destination = os.path.join(published_dir, os.path.basename(path))
+                os.replace(path, destination)
+                moved.append(destination)
+        except OSError:
+            # 发布中途失败：把已移动文件移回工作目录，完整交给 except 分支清理，
+            # 保证 03_导出成品 不出现半成品目录。
+            for destination in moved:
+                try:
+                    os.replace(
+                        destination,
+                        os.path.join(work_dir, os.path.basename(destination)),
+                    )
+                except OSError:
+                    logger.warning("回移发布文件失败: %s", destination)
+            raise
+        return published_dir
+
     @classmethod
     def execute_export_job(
         cls,
@@ -799,17 +858,26 @@ class ExportService:
         )
         project = record.project
         project_dir = ProjectRepository.get_project_dir(project)
-        export_dir = os.path.join(
-            project_dir, "exports", str(record.task_id)
+        # v3 工作目录：99_系统数据/临时/export/<task_id>/。失败/取消只清理这里，
+        # 绝不触碰 03_导出成品 中已发布的成品。
+        work_dir = os.path.join(
+            project_paths.project_dir(project_dir, "temp", create=True),
+            "export",
+            str(record.task_id),
         )
-        os.makedirs(export_dir, exist_ok=True)
-        segment_paths = {
-            str(item["segment_id"]): os.path.join(
-                project_dir, *str(item["relative_path"]).split("/")
-            )
-            for item in options.get("revision_snapshot", [])
-            if isinstance(item, dict)
-        }
+        os.makedirs(work_dir, exist_ok=True)
+        segment_paths: dict[str, str] = {}
+        for item in options.get("revision_snapshot", []):
+            if not isinstance(item, dict):
+                continue
+            try:
+                segment_paths[str(item["segment_id"])] = project_paths.resolve_relative(
+                    project_dir, str(item["relative_path"])
+                )
+            except ValueError:
+                segment_paths[str(item["segment_id"])] = os.path.join(
+                    project_dir, *str(item["relative_path"]).split("/")
+                )
         produced: list[str] = []
         manifest: dict[str, Any] | None = None
         try:
@@ -819,7 +887,7 @@ class ExportService:
                 project_dir,
                 str(options.get("format") or "wav"),
                 str(options.get("bitrate") or "192k"),
-                output_dir=export_dir,
+                output_dir=work_dir,
                 segment_paths=segment_paths,
                 streaming_postprocess=True,
                 atomic_publish=True,
@@ -837,7 +905,7 @@ class ExportService:
                 produced.extend(audio_pipeline.generate_subtitles(
                     project_dir,
                     formats=options["subtitle_formats"],
-                    output_dir=export_dir,
+                    output_dir=work_dir,
                     segment_paths=segment_paths,
                     require_complete=True,
                     atomic_publish=True,
@@ -857,6 +925,13 @@ class ExportService:
                 options.get("format"),
                 fallback=duration_fallback,
             )
+            # 全部可变失败点通过后，才把产物发布到可读目录
+            # （03_导出成品/正式导出/<YYYYmmdd_HHMMSS_书名>/）。
+            published_dir = cls._publish_export_dir(project_dir, work_dir, produced)
+            produced = [
+                os.path.join(published_dir, os.path.basename(path))
+                for path in produced
+            ]
             artifacts = []
             for path in produced:
                 if not os.path.isfile(path) or os.path.getsize(path) <= 0:
@@ -924,11 +999,20 @@ class ExportService:
                 "delivery_manifest": cls._public_manifest(manifest),
             }
         except Exception as exc:
-            cls._remove_partial_outputs(produced)
-            # Each durable export owns a unique directory, so an interrupted
-            # or failed run can safely remove every `.part`/intermediate file
-            # without touching a prior official artifact.
-            shutil.rmtree(export_dir, ignore_errors=True)
+            # 只清理仍位于临时工作目录内的部分产物（publish 中途失败时
+            # ``_publish_export_dir`` 已把已移动文件移回 work_dir；发布成功后
+            # 文件在 03_导出成品，绝不触碰）。剩余交给 rmtree(work_dir)。
+            in_work = [
+                path
+                for path in produced
+                if path and os.path.dirname(os.path.abspath(path)) == os.path.abspath(work_dir)
+            ]
+            cls._remove_partial_outputs(in_work)
+            # Each durable export owns a unique **temporary** work directory.
+            # An interrupted or failed run may safely remove every
+            # `.part`/intermediate file without touching a prior official
+            # artifact under 03_导出成品（已发布成品绝不清理）。
+            shutil.rmtree(work_dir, ignore_errors=True)
             try:
                 if manifest is not None:
                     QualityRepository.update_history_record(

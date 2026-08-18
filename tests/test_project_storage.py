@@ -8,6 +8,7 @@ import pytest
 
 from repositories.project_repo import ProjectRepository
 from repositories.project_storage_repo import ProjectStorageRepository
+from lib import project_paths
 
 
 def _script_file(tmp_path):
@@ -37,11 +38,12 @@ def storage_project(tmp_path, monkeypatch):
 
 def test_summary_is_recursive_and_preview_is_separate(storage_project):
     data_root, project_dir = storage_project
-    source_dir = project_dir / "02_原始文件"
-    source_dir.joinpath("nested").mkdir()
-    source_dir.joinpath("nested", "raw.txt").write_text("raw", encoding="utf-8")
+    source_dir = project_paths.project_dir(str(project_dir), "source_book", create=True)
+    os.makedirs(os.path.join(source_dir, "nested"), exist_ok=True)
+    with open(os.path.join(source_dir, "nested", "raw.txt"), "w", encoding="utf-8") as f:
+        f.write("raw")
     preview_dir = data_root / "preview" / "storage_book" / "chapters"
-    preview_dir.mkdir(parents=True)
+    preview_dir.mkdir(parents=True, exist_ok=True)
     preview_dir.joinpath("preview.wav").write_bytes(b"preview")
 
     summary = ProjectStorageRepository.summarize("storage_book")
@@ -53,13 +55,17 @@ def test_summary_is_recursive_and_preview_is_separate(storage_project):
 
 def test_cleanup_only_removes_temp_and_empty_segment_files(storage_project):
     _data_root, project_dir = storage_project
-    segment_dir = project_dir / "05_分段音频"
-    empty = segment_dir / "old.wav"
-    empty.touch()
-    temporary = project_dir / "cache" / "work.part"
-    temporary.write_bytes(b"temporary")
-    manual = segment_dir / "manual.wav"
-    manual.write_bytes(b"keep")
+    project_dir = str(project_dir)
+    segment_dir = project_paths.project_dir(project_dir, "segments", create=True)
+    empty = os.path.join(segment_dir, "old.wav")
+    open(empty, "wb").close()
+    cache_dir = project_paths.project_dir(project_dir, "cache", create=True)
+    temporary = os.path.join(cache_dir, "work.part")
+    with open(temporary, "wb") as f:
+        f.write(b"temporary")
+    manual = os.path.join(segment_dir, "manual.wav")
+    with open(manual, "wb") as f:
+        f.write(b"keep")
 
     plan = ProjectStorageRepository.scan_cleanup("storage_book")
     paths = {item.relative_path for item in plan.candidates}
@@ -68,20 +74,23 @@ def test_cleanup_only_removes_temp_and_empty_segment_files(storage_project):
     assert not any(path.endswith("manual.wav") for path in paths)
     result = ProjectStorageRepository.execute_cleanup("storage_book", plan.token)
     assert result["ok"] is True
-    assert not empty.exists()
-    assert not temporary.exists()
-    assert manual.exists()
+    assert not os.path.exists(empty)
+    assert not os.path.exists(temporary)
+    assert os.path.exists(manual)
 
 
 def test_cleanup_refuses_stale_token(storage_project):
     _data_root, project_dir = storage_project
-    candidate = project_dir / "05_分段音频" / "empty.wav"
-    candidate.touch()
+    project_dir = str(project_dir)
+    segment_dir = project_paths.project_dir(project_dir, "segments", create=True)
+    candidate = os.path.join(segment_dir, "empty.wav")
+    open(candidate, "wb").close()
     plan = ProjectStorageRepository.scan_cleanup("storage_book")
-    candidate.write_bytes(b"changed")
+    with open(candidate, "wb") as f:
+        f.write(b"changed")
     result = ProjectStorageRepository.execute_cleanup("storage_book", plan.token)
     assert result["stale"] is True
-    assert candidate.exists()
+    assert os.path.exists(candidate)
 
 
 def test_integrity_reports_done_audio_missing(storage_project):
@@ -130,22 +139,26 @@ def test_recycle_bin_restore_rejects_name_conflict_and_permanent_delete_is_scope
 
 def test_integrity_repair_does_not_delete_valid_audio(storage_project):
     _data_root, project_dir = storage_project
-    segment = project_dir / "05_分段音频" / "1-001.wav"
-    segment.write_bytes(b"valid-audio")
-    valid_export = project_dir / "09_导出文件" / "book.mp3"
-    valid_export.parent.mkdir(parents=True, exist_ok=True)
-    valid_export.write_bytes(b"valid-export")
-    empty_export = project_dir / "09_导出文件" / "empty.mp3"
-    empty_export.touch()
+    project_dir = str(project_dir)
+    segment_dir = project_paths.project_dir(project_dir, "segments", create=True)
+    segment = os.path.join(segment_dir, "1-001.wav")
+    with open(segment, "wb") as f:
+        f.write(b"valid-audio")
+    export_dir = project_paths.project_dir(project_dir, "delivery_official", create=True)
+    valid_export = os.path.join(export_dir, "book.mp3")
+    with open(valid_export, "wb") as f:
+        f.write(b"valid-export")
+    empty_export = os.path.join(export_dir, "empty.mp3")
+    open(empty_export, "wb").close()
 
     from services.project_storage import ProjectStorageService
 
     ProjectRepository.update_segment_status("storage_book", "1-001", "done")
     report = ProjectStorageService.repair_integrity("storage_book")
     assert "移除空输出文件：empty.mp3" in report["repaired"]
-    assert segment.exists()
-    assert valid_export.exists()
-    assert not empty_export.exists()
+    assert os.path.exists(segment)
+    assert os.path.exists(valid_export)
+    assert not os.path.exists(empty_export)
 
 
 def test_list_only_removal_keeps_project_files(storage_project):

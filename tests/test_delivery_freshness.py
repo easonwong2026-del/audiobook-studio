@@ -163,7 +163,7 @@ def test_delivery_snapshot_marks_mixed_engine_provenance(freshness_project):
     # Add a second segment revision with the other native engine identity to
     # exercise the same provenance shape used by a mixed historical project.
     project_dir = ProjectRepository.get_project_dir(freshness_project)
-    script_path = os.path.join(project_dir, "structured_script.json")
+    script_path = project_paths.project_file(project_dir, "structured_script")
     with open(script_path, encoding="utf-8") as file:
         script = json.load(file)
     script["chapters"][0]["segments"].append({

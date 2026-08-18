@@ -1,5 +1,7 @@
 """Project mutation service guards while production is active."""
 from __future__ import annotations
+from lib import project_paths
+from pathlib import Path
 
 import json
 import os
@@ -69,7 +71,7 @@ def _assert_blocked(error, operation: str) -> None:
 def test_project_service_rejects_destructive_mutations(guarded_project):
     data_dir, source_voice, _task = guarded_project
     project_dir = data_dir / "projects" / "guarded"
-    bindings_path = project_dir / "voice_bindings.json"
+    bindings_path = Path(project_paths.project_file(str(project_dir), "voice_bindings"))
     before = json.loads(bindings_path.read_text(encoding="utf-8"))
 
     with pytest.raises(ProjectMutationBlockedError) as error:
@@ -109,7 +111,7 @@ def test_storage_archive_cleanup_and_repair_are_guarded(guarded_project):
     _assert_blocked(error, "archive_project")
     assert project_dir.is_dir()
 
-    candidate = project_dir / "cache" / "active.part"
+    candidate = Path(project_paths.project_dir(str(project_dir), "cache", create=True)) / "active.part"
     candidate.write_bytes(b"partial")
     plan = ProjectStorageRepository.scan_cleanup("guarded")
     with pytest.raises(ProjectMutationBlockedError) as error:

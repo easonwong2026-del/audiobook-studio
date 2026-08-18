@@ -406,7 +406,11 @@ class TaskRepository:
 
     @staticmethod
     def get_database_path(project: str, *, create: bool = False) -> str | None:
-        """Return the project-local production database path."""
+        """Return the project-local production database path.
+
+        v3 → ``99_系统数据/任务/production_tasks.sqlite3``；
+        v2/v1 → ``01_项目配置/production_tasks.sqlite3``（历史布局）。
+        """
         name = str(project or "").strip()
         if not name:
             return None
@@ -417,11 +421,10 @@ class TaskRepository:
         except Exception:
             return None
         if not os.path.isdir(project_dir) or not os.path.isfile(
-            os.path.join(project_dir, "project.json")
+            project_paths.project_file(project_dir, "project_meta")
         ):
             return None
-        config_dir = project_paths.project_dir(project_dir, "config", create=create)
-        return os.path.join(config_dir, _DB_FILENAME)
+        return project_paths.project_file(project_dir, "task_db", create=create)
 
     @staticmethod
     def _connect(
@@ -718,7 +721,9 @@ class TaskRepository:
                         or not entry.is_dir(follow_symlinks=False)
                     ):
                         continue
-                    if os.path.isfile(os.path.join(entry.path, "project.json")):
+                    if os.path.isfile(
+                        project_paths.project_file(entry.path, "project_meta")
+                    ):
                         names.add(entry.name)
         except OSError:
             pass
@@ -1540,8 +1545,7 @@ class TaskRepository:
         root = os.path.abspath(str(project_dir or ""))
         if not root or not os.path.isdir(root):
             raise FileNotFoundError(f"恢复项目目录不存在: {project_dir}")
-        config_dir = project_paths.project_dir(root, "config", create=False)
-        database = os.path.join(config_dir, _DB_FILENAME)
+        database = project_paths.project_file(root, "task_db", create=False)
         if not os.path.isfile(database):
             return 0
         connection = sqlite3.connect(database, timeout=10.0)

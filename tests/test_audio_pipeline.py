@@ -1,3 +1,4 @@
+from lib import project_paths
 """单元测试：lib/audio_pipeline.py
 
 验证工程师修复的 BUG：
@@ -107,7 +108,7 @@ def test_export_mp3_bitrate_passthrough(book, monkeypatch):
 
     monkeypatch.setattr(ap.subprocess, "run", fake_run)
 
-    out = ap.export_book(book, format="mp3", bitrate="320k")
+    ap.export_book(book, format="mp3", bitrate="320k")
     assert calls, "导出 mp3 时未调用 subprocess.run（ffmpeg）"
     cmd = calls[0]
     # B4 验证：比特率 320k 与编码器 libmp3lame 都进了 ffmpeg 命令行
@@ -116,7 +117,7 @@ def test_export_mp3_bitrate_passthrough(book, monkeypatch):
 
 
 def test_export_missing_segment_raises(book):
-    seg_dir = os.path.join(book, "segments")
+    seg_dir = project_paths.project_dir(book, "segments", create=True)
     os.remove(os.path.join(seg_dir, "1-002.wav"))
     # 缺段场景：删除某个段落 wav 后，导出应抛 RuntimeError 提示未找到段落
     with pytest.raises(RuntimeError):

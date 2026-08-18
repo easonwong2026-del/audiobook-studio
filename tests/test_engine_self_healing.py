@@ -9,6 +9,7 @@ engine, P MCP recovering/needs_attention schema, R no mass-failure storm,
 S resume preserves completed segments.
 """
 from __future__ import annotations
+from lib import project_paths
 
 import json
 import os
@@ -82,11 +83,11 @@ def healing_project(tmp_path, monkeypatch):
     monkeypatch.setattr(pm, "LEGACY_ROOT", ProjectRepository.LEGACY_ROOT)
     ProjectService.create_project_from_data("book", _script())
     project_dir = ProjectRepository.get_project_dir("book")
-    voice_path = os.path.join(project_dir, "voices", "narrator.wav")
+    voice_path = os.path.join(project_paths.project_dir(project_dir, "project_voices", create=True), "narrator.wav")
     os.makedirs(os.path.dirname(voice_path), exist_ok=True)
     with open(voice_path, "wb") as file:
         file.write(b"voice")
-    bindings_path = os.path.join(project_dir, "voice_bindings.json")
+    bindings_path = project_paths.project_file(project_dir, "voice_bindings")
     with open(bindings_path, encoding="utf-8") as file:
         bindings = json.load(file)
     bindings["bindings"]["旁白"] = voice_path
@@ -98,7 +99,7 @@ def healing_project(tmp_path, monkeypatch):
     yield {
         "project": "book",
         "voice": voice_path,
-        "segments_dir": os.path.join(project_dir, "segments"),
+        "segments_dir": project_paths.project_dir(project_dir, "segments", create=True),
     }
     ProductionRuntimeClient.reset_inline()
 
@@ -1096,11 +1097,11 @@ def test_r_no_mass_failure_storm(healing_project, monkeypatch):
     # Simulate a 224-segment book through the production runtime.
     ProjectService.create_project_from_data("huge", _script(224))
     project_dir = ProjectRepository.get_project_dir("huge")
-    voice_path = os.path.join(project_dir, "voices", "narrator.wav")
+    voice_path = os.path.join(project_paths.project_dir(project_dir, "project_voices", create=True), "narrator.wav")
     os.makedirs(os.path.dirname(voice_path), exist_ok=True)
     with open(voice_path, "wb") as file:
         file.write(b"voice")
-    bindings_path = os.path.join(project_dir, "voice_bindings.json")
+    bindings_path = project_paths.project_file(project_dir, "voice_bindings")
     with open(bindings_path, encoding="utf-8") as file:
         bindings = json.load(file)
     bindings["bindings"]["旁白"] = voice_path

@@ -168,12 +168,28 @@ def open_selected_project(selected: str, ss) -> tuple:
         return _empty_open_outputs()
 
 
-def open_selected_directory(project_name: str) -> str:
-    """打开选中项目目录（不要求项目已打开；走 procutil 无黑框）。"""
+def open_selected_directory(project_name: str, key: str = "") -> str:
+    """打开选中项目目录或逻辑子目录（不要求项目已打开；走 procutil 无黑框）。
+
+    Args:
+        project_name: 选中项目名。
+        key: 逻辑目录 key（``""`` = 项目根；``segments`` = 生成音频；
+            ``delivery_official`` = 导出成品）。
+    """
     if not project_name:
         return "⚪ 请先从书架选择项目。"
-    _ok, message = ProjectStorageService.open_directory(project_name)
+    _ok, message = ProjectStorageService.open_directory(project_name, key)
     return ("✅ " if _ok else "❌ ") + message
+
+
+def open_selected_generated_audio(project_name: str) -> str:
+    """打开选中项目的生成音频目录（v3 → 02_生成音频/分段音频）。"""
+    return open_selected_directory(project_name, "segments")
+
+
+def open_selected_deliveries(project_name: str) -> str:
+    """打开选中项目的导出成品目录（v3 → 03_导出成品/正式导出）。"""
+    return open_selected_directory(project_name, "delivery_official")
 
 
 # ── 备份 ──
@@ -264,6 +280,112 @@ def execute_selected_cleanup(project_name: str, token: str) -> tuple[str, str, d
 def cancel_selected_cleanup() -> tuple[str, str, dict]:
     """取消清理：项目文件没有改变。"""
     return "已取消清理。项目文件没有改变。", "", _update(visible=False)
+
+
+# ── 存储布局整理（扫描方案 → token 确认两步；v1/v2 → v3 显式迁移） ──
+
+
+def _layout_label(version: int) -> str:
+    return {1: "v1（旧版英文布局）", 2: "v2（中文 canonical 布局）", 3: "v3（新版布局）"}.get(
+        int(version), f"v{version}"
+    )
+
+
+def scan_selected_storage_upgrade(project_name: str) -> tuple[str, str, dict]:
+    """扫描选中项目的存储布局整理方案（只读），返回 (预览, token, 确认按钮可见性)。
+
+    仅 v1/v2 项目返回可执行方案；v3 项目显示已是最新版。打开项目不会自动迁移。
+    """
+    if not project_name:
+        return "⚪ 请先从书架选择项目。", "", _update(visible=False)
+    try:
+        plan = ProjectStorageService.plan_storage_upgrade(project_name)
+        if plan.get("code") == "ALREADY_CURRENT":
+            return (
+                f"✅ 项目已是 **{_layout_label(3)}**，无需整理。\n\n"
+                "打开项目不会自动迁移；只有 v1/v2 项目才需要显式整理。",
+                "",
+                _update(visible=False),
+            )
+        if plan.get("blockers"):
+            lines = [
+                f"### 项目存在活动任务，暂不能整理（{_layout_label(plan['from_version'])} → v3）",
+            ]
+            lines.extend(
+                f"- **{item['code']}**：{item['message']}"
+                for item in plan["blockers"][:10]
+            )
+            lines.append("\n请先停止相关任务后再整理。")
+            return "\n".join(lines), "", _update(visible=False)
+        from services.project_storage import format_size
+
+        lines = [
+            f"### 存储布局整理方案（{_layout_label(plan['from_version'])} → **v3**）",
+            f"- 将整理 **{plan['file_count']}** 个文件，共 **{format_size(plan['total_bytes'])}**。",
+            "- 整理前会自动创建完整备份（备份路径见执行结果，永不自动删除）。",
+            "- 项目根目录将只保留 4 个一级目录：`01_原始资料/ 02_生成音频/ 03_导出成品/ 99_系统数据/`。",
+        ]
+        if plan.get("conflicts"):
+            lines.append("")
+            lines.append("**⚠ 目标目录已存在内容（将合并保留，不覆盖）：**")
+            lines.extend(
+                f"- `{item['target']}`（{'非空' if item['non_empty'] else '已存在'}）"
+                for item in plan["conflicts"][:10]
+            )
+        if plan.get("unknown_paths"):
+            lines.append("")
+            lines.append("**📁 无法识别的根级内容（将原样保留到 99_系统数据/迁移保留/，不删除）：**")
+            lines.extend(
+                f"- `{item['path']}`（{item['kind']}）"
+                for item in plan["unknown_paths"][:15]
+            )
+            if len(plan["unknown_paths"]) > 15:
+                lines.append(f"- … 其余 {len(plan['unknown_paths']) - 15} 项")
+        records = plan.get("relative_path_records") or []
+        if records:
+            lines.append("")
+            lines.append(f"**将同步重写 {sum(item['count'] for item in records)} 处历史路径记录**（resolver 兜底双保险）。")
+        lines.extend([
+            "",
+            "整理是不可逆的显式操作，但整理前会先创建完整备份；确认后执行。",
+        ])
+        return "\n".join(lines), plan.get("token", ""), _update(visible=True)
+    except Exception as exc:
+        return f"❌ 扫描整理方案失败：{exc}", "", _update(visible=False)
+
+
+def execute_selected_storage_upgrade(project_name: str, token: str) -> tuple[str, str, dict]:
+    """执行选中项目存储布局整理（token 确认后）。"""
+    if not project_name:
+        return "⚪ 请先从书架选择项目。", "", _update(visible=False)
+    if not token:
+        return "⚪ 请先扫描整理方案再确认。", "", _update(visible=False)
+    try:
+        result = ProjectStorageService.upgrade_storage(project_name, token)
+        from services.project_storage import format_size
+
+        lines = [
+            "✅ 项目已整理为 **v3** 存储布局。",
+            f"- 整理文件：{result.get('file_count', 0)} 个（{format_size(result.get('total_bytes', 0))}）。",
+            f"- 重写历史路径记录：{sum(item.get('count', 0) for item in result.get('relative_path_records', []) or [])} 处。",
+            f"- 备份：`{result.get('backup_path')}`（永不自动删除）。",
+        ]
+        if result.get("unknown_paths"):
+            lines.append(
+                f"- 保留无法识别的根级内容：{len(result['unknown_paths'])} 项（99_系统数据/迁移保留/）。"
+            )
+        return "\n".join(lines), "", _update(visible=False)
+    except Exception as exc:
+        if getattr(exc, "code", None) == "PROJECT_HAS_ACTIVE_PRODUCTION":
+            message = "项目正在生产，请先停止任务后再整理"
+        else:
+            message = f"❌ 整理失败：{exc}"
+        return message, "", _update(visible=False)
+
+
+def cancel_selected_storage_upgrade() -> tuple[str, str, dict]:
+    """取消整理：项目文件没有改变。"""
+    return "已取消整理。项目文件没有改变。", "", _update(visible=False)
 
 
 # ── 诊断与修复 ──
@@ -519,10 +641,14 @@ __all__ = [
     "archive_selected",
     "bind_open_project",
     "cancel_selected_cleanup",
+    "cancel_selected_storage_upgrade",
     "check_selected_integrity",
     "create_selected_backup",
     "execute_selected_cleanup",
+    "execute_selected_storage_upgrade",
+    "open_selected_deliveries",
     "open_selected_directory",
+    "open_selected_generated_audio",
     "open_selected_project",
     "permanently_delete_archived_global",
     "refresh_archived_projects_global",
@@ -532,5 +658,6 @@ __all__ = [
     "restore_archived_global",
     "restore_backup_global",
     "scan_selected_cleanup",
+    "scan_selected_storage_upgrade",
     "select_bookshelf_row",
 ]

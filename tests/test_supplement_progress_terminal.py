@@ -14,6 +14,7 @@ Windows 实机现象：上方已显示「补合成完成（2/2 成功）」，�
 test_runtime_start_fail_fast.py 中覆盖 runtime 层面）。
 """
 from __future__ import annotations
+from lib import project_paths
 
 import os
 from types import SimpleNamespace
@@ -91,7 +92,7 @@ def test_submit_emits_terminal_done_progress(runtime_project, monkeypatch):
         return _done_record(task_id)
 
     monkeypatch.setattr(RuntimeTTSService, "_wait", classmethod(_fake_wait))
-    artifact_dir = os.path.join(ProjectRepository.get_project_dir("book"), "cache", "sup")
+    artifact_dir = os.path.join(project_paths.project_dir(ProjectRepository.get_project_dir("book"), "cache", create=True), "sup")
     result = RuntimeTTSService._submit(
         project_name="book",
         task_type="supplement",
@@ -116,7 +117,7 @@ def test_submit_emits_terminal_error_progress(runtime_project, monkeypatch):
         raise RuntimeTTSError(_failed_record(task_id))
 
     monkeypatch.setattr(RuntimeTTSService, "_wait", classmethod(_fake_wait))
-    artifact_dir = os.path.join(ProjectRepository.get_project_dir("book"), "cache", "sup")
+    artifact_dir = os.path.join(project_paths.project_dir(ProjectRepository.get_project_dir("book"), "cache", create=True), "sup")
     with pytest.raises(RuntimeTTSError):
         RuntimeTTSService._submit(
             project_name="book",
@@ -144,7 +145,7 @@ def test_submit_keeps_engine_loading_progress_before_terminal(runtime_project, m
         return _done_record(task_id)
 
     monkeypatch.setattr(RuntimeTTSService, "_wait", classmethod(_fake_wait))
-    artifact_dir = os.path.join(ProjectRepository.get_project_dir("book"), "cache", "sup")
+    artifact_dir = os.path.join(project_paths.project_dir(ProjectRepository.get_project_dir("book"), "cache", create=True), "sup")
     RuntimeTTSService._submit(
         project_name="book",
         task_type="supplement",

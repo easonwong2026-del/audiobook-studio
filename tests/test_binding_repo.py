@@ -7,6 +7,7 @@
 - resolve_binding_path 路径标准化
 """
 from __future__ import annotations
+from lib import project_paths
 
 import json
 import os
@@ -14,7 +15,6 @@ import os
 import pytest
 
 from repositories.binding_repo import BindingRepository
-from lib import config as _cfg
 
 
 class TestBindingRepository:
@@ -92,8 +92,7 @@ class TestBindingRepository:
         """所有绑定路径存在时返回空列表。"""
         project_dir = str(tmp_path / "project_a")
         os.makedirs(project_dir)
-        voices_dir = os.path.join(project_dir, "voices")
-        os.makedirs(voices_dir)
+        voices_dir = project_paths.project_dir(project_dir, "voices", create=True)
 
         # 创建参考音频文件
         ref = os.path.join(voices_dir, "旁白.wav")
@@ -106,7 +105,7 @@ class TestBindingRepository:
             "bound_at": "",
             "verified": [],
         }
-        with open(os.path.join(project_dir, "voice_bindings.json"), "w",
+        with open(project_paths.project_file(project_dir, "voice_bindings"), "w",
                   encoding="utf-8") as f:
             json.dump(bd, f)
 
@@ -123,7 +122,7 @@ class TestBindingRepository:
             "bound_at": "",
             "verified": [],
         }
-        with open(os.path.join(project_dir, "voice_bindings.json"), "w",
+        with open(project_paths.project_file(project_dir, "voice_bindings"), "w",
                   encoding="utf-8") as f:
             json.dump(bd, f)
 

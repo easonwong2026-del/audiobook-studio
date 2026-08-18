@@ -53,6 +53,8 @@ def create_overview_page() -> dict:
         with gr.Row():
             bookshelf_open = gr.Button("打开项目", variant="primary", size="sm")
             bookshelf_open_dir = gr.Button("打开项目目录", size="sm")
+            bookshelf_open_audio = gr.Button("打开生成音频", size="sm")
+            bookshelf_open_delivery = gr.Button("打开导出成品", size="sm")
             bookshelf_backup = gr.Button("创建备份", size="sm")
             bookshelf_cleanup = gr.Button("清理缓存", size="sm")
             bookshelf_cleanup_confirm = gr.Button(
@@ -64,7 +66,13 @@ def create_overview_page() -> dict:
             placeholder="可选",
         )
         bookshelf_cleanup_token = gr.State("")
+        bookshelf_storage_token = gr.State("")
         with gr.Row():
+            bookshelf_storage = gr.Button("整理存储布局", size="sm")
+            bookshelf_storage_confirm = gr.Button(
+                "确认整理", variant="primary", size="sm", visible=False
+            )
+            bookshelf_storage_cancel = gr.Button("取消", size="sm", visible=False)
             bookshelf_integrity = gr.Button("诊断", size="sm")
             bookshelf_integrity_repair = gr.Button(
                 "修复", variant="secondary", size="sm", visible=False
@@ -116,12 +124,18 @@ def create_overview_page() -> dict:
         "bookshelf_selected": bookshelf_selected,
         "bookshelf_open": bookshelf_open,
         "bookshelf_open_dir": bookshelf_open_dir,
+        "bookshelf_open_audio": bookshelf_open_audio,
+        "bookshelf_open_delivery": bookshelf_open_delivery,
         "bookshelf_backup": bookshelf_backup,
         "bookshelf_backup_dir": bookshelf_backup_dir,
         "bookshelf_cleanup": bookshelf_cleanup,
         "bookshelf_cleanup_confirm": bookshelf_cleanup_confirm,
         "bookshelf_cleanup_cancel": bookshelf_cleanup_cancel,
         "bookshelf_cleanup_token": bookshelf_cleanup_token,
+        "bookshelf_storage": bookshelf_storage,
+        "bookshelf_storage_token": bookshelf_storage_token,
+        "bookshelf_storage_confirm": bookshelf_storage_confirm,
+        "bookshelf_storage_cancel": bookshelf_storage_cancel,
         "bookshelf_integrity": bookshelf_integrity,
         "bookshelf_integrity_repair": bookshelf_integrity_repair,
         "bookshelf_archive": bookshelf_archive,

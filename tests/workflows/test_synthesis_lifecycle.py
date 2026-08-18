@@ -1,3 +1,4 @@
+from lib import project_paths  # noqa: E402
 """工作流测试：合成工作流（假引擎，§10.3 11-20）
 
 在临时目录中模拟合成全流程：
@@ -22,7 +23,6 @@ if PROJECT_ROOT not in sys.path:
 
 import lib.project_manager as pm  # noqa: E402
 import lib.segment_cache as segment_cache  # noqa: E402
-from lib import project_paths  # noqa: E402
 
 
 # ── 假音频生成 ────────────────────────────────────────────────────────────────
@@ -81,7 +81,7 @@ def synth_project(tmp_path, monkeypatch):
     ref_wav2 = os.path.join(voices_dir, "ref_小明.wav")
     _make_fake_wav(ref_wav2)
 
-    bp = os.path.join(proj_dir, "voice_bindings.json")
+    bp = project_paths.project_file(proj_dir, "voice_bindings")
     with open(bp, encoding="utf-8") as f:
         bd = json.load(f)
     bd["bindings"]["旁白"] = ref_wav

@@ -1,3 +1,4 @@
+from lib import project_paths
 """O13 统一试听播放器：章节级合并试听 concat_for_preview（无 GPU）。
 
 验证（设计 §6 O13 / §12.3）：
@@ -65,8 +66,8 @@ def _fake_find(paths):
 @pytest.fixture
 def chapter1_wavs(tmp_path, monkeypatch):
     proj_dir = _make_book(tmp_path, {"1-001": 1600, "1-002": 2400})
-    paths = {"1-001": os.path.join(proj_dir, "segments", "1-001.wav"),
-             "1-002": os.path.join(proj_dir, "segments", "1-002.wav")}
+    paths = {"1-001": os.path.join(project_paths.project_dir(proj_dir, "segments", create=True), "1-001.wav"),
+             "1-002": os.path.join(project_paths.project_dir(proj_dir, "segments", create=True), "1-002.wav")}
     monkeypatch.setattr(ap, "_find_segment", _fake_find(paths))
     out = os.path.join(proj_dir, "chapter_1_preview.wav")
     return proj_dir, out
@@ -90,7 +91,6 @@ def test_concat_for_preview_produces_output(chapter1_wavs):
 def test_concat_for_preview_skips_missing_segment(chapter1_wavs, monkeypatch):
     proj_dir, out = chapter1_wavs
     # 1-002 缺段（_find_segment 返回 None），1-001 仍存在 -> 跳过缺失段
-    seg_dir = os.path.join(proj_dir, "segments")
     monkeypatch.setattr(
         ap, "_find_segment",
         lambda sd, seg_id, *a, **k: None if seg_id == "1-002" else os.path.join(sd, "1-001.wav"))
@@ -111,8 +111,8 @@ def test_concat_for_preview_all_missing_returns_none(tmp_path, monkeypatch):
 
 def test_concat_for_preview_unknown_chapter_returns_none(tmp_path, monkeypatch):
     proj_dir = _make_book(tmp_path, {"1-001": 1600, "1-002": 2400})
-    paths = {"1-001": os.path.join(proj_dir, "segments", "1-001.wav"),
-             "1-002": os.path.join(proj_dir, "segments", "1-002.wav")}
+    paths = {"1-001": os.path.join(project_paths.project_dir(proj_dir, "segments", create=True), "1-001.wav"),
+             "1-002": os.path.join(project_paths.project_dir(proj_dir, "segments", create=True), "1-002.wav")}
     monkeypatch.setattr(ap, "_find_segment", _fake_find(paths))
     out = os.path.join(proj_dir, "chapter_99_preview.wav")
     assert ap.concat_for_preview(proj_dir, 99, out) is None, "未知章节应返回 None"

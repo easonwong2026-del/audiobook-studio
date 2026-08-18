@@ -132,4 +132,6 @@ jobs:
           tests/test_export_r2.py
           tests/test_project_backup.py
           tests/test_mcp_server.py
+          tests/test_storage_layout_v3.py
+          tests/test_storage_migration_rollback.py
           tests/workflows/test_project_lifecycle.py

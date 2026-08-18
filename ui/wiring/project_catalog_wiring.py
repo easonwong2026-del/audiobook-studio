@@ -60,9 +60,19 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
         if goto is not None and groups:
             chain.then(goto, None, groups)
 
-    # ── 打开目录 / 备份 / 清理 / 诊断 / 移入回收站 ──
+    # ── 打开目录 / 备份 / 清理 / 整理存储布局 / 诊断 / 移入回收站 ──
     page["bookshelf_open_dir"].click(
         catalog_handlers.open_selected_directory,
+        [page["bookshelf_selected_proj"]],
+        [page["bookshelf_msg"]],
+    )
+    page["bookshelf_open_audio"].click(
+        catalog_handlers.open_selected_generated_audio,
+        [page["bookshelf_selected_proj"]],
+        [page["bookshelf_msg"]],
+    )
+    page["bookshelf_open_delivery"].click(
+        catalog_handlers.open_selected_deliveries,
         [page["bookshelf_selected_proj"]],
         [page["bookshelf_msg"]],
     )
@@ -96,6 +106,38 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
             page["bookshelf_msg"],
             page["bookshelf_cleanup_token"],
             page["bookshelf_cleanup_confirm"],
+        ],
+    )
+
+    # ── 存储布局整理：扫描方案 → token 确认（v1/v2 → v3 显式迁移） ──
+    page["bookshelf_storage"].click(
+        catalog_handlers.scan_selected_storage_upgrade,
+        [page["bookshelf_selected_proj"]],
+        [
+            page["bookshelf_msg"],
+            page["bookshelf_storage_token"],
+            page["bookshelf_storage_confirm"],
+            page["bookshelf_storage_cancel"],
+        ],
+    )
+    page["bookshelf_storage_confirm"].click(
+        catalog_handlers.execute_selected_storage_upgrade,
+        [page["bookshelf_selected_proj"], page["bookshelf_storage_token"]],
+        [
+            page["bookshelf_msg"],
+            page["bookshelf_storage_token"],
+            page["bookshelf_storage_confirm"],
+            page["bookshelf_storage_cancel"],
+        ],
+    )
+    page["bookshelf_storage_cancel"].click(
+        catalog_handlers.cancel_selected_storage_upgrade,
+        [],
+        [
+            page["bookshelf_msg"],
+            page["bookshelf_storage_token"],
+            page["bookshelf_storage_confirm"],
+            page["bookshelf_storage_cancel"],
         ],
     )
     page["bookshelf_integrity"].click(

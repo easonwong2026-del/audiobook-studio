@@ -184,14 +184,43 @@ class ProjectBackupService:
                     if size != item["size"] or digest.hexdigest() != item["sha256"]:
                         raise ValueError(f"文件校验失败：{relative}")
 
-            required = ("project.json", "structured_script.json", "voice_bindings.json")
-            if not all(os.path.isfile(os.path.join(temporary, marker)) for marker in required):
-                raise ValueError("备份缺少项目核心文件")
-            with open(os.path.join(temporary, "project.json"), encoding="utf-8") as file:
-                meta = json.load(file)
-            if not isinstance(meta, dict) or meta.get("project_name") != safe_name:
+            # Core marker 校验按解析器定位：v3 备份的核心 JSON 在
+            # 99_系统数据/配置/ 下；v1/v2 在项目根。先探测 manifest 判定版本。
+            from lib import project_paths
+
+            meta: dict[str, Any] = {}
+            for candidate in (
+                project_paths.project_file(temporary, "project_meta", prefer_version=3),
+                os.path.join(temporary, "project.json"),
+            ):
+                if os.path.isfile(candidate):
+                    with open(candidate, encoding="utf-8") as file:
+                        value = json.load(file)
+                    if isinstance(value, dict):
+                        meta = value
+                        break
+            if not meta:
+                raise ValueError("备份缺少 project.json")
+            if meta.get("project_name") != safe_name:
                 raise ValueError("project.json 的项目名与恢复目标不一致")
-            with open(os.path.join(temporary, "structured_script.json"), encoding="utf-8") as file:
+            restored_version = int(meta.get("storage_version", 0) or 0)
+            file_keys = ("structured_script", "voice_bindings")
+            if restored_version >= project_paths.STORAGE_VERSION:
+                required_paths = [
+                    project_paths.project_file(temporary, key) for key in file_keys
+                ]
+            else:
+                required_paths = [
+                    os.path.join(temporary, f"{key}.json") for key in file_keys
+                ]
+            if not all(os.path.isfile(path) for path in required_paths):
+                raise ValueError("备份缺少项目核心文件")
+            script_path = (
+                project_paths.project_file(temporary, "structured_script", prefer_version=max(restored_version, 1))
+                if restored_version >= project_paths.STORAGE_VERSION
+                else os.path.join(temporary, "structured_script.json")
+            )
+            with open(script_path, encoding="utf-8") as file:
                 script = script_loader.from_dict(json.load(file))
             errors = script_loader.validate_script(script)
             if errors:

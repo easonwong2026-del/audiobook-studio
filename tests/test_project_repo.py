@@ -17,6 +17,7 @@ import pytest
 
 from repositories.project_repo import ProjectRepository
 from repositories.exceptions import ProjectNotFoundError
+from lib import project_paths
 
 
 # 辅助：创建最小的剧本 JSON
@@ -166,13 +167,14 @@ class TestProjectRepository:
             assert before.completed_count == 1
             assert before.failed_count == 1
             project_dir = ProjectRepository.get_project_dir("batch_status")
-            with open(os.path.join(project_dir, "project.json"), encoding="utf-8") as file:
+            meta_path = project_paths.project_file(project_dir, "project_meta")
+            with open(meta_path, encoding="utf-8") as file:
                 raw_before_flush = json.load(file)
             assert raw_before_flush["completed_count"] == 0
             assert raw_before_flush["failed_count"] == 0
 
             writer.checkpoint()
-            with open(os.path.join(project_dir, "project.json"), encoding="utf-8") as file:
+            with open(meta_path, encoding="utf-8") as file:
                 raw_after_checkpoint = json.load(file)
             assert raw_after_checkpoint["completed_count"] == 0
             assert raw_after_checkpoint["failed_count"] == 0
@@ -586,12 +588,21 @@ class TestAtomicCreateFailure:
 
     def _assert_valid_project(self, name):
         from repositories.project_repo import ProjectRepository
+        from lib import project_paths
         project_dir = os.path.join(ProjectRepository.WORKSPACE_ROOT, name)
         assert os.path.isdir(project_dir)
+        # v3 项目：根目录只允许 4 个一级目录，系统 JSON 全在 99_系统数据/配置/。
+        root_entries = set(os.listdir(project_dir))
+        assert root_entries == {"01_原始资料", "02_生成音频", "03_导出成品", "99_系统数据"}
         for marker in ("project.json", "structured_script.json", "voice_bindings.json"):
-            assert os.path.isfile(os.path.join(project_dir, marker))
-        for sub in ("voices", "segments", "chapters", "output"):
-            assert os.path.isdir(os.path.join(project_dir, sub))
+            key = {
+                "project.json": "project_meta",
+                "structured_script.json": "structured_script",
+                "voice_bindings.json": "voice_bindings",
+            }[marker]
+            assert os.path.isfile(project_paths.project_file(project_dir, key))
+        for key in ("source_book", "project_voices", "segments", "chapter_data"):
+            assert os.path.isdir(project_paths.project_dir(project_dir, key))
 
     def test_copy2_failure(self, monkeypatch):
         """shutil.copy2 失败时清理临时目录，原异常继续抛出。"""

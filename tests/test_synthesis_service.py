@@ -1,3 +1,4 @@
+from lib import project_paths
 """SynthesisService 单测：后台队列 + 进度推进 + 单段协作取消。
 
 直接 monkeypatch ``tts_engine.synthesize_segment``（``lib.queue.synthesize_project``
@@ -61,9 +62,9 @@ def project(tmp_path, monkeypatch):
     sp.write_text(json.dumps(SCRIPT, ensure_ascii=False), encoding="utf-8")
     pm.create_project("syn", str(sp))
     d = pm.get_project_dir("syn")
-    vo = os.path.join(d, "voices", "ref.wav")
+    vo = os.path.join(project_paths.project_dir(d, "project_voices", create=True), "ref.wav")
     _dummy(vo)
-    bp = os.path.join(d, "voice_bindings.json")
+    bp = project_paths.project_file(d, "voice_bindings")
     with open(bp, encoding="utf-8") as f:
         bd = json.load(f)
     bd["bindings"]["旁白"] = vo
@@ -73,7 +74,7 @@ def project(tmp_path, monkeypatch):
 
 
 def _bindings(proj_dir: str) -> dict:
-    return {"旁白": os.path.join(proj_dir, "voices", "ref.wav")}
+    return {"旁白": os.path.join(project_paths.project_dir(proj_dir, "project_voices", create=True), "ref.wav")}
 
 
 def _dummy(path, n=800):

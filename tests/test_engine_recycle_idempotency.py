@@ -25,6 +25,7 @@ IMPORTANT: fake engine tests prove flow correctness, NOT GPU/model
 correctness.  Real IndexTTS 2 / 2.5 validation requires a Windows RTX box.
 """
 from __future__ import annotations
+from lib import project_paths
 
 import json
 import os
@@ -326,7 +327,7 @@ def test_pending_switch_plus_supplement_does_not_double_recycle(
     # Supplement frozen with snapshot=2.5 (equivalent to _select_utility_engine
     # returning runtime_switch_target), claimed by the runtime.
     project_dir = ProjectRepository.get_project_dir("book")
-    artifact_dir = os.path.join(project_dir, "cache", "supplement_tasks", "case_a")
+    artifact_dir = os.path.join(project_paths.project_dir(project_dir, "cache", create=True), "supplement_tasks", "case_a")
     os.makedirs(artifact_dir, exist_ok=True)
     record = _make_supplement_record("book", artifact_dir, snapshot=profile_v25)
     outcome, durable = TaskRepository.create_runtime_task(record)
@@ -414,7 +415,7 @@ def test_supplement_20_lines_persistence_count(runtime_project, tmp_path, monkey
     runtime._engine.ensure_ready(target)
 
     project_dir = ProjectRepository.get_project_dir("book")
-    artifact_dir = os.path.join(project_dir, "cache", "supplement_tasks", "perf20")
+    artifact_dir = os.path.join(project_paths.project_dir(project_dir, "cache", create=True), "supplement_tasks", "perf20")
     os.makedirs(artifact_dir, exist_ok=True)
     lines = [f"性能检查第{i}句" for i in range(1, 21)]
     record = _make_supplement_record("book", artifact_dir, snapshot=target, lines=lines)

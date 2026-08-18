@@ -300,7 +300,7 @@ def synthesize_project(
 
     segments_dir = project_paths.project_dir(project_dir, "segments", create=True)
     os.makedirs(segments_dir, exist_ok=True)
-    cast_active = os.path.isfile(os.path.join(project_dir, "voice_cast.json"))
+    cast_active = os.path.isfile(project_paths.project_file(project_dir, "voice_cast"))
     speaker_fingerprints: dict[str, str | None] = {}
     cast_role_bindings = (
         bindings_document.get("role_bindings", {})

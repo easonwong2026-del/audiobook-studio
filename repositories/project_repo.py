@@ -34,6 +34,14 @@ _PROJECT_MARKERS = (
     "voice_bindings.json",
 )
 
+# 根级 marker 文件名 → project_paths 文件级 key（v3 起这些 JSON 移入
+# 99_系统数据/配置/，判定必须经 resolver 定位，禁止在根目录硬查）。
+_MARKER_FILE_KEYS = {
+    "project.json": "project_meta",
+    "structured_script.json": "structured_script",
+    "voice_bindings.json": "voice_bindings",
+}
+
 
 def sanitize_project_name(value: str) -> str:
     """Return the single canonical project-directory name used by UI and storage."""
@@ -197,8 +205,17 @@ class ProjectRepository:
         return new
 
     @staticmethod
-    def _meta_path(project_dir: str) -> str:
-        return os.path.join(project_dir, "project.json")
+    def _meta_path(project_dir: str, *, version: int | None = None) -> str:
+        """权威 project.json 路径（v3 → 99_系统数据/配置/project.json）。
+
+        ``version`` 用于创建期（manifest 尚未落盘时按 meta.storage_version 解析）；
+        缺省按 ``detect_storage_version`` 自动判定。
+        """
+        if version is not None:
+            return project_paths.project_file(
+                project_dir, "project_meta", prefer_version=max(int(version), 1)
+            )
+        return project_paths.project_file(project_dir, "project_meta")
 
     @staticmethod
     def _load_meta(project_dir: str) -> ProjectMeta:
@@ -212,8 +229,9 @@ class ProjectRepository:
 
     @staticmethod
     def _status_journal_path(project_dir: str) -> str:
-        config_dir = project_paths.project_dir(project_dir, "config", create=True)
-        return os.path.join(config_dir, "segment_status.journal.jsonl")
+        return project_paths.project_file(
+            project_dir, "segment_status_journal", create=True
+        )
 
     @staticmethod
     def _replay_status_journal(project_dir: str, meta: ProjectMeta) -> None:
@@ -267,7 +285,7 @@ class ProjectRepository:
     @staticmethod
     def _repair_meta(project_dir: str, meta: ProjectMeta) -> None:
         """自动修复：确保 segments_status 的 key 与 structured_script.json 的 seg_id 一致。"""
-        script_path = os.path.join(project_dir, "structured_script.json")
+        script_path = project_paths.project_file(project_dir, "structured_script")
         if not os.path.isfile(script_path):
             return
         with open(script_path, encoding="utf-8") as f:
@@ -314,8 +332,13 @@ class ProjectRepository:
 
     @staticmethod
     def _save_meta(project_dir: str, meta: ProjectMeta) -> None:
-        """原子写 project.json。"""
-        path = ProjectRepository._meta_path(project_dir)
+        """原子写 project.json。
+
+        v3：权威副本在 ``99_系统数据/配置/project.json``（无根镜像）；
+        v2：根 ``project.json`` 权威 + ``01_项目配置/project.json`` 镜像；
+        v1：根 ``project.json`` 权威（无镜像）。
+        """
+        path = ProjectRepository._meta_path(project_dir, version=meta.storage_version)
         payload = {
             "project_name": meta.project_name,
             "created_at": meta.created_at,
@@ -332,10 +355,8 @@ class ProjectRepository:
             "source_file": meta.source_file,
         }
         _atomic_write(path, payload)
-        # Keep a human-visible copy beside the other project configuration.
-        # The root project.json remains the authoritative marker used by the
-        # project scanner and atomic replacement logic.
-        if meta.storage_version >= project_paths.STORAGE_VERSION:
+        # v2 项目保留「根权威 + 配置目录镜像」的历史行为；v3 已无根副本。
+        if meta.storage_version == 2:
             config_dir = project_paths.project_dir(project_dir, "config", create=True)
             config_path = os.path.join(config_dir, "project.json")
             try:
@@ -447,7 +468,9 @@ class ProjectRepository:
         missing = [
             marker
             for marker in _PROJECT_MARKERS
-            if not os.path.isfile(os.path.join(path, marker))
+            if not os.path.isfile(
+                project_paths.project_file(path, _MARKER_FILE_KEYS[marker])
+            )
         ]
         if missing:
             return ProjectSlotInspection(
@@ -463,7 +486,10 @@ class ProjectRepository:
         parsed: dict[str, object] = {}
         for marker in _PROJECT_MARKERS:
             try:
-                with open(os.path.join(path, marker), encoding="utf-8") as file:
+                with open(
+                    project_paths.project_file(path, _MARKER_FILE_KEYS[marker]),
+                    encoding="utf-8",
+                ) as file:
                     parsed[marker] = json.load(file)
             except (OSError, UnicodeError, json.JSONDecodeError):
                 invalid.append(marker)
@@ -581,7 +607,9 @@ class ProjectRepository:
         if name.startswith(".tmp_"):
             return False
         for marker in _PROJECT_MARKERS:
-            if not os.path.isfile(os.path.join(project_dir, marker)):
+            if not os.path.isfile(
+                project_paths.project_file(project_dir, _MARKER_FILE_KEYS[marker])
+            ):
                 return False
         return True
 
@@ -643,10 +671,10 @@ class ProjectRepository:
             raise ProjectNotFoundError(f"项目 '{name}' 不存在")
 
         meta = ProjectRepository._load_meta(project_dir)
-        with open(os.path.join(project_dir, "structured_script.json"),
+        with open(project_paths.project_file(project_dir, "structured_script"),
                   encoding="utf-8") as f:
             script = script_loader.canonicalize_collections(json.load(f))
-        with open(os.path.join(project_dir, "voice_bindings.json"),
+        with open(project_paths.project_file(project_dir, "voice_bindings"),
                   encoding="utf-8") as f:
             bindings = json.load(f)
 
@@ -705,7 +733,11 @@ class ProjectRepository:
         *,
         source_file_path: str | None = None,
     ) -> str:
-        """Build one project in a temporary directory and publish it atomically."""
+        """Build one project in a temporary directory and publish it atomically.
+
+        新项目一律创建 **纯 v3 布局**（``ensure_layout(compatibility=False)``，
+        不建任何 legacy 空目录 / junction）；根目录只允许 4 个一级目录。
+        """
         ProjectRepository._ensure_roots()
         name = sanitize_project_name(name)
         ws = ProjectRepository.WORKSPACE_ROOT or ""
@@ -715,16 +747,22 @@ class ProjectRepository:
         os.makedirs(ws, exist_ok=True)
         tmp_dir = os.path.join(ws, f".tmp_{name}_{uuid.uuid4().hex}")
         try:
-            paths = project_paths.ensure_layout(tmp_dir, prefer_canonical=True, compatibility=True)
+            paths = project_paths.ensure_layout(
+                tmp_dir, prefer_version=project_paths.STORAGE_VERSION, compatibility=False
+            )
             normalized_script = chapter_identity.normalize_script_for_project(raw_script)
-            with open(os.path.join(tmp_dir, "structured_script.json"), "w", encoding="utf-8") as f:
+            script_path = project_paths.project_file(
+                tmp_dir, "structured_script", create=True,
+                prefer_version=project_paths.STORAGE_VERSION,
+            )
+            with open(script_path, "w", encoding="utf-8") as f:
                 json.dump(normalized_script, f, ensure_ascii=False, indent=2)
 
             source_name = chapter_identity.safe_filename(
                 os.path.basename(source_file_path) if source_file_path else "structured_script.json",
                 "structured_script.json",
             )
-            source_target = os.path.join(paths["source"], source_name)
+            source_target = os.path.join(paths["source_book"], source_name)
             if source_file_path:
                 # Keep the existing file-import copy behavior (and its
                 # Windows-safe metadata) while sharing the rest of creation.
@@ -736,7 +774,7 @@ class ProjectRepository:
                 if not isinstance(chapter, dict):
                     continue
                 chapter_path = os.path.join(
-                    paths["chapter_text"],
+                    paths["chapter_data"],
                     f"{chapter_identity.chapter_file_stem(chapter, index, len(normalized_script.get('chapters', [])))}.json",
                 )
                 with open(chapter_path, "w", encoding="utf-8") as f:
@@ -744,13 +782,6 @@ class ProjectRepository:
 
             parsed_script = script_loader.from_dict(normalized_script)
             total_segments = sum(len(ch.segments) for ch in parsed_script.chapters)
-            bindings = {"bindings": {n: None for n in parsed_script.voices},
-                        "bound_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "verified": []}
-            ProjectRepository.save_bindings(tmp_dir, bindings)
-            shutil.copy2(
-                os.path.join(tmp_dir, "voice_bindings.json"),
-                os.path.join(paths["voices"], "voice_bindings.json"),
-            )
             meta = ProjectMeta(project_name=name, created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
                                updated_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
                                total_chapters=len(parsed_script.chapters), total_segments=total_segments,
@@ -759,7 +790,11 @@ class ProjectRepository:
                                storage_version=project_paths.STORAGE_VERSION,
                                directories=project_paths.layout_manifest(tmp_dir),
                                source_file=os.path.relpath(source_target, tmp_dir))
+            # 先落权威 project.json（storage_version=3），后续 JSON 写入即可按 v3 解析。
             ProjectRepository._save_meta(tmp_dir, meta)
+            bindings = {"bindings": {n: None for n in parsed_script.voices},
+                        "bound_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "verified": []}
+            ProjectRepository.save_bindings(tmp_dir, bindings)
             if os.path.lexists(project_dir):
                 raise FileExistsError(f"项目 '{name}' 已存在")
             os.replace(tmp_dir, project_dir)
@@ -1013,7 +1048,7 @@ class ProjectRepository:
         """
         title = fallback_name
         author = "未填写"
-        script_path = os.path.join(project_dir, "structured_script.json")
+        script_path = project_paths.project_file(project_dir, "structured_script")
         try:
             with open(script_path, encoding="utf-8") as file:
                 data = json.load(file)
@@ -1090,7 +1125,7 @@ class ProjectRepository:
             覆盖参数字典，缺省为 {}。
         """
         project_dir = ProjectRepository._resolve_dir(name)
-        path = os.path.join(project_dir, "synthesis_overrides.json")
+        path = project_paths.project_file(project_dir, "synthesis_overrides")
         if not os.path.isfile(path):
             return {}
         try:
@@ -1113,7 +1148,7 @@ class ProjectRepository:
             AtomicWriteError: 写入失败时抛出。
         """
         project_dir = ProjectRepository._resolve_dir(name)
-        path = os.path.join(project_dir, "synthesis_overrides.json")
+        path = project_paths.project_file(project_dir, "synthesis_overrides")
         _atomic_write(path, overrides if isinstance(overrides, dict) else {})
 
     # --- synthesis_selections.json ---
@@ -1129,7 +1164,7 @@ class ProjectRepository:
             勾选字典（含 chapters 键），缺省为 {}。
         """
         project_dir = ProjectRepository._resolve_dir(name)
-        path = os.path.join(project_dir, "synthesis_selections.json")
+        path = project_paths.project_file(project_dir, "synthesis_selections")
         if not os.path.isfile(path):
             return {}
         try:
@@ -1152,14 +1187,14 @@ class ProjectRepository:
             AtomicWriteError: 写入失败时抛出。
         """
         project_dir = ProjectRepository._resolve_dir(name)
-        path = os.path.join(project_dir, "synthesis_selections.json")
+        path = project_paths.project_file(project_dir, "synthesis_selections")
         _atomic_write(path, selections if isinstance(selections, dict) else {})
 
     # --- voice_bindings.json ---
 
     @staticmethod
     def load_bindings(project_dir: str) -> dict:
-        """读 project_dir/voice_bindings.json，返回完整 dict。
+        """读 project 的 voice_bindings.json（v3 → 99_系统数据/配置/），返回完整 dict。
 
         Args:
             project_dir: 项目目录绝对路径。
@@ -1167,7 +1202,7 @@ class ProjectRepository:
         Returns:
             voice_bindings dict；文件不存在时返回空 dict。
         """
-        path = os.path.join(project_dir, "voice_bindings.json")
+        path = project_paths.project_file(project_dir, "voice_bindings")
         if not os.path.isfile(path):
             return {}
         try:
@@ -1180,7 +1215,7 @@ class ProjectRepository:
 
     @staticmethod
     def save_bindings(project_dir: str, bindings: dict) -> None:
-        """原子写 project_dir/voice_bindings.json。
+        """原子写 project 的 voice_bindings.json（v3 → 99_系统数据/配置/）。
 
         Args:
             project_dir: 项目目录绝对路径。
@@ -1189,5 +1224,7 @@ class ProjectRepository:
         Raises:
             AtomicWriteError: 写入失败时抛出。
         """
-        path = os.path.join(project_dir, "voice_bindings.json")
+        path = project_paths.project_file(
+            project_dir, "voice_bindings", create=True
+        )
         _atomic_write(path, bindings if isinstance(bindings, dict) else {})

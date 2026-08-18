@@ -239,7 +239,7 @@ def test_legacy_project_without_voice_cast_is_not_gated(tmp_path, monkeypatch):
         }],
     })
     project_dir = ProjectRepository.get_project_dir("legacy")
-    voice = os.path.join(project_dir, "voices", "narrator.wav")
+    voice = os.path.join(project_paths.project_dir(project_dir, "project_voices", create=True), "narrator.wav")
     _make_wav(voice)
     bindings = ProjectRepository.load_bindings(project_dir)
     bindings["bindings"]["旁白"] = voice
@@ -594,7 +594,7 @@ def test_export_book_finds_engine_aware_segments(vc_project, engine_config):
     project_dir = ProjectRepository.get_project_dir(vc_project)
     output = audio_pipeline.export_book(
         project_dir, format="wav",
-        output_dir=os.path.join(project_dir, "exports"),
+        output_dir=project_paths.project_dir(project_dir, "delivery_official", create=True),
     )
     assert os.path.isfile(output)
     assert os.path.getsize(output) > 0
@@ -616,7 +616,7 @@ def test_generate_subtitles_finds_engine_aware_segments(vc_project, engine_confi
     project_dir = ProjectRepository.get_project_dir(vc_project)
     written = audio_pipeline.generate_subtitles(
         project_dir, formats=("srt",),
-        output_dir=os.path.join(project_dir, "exports"),
+        output_dir=project_paths.project_dir(project_dir, "delivery_official", create=True),
         require_complete=True,
     )
     assert written and os.path.isfile(written[0])

@@ -73,8 +73,9 @@ class QualityRepository:
     @staticmethod
     def state_path(project_name: str, *, create: bool = True) -> str:
         project_dir = ProjectRepository.get_project_dir(str(project_name))
-        quality_dir = project_paths.project_dir(project_dir, "quality", create=create)
-        return os.path.join(quality_dir, _STATE_FILE)
+        return project_paths.project_file(
+            project_dir, "quality_state", create=create
+        )
 
     @classmethod
     def lock_path(cls, project_name: str) -> str:

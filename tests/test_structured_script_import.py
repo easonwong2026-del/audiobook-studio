@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from lib import project_paths
 from repositories.project_repo import ProjectRepository
 from services.structured_script_import import StructuredScriptImportService
 
@@ -104,9 +105,9 @@ def test_creation_initializes_project_snapshot_and_bindings(isolated_projects):
     result = StructuredScriptImportService.create("created", str(VALID))
     project_dir = Path(ProjectRepository.get_project_dir(result.project_name))
     assert result.segment_count == 4
-    assert (project_dir / "project.json").is_file()
-    assert (project_dir / "structured_script.json").is_file()
-    bindings = json.loads((project_dir / "voice_bindings.json").read_text(encoding="utf-8"))
+    assert Path(project_paths.project_file(str(project_dir), "project_meta")).is_file()
+    assert Path(project_paths.project_file(str(project_dir), "structured_script")).is_file()
+    bindings = json.loads(Path(project_paths.project_file(str(project_dir), "voice_bindings")).read_text(encoding="utf-8"))
     assert bindings["bindings"] == {"旁白": None, "小雨": None}
     snapshot = ProjectRepository.load_snapshot("created")
     assert snapshot.meta.total_chapters == 2
