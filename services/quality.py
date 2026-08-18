@@ -641,6 +641,35 @@ class QualityService:
             resolve_missing_revision=False,
         )
 
+    @staticmethod
+    def _technical_qa_error_result(
+        segment_id: str,
+        revision_id: str | None,
+        exc: Exception,
+    ) -> dict[str, Any]:
+        """Keep one unexpected batch-item failure visible and JSON-safe.
+
+        A failed analysis is represented as a normal technical ``fail`` with a
+        durable error check.  This keeps the existing QA state vocabulary and
+        lets ``save_technical_qa_batch`` persist the result when the segment
+        already has an active revision, without changing the repository schema.
+        """
+        detail = str(exc).strip() or type(exc).__name__
+        return {
+            "segment_id": str(segment_id),
+            "revision_id": str(revision_id or ""),
+            "outcome": "fail",
+            "error": detail[:500],
+            "checks": [{
+                "code": "QA_ITEM_ERROR",
+                "severity": "error",
+                "message": f"技术 QA 分析异常：{detail[:300]}",
+            }],
+            "metrics": {},
+            "checker_version": 1,
+            "checked_at": _now(),
+        }
+
     @classmethod
     def run_technical_qa(
         cls,
@@ -664,11 +693,13 @@ class QualityService:
         revision_ids: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
         """Analyze many segments without writing ``quality_state.json``."""
-        prepared_ids = [
-            str(segment_id).strip()
-            for segment_id in segment_ids
-            if str(segment_id).strip()
-        ]
+        prepared_ids: list[str] = []
+        seen_ids: set[str] = set()
+        for value in segment_ids:
+            segment_id = str(value).strip()
+            if segment_id and segment_id not in seen_ids:
+                prepared_ids.append(segment_id)
+                seen_ids.add(segment_id)
         revision_map = {
             str(segment_id): str(revision_id)
             for segment_id, revision_id in (revision_ids or {}).items()
@@ -687,38 +718,39 @@ class QualityService:
         results: list[dict[str, Any]] = []
         for segment_id in prepared_ids:
             segment = segments.get(segment_id)
-            if segment is None:
-                # Preserve the single-segment API's KeyError contract for an
-                # invalid identifier rather than silently dropping a result.
-                results.append(
-                    cls._analyze_technical_qa(
+            selected_revision_id = revision_map.get(segment_id)
+            if not selected_revision_id:
+                selected_revision_id = state["active_revisions"].get(segment_id)
+            selected_revision = state["revisions"].get(selected_revision_id)
+            try:
+                if segment is None:
+                    # Preserve the single-segment API's KeyError contract for
+                    # an invalid identifier, but isolate it to this item so a
+                    # valid neighbor still completes the batch.
+                    result = cls._analyze_technical_qa(
                         project_name,
                         segment_id,
-                        revision_map.get(segment_id),
+                        selected_revision_id,
                     )
+                else:
+                    result = cls._analyze_technical_qa(
+                        project_name,
+                        segment_id,
+                        selected_revision_id,
+                        meta=meta,
+                        segment=segment,
+                        bindings=bindings,
+                        revision=(
+                            selected_revision
+                            if isinstance(selected_revision, dict) else None
+                        ),
+                        resolve_missing_revision=False,
+                    )
+            except Exception as exc:  # one bad item must not abort the batch
+                result = cls._technical_qa_error_result(
+                    segment_id, selected_revision_id, exc
                 )
-                continue
-            selected_revision_id = revision_map.get(segment_id)
-            if selected_revision_id:
-                selected_revision = state["revisions"].get(selected_revision_id)
-            else:
-                selected_revision_id = state["active_revisions"].get(segment_id)
-                selected_revision = state["revisions"].get(selected_revision_id)
-            results.append(
-                cls._analyze_technical_qa(
-                    project_name,
-                    segment_id,
-                    selected_revision_id,
-                    meta=meta,
-                    segment=segment,
-                    bindings=bindings,
-                    revision=(
-                        selected_revision
-                        if isinstance(selected_revision, dict) else None
-                    ),
-                    resolve_missing_revision=False,
-                )
-            )
+            results.append(result)
         return results
 
     @classmethod
@@ -860,6 +892,7 @@ class QualityService:
             "segment_ids": [
                 str(item.get("segment_id") or "") for item in saved
             ],
+            "skipped_segment_ids": skipped,
         }
 
     @classmethod
