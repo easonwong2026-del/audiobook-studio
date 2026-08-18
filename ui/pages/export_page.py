@@ -38,6 +38,12 @@ def create_export_page() -> dict:
             e_go = gr.Button("导出成品", variant="primary")
             e_out = gr.File(label="下载成品", interactive=False)
             e_path = gr.Textbox(label="导出状态", interactive=False)
+            e_open = gr.Button("打开导出位置", variant="secondary", interactive=False)
+            # Export status is backed by the durable task id, not a local
+            # button/session flag.  The owning app wires these hidden states
+            # to the Export-only polling timer.
+            e_export_task_id = gr.State("")
+            e_export_output_dir = gr.State("")
 
         with gr.Group(elem_classes=["delivery-workspace"]):
             gr.Markdown("##### 字幕文件")
@@ -65,6 +71,9 @@ def create_export_page() -> dict:
         "e_go": e_go,
         "e_out": e_out,
         "e_path": e_path,
+        "e_open": e_open,
+        "e_export_task_id": e_export_task_id,
+        "e_export_output_dir": e_export_output_dir,
         "e_subtitle": e_subtitle,
         "e_subtitle_btn": e_subtitle_btn,
         "e_subtitle_out": e_subtitle_out,
