@@ -1,11 +1,11 @@
-"""补录页接线 AST 回归（无需 import gradio，与 test_app_wiring.py 同风格）。
+"""统一补录 / Quick TTS 页面接线 AST 回归。
 
 验证：
   - 「角色补录」被收纳到顶级「生产与质检」阶段，而非单独导航按钮。
   - 新增 grp-supplement 分组（ui/pages/supplement_page.py 中 elem_id="grp-supplement"）。
   - _GROUPS 在 app.py 运行时装填 8 项（含生产阶段内部导航）。
   - _goto 定义在 ui/navigation.py 中，返回 8 个 gr.update。
-  - 新增 handler 均定义且接 ss（首参或含 ss），并已接线。
+  - 统一 handler 定义且接 ss，并已接线。
 """
 from __future__ import annotations
 
@@ -78,10 +78,10 @@ def test_goto_returns_internal_group_updates_for_five_stage_navigation():
 def test_supplement_handlers_defined_and_take_ss():
     expected = {
         "refresh_supplement_roles": True,   # ss 首参
-        "do_supplement_parse_json": True,   # 含 ss
-        "do_supplement_synth": True,        # 含 ss（末参）
-        "do_supplement_export": True,       # 含 ss（末参）
-        "play_supplement_preview": True,    # 含 ss（��参）
+        "do_utility_parse_json": True,
+        "do_utility_tts_synth": True,
+        "do_utility_export": True,
+        "play_utility_preview": True,
     }
     for h, _ in expected.items():
         fn = find_func(TREE, h)
@@ -92,27 +92,31 @@ def test_supplement_handlers_defined_and_take_ss():
 
 def test_supplement_refresh_wired_to_production_stage():
     assert "nav_synth.click(" in SRC, "生产与质检入口缺接线"
-    assert "refresh_supplement_roles, [ss], [sup_role]" in SRC, \
+    assert "refresh_supplement_roles, [ss], [utility_role]" in SRC, \
         "进入生产与质检后未懒刷新补录角色"
 
 
 def test_parse_json_wired():
-    assert "do_supplement_parse_json" in SRC
-    assert "sup_json_parse.click(do_supplement_parse_json" in SRC, \
+    assert "do_utility_parse_json" in SRC
+    assert "utility_json_parse.click(" in SRC and "do_utility_parse_json" in SRC, \
         "小 JSON 解析按钮未接线到 do_supplement_parse_json"
 
 
 def test_synth_wired():
-    assert "sup_synth.click(do_supplement_synth" in SRC, \
-        "补合成按钮未接线到 do_supplement_synth"
+    assert "utility_synth.click(" in SRC and "do_utility_tts_synth" in SRC, \
+        "统一生成按钮未接线到 do_utility_tts_synth"
 
 
 def test_export_wired():
-    assert "sup_export.click(do_supplement_export" in SRC, \
-        "导出按钮未接线到 do_supplement_export"
+    assert "utility_export.click(" in SRC and "do_utility_export" in SRC, \
+        "统一导出按钮未接线到 do_utility_export"
 
 
 def test_preview_wired():
-    assert "play_supplement_preview(" in SRC, "试听���调用 play_supplement_preview"
-    assert "sup_play_all.click(" in SRC and "sup_play_seg.click(" in SRC, \
-        "整段 / 逐句试听按钮未接线"
+    assert "play_utility_preview" in SRC, "统一试听调用缺失"
+    assert "utility_preview.click(" in SRC, "统一试听按钮未接线"
+
+
+def test_project_result_identity_is_wired_for_stale_safety():
+    assert "utility_result_project" in SRC, "缺少项目结果身份 state"
+    assert "utility_result_project" in SUP_SRC, "页面未创建项目结果身份 state"

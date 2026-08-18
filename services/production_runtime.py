@@ -1559,6 +1559,10 @@ class ProductionRuntime:
             beams = max(int(payload.get("num_beams", 2) or 2), 1)
         except (TypeError, ValueError):
             beams = 2
+        overrides = payload.get("overrides") if isinstance(payload.get("overrides"), dict) else {}
+        emotion = overrides.get("emotion") or "neutral"
+        emo_alpha = overrides.get("emo_alpha")
+        speech_rate = overrides.get("speech_rate")
         if not text:
             return {
                 "text": "",
@@ -1578,9 +1582,9 @@ class ProductionRuntime:
             generated = tts_engine.synthesize_segment(
                 text=text,
                 speaker_audio=speaker_audio,
-                emotion="neutral",
-                emo_alpha=1.0,
-                speech_rate=1.0,
+                emotion=emotion,
+                emo_alpha=float(emo_alpha) if emo_alpha is not None else 1.0,
+                speech_rate=float(speech_rate) if speech_rate is not None else 1.0,
                 output_path=temporary,
                 num_beams=beams,
             )

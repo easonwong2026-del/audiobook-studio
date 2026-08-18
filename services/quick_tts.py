@@ -87,6 +87,7 @@ class QuickTTSService:
         speaker_audio: str,
         *,
         num_beams: int = 2,
+        overrides: dict[str, Any] | None = None,
         timeout: float = 3600.0,
         progress_cb: Any = None,
     ) -> str:
@@ -112,6 +113,7 @@ class QuickTTSService:
             text=text,
             speaker_audio=speaker,
             num_beams=num_beams,
+            overrides=overrides,
             timeout=timeout,
             progress_cb=progress_cb,
         )

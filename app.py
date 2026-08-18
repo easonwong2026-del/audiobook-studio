@@ -2235,10 +2235,55 @@ def do_supplement_parse_json(sup_json, ss):
     return (gr.update(value=role), role, lines, preview)
 
 
-def do_supplement_synth(sup_role, sup_mode, sup_text, sup_json_role, sup_json_lines,
-                        sup_emotion, sup_emo_alpha, sup_rate, sup_quality,
-                        sup_split_punct, sup_voice, ss,
-                        progress: "gr.Progress" = None):
+def do_utility_parse_json(utility_json, ss):
+    """Parse project supplement JSON and feed role/text into shared UI state."""
+    role_update, role, lines, message = do_supplement_parse_json(utility_json, ss)
+    if message.startswith("### ✅"):
+        return role_update, "\n".join(lines), gr.update(value=False), message
+    return role_update, gr.update(), gr.update(), message
+
+
+def _utility_progress(progress: "gr.Progress" = None):
+    """Build the single progress adapter shared by project and utility TTS."""
+    progress_phases: list[str] = []
+    started_at = time.monotonic()
+
+    def _callback(phase: str, message: str) -> None:
+        progress_phases.append(str(message or phase or ""))
+        if progress is None:
+            return
+        try:
+            elapsed = int(time.monotonic() - started_at)
+            if phase in {"submitted", "runtime_ensure_requested"}:
+                progress(None, desc=str(message or "正在处理…"))
+            elif phase == "engine_loading":
+                progress(
+                    None,
+                    desc=f"{str(message or '正在加载引擎…')} 已等待 {_fmt_elapsed(elapsed)}",
+                )
+            elif phase == "engine_ready":
+                progress(0.0, desc=str(message or "引擎就绪"))
+            elif phase == "infer":
+                percent = _infer_percent(message)
+                progress(
+                    0.0 if percent is None else percent,
+                    desc=str(message or "正在合成…"),
+                )
+            elif phase in {"done", "error"}:
+                progress(
+                    1.0,
+                    desc=str(message or ("✅ 任务完成" if phase == "done" else "❌ 任务失败")),
+                )
+        except Exception:  # pragma: no cover - progress is best effort
+            pass
+
+    return progress_phases, _callback
+
+
+def _synthesize_project_utility(sup_role, sup_mode, sup_text, sup_json_role, sup_json_lines,
+                                sup_emotion, sup_emo_alpha, sup_rate, sup_quality,
+                                sup_split_punct, sup_voice, ss,
+                                progress: "gr.Progress" = None):
     """逐句补合成：按模式取（角色, 文本）→ 逐句 synthesize → 收集 wav + 逐句状态。
 
     输入模式（``sup_mode``）：
@@ -2300,45 +2345,9 @@ def do_supplement_synth(sup_role, sup_mode, sup_text, sup_json_role, sup_json_li
         created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
         task_dir=task_dir,
     )
-    # 引擎加载/切换是多分钟级阻塞操作：#38 之后补录会在 Runtime 内做
-    # profile compliance（冷加载或 recycle）。把每个阶段透传为 Gradio 进度，
-    # 让用户在等待期间看到「正在加载 IndexTTS 2.5…」而不是“卡死”。
-    progress_phases: list[str] = []
-    _progress_started_at = time.monotonic()
-
-    def _supplement_progress(phase: str, message: str) -> None:
-        progress_phases.append(str(message or phase or ""))
-        if progress is not None:
-            try:
-                elapsed = int(time.monotonic() - _progress_started_at)
-                if phase in {"submitted", "runtime_ensure_requested"}:
-                    progress(None, desc=str(message or "正在处理…"))
-                elif phase == "engine_loading":
-                    # 模型加载阶段不伪造百分比：indeterminate + 阶段名 + 已耗时。
-                    progress(
-                        None,
-                        desc=f"{str(message or '正在加载引擎…')} 已等待 {_fmt_elapsed(elapsed)}",
-                    )
-                elif phase == "engine_ready":
-                    progress(0.0, desc=str(message or "引擎就绪"))
-                elif phase == "infer":
-                    # 真实 determinate 进度：解析 "正在生成第 X/N 句 · 已完成 C · 失败 F · 进度 P%"
-                    percent = _infer_percent(message)
-                    if percent is None:
-                        progress(0.0, desc=str(message or "正在合成…"))
-                    else:
-                        progress(percent, desc=str(message or "正在合成…"))
-                elif phase in {"done", "error"}:
-                    # 终态：清空/替换残留的「正在加载模型…」，进度条回到明确终态。
-                    progress(
-                        1.0,
-                        desc=str(
-                            message
-                            or ("✅ 任务完成" if phase == "done" else "❌ 任务失败")
-                        ),
-                    )
-            except Exception:  # pragma: no cover - progress is best effort
-                pass
+    # 引擎加载/切换是多分钟级阻塞操作；项目补录和 Quick TTS 共用同一套
+    # authoritative progress 适配器，不伪造百分比。
+    progress_phases, _supplement_progress = _utility_progress(progress)
 
     try:
         results = SupplementService.synthesize_lines(
@@ -2434,6 +2443,113 @@ def do_supplement_synth(sup_role, sup_mode, sup_text, sup_json_role, sup_json_li
     return wav_paths, "\n".join(md)
 
 
+def do_utility_tts_synth(
+    utility_mode,
+    utility_role,
+    utility_voice,
+    utility_text,
+    utility_emotion,
+    utility_emo_alpha,
+    utility_rate,
+    utility_quality,
+    utility_split_punct,
+    utility_override_voice,
+    ss,
+    progress: "gr.Progress" = None,
+):
+    """Shared synth entrypoint dispatching to the two authoritative services."""
+    mode = str(utility_mode or "project_role")
+    if mode == "project_role":
+        wavs, message = _synthesize_project_utility(
+            utility_role,
+            "paste",
+            utility_text,
+            "",
+            [],
+            utility_emotion,
+            utility_emo_alpha,
+            utility_rate,
+            utility_quality,
+            utility_split_punct,
+            utility_override_voice,
+            ss,
+            progress=progress,
+        )
+        return wavs, message, mode if wavs else "", str(ss.project) if wavs and ss else ""
+
+    if mode != "library_voice":
+        return [], "❌ 未知声音来源，请重新选择", "", ""
+    if not utility_voice:
+        return [], "❌ 请选择声音（全局声音库）", "", ""
+    text = str(utility_text or "").strip()
+    if not text:
+        return [], "❌ 请输入台词", "", ""
+    speaker = _lib_path(utility_voice)
+    if not speaker or not os.path.isfile(speaker):
+        return [], f"❌ 声音文件不存在：{utility_voice}", "", ""
+
+    use_override = utility_emotion not in (None, "(按默认)")
+    overrides = {
+        "emotion": utility_emotion if use_override else None,
+        "emo_alpha": float(utility_emo_alpha) if use_override else None,
+        "speech_rate": float(utility_rate) if use_override else None,
+    }
+    progress_phases, utility_progress = _utility_progress(progress)
+    try:
+        wav = QuickTTSService.synthesize(
+            text=text,
+            speaker_audio=speaker,
+            num_beams=int(utility_quality) if utility_quality else 2,
+            overrides=overrides,
+            progress_cb=utility_progress,
+        )
+    except QuickTTSBusyError as exc:
+        if progress is not None:
+            try:
+                progress(1.0, desc="❌ 临时配音繁忙")
+            except Exception:  # pragma: no cover - progress is best effort
+                pass
+        return [], f"❌ {exc}", "", ""
+    except Exception as exc:
+        hint = ""
+        if progress_phases:
+            hint = f"（阶段：{' → '.join(progress_phases[-3:])}）"
+        if progress is not None:
+            try:
+                progress(1.0, desc="❌ 临时配音失败")
+            except Exception:  # pragma: no cover - progress is best effort
+                pass
+        return [], f"❌ 临时配音失败：{str(exc)[:200]}{hint}", "", ""
+    if progress is not None:
+        try:
+            progress(1.0, desc="✅ 临时配音完成")
+        except Exception:  # pragma: no cover - progress is best effort
+            pass
+    return [wav], f"### 🎙 临时配音完成\n- ✅ 已生成：`{wav}`\n> 临时配音不走项目书架；试听或导出后产物位于 Quick TTS 目录。", mode, ""
+
+
+def do_supplement_synth(sup_role, sup_mode, sup_text, sup_json_role, sup_json_lines,
+                        sup_emotion, sup_emo_alpha, sup_rate, sup_quality,
+                        sup_split_punct, sup_voice, ss,
+                        progress: "gr.Progress" = None):
+    """Compatibility API for existing callers; UI uses ``do_utility_tts_synth``."""
+    return _synthesize_project_utility(
+        sup_role,
+        sup_mode,
+        sup_text,
+        sup_json_role,
+        sup_json_lines,
+        sup_emotion,
+        sup_emo_alpha,
+        sup_rate,
+        sup_quality,
+        sup_split_punct,
+        sup_voice,
+        ss,
+        progress=progress,
+    )
+
+
 def do_supplement_export(sup_format, sup_bitrate, sup_export_name, sup_wavs, sup_role, ss):
     """把已合成的补录 wav 导出为独立音频（不进整本拼接），经白名单后返回下载路径。
 
@@ -2520,76 +2636,13 @@ def _engine_display_label(profile):
 
 
 def do_quick_tts_synth(qt_voice, qt_text, ss, progress: "gr.Progress" = None):
-    """临时配音：全局声音库 + 台词 → 通过 singleton runtime 生成 WAV。
-
-    Returns:
-        ``(qt_wavs state, 状态 markdown)``。
-    """
-    if not qt_voice:
-        return [], "❌ 请选择声音（全局声音库）"
-    text = str(qt_text or "").strip()
-    if not text:
-        return [], "❌ 请输入台词"
-    speaker = _lib_path(qt_voice)
-    if not speaker or not os.path.isfile(speaker):
-        return [], f"❌ 声音文件不存在：{qt_voice}"
-    progress_phases: list[str] = []
-    _qt_started_at = time.monotonic()
-
-    def _qt_progress(phase: str, message: str) -> None:
-        progress_phases.append(str(message or phase or ""))
-        if progress is not None:
-            try:
-                elapsed = int(time.monotonic() - _qt_started_at)
-                if phase in {"submitted", "runtime_ensure_requested"}:
-                    progress(None, desc=str(message or "正在处理…"))
-                elif phase == "engine_loading":
-                    progress(
-                        None,
-                        desc=f"{str(message or '正在加载引擎…')} 已等待 {_fmt_elapsed(elapsed)}",
-                    )
-                elif phase == "engine_ready":
-                    progress(0.0, desc=str(message or "引擎就绪"))
-                elif phase == "infer":
-                    progress(0.5, desc=str(message or "正在合成…"))
-                elif phase in {"done", "error"}:
-                    progress(1.0, desc=str(message or ("✅ 任务完成" if phase == "done" else "❌ 任务失败")))
-            except Exception:  # pragma: no cover - progress is best effort
-                pass
-
-    try:
-        wav = QuickTTSService.synthesize(
-            text=text,
-            speaker_audio=speaker,
-            num_beams=2,
-            progress_cb=_qt_progress,
-        )
-    except QuickTTSBusyError as e:
-        if progress is not None:
-            try:
-                progress(1.0, desc="❌ 临时配音繁忙")
-            except Exception:  # pragma: no cover
-                pass
-        return [], f"❌ {e}"
-    except Exception as e:
-        hint = ""
-        if progress_phases:
-            hint = f"（阶段：{' → '.join(progress_phases[-3:])}）"
-        if progress is not None:
-            try:
-                progress(1.0, desc="❌ 临时配音失败")
-            except Exception:  # pragma: no cover
-                pass
-        return [], f"❌ 临时配音失败：{str(e)[:200]}{hint}"
-    if progress is not None:
-        try:
-            progress(1.0, desc="✅ 临时配音完成")
-        except Exception:  # pragma: no cover
-            pass
-    md = "### 🎙 临时配音完成"
-    md += f"\n- ✅ 已生成：`{wav}`"
-    md += "\n> 临时配音不走项目书架；试听或导出后产物位于 Quick TTS 目录。"
-    return [wav], md
+    """Compatibility API for existing callers; UI uses the shared entrypoint."""
+    wavs, message, _, _ = do_utility_tts_synth(
+        "library_voice", None, qt_voice, qt_text,
+        "(按默认)", 1.0, 1.0, 2, True, None, ss,
+        progress=progress,
+    )
+    return wavs, message
 
 
 def play_quick_tts(qt_wavs):
@@ -2630,6 +2683,89 @@ def open_quick_tts_folder():
 
     ok = open_in_folder(out_dir)
     return f"✅ 已打开导出目录：`{out_dir}`" if ok else f"❌ 打开目录失败：`{out_dir}`"
+
+
+def refresh_utility_export_hint(utility_mode, ss):
+    """Show the authoritative destination for the selected utility mode."""
+    if str(utility_mode or "project_role") == "library_voice":
+        out_dir = QuickTTSService.exports_root()
+        return f"**保存位置：** `{out_dir}`"
+    return refresh_supplement_export_hint(ss)
+
+
+def reset_utility_mode(utility_mode, ss):
+    """Clear result state when switching business modes."""
+    mode = str(utility_mode or "project_role")
+    if mode not in {"project_role", "library_voice"}:
+        mode = "project_role"
+    label = "项目补录" if mode == "project_role" else "临时配音"
+    return (
+        gr.update(visible=mode == "project_role"),
+        gr.update(visible=mode == "library_voice"),
+        [],
+        "",
+        "",
+        None,
+        None,
+        "",
+        f"已切换到「{label}」，请重新生成音频。",
+        refresh_utility_export_hint(mode, ss),
+    )
+
+
+def play_utility_preview(utility_mode, utility_result_mode, utility_result_project, utility_wavs, ss):
+    """Preview the current mode's artifact through the single Audio component."""
+    mode = str(utility_mode or "project_role")
+    if mode != str(utility_result_mode or ""):
+        return None
+    if mode == "library_voice":
+        return play_quick_tts(utility_wavs)
+    if not ss or not ss.project or str(ss.project) != str(utility_result_project or ""):
+        return None
+    return play_supplement_preview("all", utility_wavs, ss)
+
+
+def do_utility_export(
+    utility_mode,
+    utility_result_mode,
+    utility_result_project,
+    utility_format,
+    utility_bitrate,
+    utility_export_name,
+    utility_wavs,
+    utility_role,
+    ss,
+):
+    """Dispatch shared export presentation to the mode-specific destination."""
+    mode = str(utility_mode or "project_role")
+    if mode != str(utility_result_mode or ""):
+        return None, "❌ 当前音频来自另一种声音来源，请先重新生成"
+    if mode == "library_voice":
+        return do_quick_tts_export(
+            utility_format, utility_bitrate, utility_export_name, utility_wavs
+        )
+    if not ss or not ss.project or str(ss.project) != str(utility_result_project or ""):
+        return None, "❌ 当前项目已变化，请重新生成"
+    return do_supplement_export(
+        utility_format,
+        utility_bitrate,
+        utility_export_name,
+        utility_wavs,
+        utility_role,
+        ss,
+    )
+
+
+def open_utility_folder(utility_mode, utility_result_mode, utility_result_project, utility_wavs, ss):
+    """Open the selected mode's real export directory with the shared button."""
+    mode = str(utility_mode or "project_role")
+    if mode != str(utility_result_mode or ""):
+        return "❌ 当前音频来自另一种声音来源，请先重新生成"
+    if mode == "library_voice":
+        return open_quick_tts_folder()
+    if not ss or not ss.project or str(ss.project) != str(utility_result_project or ""):
+        return "❌ 当前项目已变化，请重新生成"
+    return open_supplement_folder(utility_wavs, ss)
 
 
 def _on_ui_ready_prewarm():
@@ -3378,7 +3514,7 @@ def _open_chain_rest(event):
     )
     e = e.then(refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
     e = e.then(refresh_categories, [], [v_bind_category, v_save_category])
-    e = e.then(refresh_production_voice_choices, [], [e_voice, sup_voice])
+    e = e.then(refresh_production_voice_choices, [], [e_voice, utility_override_voice])
     e = e.then(refresh_production_check, [ss], [production_check])
     e = e.then(refresh_export_default_dir, [ss], [e_save_dir_hint])
     e = e.then(
@@ -3620,50 +3756,37 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             # ───────── 角色单独补录 / 补合成导出 / 临时配音 ─────────
             supplement_page = create_supplement_page()
             grp_supplement = supplement_page["group"]
-            sup_role = supplement_page["sup_role"]
-            sup_refresh = supplement_page["sup_refresh"]
-            sup_text = supplement_page["sup_text"]
-            sup_split_punct = supplement_page["sup_split_punct"]
-            sup_json = supplement_page["sup_json"]
-            sup_json_parse = supplement_page["sup_json_parse"]
-            sup_json_role = supplement_page["sup_json_role"]
-            sup_json_lines = supplement_page["sup_json_lines"]
-            sup_emotion = supplement_page["sup_emotion"]
-            sup_emo_alpha = supplement_page["sup_emo_alpha"]
-            sup_rate = supplement_page["sup_rate"]
-            sup_quality = supplement_page["sup_quality"]
-            sup_voice = supplement_page["sup_voice"]
-            sup_mode = supplement_page["sup_mode"]
-            sup_synth = supplement_page["sup_synth"]
-            sup_synth_status = supplement_page["sup_synth_status"]
-            sup_wavs = supplement_page["sup_wavs"]
-            sup_play_all = supplement_page["sup_play_all"]
-            sup_play_seg = supplement_page["sup_play_seg"]
-            sup_audio = supplement_page["sup_audio"]
-            sup_export_name = supplement_page["sup_export_name"]
-            sup_format = supplement_page["sup_format"]
-            sup_bitrate = supplement_page["sup_bitrate"]
-            sup_export = supplement_page["sup_export"]
-            sup_open_folder = supplement_page["sup_open_folder"]
-            sup_save_loc = supplement_page["sup_save_loc"]
-            sup_out = supplement_page["sup_out"]
-            sup_path = supplement_page["sup_path"]
-            qt_voice = supplement_page["qt_voice"]
-            qt_engine = supplement_page["qt_engine"]
-            qt_text = supplement_page["qt_text"]
-            qt_synth = supplement_page["qt_synth"]
-            qt_status = supplement_page["qt_status"]
-            qt_wavs = supplement_page["qt_wavs"]
-            qt_play = supplement_page["qt_play"]
-            qt_audio = supplement_page["qt_audio"]
-            qt_export_name = supplement_page["qt_export_name"]
-            qt_format = supplement_page["qt_format"]
-            qt_bitrate = supplement_page["qt_bitrate"]
-            qt_export = supplement_page["qt_export"]
-            qt_open_folder = supplement_page["qt_open_folder"]
-            qt_save_loc = supplement_page["qt_save_loc"]
-            qt_out = supplement_page["qt_out"]
-            qt_path = supplement_page["qt_path"]
+            utility_mode = supplement_page["utility_mode"]
+            utility_project_group = supplement_page["utility_project_group"]
+            utility_role = supplement_page["utility_role"]
+            utility_role_refresh = supplement_page["utility_role_refresh"]
+            utility_json = supplement_page["utility_json"]
+            utility_json_parse = supplement_page["utility_json_parse"]
+            utility_split_punct = supplement_page["utility_split_punct"]
+            utility_override_voice = supplement_page["utility_override_voice"]
+            utility_library_group = supplement_page["utility_library_group"]
+            utility_voice = supplement_page["utility_voice"]
+            utility_engine = supplement_page["utility_engine"]
+            utility_text = supplement_page["utility_text"]
+            utility_emotion = supplement_page["utility_emotion"]
+            utility_emo_alpha = supplement_page["utility_emo_alpha"]
+            utility_rate = supplement_page["utility_rate"]
+            utility_quality = supplement_page["utility_quality"]
+            utility_synth = supplement_page["utility_synth"]
+            utility_status = supplement_page["utility_status"]
+            utility_wavs = supplement_page["utility_wavs"]
+            utility_result_mode = supplement_page["utility_result_mode"]
+            utility_result_project = supplement_page["utility_result_project"]
+            utility_preview = supplement_page["utility_preview"]
+            utility_audio = supplement_page["utility_audio"]
+            utility_export_name = supplement_page["utility_export_name"]
+            utility_format = supplement_page["utility_format"]
+            utility_bitrate = supplement_page["utility_bitrate"]
+            utility_export = supplement_page["utility_export"]
+            utility_open_folder = supplement_page["utility_open_folder"]
+            utility_save_loc = supplement_page["utility_save_loc"]
+            utility_out = supplement_page["utility_out"]
+            utility_path = supplement_page["utility_path"]
             # ───────── 设置 ─────────
             set_page = create_settings_page()
             grp_settings = set_page["group"]
@@ -3740,7 +3863,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         lambda: _goto("synth"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-synth')?.classList.add('active'); }").then(
         lambda: gr.update(value="synth"), None, [production_stage]).then(
-        refresh_production_voice_choices, [], [e_voice, sup_voice]).then(
+        refresh_production_voice_choices, [], [e_voice, utility_override_voice]).then(
         refresh_production_check, [ss], [production_check]).then(
         preview_chapters, [ss], _review_outputs()).then(
         preview_chapter_options, [ss], [e_chapter_sel]).then(
@@ -3750,10 +3873,10 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         refresh_queue_list, [ss], [s_queue_list]).then(
         refresh_production_task, [ss], [s_task_status]).then(
         refresh_production_engine_status, [ss], [s_engine_status]).then(
-        refresh_supplement_roles, [ss], [sup_role]).then(
-        refresh_supplement_export_hint, [ss], [sup_save_loc]).then(
-        lambda: gr.update(choices=_lib_voices(), value=None), None, [qt_voice]).then(
-        refresh_quick_tts_engine_info, None, [qt_engine])
+        refresh_supplement_roles, [ss], [utility_role]).then(
+        refresh_utility_export_hint, [utility_mode, ss], [utility_save_loc]).then(
+        lambda: gr.update(choices=_lib_voices(), value=None), None, [utility_voice]).then(
+        refresh_quick_tts_engine_info, None, [utility_engine])
     nav_export.click(
         lambda: _goto("export"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-export')?.classList.add('active'); }").then(
@@ -3812,7 +3935,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         lambda: _goto("synth"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-synth')?.classList.add('active'); }").then(
         lambda: gr.update(value="synth"), None, [production_stage]).then(
-        refresh_production_voice_choices, [], [e_voice, sup_voice]).then(
+        refresh_production_voice_choices, [], [e_voice, utility_override_voice]).then(
         refresh_production_check, [ss], [production_check]).then(
         preview_chapters, [ss], _review_outputs()).then(
         preview_chapter_options, [ss], [e_chapter_sel]).then(
@@ -3821,10 +3944,10 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         [e_quality_summary, e_seg_preview_sel, e_seg_regen_sel, e_segment_quality]).then(
         refresh_queue_list, [ss], [s_queue_list]).then(
         refresh_production_task, [ss], [s_task_status]).then(
-        refresh_supplement_roles, [ss], [sup_role]).then(
-        refresh_supplement_export_hint, [ss], [sup_save_loc]).then(
-        lambda: gr.update(choices=_lib_voices(), value=None), None, [qt_voice]).then(
-        refresh_quick_tts_engine_info, None, [qt_engine])
+        refresh_supplement_roles, [ss], [utility_role]).then(
+        refresh_utility_export_hint, [utility_mode, ss], [utility_save_loc]).then(
+        lambda: gr.update(choices=_lib_voices(), value=None), None, [utility_voice]).then(
+        refresh_quick_tts_engine_info, None, [utility_engine])
     ov_export.click(
         lambda: _goto("export"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-export')?.classList.add('active'); }").then(
@@ -4129,34 +4252,81 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     )
     e_subtitle_btn.click(do_export_subtitles, [ss, e_subtitle], [e_subtitle_out, e_subtitle_msg])
 
-    # ── 角色单独补录 / 补合成导出 / 临时配音 ──
-    sup_refresh.click(refresh_supplement_roles, [ss], [sup_role]).then(
-        refresh_supplement_export_hint, [ss], [sup_save_loc])
-    sup_json_parse.click(do_supplement_parse_json, [sup_json, ss],
-                         [sup_role, sup_json_role, sup_json_lines, sup_synth_status])
-    sup_synth.click(do_supplement_synth,
-                    [sup_role, sup_mode, sup_text, sup_json_role, sup_json_lines,
-                     sup_emotion, sup_emo_alpha, sup_rate, sup_quality,
-                     sup_split_punct, sup_voice, ss],
-                    [sup_wavs, sup_synth_status])
-    sup_export.click(do_supplement_export,
-                     [sup_format, sup_bitrate, sup_export_name, sup_wavs, sup_role, ss],
-                     [sup_out, sup_path]).then(
-        refresh_supplement_export_hint, [ss], [sup_save_loc])
-    sup_open_folder.click(open_supplement_folder, [sup_wavs, ss], [sup_path])
-    sup_play_all.click(lambda wavs, ss: play_supplement_preview("all", wavs, ss),
-                       [sup_wavs, ss], [sup_audio])
-    sup_play_seg.click(lambda wavs, ss: play_supplement_preview("seg", wavs, ss),
-                       [sup_wavs, ss], [sup_audio])
-
-    # ── 临时配音（Quick TTS）──
-    qt_synth.click(do_quick_tts_synth, [qt_voice, qt_text, ss],
-                   [qt_wavs, qt_status])
-    qt_play.click(play_quick_tts, [qt_wavs], [qt_audio])
-    qt_export.click(do_quick_tts_export,
-                    [qt_format, qt_bitrate, qt_export_name, qt_wavs],
-                    [qt_out, qt_path])
-    qt_open_folder.click(open_quick_tts_folder, [], [qt_path])
+    # ── 统一补录 / Quick TTS 操作区 ──
+    utility_mode.change(
+        reset_utility_mode,
+        [utility_mode, ss],
+        [
+            utility_project_group,
+            utility_library_group,
+            utility_wavs,
+            utility_result_mode,
+            utility_result_project,
+            utility_audio,
+            utility_out,
+            utility_path,
+            utility_status,
+            utility_save_loc,
+        ],
+    )
+    utility_role_refresh.click(
+        refresh_supplement_roles, [ss], [utility_role]
+    ).then(
+        refresh_utility_export_hint,
+        [utility_mode, ss],
+        [utility_save_loc],
+    )
+    utility_json_parse.click(
+        do_utility_parse_json,
+        [utility_json, ss],
+        [utility_role, utility_text, utility_split_punct, utility_status],
+    )
+    utility_synth.click(
+        do_utility_tts_synth,
+        [
+            utility_mode,
+            utility_role,
+            utility_voice,
+            utility_text,
+            utility_emotion,
+            utility_emo_alpha,
+            utility_rate,
+            utility_quality,
+            utility_split_punct,
+            utility_override_voice,
+            ss,
+        ],
+        [utility_wavs, utility_status, utility_result_mode, utility_result_project],
+    )
+    utility_preview.click(
+        play_utility_preview,
+        [utility_mode, utility_result_mode, utility_result_project, utility_wavs, ss],
+        [utility_audio],
+    )
+    utility_export.click(
+        do_utility_export,
+        [
+            utility_mode,
+            utility_result_mode,
+            utility_result_project,
+            utility_format,
+            utility_bitrate,
+            utility_export_name,
+            utility_wavs,
+            utility_role,
+            ss,
+        ],
+        [utility_out, utility_path],
+    ).then(
+        refresh_utility_export_hint,
+        [utility_mode, ss],
+        [utility_save_loc],
+    )
+    utility_open_folder.click(
+        open_utility_folder,
+        [utility_mode, utility_result_mode, utility_result_project, utility_wavs, ss],
+        [utility_path],
+    )
 
     # ── 后台预热：UI-ready 一次性事件（Gradio app.load）──
     # 只有 Gradio 确认 UI/server 可用后才触发，杜绝「线程+sleep(2s) 猜 UI Ready」

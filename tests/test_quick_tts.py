@@ -159,6 +159,25 @@ def test_quick_tts_frozen_engine_is_settings_default(
     assert source == "global_default"
 
 
+def test_quick_tts_durable_request_keeps_shared_overrides(
+    quick_env, tmp_path, monkeypatch, global_default_v25,
+):
+    captured = _submit_spy(monkeypatch, tmp_path)
+    RuntimeTTSService.quick_tts_synthesize(
+        text="情绪和语速透传",
+        speaker_audio="/tmp/v.wav",
+        num_beams=3,
+        overrides={"emotion": "sad", "emo_alpha": 0.6, "speech_rate": 0.9},
+        timeout=10,
+    )
+    assert captured["options"]["overrides"] == {
+        "emotion": "sad",
+        "emo_alpha": 0.6,
+        "speech_rate": 0.9,
+    }
+    assert captured["options"]["num_beams"] == 3
+
+
 # ── E3: runtime worker 完成 → Audio path 存在 ────────────────────────────
 class FakeTtsEngine:
     def __init__(self) -> None:
@@ -189,6 +208,8 @@ class FakeTtsEngine:
                            speech_rate, output_path, num_beams) -> str:
         self.synth_calls.append({
             "text": text, "num_beams": num_beams,
+            "emotion": emotion, "emo_alpha": emo_alpha,
+            "speech_rate": speech_rate,
             "engine_identity": self._profile.get("engine_identity", ""),
         })
         _write_wav(output_path)
@@ -229,6 +250,41 @@ def test_quick_tts_runtime_worker_produces_wav(tmp_path, monkeypatch, quick_env)
     assert result["status"] == "ok"
     assert os.path.isfile(result["wav_path"])
     assert fake.synth_calls[0]["engine_identity"] == "indextts:2"
+
+
+def test_quick_tts_forwards_shared_emotion_and_rate_to_runtime(
+    tmp_path, monkeypatch, quick_env,
+):
+    fake = FakeTtsEngine()
+    _install_fake_engine(monkeypatch, fake)
+    from services.production_runtime import ProductionRuntime
+
+    runtime = ProductionRuntime(
+        owner_id="qt-params",
+        lock_path=str(tmp_path / "params.lock"),
+        status_path=str(tmp_path / "params-status.json"),
+    )
+    target = tts_profile.resolve_profile({"engine_version": "2"})
+    result = runtime.run_quick_tts_direct(
+        {
+            "text": "共享参数",
+            "speaker_audio": "spk.wav",
+            "num_beams": 3,
+            "overrides": {
+                "emotion": "happy",
+                "emo_alpha": 0.7,
+                "speech_rate": 1.2,
+            },
+        },
+        str(tmp_path / "cache" / "qt_params"),
+        validate_output=True,
+        engine_profile=target,
+    )
+    assert result["status"] == "ok"
+    assert fake.synth_calls[0]["emotion"] == "happy"
+    assert fake.synth_calls[0]["emo_alpha"] == 0.7
+    assert fake.synth_calls[0]["speech_rate"] == 1.2
+    assert fake.synth_calls[0]["num_beams"] == 3
 
 
 # ── E4: Quick TTS 不出现在项目扫描 ──────────────────────────────────────

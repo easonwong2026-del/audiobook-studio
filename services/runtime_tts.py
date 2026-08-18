@@ -658,6 +658,7 @@ class RuntimeTTSService:
         text: str,
         speaker_audio: str,
         num_beams: int = 2,
+        overrides: dict[str, Any] | None = None,
         timeout: float = 3600.0,
         engine_profile: dict[str, Any] | None = None,
         progress_cb: Any = None,
@@ -688,6 +689,7 @@ class RuntimeTTSService:
             "text": text,
             "speaker_audio": os.path.abspath(str(speaker_audio)),
             "num_beams": max(int(num_beams or 2), 1),
+            "overrides": dict(overrides or {}),
             "engine_snapshot": snapshot,
         }
         active = _active_tts_lane()
