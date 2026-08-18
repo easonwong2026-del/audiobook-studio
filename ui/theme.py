@@ -38,13 +38,25 @@ THEME = gr.themes.Default(
     # 画布与表面
     body_background_fill=SURFACE,
     body_background_fill_dark=SURFACE,
+    background_fill_primary=CARD,
+    background_fill_primary_dark=CARD,
+    background_fill_secondary=PANEL,
+    background_fill_secondary_dark=PANEL,
+    panel_background_fill=PANEL,
+    panel_background_fill_dark=PANEL,
+    panel_border_color=BORDER,
+    panel_border_color_dark=BORDER,
     block_background_fill=CARD,
     block_background_fill_dark=CARD,
     block_border_color=BORDER,
     block_border_color_dark=BORDER,
     block_radius="16px",
+    block_info_text_color=TEXT_MUTED,
+    block_info_text_color_dark=TEXT_MUTED,
     block_label_text_color=TEXT_MUTED,
+    block_label_text_color_dark=TEXT_MUTED,
     block_title_text_color=TEXT_PRIMARY,
+    block_title_text_color_dark=TEXT_PRIMARY,
     # 主色（黄绿仅做 CTA/激活——功能色）
     button_primary_background_fill=ACCENT,
     button_primary_background_fill_hover="#c4e55a",
@@ -60,15 +72,54 @@ THEME = gr.themes.Default(
     button_cancel_border_color="#f14658",
     # 输入
     input_background_fill=CARD,
+    input_background_fill_dark=CARD,
     input_background_fill_focus=CARD,
+    input_background_fill_focus_dark=CARD,
     input_border_color=BORDER,
+    input_border_color_dark=BORDER,
     input_border_color_focus=TEXT_PRIMARY,
+    input_border_color_focus_dark=TEXT_PRIMARY,
     input_radius=RADIUS_INPUT,
     input_placeholder_color="#9a9a9a",
+    input_placeholder_color_dark="#7d8980",
+    # 单选 / 复选（Gradio 5.50 共用 checkbox label token）
+    checkbox_background_color=CARD,
+    checkbox_background_color_dark=CARD,
+    checkbox_background_color_focus=PANEL,
+    checkbox_background_color_focus_dark=PANEL,
+    checkbox_background_color_hover=PANEL,
+    checkbox_background_color_hover_dark=PANEL,
+    checkbox_background_color_selected=ACCENT,
+    checkbox_background_color_selected_dark=ACCENT,
+    checkbox_border_color=BORDER,
+    checkbox_border_color_dark=BORDER,
+    checkbox_border_color_focus=ACCENT_DEEP,
+    checkbox_border_color_focus_dark=ACCENT_DEEP,
+    checkbox_border_color_hover=ACCENT_DEEP,
+    checkbox_border_color_hover_dark=ACCENT_DEEP,
+    checkbox_border_color_selected=ACCENT_DEEP,
+    checkbox_border_color_selected_dark=ACCENT_DEEP,
+    checkbox_label_background_fill=CARD,
+    checkbox_label_background_fill_dark=CARD,
+    checkbox_label_background_fill_hover=PANEL,
+    checkbox_label_background_fill_hover_dark=PANEL,
+    checkbox_label_background_fill_selected=ACCENT_SOFT,
+    checkbox_label_background_fill_selected_dark=ACCENT_SOFT,
+    checkbox_label_border_color=BORDER,
+    checkbox_label_border_color_dark=BORDER,
+    checkbox_label_border_color_hover=ACCENT_DEEP,
+    checkbox_label_border_color_hover_dark=ACCENT_DEEP,
+    checkbox_label_border_color_selected=ACCENT_DEEP,
+    checkbox_label_border_color_selected_dark=ACCENT_DEEP,
+    checkbox_label_text_color=TEXT_PRIMARY,
+    checkbox_label_text_color_dark=TEXT_PRIMARY,
+    checkbox_label_text_color_selected=TEXT_PRIMARY,
+    checkbox_label_text_color_selected_dark=TEXT_PRIMARY,
     # 文本
     body_text_color=TEXT_PRIMARY,
     body_text_color_subdued=TEXT_MUTED,
     body_text_color_dark=TEXT_PRIMARY,
+    body_text_color_subdued_dark=TEXT_MUTED,
     link_text_color=ACCENT_DEEP,
     # 阴影
     shadow_drop=SHADOW_CARD,
@@ -104,22 +155,61 @@ footer {{ display:none!important }}
 body, .gradio-container {{
   font-family:'Outfit','SpotifyMixUI',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif,'Apple Color Emoji','Segoe UI Emoji','Segoe UI Symbol'!important;
   --body-text-color:{TEXT_PRIMARY}!important;
+  --body-text-color-dark:{TEXT_PRIMARY}!important;
   --body-text-color-subdued:{TEXT_MUTED}!important;
+  --body-text-color-subdued-dark:{TEXT_MUTED}!important;
+  --block-info-text-color:{TEXT_MUTED}!important;
+  --block-info-text-color-dark:{TEXT_MUTED}!important;
   --block-label-text-color:{TEXT_MUTED}!important;
+  --block-label-text-color-dark:{TEXT_MUTED}!important;
+  --block-title-text-color:{TEXT_PRIMARY}!important;
+  --block-title-text-color-dark:{TEXT_PRIMARY}!important;
   --block-background-fill:{CARD}!important;
+  --block-background-fill-dark:{CARD}!important;
   --block-border-color:{BORDER}!important;
+  --block-border-color-dark:{BORDER}!important;
   --table-odd-background-fill:#f7faf7!important;
   --table-even-background-fill:{CARD}!important;
   --border-color-primary:{BORDER}!important;
   --table-radius:14px!important;
   --color-accent:{ACCENT}!important;
   --input-background-fill:{CARD}!important;
+  --input-background-fill-dark:{CARD}!important;
   --input-background-fill-focus:{CARD}!important;
+  --input-background-fill-focus-dark:{CARD}!important;
   --input-border-color:{BORDER}!important;
+  --input-border-color-dark:{BORDER}!important;
   --input-border-color-focus:{ACCENT_DEEP}!important;
+  --input-border-color-focus-dark:{ACCENT_DEEP}!important;
+  --input-placeholder-color:{TEXT_MUTED}!important;
+  --input-placeholder-color-dark:{TEXT_MUTED}!important;
   --input-text-color:{TEXT_PRIMARY}!important;
   --input-radius:{RADIUS_INPUT}!important;
   --block-radius:16px!important;
+  --checkbox-background-color:{CARD}!important;
+  --checkbox-background-color-dark:{CARD}!important;
+  --checkbox-background-color-focus:{PANEL}!important;
+  --checkbox-background-color-focus-dark:{PANEL}!important;
+  --checkbox-background-color-hover:{PANEL}!important;
+  --checkbox-background-color-hover-dark:{PANEL}!important;
+  --checkbox-background-color-selected:{ACCENT}!important;
+  --checkbox-background-color-selected-dark:{ACCENT}!important;
+  --checkbox-label-background-fill:{CARD}!important;
+  --checkbox-label-background-fill-dark:{CARD}!important;
+  --checkbox-label-background-fill-hover:{PANEL}!important;
+  --checkbox-label-background-fill-hover-dark:{PANEL}!important;
+  --checkbox-label-background-fill-selected:{ACCENT_SOFT}!important;
+  --checkbox-label-background-fill-selected-dark:{ACCENT_SOFT}!important;
+  --checkbox-label-border-color:{BORDER}!important;
+  --checkbox-label-border-color-dark:{BORDER}!important;
+  --checkbox-label-border-color-hover:{ACCENT_DEEP}!important;
+  --checkbox-label-border-color-hover-dark:{ACCENT_DEEP}!important;
+  --checkbox-label-border-color-selected:{ACCENT_DEEP}!important;
+  --checkbox-label-border-color-selected-dark:{ACCENT_DEEP}!important;
+  --checkbox-label-text-color:{TEXT_PRIMARY}!important;
+  --checkbox-label-text-color-dark:{TEXT_PRIMARY}!important;
+  --checkbox-label-text-color-selected:{TEXT_PRIMARY}!important;
+  --checkbox-label-text-color-selected-dark:{TEXT_PRIMARY}!important;
   background:{SURFACE}!important;
 }}
 html {{
@@ -163,6 +253,63 @@ input:disabled, textarea:disabled, [aria-disabled="true"] input {{
   color:#68756c!important; -webkit-text-fill-color:#68756c!important;
   background:#f1f5f1!important; opacity:1!important;
 }}
+
+/* ===== Gradio 5.50 component content（固定浅色主题，兼容 body.dark） ===== */
+.gradio-container [data-testid="block-info"] {{
+  color:{TEXT_PRIMARY}!important;
+  -webkit-text-fill-color:{TEXT_PRIMARY}!important;
+}}
+.gradio-container [data-testid="block-info"] + div .prose,
+.gradio-container [data-testid="block-info"] + div .prose * {{
+  color:{TEXT_MUTED}!important;
+}}
+.gradio-container input[role="listbox"],
+.gradio-container [data-testid="textbox"],
+.gradio-container textarea {{
+  color:{TEXT_PRIMARY}!important;
+  -webkit-text-fill-color:{TEXT_PRIMARY}!important;
+  background:{CARD}!important;
+}}
+.gradio-container input[role="listbox"]:disabled,
+.gradio-container [data-testid="textbox"]:disabled,
+.gradio-container textarea:disabled {{
+  color:{TEXT_PRIMARY}!important;
+  -webkit-text-fill-color:{TEXT_PRIMARY}!important;
+  background:{PANEL}!important;
+  opacity:1!important;
+}}
+.gradio-container label[data-testid$="-radio-label"],
+.gradio-container label[data-testid$="-checkbox-label"] {{
+  background:{CARD}!important;
+  color:{TEXT_PRIMARY}!important;
+  border:1px solid {BORDER}!important;
+  opacity:1!important;
+}}
+.gradio-container label[data-testid$="-radio-label"] span,
+.gradio-container label[data-testid$="-checkbox-label"] span {{
+  color:{TEXT_PRIMARY}!important;
+  -webkit-text-fill-color:{TEXT_PRIMARY}!important;
+}}
+.gradio-container label[data-testid$="-radio-label"]:hover,
+.gradio-container label[data-testid$="-checkbox-label"]:hover {{
+  background:{PANEL}!important;
+  border-color:{ACCENT_DEEP}!important;
+}}
+.gradio-container label[data-testid$="-radio-label"].selected,
+.gradio-container label[data-testid$="-radio-label"]:has(input:checked),
+.gradio-container label[data-testid$="-checkbox-label"].selected,
+.gradio-container label[data-testid$="-checkbox-label"]:has(input:checked) {{
+  background:{ACCENT_SOFT}!important;
+  color:{TEXT_PRIMARY}!important;
+  border-color:{ACCENT_DEEP}!important;
+}}
+.gradio-container label[data-testid$="-radio-label"].disabled,
+.gradio-container label[data-testid$="-checkbox-label"].disabled,
+.gradio-container label[data-testid$="-radio-label"][aria-disabled="true"],
+.gradio-container label[data-testid$="-checkbox-label"][aria-disabled="true"] {{
+  opacity:1!important;
+}}
+.sidebar [data-testid="block-info"] {{ color:#ffffff!important; -webkit-text-fill-color:#ffffff!important; }}
 [data-testid="block-label"] {{
   color:{TEXT_PRIMARY}!important; background:#eef3ef!important;
   border:1px solid {BORDER}!important; border-radius:7px!important;

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,12 +12,85 @@ from ui.components.voice_binding import (
     format_bound_role_choices,
     format_role_choices,
 )
+from ui.theme import LIGHT_CSS, THEME
+from ui.tokens import (
+    ACCENT_DEEP,
+    ACCENT_SOFT,
+    BORDER,
+    CARD,
+    PANEL,
+    SIDEBAR,
+    TEXT_MUTED,
+    TEXT_PRIMARY,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def _text(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
+
+
+_CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+_CSS_RULE_RE = re.compile(r"(?P<selectors>[^{}]+)\{(?P<body>[^{}]*)\}", re.DOTALL)
+
+
+def _css_rules(css: str) -> list[tuple[list[str], str]]:
+    """Return simple CSS rule blocks from rendered CSS (nested rules are skipped)."""
+    css = _CSS_COMMENT_RE.sub("", css)
+    return [
+        (
+            [re.sub(r"\s+", " ", selector.strip()) for selector in match.group("selectors").split(",")],
+            match.group("body"),
+        )
+        for match in _CSS_RULE_RE.finditer(css)
+    ]
+
+
+def _extract_css_rule(css: str, selector: str) -> str:
+    """Find one rendered CSS declaration block by an exact selector member."""
+    wanted = re.sub(r"\s+", " ", selector.strip())
+    for selectors, body in _css_rules(css):
+        if wanted in selectors:
+            return body
+    raise AssertionError(f"CSS selector not found: {selector}")
+
+
+def _assert_css_declarations(rule: str, *declarations: str) -> None:
+    actual = {}
+    for match in re.finditer(
+        r"(?P<property>[-\w]+)\s*:\s*(?P<value>[^;]+)",
+        rule,
+    ):
+        value = re.sub(r"\s+", "", match.group("value")).lower()
+        if value.endswith("!important"):
+            value = value[: -len("!important")]
+        actual[match.group("property").lower()] = value
+
+    missing = [
+        declaration
+        for declaration in declarations
+        if (
+            (property_name := declaration.split(":", 1)[0].lower()) not in actual
+            or actual[property_name]
+            != re.sub(r"\s+", "", declaration.split(":", 1)[1]).lower()
+        )
+    ]
+    assert not missing, f"Missing CSS declarations: {missing}; rule={rule!r}"
+
+
+def _broad_color_wildcards(css: str) -> list[str]:
+    """Reject only wildcard selectors that impose color on an entire surface."""
+    broad = re.compile(
+        r"^(?:\*|html\s+\*|body(?:\.dark)?\s+\*|\.gradio-container\s+\*|"
+        r"(?:html|body(?:\.dark)?|\.gradio-container)\s*>\s*\*)$"
+    )
+    result = []
+    for selectors, body in _css_rules(css):
+        if "color:" not in re.sub(r"\s+", "", body):
+            continue
+        result.extend(selector for selector in selectors if broad.fullmatch(selector))
+    return result
 
 
 def test_role_choices_include_description_without_changing_value():
@@ -153,6 +227,135 @@ def test_theme_keeps_text_readable_and_voice_layout_compact():
     assert ".voice-config-footer" in theme
     assert ".voice-reference-upload .audio-container button.boundedheight" in theme
     assert 'elem_classes=["voice-reference-upload"]' in voice
+
+
+def test_theme_keeps_gradio_550_components_readable_in_dark_preference():
+    expected_dark_tokens = {
+        "body_text_color_subdued_dark": TEXT_MUTED,
+        "block_info_text_color_dark": TEXT_MUTED,
+        "block_label_text_color_dark": TEXT_MUTED,
+        "block_title_text_color_dark": TEXT_PRIMARY,
+        "input_background_fill_dark": CARD,
+        "input_background_fill_focus_dark": CARD,
+        "input_border_color_dark": BORDER,
+        "checkbox_label_background_fill_dark": CARD,
+        "checkbox_label_background_fill_selected_dark": ACCENT_SOFT,
+        "checkbox_label_text_color_dark": TEXT_PRIMARY,
+        "checkbox_label_text_color_selected_dark": TEXT_PRIMARY,
+    }
+    for token, value in expected_dark_tokens.items():
+        assert getattr(THEME, token) == value
+
+    # Use the rendered CSS: the source f-string contains doubled braces and is
+    # not the stylesheet that Gradio actually receives.
+    assert _broad_color_wildcards(LIGHT_CSS) == []
+
+    radio = _extract_css_rule(
+        LIGHT_CSS,
+        '.gradio-container label[data-testid$="-radio-label"]',
+    )
+    _assert_css_declarations(
+        radio,
+        f"background:{CARD}",
+        f"color:{TEXT_PRIMARY}",
+        f"border:1px solid {BORDER}",
+        "opacity:1",
+    )
+    radio_hover = _extract_css_rule(
+        LIGHT_CSS,
+        '.gradio-container label[data-testid$="-radio-label"]:hover',
+    )
+    _assert_css_declarations(
+        radio_hover,
+        f"background:{PANEL}",
+        f"border-color:{ACCENT_DEEP}",
+    )
+    for selected_selector in (
+        '.gradio-container label[data-testid$="-radio-label"].selected',
+        '.gradio-container label[data-testid$="-radio-label"]:has(input:checked)',
+    ):
+        selected = _extract_css_rule(LIGHT_CSS, selected_selector)
+        _assert_css_declarations(
+            selected,
+            f"background:{ACCENT_SOFT}",
+            f"color:{TEXT_PRIMARY}",
+            f"border-color:{ACCENT_DEEP}",
+        )
+        assert "#2e2e2e" not in selected.lower()
+
+    for selector in (
+        '.gradio-container input[role="listbox"]',
+        '.gradio-container [data-testid="textbox"]',
+        ".gradio-container textarea",
+    ):
+        component = _extract_css_rule(LIGHT_CSS, selector)
+        _assert_css_declarations(
+            component,
+            f"background:{CARD}",
+            f"color:{TEXT_PRIMARY}",
+            f"-webkit-text-fill-color:{TEXT_PRIMARY}",
+        )
+
+    for selector in (
+        '.gradio-container input[role="listbox"]:disabled',
+        '.gradio-container [data-testid="textbox"]:disabled',
+        ".gradio-container textarea:disabled",
+    ):
+        disabled = _extract_css_rule(LIGHT_CSS, selector)
+        _assert_css_declarations(
+            disabled,
+            f"background:{PANEL}",
+            f"color:{TEXT_PRIMARY}",
+            f"-webkit-text-fill-color:{TEXT_PRIMARY}",
+            "opacity:1",
+        )
+
+    helper = _extract_css_rule(
+        LIGHT_CSS,
+        '.gradio-container [data-testid="block-info"] + div .prose',
+    )
+    _assert_css_declarations(helper, f"color:{TEXT_MUTED}")
+    placeholder = _extract_css_rule(LIGHT_CSS, "input::placeholder")
+    _assert_css_declarations(
+        placeholder,
+        f"color:{THEME.input_placeholder_color_dark}",
+        "opacity:1",
+    )
+
+    body = _extract_css_rule(LIGHT_CSS, "body")
+    _assert_css_declarations(
+        body,
+        f"--block-title-text-color-dark:{TEXT_PRIMARY}",
+        f"--checkbox-label-background-fill-dark:{CARD}",
+        f"--checkbox-label-background-fill-selected-dark:{ACCENT_SOFT}",
+        f"--checkbox-label-text-color-dark:{TEXT_PRIMARY}",
+        f"--input-background-fill-dark:{CARD}",
+        f"--input-text-color:{TEXT_PRIMARY}",
+    )
+
+    sidebar = _extract_css_rule(LIGHT_CSS, ".sidebar")
+    _assert_css_declarations(sidebar, f"background:{SIDEBAR}")
+    sidebar_info = _extract_css_rule(
+        LIGHT_CSS,
+        '.sidebar [data-testid="block-info"]',
+    )
+    _assert_css_declarations(
+        sidebar_info,
+        f"color:{THEME.button_secondary_text_color}",
+        f"-webkit-text-fill-color:{THEME.button_secondary_text_color}",
+    )
+    nav = _extract_css_rule(LIGHT_CSS, ".sidebar .nav-btn")
+    _assert_css_declarations(
+        nav,
+        "background:transparent",
+        "color:#c7d0c9",
+    )
+    secondary = _extract_css_rule(LIGHT_CSS, ".gr-button.secondary")
+    _assert_css_declarations(
+        secondary,
+        f"background:{THEME.button_secondary_background_fill}",
+        f"color:{THEME.button_secondary_text_color}",
+    )
 
 
 def test_dashboard_and_page_titles_do_not_repeat_navigation():
