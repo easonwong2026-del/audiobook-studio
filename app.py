@@ -59,6 +59,7 @@ from services.project_storage import format_size
 from services.review_audio import ReviewAudioService
 from services.session import SessionState
 from services.synthesis import SynthesisState
+from ui import chapter_merge_handlers as merge_ui
 from ui import create_project_handlers as create_ui
 from ui import project_catalog_handlers as catalog_ui
 from ui.components import (
@@ -4396,6 +4397,11 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             bookshelf_trash_confirm = ov_page["bookshelf_trash_confirm"]
             bookshelf_trash_delete = ov_page["bookshelf_trash_delete"]
             bookshelf_trash_status = ov_page["bookshelf_trash_status"]
+            merge_source_chapter = ov_page["merge_source_chapter"]
+            merge_target_book = ov_page["merge_target_book"]
+            merge_analyze = ov_page["merge_analyze"]
+            merge_plan_result = ov_page["merge_plan_result"]
+            merge_plan_state = ov_page["merge_plan_state"]
 
             # ───────── 新建项目 ─────────
             cr_page = create_create_project_page()
@@ -4605,6 +4611,13 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             catalog_management_outputs = bookshelf_management_outputs(
                 ov_page, p_sel, include_hierarchy=True
             )
+            merge_planner_outputs = [
+                merge_source_chapter,
+                merge_target_book,
+                merge_analyze,
+                merge_plan_result,
+                merge_plan_state,
+            ]
 
     # 填充 _GROUPS（运行时装载，供 navigation._goto 使用）
     _GROUPS[:] = [
@@ -4690,6 +4703,11 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         catalog_ui.refresh_bookshelf_management_view_with_hierarchy,
         [bookshelf_search, p_sel, ss],
         catalog_management_outputs,
+    )
+    overview_nav_chain.then(
+        merge_ui.refresh_merge_planner_controls,
+        [ss],
+        merge_planner_outputs,
     )
     nav_project.click(
         lambda: _goto("project"), None, _GROUPS,
@@ -4782,6 +4800,11 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         catalog_ui.reconcile_bookshelf_hierarchy_selection,
         [ss],
         hierarchy_outputs(ov_page),
+    )
+    bookshelf_select_chain.then(
+        merge_ui.refresh_merge_planner_controls,
+        [ss],
+        merge_planner_outputs,
     )
 
     # ── 概览页快捷操作：「打开项目」切页 → open_project 首步 → 打开链刷新 ──
@@ -4889,6 +4912,11 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         [bookshelf_search, p_sel, ss],
         catalog_management_outputs,
     )
+    voice_create_chain.then(
+        merge_ui.refresh_merge_planner_controls,
+        [ss],
+        merge_planner_outputs,
+    )
 
     # ═══════════ 设置页面 ═══════════
     wire_settings_page(
@@ -4899,6 +4927,11 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             catalog_management_outputs,
         ),
         session=ss,
+        merge_refresh=(
+            merge_ui.refresh_merge_planner_controls,
+            [ss],
+            merge_planner_outputs,
+        ),
     )
 
     # ═══════════ 角色与声音页面 ═══════════
@@ -4942,6 +4975,10 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             ],
             "management_outputs": catalog_management_outputs,
             "management_refresh": catalog_ui.refresh_bookshelf_management_view_with_hierarchy,
+            "merge_refresh": merge_ui.refresh_merge_planner_controls,
+            "merge_outputs": merge_planner_outputs,
+            "merge_analyze": merge_ui.analyze_merge_plan,
+            "merge_invalidate": merge_ui.invalidate_merge_plan,
             "callbacks": {
                 "open_project": open_project,
                 "open_project_outputs": [
@@ -4953,9 +4990,19 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         },
     )
 
-    p_refresh.click(refresh_projects_full, [], [p_sel])
+    p_refresh_chain = p_refresh.click(refresh_projects_full, [], [p_sel])
+    p_refresh_chain.then(
+        merge_ui.refresh_merge_planner_controls,
+        [ss],
+        merge_planner_outputs,
+    )
     chain = p_open.click(open_project, [p_sel, ss], [p_summary, v_table, v_role, v_role_title, v_lib, s_log, v_status])
-    _open_chain_rest(chain)
+    chain = _open_chain_rest(chain)
+    chain.then(
+        merge_ui.refresh_merge_planner_controls,
+        [ss],
+        merge_planner_outputs,
+    )
     s_scope_mode.change(
         update_scope_visibility,
         [s_scope_mode],
@@ -5263,6 +5310,11 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         catalog_ui.refresh_bookshelf_management_view_with_hierarchy,
         [bookshelf_search, p_sel, ss],
         catalog_management_outputs,
+    )
+    app.load(
+        merge_ui.refresh_merge_planner_controls,
+        [ss],
+        merge_planner_outputs,
     )
 
     # ── 后台预热：UI-ready 一次性事件（Gradio app.load）──

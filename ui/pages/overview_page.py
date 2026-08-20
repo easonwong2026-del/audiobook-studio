@@ -146,6 +146,30 @@ def create_overview_page() -> dict:
                 "选择项目后，可在此设置或解除所属整书。"
             )
 
+            gr.Markdown("#### Chapter → Book 合并计划（只读分析）")
+            with gr.Row(equal_height=True):
+                merge_source_chapter = gr.Dropdown(
+                    label="来源 Chapter",
+                    choices=[],
+                    value=None,
+                    interactive=False,
+                    scale=2,
+                )
+                merge_target_book = gr.Dropdown(
+                    label="目标 Book",
+                    choices=[],
+                    value=None,
+                    interactive=False,
+                    scale=2,
+                )
+                merge_analyze = gr.Button(
+                    "分析合并计划", variant="secondary", size="sm", interactive=False
+                )
+            merge_plan_result = gr.Markdown(
+                "选择一个 Chapter 后，可分析其到目标 Book 的只读合并计划。"
+            )
+            merge_plan_state = gr.State(None)
+
         # 两步确认状态：记录「已确认的项目名」（字符串语义，"" 表示未确认）；
         # SessionState 另外绑定 selection revision，防止 A → B → A 复用旧确认。
         bookshelf_cleanup_token = gr.State("")
@@ -222,6 +246,11 @@ def create_overview_page() -> dict:
         "bookshelf_chapter_order": bookshelf_chapter_order,
         "bookshelf_update_chapter": bookshelf_update_chapter,
         "bookshelf_relation_status": bookshelf_relation_status,
+        "merge_source_chapter": merge_source_chapter,
+        "merge_target_book": merge_target_book,
+        "merge_analyze": merge_analyze,
+        "merge_plan_result": merge_plan_result,
+        "merge_plan_state": merge_plan_state,
         "bookshelf_archive": bookshelf_archive,
         "bookshelf_archive_confirm": bookshelf_archive_confirm,
         "bookshelf_msg": bookshelf_msg,
