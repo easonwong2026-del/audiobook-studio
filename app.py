@@ -39,14 +39,13 @@ from services import (
     ProductionJobService,
     ProjectBackupService,
     ProjectCatalogService,
-    get_application_lifecycle,
     ProjectService,
     ProjectStorageService,
     QualityService,
-    RepairError,
-    RepairService,
     QuickTTSBusyError,
     QuickTTSService,
+    RepairError,
+    RepairService,
     RuntimeTTSService,
     SupplementService,
     SupplementTaskState,
@@ -54,6 +53,7 @@ from services import (
     VoiceCastError,
     VoiceCastResolver,
     WorkflowService,
+    get_application_lifecycle,
 )
 from services.project_storage import format_size
 from services.review_audio import ReviewAudioService
@@ -84,7 +84,11 @@ from ui.pages import (
 )
 from ui.shared import create_status_bar
 from ui.theme import LIGHT_CSS, THEME
-from ui.wiring.project_catalog_wiring import wire_project_catalog
+from ui.wiring.project_catalog_wiring import (
+    bookshelf_management_outputs,
+    selection_ui_outputs,
+    wire_project_catalog,
+)
 from ui.wiring.settings_wiring import wire_settings_page
 from ui.wiring.voice_wiring import wire_voice_page
 
@@ -4314,6 +4318,11 @@ def _open_chain_rest(event):
         [ov_status, ov_progress, ov_task, ov_issues, ov_bookshelf],
     )
     e = e.then(refresh_p_sel, [p_sel], [p_sel])
+    e = e.then(
+        catalog_ui.refresh_bookshelf_management_view,
+        [bookshelf_search, p_sel, ss],
+        catalog_management_outputs,
+    )
     return e
 
 
@@ -4355,6 +4364,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             ov_synth = ov_page["ov_synth"]
             ov_export = ov_page["ov_export"]
             bookshelf_search = ov_page["bookshelf_search"]
+            bookshelf_refresh = ov_page["bookshelf_refresh"]
             bookshelf_selected_proj = ov_page["bookshelf_selected_proj"]
             bookshelf_selected = ov_page["bookshelf_selected"]
             bookshelf_open = ov_page["bookshelf_open"]
@@ -4587,6 +4597,12 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             set_page = create_settings_page()
             grp_settings = set_page["group"]
 
+            # State-aware bookshelf refresh contract.  The low-level
+            # refresh_project_catalog five-tuple remains available for
+            # compatibility; all visible bookshelf management paths use this
+            # centralized reconciliation output list.
+            catalog_management_outputs = bookshelf_management_outputs(ov_page, p_sel)
+
     # 填充 _GROUPS（运行时装载，供 navigation._goto 使用）
     _GROUPS[:] = [
         grp_overview,
@@ -4663,10 +4679,15 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
 
     # 旧的全量刷新契约（22 元组）已移除（阶段三：open_project 首步 + _open_chain_rest 打开链）
 
-    nav_overview.click(
+    overview_nav_chain = nav_overview.click(
         lambda: _goto("overview"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-overview')?.classList.add('active'); }").then(
         refresh_overview, [ss], [ov_status, ov_progress, ov_task, ov_issues, ov_bookshelf])
+    overview_nav_chain.then(
+        catalog_ui.refresh_bookshelf_management_view,
+        [bookshelf_search, p_sel, ss],
+        catalog_management_outputs,
+    )
     nav_project.click(
         lambda: _goto("project"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-project')?.classList.add('active'); }")
@@ -4744,10 +4765,15 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     )
 
     # ── 概览页：书架点选 → 只设 ss.selected_project（选择≠打开；打开需点按钮） ──
-    ov_bookshelf.select(
+    bookshelf_select_chain = ov_bookshelf.select(
         catalog_ui.select_bookshelf_row,
         [ov_bookshelf, ss],
         [bookshelf_selected_proj, bookshelf_selected, p_sel],
+    )
+    bookshelf_select_chain.then(
+        catalog_ui.reconcile_bookshelf_selection,
+        [ss, p_sel],
+        selection_ui_outputs(ov_page, p_sel),
     )
 
     # ── 概览页快捷操作：「打开项目」切页 → open_project 首步 → 打开链刷新 ──
@@ -4851,19 +4877,20 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     )
     # 创建项目成功后统一刷新目录类组件（书架 / p_sel / 回收站）
     voice_create_chain.then(
-        catalog_ui.refresh_project_catalog,
-        [bookshelf_search, p_sel],
-        [ov_bookshelf, p_sel, bookshelf_trash_table, bookshelf_trash_sel, bookshelf_trash_status],
+        catalog_ui.refresh_bookshelf_management_view,
+        [bookshelf_search, p_sel, ss],
+        catalog_management_outputs,
     )
 
     # ═══════════ 设置页面 ═══════════
     wire_settings_page(
         set_page,
         catalog_refresh=(
-            catalog_ui.refresh_project_catalog,
-            [bookshelf_search, p_sel],
-            [ov_bookshelf, p_sel, bookshelf_trash_table, bookshelf_trash_sel, bookshelf_trash_status],
+            catalog_ui.refresh_bookshelf_management_view,
+            [bookshelf_search, p_sel, ss],
+            catalog_management_outputs,
         ),
+        session=ss,
     )
 
     # ═══════════ 角色与声音页面 ═══════════
@@ -5218,6 +5245,14 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         open_utility_folder,
         [utility_mode, utility_result_mode, utility_result_project, utility_wavs, ss],
         [utility_path],
+    )
+
+    # ── UI-ready 书架初始化：轻量 catalog 扫描，与 TTS prewarm 解耦 ──
+    # 仅读取项目摘要 / 回收站状态，不触碰模型、runtime 或生产任务。
+    app.load(
+        catalog_ui.refresh_bookshelf_management_view,
+        [bookshelf_search, p_sel, ss],
+        catalog_management_outputs,
     )
 
     # ── 后台预热：UI-ready 一次性事件（Gradio app.load）──

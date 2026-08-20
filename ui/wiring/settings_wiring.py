@@ -19,7 +19,11 @@ def run_diagnostics_ui():
     )
 
 
-def wire_settings_page(page: dict, catalog_refresh: tuple | None = None) -> None:
+def wire_settings_page(
+    page: dict,
+    catalog_refresh: tuple | None = None,
+    session=None,
+) -> None:
     tts_inputs = [
         page["s_tts_engine"],
         page["s_legacy_model_dir"],
@@ -54,7 +58,7 @@ def wire_settings_page(page: dict, catalog_refresh: tuple | None = None) -> None
         )
     data_dir_chain = page["s_data_apply"].click(
         settings_handlers.apply_data_dir,
-        [page["s_data_dir"]],
+        [page["s_data_dir"], session] if session is not None else [page["s_data_dir"]],
         [page["s_data_msg"], page["s_data_dir"]],
     )
     if catalog_refresh is not None:

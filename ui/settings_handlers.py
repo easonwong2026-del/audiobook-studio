@@ -573,11 +573,16 @@ def archive_abnormal_project(project_name: str) -> str:
         return f"❌ 归档失败：{html.escape(str(exc))}"
 
 
-def apply_data_dir(new_dir: str) -> tuple:
+def apply_data_dir(new_dir: str, ss=None) -> tuple:
     if not new_dir or not str(new_dir).strip():
         return "⚠ 请填写保存位置", ""
     try:
         path = os.path.normpath(ProjectService.set_data_dir(str(new_dir).strip()))
+        if ss is not None:
+            # A same-named project in the new root is still a different asset
+            # context.  Clear selected/opened/session state before the catalog
+            # reconciliation callback runs; keep catalog_query by contract.
+            ss.reset_for_data_root()
         return f"✅ 数据目录已设置为：{path}（本会话立即生效）", path
     except (OSError, ValueError, RuntimeError) as exc:
         return f"❌ 设置失败：{html.escape(str(exc))}", ""

@@ -22,7 +22,6 @@ import pytest
 from lib import project_paths
 from repositories.project_repo import ProjectRepository
 
-
 # ── helpers ────────────────────────────────────────────────────────────────
 
 
@@ -231,6 +230,16 @@ class TestMigration:
         with pytest.raises(ValueError):
             ProjectStorageService.upgrade_storage("v2book", plan["token"])
 
+    def test_token_rejects_cross_project_plan(self, tmp_path, monkeypatch):
+        from services.project_storage import ProjectStorageService
+        _data_root, _alpha_dir = _make_v2_project(tmp_path, monkeypatch, name="alpha")
+        _data_root, beta_dir = _make_v2_project(tmp_path, monkeypatch, name="beta")
+        alpha_plan = ProjectStorageService.plan_storage_upgrade("alpha")
+
+        with pytest.raises(ValueError):
+            ProjectStorageService.upgrade_storage("beta", alpha_plan["token"])
+        assert beta_dir.exists()
+
     def test_already_current(self, tmp_path, monkeypatch):
         from services.project_storage import ProjectStorageService
         data_root = tmp_path / "data"
@@ -272,8 +281,8 @@ class TestMigration:
         assert meta.storage_version == 3
 
     def test_backup_failure_no_mutation(self, tmp_path, monkeypatch):
-        from services.project_storage import ProjectStorageService
         from services import project_backup
+        from services.project_storage import ProjectStorageService
         _data_root, project_dir = _make_v2_project(tmp_path, monkeypatch)
         before = sorted(p.name for p in project_dir.iterdir())
         plan = ProjectStorageService.plan_storage_upgrade("v2book")

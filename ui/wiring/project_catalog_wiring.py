@@ -10,6 +10,57 @@ from typing import Any
 from ui import project_catalog_handlers as catalog_handlers
 
 
+def cleanup_outputs(page: dict) -> list:
+    """Return the four-output cleanup handler contract."""
+    return [
+        page["bookshelf_msg"],
+        page["bookshelf_cleanup_token"],
+        page["bookshelf_cleanup_confirm"],
+        page["bookshelf_cleanup_cancel"],
+    ]
+
+
+def storage_upgrade_outputs(page: dict) -> list:
+    """Return the four-output Storage Layout v3 handler contract."""
+    return [
+        page["bookshelf_msg"],
+        page["bookshelf_storage_token"],
+        page["bookshelf_storage_confirm"],
+        page["bookshelf_storage_cancel"],
+    ]
+
+
+def bookshelf_management_outputs(page: dict, project_sel) -> list:
+    """Return the 25-output state-aware bookshelf refresh contract."""
+    return [
+        page["ov_bookshelf"],
+        project_sel,
+        page["bookshelf_trash_table"],
+        page["bookshelf_trash_sel"],
+        page["bookshelf_trash_status"],
+        page["bookshelf_selected_proj"],
+        page["bookshelf_selected"],
+        *selection_ui_outputs(page, project_sel)[1:],
+    ]
+
+
+def selection_ui_outputs(page: dict, project_sel) -> list:
+    """Return outputs matching ``reconcile_bookshelf_selection``."""
+    return [
+        project_sel,
+        *(page[key] for key in catalog_handlers.BOOKSHELF_ACTION_KEYS),
+        page["bookshelf_archive_confirm"],
+        page["bookshelf_cleanup_token"],
+        page["bookshelf_cleanup_confirm"],
+        page["bookshelf_cleanup_cancel"],
+        page["bookshelf_storage_token"],
+        page["bookshelf_storage_confirm"],
+        page["bookshelf_storage_cancel"],
+        page["bookshelf_integrity_repair"],
+        page["bookshelf_msg"],
+    ]
+
+
 def wire_project_catalog(page: dict, deps: dict) -> None:
     """注册书架搜索、选择、管理动作、全局恢复/回收站事件。
 
@@ -19,21 +70,27 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
             - ``session``: ``gr.State(SessionState())``；
             - ``project_sel``: 项目页 ``p_sel`` Dropdown（刷新 choices 用，
               兼容保留；书架 select 同步由 app.py 内联接线完成）；
-            - ``catalog_outputs``: ``refresh_project_catalog`` 的 5 个输出组件；
+            - ``catalog_outputs``: legacy five-output catalog components;
+            - ``management_outputs``: state-aware 25-output bookshelf refresh;
             - ``callbacks``: app.py 注入的回调，可选键：
               ``open_project`` / ``open_project_outputs`` / ``open_chain_rest`` /
               ``goto_project`` / ``groups``；
             - ``groups``: 导航 ``_GROUPS``（供打开项目后切页）。
     """
     session = deps["session"]
-    catalog_outputs = deps["catalog_outputs"]
+    management_outputs = deps.get("management_outputs") or bookshelf_management_outputs(
+        page, deps["project_sel"]
+    )
+    selection_outputs = selection_ui_outputs(page, deps["project_sel"])
+    cleanup_handler_outputs = cleanup_outputs(page)
+    storage_handler_outputs = storage_upgrade_outputs(page)
     cb = deps.get("callbacks", {})
     groups = deps.get("groups", [])
 
     # ── 搜索 → 过滤书架行（ss.catalog_query 单一状态来源；选中项被过滤出
     #    结果时同步清空 ss.selected_project + UI 选中态，杜绝幽灵状态） ──
     for event_name in ("change", "submit"):
-        page["bookshelf_search"].__getattribute__(event_name)(
+        search_chain = page["bookshelf_search"].__getattribute__(event_name)(
             catalog_handlers.apply_project_search,
             [page["bookshelf_search"], session],
             [
@@ -41,6 +98,11 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
                 page["bookshelf_selected"],
                 page["bookshelf_selected_proj"],
             ],
+        )
+        search_chain.then(
+            catalog_handlers.reconcile_bookshelf_selection,
+            [session, deps["project_sel"]],
+            selection_outputs,
         )
 
     # 注：书架 select → 只设 ss.selected_project 的接线在 app.py 内联完成
@@ -56,9 +118,21 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
         )
         if "open_chain_rest" in cb:
             chain = cb["open_chain_rest"](chain)
+        chain = chain.then(
+            catalog_handlers.refresh_bookshelf_management_view,
+            [page["bookshelf_search"], deps["project_sel"], session],
+            management_outputs,
+        )
         goto = cb.get("goto_project")
         if goto is not None and groups:
             chain.then(goto, None, groups)
+
+    # ── 手动刷新：query 保持，selection 仅在不可见/不存在时清除 ──
+    page["bookshelf_refresh"].click(
+        catalog_handlers.refresh_bookshelf_management_view,
+        [page["bookshelf_search"], deps["project_sel"], session],
+        management_outputs,
+    )
 
     # ── 打开目录 / 备份 / 清理 / 整理存储布局 / 诊断 / 移入回收站 ──
     page["bookshelf_open_dir"].click(
@@ -84,61 +158,34 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
     page["bookshelf_cleanup"].click(
         catalog_handlers.scan_selected_cleanup,
         [page["bookshelf_selected_proj"]],
-        [
-            page["bookshelf_msg"],
-            page["bookshelf_cleanup_token"],
-            page["bookshelf_cleanup_confirm"],
-        ],
+        cleanup_handler_outputs,
     )
     page["bookshelf_cleanup_confirm"].click(
         catalog_handlers.execute_selected_cleanup,
         [page["bookshelf_selected_proj"], page["bookshelf_cleanup_token"]],
-        [
-            page["bookshelf_msg"],
-            page["bookshelf_cleanup_token"],
-            page["bookshelf_cleanup_confirm"],
-        ],
+        cleanup_handler_outputs,
     )
     page["bookshelf_cleanup_cancel"].click(
         catalog_handlers.cancel_selected_cleanup,
         [],
-        [
-            page["bookshelf_msg"],
-            page["bookshelf_cleanup_token"],
-            page["bookshelf_cleanup_confirm"],
-        ],
+        cleanup_handler_outputs,
     )
 
     # ── 存储布局整理：扫描方案 → token 确认（v1/v2 → v3 显式迁移） ──
     page["bookshelf_storage"].click(
         catalog_handlers.scan_selected_storage_upgrade,
         [page["bookshelf_selected_proj"]],
-        [
-            page["bookshelf_msg"],
-            page["bookshelf_storage_token"],
-            page["bookshelf_storage_confirm"],
-            page["bookshelf_storage_cancel"],
-        ],
+        storage_handler_outputs,
     )
     page["bookshelf_storage_confirm"].click(
         catalog_handlers.execute_selected_storage_upgrade,
         [page["bookshelf_selected_proj"], page["bookshelf_storage_token"]],
-        [
-            page["bookshelf_msg"],
-            page["bookshelf_storage_token"],
-            page["bookshelf_storage_confirm"],
-            page["bookshelf_storage_cancel"],
-        ],
+        storage_handler_outputs,
     )
     page["bookshelf_storage_cancel"].click(
         catalog_handlers.cancel_selected_storage_upgrade,
         [],
-        [
-            page["bookshelf_msg"],
-            page["bookshelf_storage_token"],
-            page["bookshelf_storage_confirm"],
-            page["bookshelf_storage_cancel"],
-        ],
+        storage_handler_outputs,
     )
     page["bookshelf_integrity"].click(
         catalog_handlers.check_selected_integrity,
@@ -174,9 +221,9 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
     if "open_chain_rest" in cb:
         archive_chain = cb["open_chain_rest"](archive_chain)
     archive_chain.then(
-        catalog_handlers.refresh_project_catalog,
-        [page["bookshelf_search"], deps["project_sel"]],
-        catalog_outputs,
+        catalog_handlers.refresh_bookshelf_management_view,
+        [page["bookshelf_search"], deps["project_sel"], session],
+        management_outputs,
     )
 
     # ── 全局：从备份恢复 ──
@@ -185,9 +232,9 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
         [page["bookshelf_restore_file"]],
         [page["bookshelf_msg"]],
     ).then(
-        catalog_handlers.refresh_project_catalog,
-        [page["bookshelf_search"], deps["project_sel"]],
-        catalog_outputs,
+        catalog_handlers.refresh_bookshelf_management_view,
+        [page["bookshelf_search"], deps["project_sel"], session],
+        management_outputs,
     )
 
     # ── 全局：回收站（列表 / 恢复 / 永久删除） ──
@@ -205,18 +252,18 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
         [page["bookshelf_trash_sel"]],
         [page["bookshelf_msg"]],
     ).then(
-        catalog_handlers.refresh_project_catalog,
-        [page["bookshelf_search"], deps["project_sel"]],
-        catalog_outputs,
+        catalog_handlers.refresh_bookshelf_management_view,
+        [page["bookshelf_search"], deps["project_sel"], session],
+        management_outputs,
     )
     page["bookshelf_trash_delete"].click(
         catalog_handlers.permanently_delete_archived_global,
         [page["bookshelf_trash_sel"], page["bookshelf_trash_confirm"]],
         [page["bookshelf_msg"]],
     ).then(
-        catalog_handlers.refresh_project_catalog,
-        [page["bookshelf_search"], deps["project_sel"]],
-        catalog_outputs,
+        catalog_handlers.refresh_bookshelf_management_view,
+        [page["bookshelf_search"], deps["project_sel"], session],
+        management_outputs,
     ).then(
         lambda: _update_checkbox_false(),
         [],

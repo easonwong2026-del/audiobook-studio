@@ -39,7 +39,15 @@ class ProjectCatalogService:
         Returns:
             过滤后的 ``ProjectSummary`` 列表。
         """
-        summaries = ProjectRepository.list_project_summaries()
+        return ProjectCatalogService.filter_projects(
+            ProjectCatalogService.scan(), query
+        )
+
+    @staticmethod
+    def filter_projects(
+        summaries: list[ProjectSummary], query: str = ""
+    ) -> list[ProjectSummary]:
+        """Filter an already-scanned catalog without reading the disk again."""
         q = str(query or "").strip().lower()
         if not q:
             return summaries

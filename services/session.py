@@ -40,6 +40,12 @@ class SessionState:
     # 书架搜索 query 的单一状态来源（导航离开/返回后仍保持过滤；不依赖
     # Textbox 前端值，避免「搜索框还有词、列表却变回全部」的幽灵状态）。
     catalog_query: str = ""
+    # 书架连续 selection context 的版本号。它不是第二个 selection 真相源，
+    # 只用于让确认态/短暂 UI 状态知道「用户是否已经离开过这个选择上下文」。
+    selection_revision: int = 0
+    # ``None`` = 没有可追踪的确认态；``-1`` = 确认态曾存在但已被 selection
+    # context 变化失效。保留这个失效标记可防止 A → B → A 复用旧确认。
+    _archive_confirmation_revision: Optional[int] = None
 
     def set_project(self, name: str, script: Any, bindings: dict[str, str]) -> None:
         """写入当前项目，原地更新字段（不新建对象，保持 ``gr.State`` 引用稳定）。
@@ -55,11 +61,49 @@ class SessionState:
 
     def set_selected(self, name: Optional[str]) -> None:
         """写入书架选中项目（不打开项目、不加载剧本）。"""
-        self.selected_project = str(name) if name else None
+        selected = str(name) if name else None
+        if selected != self.selected_project:
+            self.selection_revision += 1
+            if self._archive_confirmation_revision is not None:
+                self._archive_confirmation_revision = -1
+        self.selected_project = selected
 
     def clear_selected(self) -> None:
         """清空书架选中项目。"""
-        self.selected_project = None
+        self.set_selected(None)
+
+    def begin_archive_confirmation(self) -> None:
+        """Bind the next archive click to the current continuous selection."""
+        self._archive_confirmation_revision = self.selection_revision
+
+    def clear_archive_confirmation(self) -> None:
+        """Forget archive confirmation after success, cancel, or a failed guard."""
+        self._archive_confirmation_revision = None
+
+    def invalidate_archive_confirmation(self) -> None:
+        """Mark a UI-held confirmation string stale without changing selection."""
+        self._archive_confirmation_revision = -1
+
+    def archive_confirmation_is_current(self) -> bool:
+        """Return whether an archive confirmation belongs to this selection context."""
+        return self._archive_confirmation_revision == self.selection_revision
+
+    def reset_for_data_root(self) -> None:
+        """Drop all assets that may belong to the previous data root.
+
+        ``catalog_query`` intentionally survives a data-root switch so the
+        bookshelf filter remains the user's query, while selected/opened
+        project assets and any production session are discarded.
+        """
+        self.clear_selected()
+        self.clear_opened()
+        self.clear_archive_confirmation()
+
+    def clear_opened(self) -> None:
+        """Clear the opened production/session assets without touching the query."""
+        self.set_project(None, None, {})
+        self.set_snapshot(None)
+        self.synthesis = None
 
     def set_catalog_query(self, query: Optional[str]) -> None:
         """写入书架搜索 query（导航返回时作为单一过滤来源）。"""
