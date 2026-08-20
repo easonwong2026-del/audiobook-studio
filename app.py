@@ -62,6 +62,7 @@ from services.synthesis import SynthesisState
 from ui import chapter_merge_handlers as merge_ui
 from ui import create_project_handlers as create_ui
 from ui import project_catalog_handlers as catalog_ui
+from ui import whole_book_assembly_handlers as assembly_ui
 from ui.components import (
     build_role_management_choices,
     create_production_navigation,
@@ -93,6 +94,10 @@ from ui.wiring.project_catalog_wiring import (
 )
 from ui.wiring.settings_wiring import wire_settings_page
 from ui.wiring.voice_wiring import wire_voice_page
+from ui.wiring.whole_book_assembly_wiring import (
+    assembly_workflow_outputs,
+    wire_whole_book_assembly,
+)
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 # 音色库外置于数据目录（默认 ~/AudiobookStudio/voice_library），与程序目录解耦。
@@ -4408,6 +4413,16 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             merge_execute = ov_page["merge_execute"]
             merge_execution_result = ov_page["merge_execution_result"]
             merge_transaction_state = ov_page["merge_transaction_state"]
+            assembly_target_book = ov_page["assembly_target_book"]
+            assembly_analyze = ov_page["assembly_analyze"]
+            assembly_plan_result = ov_page["assembly_plan_result"]
+            assembly_plan_state = ov_page["assembly_plan_state"]
+            assembly_resolution = ov_page["assembly_resolution"]
+            assembly_confirm = ov_page["assembly_confirm"]
+            assembly_confirmation_state = ov_page["assembly_confirmation_state"]
+            assembly_execute = ov_page["assembly_execute"]
+            assembly_execution_result = ov_page["assembly_execution_result"]
+            assembly_transaction_state = ov_page["assembly_transaction_state"]
 
             # ───────── 新建项目 ─────────
             cr_page = create_create_project_page()
@@ -4630,6 +4645,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
                 merge_execution_result,
                 merge_transaction_state,
             ]
+            assembly_outputs = assembly_workflow_outputs(ov_page)
 
     # 填充 _GROUPS（运行时装载，供 navigation._goto 使用）
     _GROUPS[:] = [
@@ -4720,6 +4736,11 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         merge_ui.refresh_merge_workflow_controls,
         [ss],
         merge_planner_outputs,
+    )
+    overview_nav_chain.then(
+        assembly_ui.refresh_assembly_workflow_controls,
+        [ss],
+        assembly_outputs,
     )
     nav_project.click(
         lambda: _goto("project"), None, _GROUPS,
@@ -4817,6 +4838,11 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         merge_ui.refresh_merge_workflow_controls,
         [ss],
         merge_planner_outputs,
+    )
+    bookshelf_select_chain.then(
+        assembly_ui.refresh_assembly_workflow_controls,
+        [ss],
+        assembly_outputs,
     )
 
     # ── 概览页快捷操作：「打开项目」切页 → open_project 首步 → 打开链刷新 ──
@@ -4929,6 +4955,11 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         [ss],
         merge_planner_outputs,
     )
+    voice_create_chain.then(
+        assembly_ui.refresh_assembly_workflow_controls,
+        [ss],
+        assembly_outputs,
+    )
 
     # ═══════════ 设置页面 ═══════════
     wire_settings_page(
@@ -4943,6 +4974,11 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             merge_ui.refresh_merge_workflow_controls,
             [ss],
             merge_planner_outputs,
+        ),
+        assembly_refresh=(
+            assembly_ui.refresh_assembly_after_data_dir,
+            [set_page["s_data_dir"], ss],
+            assembly_outputs,
         ),
     )
 
@@ -4989,6 +5025,8 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             "management_refresh": catalog_ui.refresh_bookshelf_management_view_with_hierarchy,
             "merge_refresh": merge_ui.refresh_merge_workflow_controls,
             "merge_outputs": merge_planner_outputs,
+            "assembly_refresh": assembly_ui.refresh_assembly_workflow_controls,
+            "assembly_outputs": assembly_outputs,
             "merge_analyze": merge_ui.analyze_merge_plan,
             "merge_invalidate": merge_ui.invalidate_merge_plan,
             "merge_prepare_execution": merge_ui.prepare_merge_execution_controls,
@@ -5006,6 +5044,10 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             },
         },
     )
+    wire_whole_book_assembly(
+        ov_page,
+        {"session": ss},
+    )
 
     p_refresh_chain = p_refresh.click(refresh_projects_full, [], [p_sel])
     p_refresh_chain.then(
@@ -5013,12 +5055,22 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         [ss],
         merge_planner_outputs,
     )
+    p_refresh_chain.then(
+        assembly_ui.refresh_assembly_workflow_controls,
+        [ss],
+        assembly_outputs,
+    )
     chain = p_open.click(open_project, [p_sel, ss], [p_summary, v_table, v_role, v_role_title, v_lib, s_log, v_status])
     chain = _open_chain_rest(chain)
     chain.then(
         merge_ui.refresh_merge_workflow_controls,
         [ss],
         merge_planner_outputs,
+    )
+    chain.then(
+        assembly_ui.refresh_assembly_workflow_controls,
+        [ss],
+        assembly_outputs,
     )
     s_scope_mode.change(
         update_scope_visibility,

@@ -117,11 +117,15 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
     groups = deps.get("groups", [])
     merge_refresh = deps.get("merge_refresh")
     merge_outputs = deps.get("merge_outputs") or []
+    assembly_refresh = deps.get("assembly_refresh")
+    assembly_outputs = deps.get("assembly_outputs") or []
 
     def refresh_merge_after(chain):
         """Refresh the dedicated planner state without growing catalog outputs."""
         if merge_refresh and merge_outputs:
-            return chain.then(merge_refresh, [session], merge_outputs)
+            chain = chain.then(merge_refresh, [session], merge_outputs)
+        if assembly_refresh and assembly_outputs:
+            chain = chain.then(assembly_refresh, [session], assembly_outputs)
         return chain
 
     # ── 搜索 → 过滤书架行（ss.catalog_query 单一状态来源；选中项被过滤出

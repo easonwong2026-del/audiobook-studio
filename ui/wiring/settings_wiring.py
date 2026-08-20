@@ -24,6 +24,7 @@ def wire_settings_page(
     catalog_refresh: tuple | None = None,
     session=None,
     merge_refresh: tuple | None = None,
+    assembly_refresh: tuple | None = None,
 ) -> None:
     tts_inputs = [
         page["s_tts_engine"],
@@ -68,6 +69,9 @@ def wire_settings_page(
         data_dir_chain = data_dir_chain.then(fn, inputs, outputs)
     if merge_refresh is not None:
         fn, inputs, outputs = merge_refresh
+        data_dir_chain.then(fn, inputs, outputs)
+    if assembly_refresh is not None:
+        fn, inputs, outputs = assembly_refresh
         data_dir_chain.then(fn, inputs, outputs)
     page["s_data_open"].click(
         settings_handlers.open_data_dir,

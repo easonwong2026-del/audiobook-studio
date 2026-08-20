@@ -188,6 +188,42 @@ def create_overview_page() -> dict:
             merge_execution_result = gr.Markdown("")
             merge_transaction_state = gr.State(None)
 
+            gr.Markdown("#### Whole-book Assembly（顺序编排，独立状态路径）")
+            assembly_target_book = gr.Dropdown(
+                label="目标 Book（跟随书架 selected Book）",
+                choices=[],
+                value=None,
+                interactive=False,
+            )
+            assembly_analyze = gr.Button(
+                "分析整书装配",
+                variant="secondary",
+                size="sm",
+                interactive=False,
+            )
+            assembly_plan_result = gr.Markdown(
+                "从书架选择一个 Book 后，可分析其关联 Chapter 的整书装配。"
+            )
+            assembly_plan_state = gr.State(None)
+            assembly_resolution = gr.JSON(
+                label="按 Chapter 的 Voice Cast resolution（可选）",
+                value={"chapters": {}},
+            )
+            assembly_confirm = gr.Checkbox(
+                label="我确认按当前 Whole-book Assembly Plan 顺序执行",
+                value=False,
+                interactive=False,
+            )
+            assembly_confirmation_state = gr.State(None)
+            assembly_execute = gr.Button(
+                "开始整书装配",
+                variant="primary",
+                size="sm",
+                interactive=False,
+            )
+            assembly_execution_result = gr.Markdown("")
+            assembly_transaction_state = gr.State(None)
+
         # 两步确认状态：记录「已确认的项目名」（字符串语义，"" 表示未确认）；
         # SessionState 另外绑定 selection revision，防止 A → B → A 复用旧确认。
         bookshelf_cleanup_token = gr.State("")
@@ -275,6 +311,16 @@ def create_overview_page() -> dict:
         "merge_execute": merge_execute,
         "merge_execution_result": merge_execution_result,
         "merge_transaction_state": merge_transaction_state,
+        "assembly_target_book": assembly_target_book,
+        "assembly_analyze": assembly_analyze,
+        "assembly_plan_result": assembly_plan_result,
+        "assembly_plan_state": assembly_plan_state,
+        "assembly_resolution": assembly_resolution,
+        "assembly_confirm": assembly_confirm,
+        "assembly_confirmation_state": assembly_confirmation_state,
+        "assembly_execute": assembly_execute,
+        "assembly_execution_result": assembly_execution_result,
+        "assembly_transaction_state": assembly_transaction_state,
         "bookshelf_archive": bookshelf_archive,
         "bookshelf_archive_confirm": bookshelf_archive_confirm,
         "bookshelf_msg": bookshelf_msg,

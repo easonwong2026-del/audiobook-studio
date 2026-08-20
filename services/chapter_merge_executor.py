@@ -63,6 +63,8 @@ class MergeExecutionStage(str, Enum):
 MERGE_FAILED_ROLLED_BACK = "MERGE_FAILED_ROLLED_BACK"
 MERGE_FAILED_ROLLBACK_FAILED = "MERGE_FAILED_ROLLBACK_FAILED"
 CONFIRMATION_SCHEMA_VERSION = "chapter-merge-confirmation-v1"
+CHAPTER_SELECTION_POLICY = "CHAPTER"
+WHOLE_BOOK_SELECTION_POLICY = "WHOLE_BOOK_ASSEMBLY"
 
 
 class MergeExecutionError(RuntimeError):
@@ -97,6 +99,8 @@ class MergeConfirmation:
     selection_revision: int
     opened_project: str
     data_root: str
+    selection_policy: str = CHAPTER_SELECTION_POLICY
+    assembly_token: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -378,6 +382,10 @@ def _coerce_confirmation(value: Any) -> MergeConfirmation | None:
         fields["selection_revision"] = -1
     if any(fields.get(key) in (None, "") for key in ("confirmation_token", "plan_token", "source_project_id", "target_project_id")):
         return None
+    fields["selection_policy"] = str(
+        fields.get("selection_policy") or CHAPTER_SELECTION_POLICY
+    )
+    fields["assembly_token"] = str(fields.get("assembly_token") or "")
     try:
         return MergeConfirmation(**fields)
     except TypeError:
@@ -518,6 +526,9 @@ class ChapterMergeExecutor:
         plan: MergePlan,
         resolutions: Any,
         session: Any = None,
+        *,
+        selection_policy: str = CHAPTER_SELECTION_POLICY,
+        assembly_token: str = "",
     ) -> dict[str, Any]:
         selected, opened, selection_revision = _session_values(session)
         source = plan.source_project
@@ -534,6 +545,8 @@ class ChapterMergeExecutor:
             "selected_project": selected,
             "opened_project": opened,
             "data_root": _data_root(),
+            "selection_policy": str(selection_policy or CHAPTER_SELECTION_POLICY),
+            "assembly_token": str(assembly_token or ""),
         }
 
     @classmethod
@@ -544,6 +557,8 @@ class ChapterMergeExecutor:
         session: Any = None,
         *,
         require_current: bool = True,
+        selection_policy: str = CHAPTER_SELECTION_POLICY,
+        assembly_token: str = "",
     ) -> dict[str, str]:
         if not isinstance(plan, MergePlan):
             raise MergeExecutionError("PLAN_REQUIRED", "executor 必须接收现有 MergePlan")
@@ -600,7 +615,18 @@ class ChapterMergeExecutor:
             raise MergeExecutionError("SOURCE_AUDIO_MISSING", "来源没有任何可迁移分段音频")
 
         selected, opened, _selection_revision = _session_values(session)
-        if session is not None and selected != plan.source_project.project_name:
+        if selection_policy == WHOLE_BOOK_SELECTION_POLICY:
+            if not str(assembly_token or "").strip():
+                raise MergeExecutionError(
+                    "ASSEMBLY_TOKEN_REQUIRED",
+                    "Whole-book execution 必须绑定 assembly token",
+                )
+            if session is not None and selected != plan.target_project.project_name:
+                raise MergeExecutionError(
+                    "ASSEMBLY_TARGET_SELECTION_CHANGED",
+                    "当前 selected Book 已变化",
+                )
+        elif session is not None and selected != plan.source_project.project_name:
             raise MergeExecutionError("SOURCE_SELECTION_CHANGED", "当前 selected Chapter 已变化")
         if opened in {plan.source_project.project_name, plan.target_project.project_name}:
             raise MergeExecutionError(
@@ -628,9 +654,24 @@ class ChapterMergeExecutor:
         resolutions: Any = None,
         *,
         session: Any = None,
+        selection_policy: str = CHAPTER_SELECTION_POLICY,
+        assembly_token: str = "",
     ) -> MergeConfirmation:
-        cls._validate_plan(plan, resolutions, session, require_current=True)
-        scope = cls._confirmation_scope(plan, resolutions, session)
+        cls._validate_plan(
+            plan,
+            resolutions,
+            session,
+            require_current=True,
+            selection_policy=selection_policy,
+            assembly_token=assembly_token,
+        )
+        scope = cls._confirmation_scope(
+            plan,
+            resolutions,
+            session,
+            selection_policy=selection_policy,
+            assembly_token=assembly_token,
+        )
         token = _digest(scope)
         return MergeConfirmation(
             schema_version=CONFIRMATION_SCHEMA_VERSION,
@@ -644,6 +685,8 @@ class ChapterMergeExecutor:
             selection_revision=int(scope["selection_revision"]),
             opened_project=str(scope["opened_project"]),
             data_root=str(scope["data_root"]),
+            selection_policy=str(scope["selection_policy"]),
+            assembly_token=str(scope["assembly_token"]),
         )
 
     @classmethod
@@ -653,11 +696,20 @@ class ChapterMergeExecutor:
         resolutions: Any,
         confirmation: Any,
         session: Any = None,
+        *,
+        selection_policy: str = CHAPTER_SELECTION_POLICY,
+        assembly_token: str = "",
     ) -> MergeConfirmation:
         current = _coerce_confirmation(confirmation)
         if current is None:
             raise MergeExecutionError("CONFIRMATION_REQUIRED", "必须先生成新的 execution confirmation")
-        expected = cls.prepare_confirmation(plan, resolutions, session=session)
+        expected = cls.prepare_confirmation(
+            plan,
+            resolutions,
+            session=session,
+            selection_policy=selection_policy,
+            assembly_token=assembly_token,
+        )
         if current != expected:
             raise MergeExecutionError(
                 "STALE_CONFIRMATION",
@@ -1336,6 +1388,8 @@ class ChapterMergeExecutor:
         *,
         session: Any = None,
         fault_injection: Mapping[str, Any] | Callable[[str, str], None] | None = None,
+        selection_policy: str = CHAPTER_SELECTION_POLICY,
+        assembly_token: str = "",
     ) -> MergeExecutionResult:
         """Execute one fresh, current plan through backup → stage → commit → verify."""
         transaction_id = f"merge-{uuid.uuid4().hex}"
@@ -1368,8 +1422,22 @@ class ChapterMergeExecutor:
 
         write_journal(journal)
         try:
-            choices = cls._validate_plan(plan, resolutions, session, require_current=True)
-            cls._validate_confirmation(plan, resolutions, confirmation, session=session)
+            choices = cls._validate_plan(
+                plan,
+                resolutions,
+                session,
+                require_current=True,
+                selection_policy=selection_policy,
+                assembly_token=assembly_token,
+            )
+            cls._validate_confirmation(
+                plan,
+                resolutions,
+                confirmation,
+                session=session,
+                selection_policy=selection_policy,
+                assembly_token=assembly_token,
+            )
         except MergeExecutionError as exc:
             journal["failure"] = {"code": exc.code, "message": str(exc), "stage": exc.stage, "details": exc.details}
             transition(MergeExecutionStage.VALIDATION_FAILED)
@@ -1694,6 +1762,8 @@ def execute_merge(
     *,
     session: Any = None,
     fault_injection: Mapping[str, Any] | Callable[[str, str], None] | None = None,
+    selection_policy: str = CHAPTER_SELECTION_POLICY,
+    assembly_token: str = "",
 ) -> MergeExecutionResult:
     """Functional convenience wrapper for non-UI callers and tests."""
     return ChapterMergeExecutor.execute(
@@ -1702,13 +1772,17 @@ def execute_merge(
         confirmation,
         session=session,
         fault_injection=fault_injection,
+        selection_policy=selection_policy,
+        assembly_token=assembly_token,
     )
 
 
 __all__ = [
+    "CHAPTER_SELECTION_POLICY",
     "CONFIRMATION_SCHEMA_VERSION",
     "MERGE_FAILED_ROLLBACK_FAILED",
     "MERGE_FAILED_ROLLED_BACK",
+    "WHOLE_BOOK_SELECTION_POLICY",
     "ChapterMergeExecutor",
     "MergeConfirmation",
     "MergeExecutionError",

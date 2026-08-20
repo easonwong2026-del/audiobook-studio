@@ -14,19 +14,23 @@ from __future__ import annotations
 
 from lib.snapshot import ProjectSnapshot
 
+from .application_lifecycle import (
+    ApplicationLifecycleService,
+    get_application_lifecycle,
+)
 from .export import ExportPlanError, ExportService
-from .project import ProjectService
-from .project_backup import ProjectBackupService
-from .project_catalog import ProjectCatalogService
-from .project_storage import ProjectStorageService
-from .quick_tts import QuickTTSBusyError, QuickTTSService
 from .production_jobs import (
     ACTIVE_PRODUCTION_STATES,
     PRODUCTION_STATES,
     ProductionJobError,
     ProductionJobService,
 )
+from .project import ProjectService
+from .project_backup import ProjectBackupService
+from .project_catalog import ProjectCatalogService
+from .project_storage import ProjectStorageService
 from .quality import QualityService
+from .quick_tts import QuickTTSBusyError, QuickTTSService
 from .repair import RepairError, RepairService
 from .runtime_tts import RuntimeTTSBusyError, RuntimeTTSError, RuntimeTTSService
 from .session import SessionState
@@ -37,29 +41,27 @@ from .structured_script_import import (
 )
 from .supplement import SupplementService, SupplementTaskState
 from .synthesis import SynthesisService, SynthesisState
-from .application_lifecycle import (
-    ApplicationLifecycleService,
-    get_application_lifecycle,
-)
 from .voice_assets import VoiceAssetError, VoiceAssetService
 from .voice_cast import VoiceCastError, VoiceCastResolver, VoiceCastService
+from .whole_book_assembly import WholeBookAssemblyService
 from .workflow import WorkflowService
 
 __all__ = [
     "ACTIVE_PRODUCTION_STATES",
     "PRODUCTION_STATES",
-    "ExportService",
+    "ApplicationLifecycleService",
     "ExportPlanError",
-    "ProjectService",
-    "ProjectBackupService",
-    "ProjectCatalogService",
-    "ProjectStorageService",
-    "QuickTTSBusyError",
-    "QuickTTSService",
+    "ExportService",
     "ProductionJobError",
     "ProductionJobService",
-    "QualityService",
+    "ProjectBackupService",
+    "ProjectCatalogService",
+    "ProjectService",
     "ProjectSnapshot",
+    "ProjectStorageService",
+    "QualityService",
+    "QuickTTSBusyError",
+    "QuickTTSService",
     "RepairError",
     "RepairService",
     "RuntimeTTSBusyError",
@@ -73,12 +75,12 @@ __all__ = [
     "SupplementTaskState",
     "SynthesisService",
     "SynthesisState",
-    "ApplicationLifecycleService",
-    "get_application_lifecycle",
     "VoiceAssetError",
     "VoiceAssetService",
     "VoiceCastError",
     "VoiceCastResolver",
     "VoiceCastService",
+    "WholeBookAssemblyService",
     "WorkflowService",
+    "get_application_lifecycle",
 ]
