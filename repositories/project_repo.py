@@ -863,6 +863,91 @@ class ProjectRepository:
         ProjectRepository._save_meta(project_dir, meta)
 
     @staticmethod
+    def set_chapter_relationship(
+        chapter_name: str,
+        parent_name: str,
+        *,
+        chapter_title: str | None = None,
+        chapter_order: int | None = None,
+    ) -> tuple[str, str]:
+        """Persist a chapter → book relationship with participant rollback.
+
+        A relationship operation may lazily materialize identities for both
+        participants.  Each project file is still published through the
+        existing atomic writer; if the second publish fails, the first file is
+        restored from its pre-operation metadata so a failed operation cannot
+        leave a half-materialized relationship behind.
+        """
+        child_name = str(chapter_name or "").strip()
+        book_name = str(parent_name or "").strip()
+        if not child_name or not book_name:
+            raise ValueError("章节项目和所属整书不能为空")
+        if child_name == book_name:
+            raise ValueError("项目不能绑定自己")
+
+        child_dir = ProjectRepository._resolve_dir(child_name)
+        parent_dir = ProjectRepository._resolve_dir(book_name)
+        child_meta = ProjectRepository._load_meta(child_dir)
+        parent_meta = ProjectRepository._load_meta(parent_dir)
+        original_child = ProjectMeta(**vars(child_meta))
+        original_parent = ProjectMeta(**vars(parent_meta))
+
+        child_id = str(child_meta.project_id or "").strip() or str(uuid.uuid4())
+        parent_id = str(parent_meta.project_id or "").strip() or str(uuid.uuid4())
+        child_meta.project_id = child_id
+        child_meta.project_kind = "chapter"
+        child_meta.parent_project_id = parent_id
+        child_meta.chapter_title = str(chapter_title or "").strip() or None
+        child_meta.chapter_order = chapter_order
+        child_meta.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        parent_needs_write = not str(parent_meta.project_id or "").strip()
+        if parent_needs_write:
+            parent_meta.project_id = parent_id
+            parent_meta.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+
+        child_attempted = False
+        parent_attempted = False
+        try:
+            child_attempted = True
+            ProjectRepository._save_meta(child_dir, child_meta)
+            if parent_needs_write:
+                parent_attempted = True
+                ProjectRepository._save_meta(parent_dir, parent_meta)
+        except Exception as exc:
+            rollback_errors: list[str] = []
+            if parent_attempted:
+                try:
+                    ProjectRepository._save_meta(parent_dir, original_parent)
+                except Exception as rollback_exc:  # pragma: no cover - defensive  # noqa: BLE001
+                    rollback_errors.append(f"parent rollback failed: {rollback_exc}")
+            if child_attempted:
+                try:
+                    ProjectRepository._save_meta(child_dir, original_child)
+                except Exception as rollback_exc:  # pragma: no cover - defensive  # noqa: BLE001
+                    rollback_errors.append(f"chapter rollback failed: {rollback_exc}")
+            detail = f"关系写入失败：{exc}"
+            if rollback_errors:
+                detail += "；" + "；".join(rollback_errors)
+            raise RuntimeError(detail) from exc
+
+        return child_id, parent_id
+
+    @staticmethod
+    def update_chapter_metadata(
+        name: str,
+        *,
+        chapter_title: str | None,
+        chapter_order: int | None,
+    ) -> None:
+        """Atomically update explicit chapter display metadata only."""
+        project_dir = ProjectRepository._resolve_dir(name)
+        meta = ProjectRepository._load_meta(project_dir)
+        meta.chapter_title = str(chapter_title or "").strip() or None
+        meta.chapter_order = chapter_order
+        meta.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        ProjectRepository._save_meta(project_dir, meta)
+
+    @staticmethod
     def clear_project_relationship(name: str) -> None:
         """Explicitly turn a chapter back into an independent book."""
         project_dir = ProjectRepository._resolve_dir(name)

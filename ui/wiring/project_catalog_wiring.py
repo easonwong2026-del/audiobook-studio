@@ -31,19 +31,28 @@ def storage_upgrade_outputs(page: dict) -> list:
 
 
 def hierarchy_outputs(page: dict) -> list:
-    """Return the Phase B relationship-control output contract."""
+    """Return the dedicated Phase B.5 relationship-control output contract.
+
+    The first four outputs keep the Phase B order.  The four appended outputs
+    expose project kind, chapter title, chapter order, and the title/order
+    update action without changing the legacy 25-output bookshelf prefix.
+    """
     return [
         page["bookshelf_parent_book"],
         page["bookshelf_bind_chapter"],
         page["bookshelf_unbind_chapter"],
         page["bookshelf_relation_status"],
+        page["bookshelf_project_kind"],
+        page["bookshelf_chapter_title"],
+        page["bookshelf_chapter_order"],
+        page["bookshelf_update_chapter"],
     ]
 
 
 def bookshelf_management_outputs(
     page: dict, project_sel, *, include_hierarchy: bool = False
 ) -> list:
-    """Return the 25-output state-aware bookshelf refresh contract."""
+    """Return the 25-output bookshelf contract, optionally plus hierarchy."""
     outputs = [
         page["ov_bookshelf"],
         project_sel,
@@ -223,10 +232,30 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
         [page["bookshelf_msg"], page["bookshelf_integrity_repair"]],
     )
 
-    # ── Phase B：显式建立 / 解除 Book ← Chapter 逻辑关系 ──
+    # ── Phase B/B.5：显式建立、编辑 / 解除 Book ← Chapter 逻辑关系 ──
     page["bookshelf_bind_chapter"].click(
         catalog_handlers.bind_selected_chapter,
-        [page["bookshelf_selected_proj"], page["bookshelf_parent_book"], session],
+        [
+            page["bookshelf_selected_proj"],
+            page["bookshelf_parent_book"],
+            session,
+            page["bookshelf_chapter_title"],
+            page["bookshelf_chapter_order"],
+        ],
+        [page["bookshelf_msg"],],
+    ).then(
+        management_refresh,
+        [page["bookshelf_search"], deps["project_sel"], session],
+        management_outputs,
+    )
+    page["bookshelf_update_chapter"].click(
+        catalog_handlers.update_selected_chapter,
+        [
+            page["bookshelf_selected_proj"],
+            page["bookshelf_chapter_title"],
+            page["bookshelf_chapter_order"],
+            session,
+        ],
         [page["bookshelf_msg"],],
     ).then(
         management_refresh,

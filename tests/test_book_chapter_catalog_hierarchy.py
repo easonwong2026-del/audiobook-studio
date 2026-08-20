@@ -260,10 +260,14 @@ def test_relationship_controls_refresh_immediately(hierarchy_workspace):
     ss.set_selected("chapter")
 
     initial = handlers.refresh_bookshelf_management_view_with_hierarchy("", "", ss)
-    assert len(initial) == 29
+    assert len(initial) == 33
     assert initial[25].get("choices") == ["book"]
     assert initial[26].get("interactive") is True
     assert initial[27].get("interactive") is False
+    assert initial[29].get("value") == "整书"
+    assert initial[30].get("interactive") is False
+    assert initial[31].get("interactive") is False
+    assert initial[32].get("interactive") is False
 
     message = handlers.bind_selected_chapter("chapter", "book", ss)
     assert "设置为" in message
@@ -271,12 +275,14 @@ def test_relationship_controls_refresh_immediately(hierarchy_workspace):
     assert bound[25].get("value") == "book"
     assert bound[27].get("interactive") is True
     assert "当前所属整书" in bound[28].get("value", "")
+    assert bound[30].get("value") == "chapter"
 
     message = handlers.unbind_selected_chapter("chapter", ss)
     assert "解除" in message
     unbound = handlers.refresh_bookshelf_management_view_with_hierarchy("", "", ss)
     assert unbound[25].get("value") is None
     assert unbound[27].get("interactive") is False
+    assert unbound[29].get("value") == "整书"
 
 
 def test_selected_opened_contract_survives_hierarchy_rows(hierarchy_workspace):

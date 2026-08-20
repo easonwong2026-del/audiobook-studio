@@ -160,6 +160,22 @@ def _selected_info(name: str, ss=None, summary=None) -> str:
             "（项目摘要读取失败，仍可执行管理操作。）\n\n"
             f"{opened_text}"
         )
+    if summary.project_kind == "chapter":
+        relationship_text = (
+            "- 项目类型：**章节**\n"
+            + (
+                f"- 所属整书：**`{html.escape(summary.parent_project_name)}`**\n"
+                if summary.relation_status == "valid"
+                and summary.parent_project_name
+                else f"- 层级状态：**{html.escape(summary.relation_message or '孤立章节')}**\n"
+            )
+            + (
+                f"- 章节标题：{html.escape(summary.chapter_title or '未设置')} · "
+                f"顺序：{summary.chapter_order if summary.chapter_order is not None else '未设置'}\n"
+            )
+        )
+    else:
+        relationship_text = "- 项目类型：**整书**\n"
     return (
         "### 当前选择\n"
         f"**`{selected_label}`**\n"
@@ -168,16 +184,7 @@ def _selected_info(name: str, ss=None, summary=None) -> str:
         f"- 章：{summary.chapters} · 段：{summary.segments} · "
         f"已完成：{summary.completed} · 失败：{summary.failed}\n"
         f"- 状态：{summary.status}\n\n"
-        + (
-            (
-                f"- 所属整书：**`{html.escape(summary.parent_project_name)}`**\n"
-                if summary.relation_status == "valid"
-                and summary.parent_project_name
-                else f"- 层级状态：**{html.escape(summary.relation_message or '孤立章节')}**\n"
-                if summary.project_kind == "chapter"
-                else "- 项目类型：**整书**\n"
-            )
-        )
+        + relationship_text
         + "\n"
         f"{opened_text}"
     )
@@ -276,7 +283,13 @@ def reconcile_bookshelf_selection(ss, p_sel_value: str = "") -> tuple:
 
 
 def _hierarchy_control_updates(ss, summaries=None) -> tuple:
-    """Render relationship controls from one normalized Catalog snapshot."""
+    """Render relationship controls from one normalized Catalog snapshot.
+
+    The first four outputs preserve the Phase B relationship-control order;
+    the four appended outputs are the Phase B.5 kind/title/order/update
+    controls.  Keeping the old prefix stable makes the dedicated hierarchy
+    path additive without changing the 25-output bookshelf contract.
+    """
     if summaries is None:
         summaries = ProjectCatalogService.scan()
     hierarchy = ProjectCatalogService.hierarchy_from_summaries(summaries)
@@ -306,7 +319,19 @@ def _hierarchy_control_updates(ss, summaries=None) -> tuple:
     elif is_chapter:
         status = f"⚠ {selected_summary.relation_message or '孤立章节'}"
     else:
-        status = "当前项目是独立整书。"
+        status = "当前项目是独立整书；选择所属整书可将其转换为章节。"
+    kind = "章节" if is_chapter else "整书" if selected_summary else "未选择"
+    title_value = (
+        selected_summary.chapter_title or ""
+        if is_chapter and selected_summary is not None
+        else ""
+    )
+    order_value = (
+        str(selected_summary.chapter_order)
+        if is_chapter and selected_summary is not None
+        and selected_summary.chapter_order is not None
+        else ""
+    )
     return (
         _update(
             choices=choices,
@@ -316,6 +341,10 @@ def _hierarchy_control_updates(ss, summaries=None) -> tuple:
         _update(interactive=has_selection and bool(choices)),
         _update(interactive=is_chapter),
         _update(value=status),
+        _update(value=kind),
+        _update(value=title_value, interactive=is_chapter),
+        _update(value=order_value, interactive=is_chapter),
+        _update(interactive=is_chapter),
     )
 
 
@@ -324,15 +353,46 @@ def reconcile_bookshelf_hierarchy_selection(ss) -> tuple:
     return _hierarchy_control_updates(ss)
 
 
-def bind_selected_chapter(project_name: str, parent_name: str, ss=None) -> str:
-    """Explicitly bind the selected project under the chosen book."""
+def bind_selected_chapter(
+    project_name: str,
+    parent_name: str,
+    ss=None,
+    chapter_title: str | None = None,
+    chapter_order: object = None,
+) -> str:
+    """Explicitly bind/designate the selected project under the chosen book."""
     if not project_name:
         return "⚪ 请先从书架选择项目。"
     try:
-        ProjectCatalogService.bind_chapter(project_name, parent_name)
+        ProjectCatalogService.bind_chapter(
+            project_name,
+            parent_name,
+            chapter_title=chapter_title,
+            chapter_order=chapter_order,
+        )
         return f"✅ 已将「{project_name}」设置为「{parent_name}」的章节。"
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return f"❌ 设置所属整书失败：{exc}"
+
+
+def update_selected_chapter(
+    project_name: str,
+    chapter_title: str | None,
+    chapter_order: object,
+    ss=None,
+) -> str:
+    """Explicitly update the selected chapter's display title and order."""
+    if not project_name:
+        return "⚪ 请先从书架选择项目。"
+    try:
+        ProjectCatalogService.update_chapter_metadata(
+            project_name,
+            chapter_title,
+            chapter_order,
+        )
+        return f"✅ 已更新「{project_name}」的章节标题和顺序。"
+    except Exception as exc:  # noqa: BLE001
+        return f"❌ 更新章节信息失败：{exc}"
 
 
 def unbind_selected_chapter(project_name: str, ss=None) -> str:
@@ -1034,10 +1094,12 @@ def refresh_bookshelf_management_view(
 def refresh_bookshelf_management_view_with_hierarchy(
     search_query: str = "", p_sel_value: str = "", ss=None
 ) -> tuple:
-    """Refresh Bookshelf Management plus Phase B relationship controls.
+    """Refresh Bookshelf Management plus Phase B/B.5 relationship controls.
 
     The hierarchy controls are derived from the same Catalog snapshot as the
     25 legacy outputs; no second scan is introduced on the main refresh path.
+    The resulting contract is 33 outputs: the stable 25-output bookshelf
+    prefix followed by eight dedicated hierarchy outputs.
     """
     result, summaries = _refresh_bookshelf_management_state(
         search_query, p_sel_value, ss
@@ -1064,6 +1126,7 @@ __all__ = [
     "apply_project_search",
     "archive_selected",
     "bind_open_project",
+    "bind_selected_chapter",
     "cancel_selected_cleanup",
     "cancel_selected_storage_upgrade",
     "check_selected_integrity",
@@ -1087,4 +1150,6 @@ __all__ = [
     "scan_selected_storage_upgrade",
     "select_bookshelf_row",
     "selection_ui_output_keys",
+    "unbind_selected_chapter",
+    "update_selected_chapter",
 ]

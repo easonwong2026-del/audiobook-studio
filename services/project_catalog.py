@@ -27,6 +27,7 @@ class CatalogHierarchy:
     books: tuple[ProjectSummary, ...]
     chapters: tuple[ProjectSummary, ...]
     orphan_chapters: tuple[ProjectSummary, ...]
+    duplicate_project_ids: tuple[str, ...] = ()
 
 
 class ProjectCatalogService:
@@ -273,6 +274,7 @@ class ProjectCatalogService:
             books=books,
             chapters=chapters,
             orphan_chapters=orphan_chapters,
+            duplicate_project_ids=tuple(sorted(duplicate_ids)),
         )
 
     @classmethod
@@ -363,8 +365,34 @@ class ProjectCatalogService:
         return [
             summary.project_name
             for summary in cls._normalize_hierarchy(summaries).books
-            if summary.project_name != excluded
+            if (
+                summary.project_name != excluded
+                and summary.relation_status == RELATION_STANDALONE
+            )
         ]
+
+    @staticmethod
+    def _parse_management_order(value: object) -> int | None:
+        """Normalize an explicit order edit; supplied values must be >= 1."""
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            raise ValueError("章节顺序必须是正整数")  # noqa: TRY004
+        if isinstance(value, int):
+            order = value
+        elif isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            try:
+                order = int(text)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("章节顺序必须是正整数") from exc
+        else:
+            raise ValueError("章节顺序必须是正整数")  # noqa: TRY004
+        if order < 1:
+            raise ValueError("章节顺序必须是正整数")
+        return order
 
     @classmethod
     def bind_chapter(
@@ -389,8 +417,17 @@ class ProjectCatalogService:
         parent = by_name.get(book_name)
         if child is None or parent is None:
             raise ValueError("章节项目或所属整书不存在")
-        if parent.project_kind != "book":
+        if parent.project_id and parent.project_id in hierarchy.duplicate_project_ids:
+            raise ValueError("所属整书的 project_id 重复，无法安全建立层级关系")
+        if (
+            parent.project_kind != "book"
+            or parent.relation_status != RELATION_STANDALONE
+        ):
             raise ValueError("所属项目必须是整书项目，不能选择章节项目")
+        if child.project_id and child.project_id in hierarchy.duplicate_project_ids:
+            raise ValueError("当前项目的 project_id 重复，无法安全修改层级关系")
+        if child.project_kind == "book" and child.parent_project_id:
+            raise ValueError("当前整书项目已有无效层级关系，无法直接转换为章节")
         if child.project_kind == "book" and child.project_id:
             existing_children = [
                 item
@@ -404,18 +441,45 @@ class ProjectCatalogService:
                     "请先解除这些章节关系"
                 )
 
-        chapter_id = ProjectRepository.ensure_project_id(child_name)
-        parent_id = ProjectRepository.ensure_project_id(book_name)
-        if chapter_id == parent_id:
+        if child.project_id and parent.project_id and child.project_id == parent.project_id:
             raise ValueError("项目稳定身份冲突，无法建立关系")
-        normalized_order = cls._normalize_order(chapter_order)
-        title = str(
-            chapter_title or child.chapter_title or child.title or child_name
-        ).strip()
-        ProjectRepository.set_project_relationship(
+        if chapter_title is None:
+            title = child.chapter_title or child.title or child_name
+        else:
+            title = str(chapter_title).strip() or None
+        if chapter_order is None:
+            normalized_order = child.chapter_order
+        else:
+            normalized_order = cls._parse_management_order(chapter_order)
+        ProjectRepository.set_chapter_relationship(
             child_name,
-            parent_id,
-            chapter_title=title or None,
+            book_name,
+            chapter_title=title,
+            chapter_order=normalized_order,
+        )
+
+    @classmethod
+    def update_chapter_metadata(
+        cls,
+        chapter_name: str,
+        chapter_title: str | None = None,
+        chapter_order: object = None,
+    ) -> None:
+        """Update a selected chapter's title/order without changing parent."""
+        name = str(chapter_name or "").strip()
+        hierarchy = cls.scan_hierarchy()
+        summary = next(
+            (item for item in hierarchy.projects if item.project_name == name), None
+        )
+        if summary is None:
+            raise ValueError("项目不存在")
+        if summary.project_kind != "chapter":
+            raise ValueError("当前项目不是章节项目")
+        normalized_title = str(chapter_title or "").strip() or None
+        normalized_order = cls._parse_management_order(chapter_order)
+        ProjectRepository.update_chapter_metadata(
+            name,
+            chapter_title=normalized_title,
             chapter_order=normalized_order,
         )
 
@@ -477,9 +541,9 @@ class ProjectCatalogService:
     @staticmethod
     def display_status(summary: ProjectSummary) -> str:
         if summary.relation_status == RELATION_ORPHAN:
-            return f"⚠孤立章节 · {summary.status}"
+            return f"⚠孤立章节：{summary.relation_message} · {summary.status}"
         if summary.relation_status == RELATION_INVALID:
-            return f"⚠关系无效 · {summary.status}"
+            return f"⚠关系无效：{summary.relation_message} · {summary.status}"
         if summary.relation_status == RELATION_VALID:
             return f"章节 · {summary.status}"
         return summary.status

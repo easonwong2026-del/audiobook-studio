@@ -110,6 +110,9 @@ def create_overview_page() -> dict:
                     "修复", variant="secondary", size="sm", visible=False
                 )
             with gr.Row(equal_height=True):
+                bookshelf_project_kind = gr.Markdown(
+                    "项目类型：未选择",
+                )
                 bookshelf_parent_book = gr.Dropdown(
                     label="所属整书（逻辑关系）",
                     choices=[],
@@ -122,6 +125,22 @@ def create_overview_page() -> dict:
                 )
                 bookshelf_unbind_chapter = gr.Button(
                     "解除章节关系", size="sm", interactive=False
+                )
+            with gr.Row(equal_height=True):
+                bookshelf_chapter_title = gr.Textbox(
+                    label="章节标题（可选）",
+                    placeholder="选择章节后编辑",
+                    interactive=False,
+                    scale=2,
+                )
+                bookshelf_chapter_order = gr.Textbox(
+                    label="章节顺序（正整数，可选）",
+                    placeholder="例如 1",
+                    interactive=False,
+                    scale=1,
+                )
+                bookshelf_update_chapter = gr.Button(
+                    "更新章节信息", variant="secondary", size="sm", interactive=False
                 )
             bookshelf_relation_status = gr.Markdown(
                 "选择项目后，可在此设置或解除所属整书。"
@@ -198,6 +217,10 @@ def create_overview_page() -> dict:
         "bookshelf_parent_book": bookshelf_parent_book,
         "bookshelf_bind_chapter": bookshelf_bind_chapter,
         "bookshelf_unbind_chapter": bookshelf_unbind_chapter,
+        "bookshelf_project_kind": bookshelf_project_kind,
+        "bookshelf_chapter_title": bookshelf_chapter_title,
+        "bookshelf_chapter_order": bookshelf_chapter_order,
+        "bookshelf_update_chapter": bookshelf_update_chapter,
         "bookshelf_relation_status": bookshelf_relation_status,
         "bookshelf_archive": bookshelf_archive,
         "bookshelf_archive_confirm": bookshelf_archive_confirm,
