@@ -1,4 +1,4 @@
-"""Gradio handlers for the read-only Chapter → Book merge planner."""
+"""Gradio handlers for the independent Chapter → Book merge workflow."""
 from __future__ import annotations
 
 import html
@@ -6,6 +6,11 @@ from typing import Any
 
 import gradio as gr
 
+from services.chapter_merge_executor import (
+    ChapterMergeExecutor,
+    MergeExecutionError,
+    MergeExecutionResult,
+)
 from services.chapter_merge_planner import (
     ChapterMergePlanner,
     MergePlan,
@@ -63,6 +68,129 @@ def invalidate_merge_plan() -> tuple[str, None]:
     return "选择变更后，旧的合并计划已清除；请重新分析。", None
 
 
+def _resolution_defaults(plan: MergePlan | None) -> dict[str, Any]:
+    if plan is None:
+        return {"voice_conflicts": {}}
+    return {
+        "voice_conflicts": {
+            str(row.get("role_key") or ""): ""
+            for row in plan.voice_compatibility.roles
+            if str(row.get("status") or "") in {"SOURCE_ONLY", "CONFLICT"}
+        }
+    }
+
+
+def clear_merge_execution_controls() -> tuple:
+    """Clear only C.2 transient controls; catalog/planner arity is untouched."""
+    return (
+        _update(value={"voice_conflicts": {}}),
+        _update(value=False, interactive=False),
+        None,
+        _update(interactive=False),
+        "",
+        None,
+    )
+
+
+def prepare_merge_execution_controls(plan: MergePlan | None) -> tuple:
+    """Expose resolution controls after Analyze, without executing anything."""
+    if plan is None:
+        return clear_merge_execution_controls()
+    planning_allowed = bool(plan.planning_status == "PLANNING_ALLOWED")
+    return (
+        _update(value=_resolution_defaults(plan)),
+        _update(value=False, interactive=planning_allowed),
+        None,
+        _update(interactive=False),
+        "",
+        None,
+    )
+
+
+def invalidate_merge_execution_state() -> tuple:
+    """Invalidate confirmation/result when a resolution or input changes."""
+    return (
+        _update(value=False, interactive=True),
+        None,
+        _update(interactive=False),
+        "",
+        None,
+    )
+
+
+def confirm_merge_plan(
+    confirmed: bool,
+    source_name: str,
+    target_name: str,
+    plan: MergePlan | None,
+    resolutions: Any,
+    ss=None,
+) -> tuple:
+    """Create a fresh identity-bound confirmation; this callback never mutates projects."""
+    if not confirmed:
+        return None, _update(interactive=False), "", None
+    if plan is None or not source_name or not target_name:
+        return None, _update(interactive=False), "⚠️ 请先 Analyze 当前 Chapter → Book 计划。", None
+    try:
+        confirmation = ChapterMergeExecutor.prepare_confirmation(
+            plan, resolutions, session=ss
+        )
+    except MergeExecutionError as exc:
+        return None, _update(interactive=False), f"⛔ 确认失败：`{html.escape(exc.code)}` — {html.escape(str(exc))}", None
+    return (
+        confirmation.as_dict(),
+        _update(interactive=True),
+        "✅ 已生成当前 source / target / plan / resolution / selection revision 的新确认态；现在才可执行。",
+        None,
+    )
+
+
+def _render_execution_result(result: MergeExecutionResult) -> str:
+    lines = [
+        "### Chapter → Book 执行结果",
+        f"- 状态：**{html.escape(result.status)}**；阶段：`{html.escape(result.stage)}`",
+        f"- Transaction ID：`{html.escape(result.transaction_id)}`",
+        f"- Backup：`{html.escape(result.backup_path or '—')}`",
+        f"- 导入 segments：{result.imported_segment_count}；音频文件：{result.imported_audio_count}",
+    ]
+    if result.error_code:
+        lines.append(f"- 错误：`{html.escape(result.error_code)}` — {html.escape(result.error)}")
+    if result.rollback_status != "NOT_STARTED":
+        lines.append(f"- Rollback：`{html.escape(result.rollback_status)}`")
+    if result.integrity:
+        target = result.integrity.get("target") or result.integrity.get("rollback") or result.integrity.get("staged")
+        if isinstance(target, dict):
+            lines.append(f"- Integrity：`{'PASS' if target.get('ok') else 'FAIL'}`")
+    if result.warnings:
+        lines.extend(["", "#### Warnings", *[f"- {html.escape(item)}" for item in result.warnings]])
+    lines.extend(["", f"- Journal：`{html.escape(result.journal_path)}`"])
+    return "\n".join(lines)
+
+
+def execute_merge_plan(
+    plan: MergePlan | None,
+    resolutions: Any,
+    confirmation: Any,
+    ss=None,
+) -> tuple:
+    """Call the service-owned executor and render its structured result."""
+    if plan is None:
+        return "⛔ 没有可执行的 MergePlan。", None, _update(interactive=False), _update(value=False, interactive=False), None
+    result = ChapterMergeExecutor.execute(
+        plan,
+        resolutions,
+        confirmation,
+        session=ss,
+    )
+    return (
+        _render_execution_result(result),
+        result.as_dict(),
+        _update(interactive=False),
+        _update(value=False, interactive=False),
+        None,
+    )
+
+
 def _conflict_markdown(plan: MergePlan) -> str:
     if not plan.conflicts:
         return "- 无冲突或警告。"
@@ -90,12 +218,15 @@ def render_merge_plan(plan: MergePlan) -> str:
             f"- 来源段落：{plan.source_inventory.total_segments}；目标已有段落：{plan.target_inventory.total_segments}",
             f"- 音频覆盖：`{html.escape(str(source_audio.get('coverage') or 'UNKNOWN'))}`",
             f"- 目标插入：`{html.escape(str(plan.placement.get('mode') or 'UNRESOLVABLE'))}`",
+            f"- Voice Cast：{plan.voice_compatibility.compatible_count} compatible；{plan.voice_compatibility.source_only_count} source-only；{plan.voice_compatibility.conflict_count} conflict",
+            f"- QA records：{plan.qa_inventory.get('record_count', 0)}；Revision records：{plan.revision_inventory.get('record_count', 0)}",
+            f"- Target backup：`{html.escape(str(plan.backup_policy.get('target_backup') or 'REQUIRED'))}`",
             f"- Plan token：`{plan.plan_token}`",
             "",
             "#### 冲突与警告",
             _conflict_markdown(plan),
             "",
-            "该结果仅用于 PLAN / REPORT / TOKEN；本版本没有合并执行按钮或执行 API。",
+            "该结果仍是只读 Plan；执行必须经过显式 resolution 与 fresh confirmation。",
         ]
     )
 
@@ -118,10 +249,21 @@ def is_planner_enabled(source_name: str, target_name: str, ss=None) -> bool:
     return bool(source_name and target_name and source_name == selected)
 
 
+def refresh_merge_workflow_controls(ss=None) -> tuple:
+    """Refresh planner controls and clear all C.2 transient execution state."""
+    return (*refresh_merge_planner_controls(ss), *clear_merge_execution_controls())
+
+
 __all__ = [
     "analyze_merge_plan",
+    "clear_merge_execution_controls",
+    "confirm_merge_plan",
+    "execute_merge_plan",
+    "invalidate_merge_execution_state",
     "invalidate_merge_plan",
     "is_planner_enabled",
+    "prepare_merge_execution_controls",
     "refresh_merge_planner_controls",
+    "refresh_merge_workflow_controls",
     "render_merge_plan",
 ]

@@ -28,6 +28,7 @@ from repositories.project_repo import ProjectRepository
 from repositories.project_storage_repo import ProjectStorageRepository
 
 PLANNER_SCHEMA_VERSION = "chapter-merge-plan-v1"
+MERGE_HISTORY_FILENAME = "merge_history.json"
 
 PLANNING_ALLOWED = "PLANNING_ALLOWED"
 PLANNING_BLOCKED = "PLANNING_BLOCKED"
@@ -60,6 +61,8 @@ _PERSISTED_FILE_KEYS = (
     "voice_bindings",
     "character_roster",
     "voice_cast",
+    "synthesis_overrides",
+    "synthesis_selections",
     "quality_state",
     "task_db",
     "segment_status_journal",
@@ -265,6 +268,28 @@ def _read_status_journal(path: str) -> tuple[tuple[dict[str, Any], ...], str | N
     return tuple(events), None
 
 
+def merge_history_path(project_dir: str) -> str:
+    """Return the minimal project-local merge-history document path.
+
+    The file lives in the existing system-data/config area but is intentionally
+    not added to the Storage Layout v3 key table: it is an additive C.2
+    provenance document, not a new layout version.
+    """
+    return os.path.join(project_paths.project_dir(project_dir, "config"), MERGE_HISTORY_FILENAME)
+
+
+def read_merge_history(project_dir: str) -> tuple[tuple[dict[str, Any], ...], str | None]:
+    path = merge_history_path(project_dir)
+    value, error = _safe_read_json(path)
+    if error:
+        return (), None if error == "missing" else error
+    if isinstance(value, list):
+        return tuple(item for item in value if isinstance(item, dict)), None
+    if isinstance(value, dict) and isinstance(value.get("records"), list):
+        return tuple(item for item in value["records"] if isinstance(item, dict)), None
+    return (), "merge_history.json top-level must be a list or {records: []}"
+
+
 @dataclass
 class _ProjectState:
     name: str
@@ -275,6 +300,7 @@ class _ProjectState:
     roster: dict[str, Any] = field(default_factory=dict)
     cast: dict[str, Any] = field(default_factory=dict)
     quality: dict[str, Any] = field(default_factory=dict)
+    merge_history: tuple[dict[str, Any], ...] = ()
     status_events: tuple[dict[str, Any], ...] = ()
     task_rows: tuple[dict[str, Any], ...] = ()
     paths: dict[str, str] = field(default_factory=dict)
@@ -348,6 +374,11 @@ def _load_project_state(name: str) -> _ProjectState:
     state.roster = _json_dict(values.get("character_roster"))
     state.cast = _json_dict(values.get("voice_cast"))
     state.quality = _json_dict(values.get("quality_state"))
+    state.paths["merge_history"] = merge_history_path(path)
+    merge_history, merge_history_error = read_merge_history(path)
+    state.merge_history = merge_history
+    if merge_history_error:
+        errors.append(f"merge_history: {merge_history_error}")
 
     status_events, status_error = _read_status_journal(
         state.paths.get("segment_status_journal", "")
@@ -551,7 +582,7 @@ def _project_file_fingerprints(state: _ProjectState) -> dict[str, dict[str, Any]
     return {
         key: _file_fingerprint(path, state.path)
         for key, path in sorted(state.paths.items())
-        if key in _PERSISTED_FILE_KEYS
+        if key in _PERSISTED_FILE_KEYS or key == "merge_history"
     }
 
 
@@ -955,6 +986,7 @@ class MergePlan:
     revision_inventory: Mapping[str, Any]
     task_state: Mapping[str, Any]
     provenance: Mapping[str, Any]
+    merge_history: Mapping[str, Any]
     export_policy: Mapping[str, Any]
     backup_policy: Mapping[str, Any]
     integrity: Mapping[str, Any]
@@ -1199,21 +1231,29 @@ def _audio_inventory(
     source_ids = {record["segment_id"] for record in source_records if record["segment_id"]}
     target_ids = {record["segment_id"] for record in target_records if record["segment_id"]}
     target_by_id = {record["segment_id"]: record for record in target_records}
+    target_segments_dir = project_paths.project_dir(target.path, "segments")
+    target_segment_files = _directory_fingerprints(target.path, target_segments_dir)
     target_conflicts: list[dict[str, Any]] = []
     for record in source_records:
         segment_id = record["segment_id"]
         if not segment_id:
             continue
         target_audio = target_by_id.get(segment_id, {}).get("audio", {})
-        if target_audio.get("present") or segment_id in target_ids:
+        target_owned_or_orphan = [
+            item
+            for item in target_segment_files
+            if _audio_file_matches(os.path.basename(str(item.get("path") or "")), segment_id)
+        ]
+        if target_audio.get("present") or segment_id in target_ids or target_owned_or_orphan:
             target_conflicts.append(
                 {
                     "segment_id": segment_id,
                     "target_segment_exists": segment_id in target_ids,
                     "target_audio_files": target_audio.get("files", []),
+                    "target_orphan_audio_files": target_owned_or_orphan,
                 }
             )
-    if target_conflicts and not (source_ids & target_ids):
+    if target_conflicts:
         _add_conflict(
             conflicts,
             "TARGET_AUDIO_PATH_CONFLICT",
@@ -1461,6 +1501,29 @@ class ChapterMergePlanner:
                 _add_conflict(conflicts, "DUPLICATE_SEGMENT_ID", ERROR, "segments", "来源剧本存在重复 segment ID", blocking=True, source_ref=source.name, details={"segment_ids": duplicate_source_segments})
             if duplicate_target_segments:
                 _add_conflict(conflicts, "DUPLICATE_SEGMENT_ID", ERROR, "segments", "目标剧本存在重复 segment ID", blocking=True, target_ref=target.name, details={"segment_ids": duplicate_target_segments})
+            source_chapter_ids = {
+                str(item.get("id") or "").strip()
+                for item in _script_chapters(source.script)
+                if str(item.get("id") or "").strip()
+            }
+            target_chapter_ids = {
+                str(item.get("id") or "").strip()
+                for item in _script_chapters(target.script)
+                if str(item.get("id") or "").strip()
+            }
+            chapter_collisions = sorted(source_chapter_ids & target_chapter_ids)
+            if chapter_collisions:
+                _add_conflict(
+                    conflicts,
+                    "CHAPTER_ID_COLLISION",
+                    ERROR,
+                    "placement",
+                    "来源 chapter ID 与目标 Book 已有 chapter ID 冲突",
+                    blocking=True,
+                    source_ref=source.name,
+                    target_ref=target.name,
+                    details={"chapter_ids": chapter_collisions},
+                )
 
         collisions = tuple(sorted(source_id_set & target_id_set))
         if collisions:
@@ -1489,8 +1552,48 @@ class ChapterMergePlanner:
                 revision_inventory["remap_required"] = bool(collisions)
                 _add_conflict(conflicts, "UNSUPPORTED_REVISION_MAPPING", ERROR, "revision", "来源存在 Revision 历史，但 C.1 没有跨项目 revision 保留/重绑契约", blocking=True, source_ref=source.name, target_ref=target.name, details={"record_count": revision_inventory["record_count"], "transfer_policy": revision_inventory["transfer_policy"]})
             qa_inventory["remap_required"] = bool(collisions and qa_inventory["record_count"])
+            if qa_inventory["record_count"]:
+                _add_conflict(
+                    conflicts,
+                    "UNSUPPORTED_QA_TRANSFER",
+                    ERROR,
+                    "qa",
+                    "来源存在 QA / human review 记录，但当前 executor 尚未实现跨项目 revision 语义保留",
+                    blocking=True,
+                    source_ref=source.name,
+                    target_ref=target.name,
+                    details={"record_count": qa_inventory["record_count"]},
+                )
             if qa_inventory["remap_required"]:
                 _add_conflict(conflicts, "UNSUPPORTED_QA_REMAP", ERROR, "qa", "segment ID 冲突会要求 QA 重绑，但 C.1 不执行 QA remap", blocking=True, source_ref=source.name, target_ref=target.name)
+            for synthesis_key, label in (
+                ("synthesis_overrides", "synthesis override"),
+                ("synthesis_selections", "synthesis selection"),
+            ):
+                synthesis_value, synthesis_error = _safe_read_json(source.paths.get(synthesis_key, ""))
+                if synthesis_error and synthesis_error != "missing":
+                    _add_conflict(
+                        conflicts,
+                        "UNSUPPORTED_SYNTHESIS_STATE",
+                        ERROR,
+                        "synthesis",
+                        f"来源 {label} 无法读取，不能安全迁移其 segment/chapter 引用",
+                        blocking=True,
+                        source_ref=source.name,
+                        details={"file": synthesis_key, "error": synthesis_error},
+                    )
+                elif synthesis_value not in (None, {}, [], ""):
+                    _add_conflict(
+                        conflicts,
+                        "UNSUPPORTED_SYNTHESIS_STATE",
+                        ERROR,
+                        "synthesis",
+                        f"来源存在非空 {label}；其项目级/章节级语义不能在单 Chapter 合并中安全重绑",
+                        blocking=True,
+                        source_ref=source.name,
+                        target_ref=target.name,
+                        details={"file": synthesis_key, "transfer_policy": "EXCLUDED_FROM_EXECUTION_PLAN"},
+                    )
             source_tasks = _task_inventory(source, source.name)
             target_tasks = _task_inventory(target, target.name)
             task_state = {"source": source_tasks, "target": target_tasks, "transfer_policy": "NOT_TRANSFERABLE"}
@@ -1505,6 +1608,18 @@ class ChapterMergePlanner:
                 _add_conflict(conflicts, "ACTIVE_REPAIR", ERROR, "repair", "来源存在活动 Repair 工作流", blocking=True, source_ref=source.name, details={"repairs": source_repairs["active_repairs"]})
             if target_repairs["active_count"]:
                 _add_conflict(conflicts, "ACTIVE_REPAIR", ERROR, "repair", "目标存在活动 Repair 工作流", blocking=True, target_ref=target.name, details={"repairs": target_repairs["active_repairs"]})
+            if source_repairs["record_count"]:
+                _add_conflict(
+                    conflicts,
+                    "UNSUPPORTED_REPAIR_HISTORY_TRANSFER",
+                    ERROR,
+                    "repair",
+                    "来源存在 Repair 历史；其 target/preserved 文件引用不能在本次单 Chapter 合并中安全重绑",
+                    blocking=True,
+                    source_ref=source.name,
+                    target_ref=target.name,
+                    details={"record_count": source_repairs["record_count"]},
+                )
             task_state["source"]["repair"] = source_repairs
             task_state["target"]["repair"] = target_repairs
             provenance = {
@@ -1532,6 +1647,54 @@ class ChapterMergePlanner:
                 _add_conflict(conflicts, "TARGET_INTEGRITY_FAILED", ERROR, "integrity", "目标完整性扫描失败；C.1 不执行修复", blocking=True, target_ref=target.name, details=integrity["target"])
             source_state_fingerprint = _state_fingerprint(source, voice_assets)
             target_state_fingerprint = _state_fingerprint(target, voice_assets)
+            matching_history = [
+                record
+                for record in target.merge_history
+                if str(record.get("source_project_id") or "") == source.project_id
+                and str(record.get("target_project_id") or "") == target.project_id
+            ]
+            same_source_history = [
+                record
+                for record in matching_history
+                if str(record.get("source_state_fingerprint") or "") == source_state_fingerprint
+            ]
+            changed_source_history = [
+                record
+                for record in matching_history
+                if str(record.get("source_state_fingerprint") or "")
+                and str(record.get("source_state_fingerprint") or "") != source_state_fingerprint
+            ]
+            merge_history = {
+                "target_records": list(target.merge_history),
+                "matching_records": matching_history,
+                "same_source_state_records": same_source_history,
+                "changed_source_state_records": changed_source_history,
+                "policy": "BLOCK_IDENTICAL_REPEAT_AND_SOURCE_CHANGES",
+            }
+            if same_source_history:
+                _add_conflict(
+                    conflicts,
+                    "ALREADY_MERGED",
+                    ERROR,
+                    "merge_history",
+                    "相同 source state 已经合并到该 target；当前版本不执行重复导入",
+                    blocking=True,
+                    source_ref=source.name,
+                    target_ref=target.name,
+                    details={"records": same_source_history},
+                )
+            elif changed_source_history:
+                _add_conflict(
+                    conflicts,
+                    "SOURCE_CHANGED_AFTER_PREVIOUS_MERGE",
+                    ERROR,
+                    "merge_history",
+                    "该 Chapter 曾以其他 state 合并到该 Book；当前版本不执行增量更新",
+                    blocking=True,
+                    source_ref=source.name,
+                    target_ref=target.name,
+                    details={"records": changed_source_history},
+                )
         else:
             source_audio = {"coverage": NO_AUDIO, "expected_count": 0, "present_count": 0, "missing_count": 0, "missing_segment_ids": [], "files": [], "unexpected_files": []}
             target_audio = {"existing_segment_count": 0, "files": [], "unexpected_files": [], "destination_conflicts": [], "proposed_destination_unique": False}
@@ -1544,6 +1707,7 @@ class ChapterMergePlanner:
             export_policy = {"transfer_policy": "EXCLUDED_FROM_EXECUTION_PLAN"}
             backup_policy = {"target_backup": "REQUIRED_BEFORE_C2_EXECUTION", "source_backup": "NOT_REQUIRED_BY_DEFAULT", "created": False}
             integrity = {"repair_performed": False}
+            merge_history = {"policy": "BLOCK_IDENTICAL_REPEAT_AND_SOURCE_CHANGES"}
             source_state_fingerprint = _digest({"requested": source_requested})
             target_state_fingerprint = _digest({"requested": target_requested})
 
@@ -1643,6 +1807,7 @@ class ChapterMergePlanner:
             revision_inventory=revision_inventory,
             task_state=task_state,
             provenance=provenance,
+            merge_history=merge_history,
             export_policy=export_policy,
             backup_policy=backup_policy,
             integrity=integrity,
@@ -1681,6 +1846,7 @@ __all__ = [
     "COMPLETE_AUDIO",
     "ERROR",
     "INFO",
+    "MERGE_HISTORY_FILENAME",
     "NO_AUDIO",
     "NO_COLLISION",
     "PARTIAL_AUDIO",
@@ -1698,5 +1864,7 @@ __all__ = [
     "ProjectReference",
     "SegmentRemapPlan",
     "VoiceCompatibilityPlan",
+    "merge_history_path",
     "plan_merge",
+    "read_merge_history",
 ]

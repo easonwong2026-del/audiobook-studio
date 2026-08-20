@@ -368,23 +368,139 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
     merge_analyze = page.get("merge_analyze")
     merge_result = page.get("merge_plan_result")
     merge_state = page.get("merge_plan_state")
+    merge_resolution = page.get("merge_resolution")
+    merge_confirm = page.get("merge_confirm")
+    merge_confirmation_state = page.get("merge_confirmation_state")
+    merge_execute = page.get("merge_execute")
+    merge_execution_result = page.get("merge_execution_result")
+    merge_transaction_state = page.get("merge_transaction_state")
     merge_analyze_callback = deps.get("merge_analyze")
     merge_invalidate_callback = deps.get("merge_invalidate")
+    merge_prepare_callback = deps.get("merge_prepare_execution")
+    merge_clear_callback = deps.get("merge_clear_execution")
+    merge_invalidate_execution_callback = deps.get("merge_invalidate_execution")
+    merge_confirm_callback = deps.get("merge_confirm")
+    merge_execute_callback = deps.get("merge_execute")
     if (
         all(item is not None for item in (merge_source, merge_target, merge_analyze, merge_result, merge_state))
         and merge_analyze_callback is not None
         and merge_invalidate_callback is not None
     ):
-        merge_analyze.click(
+        analyze_chain = merge_analyze.click(
             merge_analyze_callback,
             [merge_source, merge_target, session],
             [merge_result, merge_state],
         )
+        if merge_prepare_callback and all(
+            item is not None
+            for item in (
+                merge_resolution,
+                merge_confirm,
+                merge_confirmation_state,
+                merge_execute,
+                merge_execution_result,
+                merge_transaction_state,
+            )
+        ):
+            analyze_chain.then(
+                merge_prepare_callback,
+                [merge_state],
+                [
+                    merge_resolution,
+                    merge_confirm,
+                    merge_confirmation_state,
+                    merge_execute,
+                    merge_execution_result,
+                    merge_transaction_state,
+                ],
+            )
         for component in (merge_source, merge_target):
-            component.change(
+            input_chain = component.change(
                 merge_invalidate_callback,
                 [],
                 [merge_result, merge_state],
+            )
+            if merge_clear_callback and all(
+                item is not None
+                for item in (
+                    merge_resolution,
+                    merge_confirm,
+                    merge_confirmation_state,
+                    merge_execute,
+                    merge_execution_result,
+                    merge_transaction_state,
+                )
+            ):
+                input_chain.then(
+                    merge_clear_callback,
+                    [],
+                    [
+                        merge_resolution,
+                        merge_confirm,
+                        merge_confirmation_state,
+                        merge_execute,
+                        merge_execution_result,
+                        merge_transaction_state,
+                    ],
+                )
+        if merge_resolution is not None and merge_invalidate_execution_callback and all(
+            item is not None
+            for item in (
+                merge_confirm,
+                merge_confirmation_state,
+                merge_execute,
+                merge_execution_result,
+                merge_transaction_state,
+            )
+        ):
+            merge_resolution.change(
+                merge_invalidate_execution_callback,
+                [],
+                [
+                    merge_confirm,
+                    merge_confirmation_state,
+                    merge_execute,
+                    merge_execution_result,
+                    merge_transaction_state,
+                ],
+            )
+        if merge_confirm is not None and merge_confirm_callback and all(
+            item is not None
+            for item in (
+                merge_confirmation_state,
+                merge_execute,
+                merge_execution_result,
+                merge_transaction_state,
+            )
+        ):
+            merge_confirm.change(
+                merge_confirm_callback,
+                [merge_confirm, merge_source, merge_target, merge_state, merge_resolution, session],
+                [
+                    merge_confirmation_state,
+                    merge_execute,
+                    merge_execution_result,
+                    merge_transaction_state,
+                ],
+            )
+        if merge_execute is not None and merge_execute_callback and all(
+            item is not None
+            for item in (
+                merge_execution_result,
+                merge_transaction_state,
+                merge_confirmation_state,
+            )
+        ):
+            merge_execute.click(
+                merge_execute_callback,
+                [merge_state, merge_resolution, merge_confirmation_state, session],
+                [
+                    merge_execution_result,
+                    merge_transaction_state,
+                    merge_execute,
+                    merge_confirm,
+                    merge_confirmation_state,
+                ],
             )
 
 

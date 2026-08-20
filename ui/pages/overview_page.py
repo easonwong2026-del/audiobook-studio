@@ -146,7 +146,7 @@ def create_overview_page() -> dict:
                 "选择项目后，可在此设置或解除所属整书。"
             )
 
-            gr.Markdown("#### Chapter → Book 合并计划（只读分析）")
+            gr.Markdown("#### Chapter → Book 合并（独立事务工作流）")
             with gr.Row(equal_height=True):
                 merge_source_chapter = gr.Dropdown(
                     label="来源 Chapter",
@@ -166,9 +166,27 @@ def create_overview_page() -> dict:
                     "分析合并计划", variant="secondary", size="sm", interactive=False
                 )
             merge_plan_result = gr.Markdown(
-                "选择一个 Chapter 后，可分析其到目标 Book 的只读合并计划。"
+                "选择一个 Chapter 后，可分析其到目标 Book 的合并计划。"
             )
             merge_plan_state = gr.State(None)
+            merge_resolution = gr.JSON(
+                label="冲突 resolution（必须显式选择）",
+                value={"voice_conflicts": {}},
+            )
+            merge_confirm = gr.Checkbox(
+                label="我确认按当前 Plan / resolution 执行一次 Chapter → Book 合并",
+                value=False,
+                interactive=False,
+            )
+            merge_confirmation_state = gr.State(None)
+            merge_execute = gr.Button(
+                "执行 Chapter → Book 合并",
+                variant="primary",
+                size="sm",
+                interactive=False,
+            )
+            merge_execution_result = gr.Markdown("")
+            merge_transaction_state = gr.State(None)
 
         # 两步确认状态：记录「已确认的项目名」（字符串语义，"" 表示未确认）；
         # SessionState 另外绑定 selection revision，防止 A → B → A 复用旧确认。
@@ -251,6 +269,12 @@ def create_overview_page() -> dict:
         "merge_analyze": merge_analyze,
         "merge_plan_result": merge_plan_result,
         "merge_plan_state": merge_plan_state,
+        "merge_resolution": merge_resolution,
+        "merge_confirm": merge_confirm,
+        "merge_confirmation_state": merge_confirmation_state,
+        "merge_execute": merge_execute,
+        "merge_execution_result": merge_execution_result,
+        "merge_transaction_state": merge_transaction_state,
         "bookshelf_archive": bookshelf_archive,
         "bookshelf_archive_confirm": bookshelf_archive_confirm,
         "bookshelf_msg": bookshelf_msg,

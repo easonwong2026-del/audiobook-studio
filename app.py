@@ -4402,6 +4402,12 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             merge_analyze = ov_page["merge_analyze"]
             merge_plan_result = ov_page["merge_plan_result"]
             merge_plan_state = ov_page["merge_plan_state"]
+            merge_resolution = ov_page["merge_resolution"]
+            merge_confirm = ov_page["merge_confirm"]
+            merge_confirmation_state = ov_page["merge_confirmation_state"]
+            merge_execute = ov_page["merge_execute"]
+            merge_execution_result = ov_page["merge_execution_result"]
+            merge_transaction_state = ov_page["merge_transaction_state"]
 
             # ───────── 新建项目 ─────────
             cr_page = create_create_project_page()
@@ -4617,6 +4623,12 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
                 merge_analyze,
                 merge_plan_result,
                 merge_plan_state,
+                merge_resolution,
+                merge_confirm,
+                merge_confirmation_state,
+                merge_execute,
+                merge_execution_result,
+                merge_transaction_state,
             ]
 
     # 填充 _GROUPS（运行时装载，供 navigation._goto 使用）
@@ -4705,7 +4717,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         catalog_management_outputs,
     )
     overview_nav_chain.then(
-        merge_ui.refresh_merge_planner_controls,
+        merge_ui.refresh_merge_workflow_controls,
         [ss],
         merge_planner_outputs,
     )
@@ -4802,7 +4814,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         hierarchy_outputs(ov_page),
     )
     bookshelf_select_chain.then(
-        merge_ui.refresh_merge_planner_controls,
+        merge_ui.refresh_merge_workflow_controls,
         [ss],
         merge_planner_outputs,
     )
@@ -4913,7 +4925,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         catalog_management_outputs,
     )
     voice_create_chain.then(
-        merge_ui.refresh_merge_planner_controls,
+        merge_ui.refresh_merge_workflow_controls,
         [ss],
         merge_planner_outputs,
     )
@@ -4928,7 +4940,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         ),
         session=ss,
         merge_refresh=(
-            merge_ui.refresh_merge_planner_controls,
+            merge_ui.refresh_merge_workflow_controls,
             [ss],
             merge_planner_outputs,
         ),
@@ -4975,10 +4987,15 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             ],
             "management_outputs": catalog_management_outputs,
             "management_refresh": catalog_ui.refresh_bookshelf_management_view_with_hierarchy,
-            "merge_refresh": merge_ui.refresh_merge_planner_controls,
+            "merge_refresh": merge_ui.refresh_merge_workflow_controls,
             "merge_outputs": merge_planner_outputs,
             "merge_analyze": merge_ui.analyze_merge_plan,
             "merge_invalidate": merge_ui.invalidate_merge_plan,
+            "merge_prepare_execution": merge_ui.prepare_merge_execution_controls,
+            "merge_clear_execution": merge_ui.clear_merge_execution_controls,
+            "merge_invalidate_execution": merge_ui.invalidate_merge_execution_state,
+            "merge_confirm": merge_ui.confirm_merge_plan,
+            "merge_execute": merge_ui.execute_merge_plan,
             "callbacks": {
                 "open_project": open_project,
                 "open_project_outputs": [
@@ -4992,14 +5009,14 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
 
     p_refresh_chain = p_refresh.click(refresh_projects_full, [], [p_sel])
     p_refresh_chain.then(
-        merge_ui.refresh_merge_planner_controls,
+        merge_ui.refresh_merge_workflow_controls,
         [ss],
         merge_planner_outputs,
     )
     chain = p_open.click(open_project, [p_sel, ss], [p_summary, v_table, v_role, v_role_title, v_lib, s_log, v_status])
     chain = _open_chain_rest(chain)
     chain.then(
-        merge_ui.refresh_merge_planner_controls,
+        merge_ui.refresh_merge_workflow_controls,
         [ss],
         merge_planner_outputs,
     )
@@ -5312,7 +5329,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         catalog_management_outputs,
     )
     app.load(
-        merge_ui.refresh_merge_planner_controls,
+        merge_ui.refresh_merge_workflow_controls,
         [ss],
         merge_planner_outputs,
     )
