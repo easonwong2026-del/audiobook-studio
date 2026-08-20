@@ -30,9 +30,21 @@ def storage_upgrade_outputs(page: dict) -> list:
     ]
 
 
-def bookshelf_management_outputs(page: dict, project_sel) -> list:
-    """Return the 25-output state-aware bookshelf refresh contract."""
+def hierarchy_outputs(page: dict) -> list:
+    """Return the Phase B relationship-control output contract."""
     return [
+        page["bookshelf_parent_book"],
+        page["bookshelf_bind_chapter"],
+        page["bookshelf_unbind_chapter"],
+        page["bookshelf_relation_status"],
+    ]
+
+
+def bookshelf_management_outputs(
+    page: dict, project_sel, *, include_hierarchy: bool = False
+) -> list:
+    """Return the 25-output state-aware bookshelf refresh contract."""
+    outputs = [
         page["ov_bookshelf"],
         project_sel,
         page["bookshelf_trash_table"],
@@ -42,6 +54,9 @@ def bookshelf_management_outputs(page: dict, project_sel) -> list:
         page["bookshelf_selected"],
         *selection_ui_outputs(page, project_sel)[1:],
     ]
+    if include_hierarchy:
+        outputs.extend(hierarchy_outputs(page))
+    return outputs
 
 
 def selection_ui_outputs(page: dict, project_sel) -> list:
@@ -79,9 +94,14 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
     """
     session = deps["session"]
     management_outputs = deps.get("management_outputs") or bookshelf_management_outputs(
-        page, deps["project_sel"]
+        page, deps["project_sel"], include_hierarchy=True
+    )
+    management_refresh = deps.get(
+        "management_refresh",
+        catalog_handlers.refresh_bookshelf_management_view_with_hierarchy,
     )
     selection_outputs = selection_ui_outputs(page, deps["project_sel"])
+    relationship_outputs = hierarchy_outputs(page)
     cleanup_handler_outputs = cleanup_outputs(page)
     storage_handler_outputs = storage_upgrade_outputs(page)
     cb = deps.get("callbacks", {})
@@ -104,6 +124,11 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
             [session, deps["project_sel"]],
             selection_outputs,
         )
+        search_chain.then(
+            catalog_handlers.reconcile_bookshelf_hierarchy_selection,
+            [session],
+            relationship_outputs,
+        )
 
     # 注：书架 select → 只设 ss.selected_project 的接线在 app.py 内联完成
     # （``ov_bookshelf.select(catalog_ui.select_bookshelf_row, ...)``），保持
@@ -119,7 +144,7 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
         if "open_chain_rest" in cb:
             chain = cb["open_chain_rest"](chain)
         chain = chain.then(
-            catalog_handlers.refresh_bookshelf_management_view,
+            management_refresh,
             [page["bookshelf_search"], deps["project_sel"], session],
             management_outputs,
         )
@@ -129,7 +154,7 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
 
     # ── 手动刷新：query 保持，selection 仅在不可见/不存在时清除 ──
     page["bookshelf_refresh"].click(
-        catalog_handlers.refresh_bookshelf_management_view,
+        management_refresh,
         [page["bookshelf_search"], deps["project_sel"], session],
         management_outputs,
     )
@@ -198,6 +223,26 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
         [page["bookshelf_msg"], page["bookshelf_integrity_repair"]],
     )
 
+    # ── Phase B：显式建立 / 解除 Book ← Chapter 逻辑关系 ──
+    page["bookshelf_bind_chapter"].click(
+        catalog_handlers.bind_selected_chapter,
+        [page["bookshelf_selected_proj"], page["bookshelf_parent_book"], session],
+        [page["bookshelf_msg"],],
+    ).then(
+        management_refresh,
+        [page["bookshelf_search"], deps["project_sel"], session],
+        management_outputs,
+    )
+    page["bookshelf_unbind_chapter"].click(
+        catalog_handlers.unbind_selected_chapter,
+        [page["bookshelf_selected_proj"], session],
+        [page["bookshelf_msg"],],
+    ).then(
+        management_refresh,
+        [page["bookshelf_search"], deps["project_sel"], session],
+        management_outputs,
+    )
+
     # ── 移入回收站：两步确认（确认态绑定项目名） ──
     # 输出 4 元组（消息 / 确认态 / 选中项目 State / 选中信息 Markdown）：
     # 首次确认与 guard 阻止不清 selection；成功后全清（handler 内完成）。
@@ -221,7 +266,7 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
     if "open_chain_rest" in cb:
         archive_chain = cb["open_chain_rest"](archive_chain)
     archive_chain.then(
-        catalog_handlers.refresh_bookshelf_management_view,
+        management_refresh,
         [page["bookshelf_search"], deps["project_sel"], session],
         management_outputs,
     )
@@ -232,7 +277,7 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
         [page["bookshelf_restore_file"]],
         [page["bookshelf_msg"]],
     ).then(
-        catalog_handlers.refresh_bookshelf_management_view,
+        management_refresh,
         [page["bookshelf_search"], deps["project_sel"], session],
         management_outputs,
     )
@@ -252,7 +297,7 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
         [page["bookshelf_trash_sel"]],
         [page["bookshelf_msg"]],
     ).then(
-        catalog_handlers.refresh_bookshelf_management_view,
+        management_refresh,
         [page["bookshelf_search"], deps["project_sel"], session],
         management_outputs,
     )
@@ -261,7 +306,7 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
         [page["bookshelf_trash_sel"], page["bookshelf_trash_confirm"]],
         [page["bookshelf_msg"]],
     ).then(
-        catalog_handlers.refresh_bookshelf_management_view,
+        management_refresh,
         [page["bookshelf_search"], deps["project_sel"], session],
         management_outputs,
     ).then(

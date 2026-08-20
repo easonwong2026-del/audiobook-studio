@@ -109,6 +109,23 @@ def create_overview_page() -> dict:
                 bookshelf_integrity_repair = gr.Button(
                     "修复", variant="secondary", size="sm", visible=False
                 )
+            with gr.Row(equal_height=True):
+                bookshelf_parent_book = gr.Dropdown(
+                    label="所属整书（逻辑关系）",
+                    choices=[],
+                    value=None,
+                    interactive=False,
+                    scale=2,
+                )
+                bookshelf_bind_chapter = gr.Button(
+                    "绑定为章节", size="sm", interactive=False
+                )
+                bookshelf_unbind_chapter = gr.Button(
+                    "解除章节关系", size="sm", interactive=False
+                )
+            bookshelf_relation_status = gr.Markdown(
+                "选择项目后，可在此设置或解除所属整书。"
+            )
 
         # 两步确认状态：记录「已确认的项目名」（字符串语义，"" 表示未确认）；
         # SessionState 另外绑定 selection revision，防止 A → B → A 复用旧确认。
@@ -178,6 +195,10 @@ def create_overview_page() -> dict:
         "bookshelf_storage_cancel": bookshelf_storage_cancel,
         "bookshelf_integrity": bookshelf_integrity,
         "bookshelf_integrity_repair": bookshelf_integrity_repair,
+        "bookshelf_parent_book": bookshelf_parent_book,
+        "bookshelf_bind_chapter": bookshelf_bind_chapter,
+        "bookshelf_unbind_chapter": bookshelf_unbind_chapter,
+        "bookshelf_relation_status": bookshelf_relation_status,
         "bookshelf_archive": bookshelf_archive,
         "bookshelf_archive_confirm": bookshelf_archive_confirm,
         "bookshelf_msg": bookshelf_msg,

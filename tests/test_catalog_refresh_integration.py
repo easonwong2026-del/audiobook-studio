@@ -1,12 +1,12 @@
 """T04 统一刷新集成：目录类变更链尾统一接 state-aware bookshelf refresh。
 
 验证（设计 B5 / B9-9），AST + 纯函数：
-- 移入回收站成功（archive）→ 链尾 refresh_bookshelf_management_view；
-- 回收站恢复成功（restore_archived）→ 链尾 refresh_bookshelf_management_view；
-- 回收站永久删除成功 → 链尾 refresh_bookshelf_management_view；
-- 从备份恢复成功（restore_backup）→ 链尾 refresh_bookshelf_management_view；
-- 创建项目成功（cp_json_create 链尾）→ refresh_bookshelf_management_view；
-- 切换数据目录（apply_data_dir）→ refresh_bookshelf_management_view；
+- 移入回收站成功（archive）→ 链尾 state-aware hierarchy refresh；
+- 回收站恢复成功（restore_archived）→ 链尾 state-aware hierarchy refresh；
+- 回收站永久删除成功 → 链尾 state-aware hierarchy refresh；
+- 从备份恢复成功（restore_backup）→ 链尾 state-aware hierarchy refresh；
+- 创建项目成功（cp_json_create 链尾）→ hierarchy refresh；
+- 切换数据目录（apply_data_dir）→ hierarchy refresh；
 - ``_open_chain_rest``（打开项目后的工作流刷新）**不受影响**（不含目录刷新）。
 """
 from __future__ import annotations
@@ -53,30 +53,30 @@ def _click_block_contains(component: str, needle: str) -> bool:
 
 
 def test_archive_chain_refreshes_catalog():
-    assert _click_block_contains("bookshelf_archive", "catalog_handlers.refresh_bookshelf_management_view")
+    assert _click_block_contains("bookshelf_archive", "management_refresh")
 
 
 def test_backup_restore_chain_refreshes_catalog():
-    assert _click_block_contains("bookshelf_restore", "catalog_handlers.refresh_bookshelf_management_view")
+    assert _click_block_contains("bookshelf_restore", "management_refresh")
 
 
 def test_trash_restore_chain_refreshes_catalog():
-    assert _click_block_contains("bookshelf_trash_restore", "catalog_handlers.refresh_bookshelf_management_view")
+    assert _click_block_contains("bookshelf_trash_restore", "management_refresh")
 
 
 def test_trash_delete_chain_refreshes_catalog():
-    assert _click_block_contains("bookshelf_trash_delete", "catalog_handlers.refresh_bookshelf_management_view")
+    assert _click_block_contains("bookshelf_trash_delete", "management_refresh")
 
 
 def test_catalog_wiring_has_four_mutation_refresh_subscriptions():
     """四条目录变更链均进入唯一 state-aware reconciliation helper。"""
-    count = WIRING_SRC.count("catalog_handlers.refresh_bookshelf_management_view")
+    count = WIRING_SRC.count("management_refresh")
     assert count >= 4, f"state-aware refresh 订阅数应至少为 4，实际 {count}"
 
 
 def test_create_project_chain_refreshes_catalog():
-    assert "catalog_ui.refresh_bookshelf_management_view" in APP_SRC
-    assert "voice_create_chain.then(\n        catalog_ui.refresh_bookshelf_management_view" in APP_SRC
+    assert "catalog_ui.refresh_bookshelf_management_view_with_hierarchy" in APP_SRC
+    assert "voice_create_chain.then(\n        catalog_ui.refresh_bookshelf_management_view_with_hierarchy" in APP_SRC
 
 
 def test_data_dir_chain_refreshes_catalog():

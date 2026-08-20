@@ -418,7 +418,7 @@ def test_cleanup_token_cannot_cross_project(bookshelf_workspace):
 def test_ui_ready_catalog_load_is_separate_from_prewarm():
     app_path = Path(__file__).parents[1] / "app.py"
     source = app_path.read_text(encoding="utf-8")
-    assert "app.load(\n        catalog_ui.refresh_bookshelf_management_view" in source
+    assert "app.load(\n        catalog_ui.refresh_bookshelf_management_view_with_hierarchy" in source
     assert "app.load(_on_ui_ready_prewarm)" in source
     tree = ast.parse(source)
     load_callbacks = []
@@ -429,5 +429,5 @@ def test_ui_ready_catalog_load_is_separate_from_prewarm():
             continue
         callback = node.args[0]
         load_callbacks.append(ast.unparse(callback))
-    assert "catalog_ui.refresh_bookshelf_management_view" in load_callbacks
+    assert "catalog_ui.refresh_bookshelf_management_view_with_hierarchy" in load_callbacks
     assert "_on_ui_ready_prewarm" in load_callbacks

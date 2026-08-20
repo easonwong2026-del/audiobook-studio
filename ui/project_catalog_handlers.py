@@ -79,7 +79,12 @@ def _empty_open_outputs() -> tuple:
 def _render_bookshelf_summaries(projects) -> dict:
     """Render rows from an already-scanned catalog snapshot."""
     rows = [
-        [p.project_name, p.chapters, f"{p.completed}/{p.segments}", p.status]
+        [
+            ProjectCatalogService.display_name(p),
+            p.chapters,
+            f"{p.completed}/{p.segments}",
+            ProjectCatalogService.display_status(p),
+        ]
         for p in projects
     ]
     return df_style.style_dataframe(
@@ -115,7 +120,10 @@ def apply_project_search(query: str, ss=None) -> tuple[dict, str, dict]:
     if ss is not None:
         # 搜索 query 单一状态来源：导航离开/返回后仍保持过滤
         ss.set_catalog_query(query)
-    visible = {row[0] for row in (styled.get("data") or [])}
+    visible = {
+        ProjectCatalogService.project_name_from_display(row[0])
+        for row in (styled.get("data") or [])
+    }
     selected = ss.selected_project if ss is not None else None
     if selected and selected not in visible:
         if ss is not None:
@@ -160,6 +168,17 @@ def _selected_info(name: str, ss=None, summary=None) -> str:
         f"- 章：{summary.chapters} · 段：{summary.segments} · "
         f"已完成：{summary.completed} · 失败：{summary.failed}\n"
         f"- 状态：{summary.status}\n\n"
+        + (
+            (
+                f"- 所属整书：**`{html.escape(summary.parent_project_name)}`**\n"
+                if summary.relation_status == "valid"
+                and summary.parent_project_name
+                else f"- 层级状态：**{html.escape(summary.relation_message or '孤立章节')}**\n"
+                if summary.project_kind == "chapter"
+                else "- 项目类型：**整书**\n"
+            )
+        )
+        + "\n"
         f"{opened_text}"
     )
 
@@ -179,7 +198,7 @@ def select_bookshelf_row(rows, ss, evt: gr.SelectData) -> tuple[str, str, dict]:
         return "", _BOOKSHELF_HINT, _update()
     try:
         rows = rows["data"] if isinstance(rows, dict) else rows
-        name = rows[evt.index[0]][0]
+        name = ProjectCatalogService.project_name_from_display(rows[evt.index[0]][0])
     except Exception:
         return "", _BOOKSHELF_HINT, _update()
     name = str(name or "")
@@ -254,6 +273,77 @@ def reconcile_bookshelf_selection(ss, p_sel_value: str = "") -> tuple:
     if ss is not None:
         ss.invalidate_archive_confirmation()
     return _selection_controls_updates(ss, p_sel_value)
+
+
+def _hierarchy_control_updates(ss, summaries=None) -> tuple:
+    """Render relationship controls from one normalized Catalog snapshot."""
+    if summaries is None:
+        summaries = ProjectCatalogService.scan()
+    hierarchy = ProjectCatalogService.hierarchy_from_summaries(summaries)
+    selected = str(getattr(ss, "selected_project", "") or "") if ss is not None else ""
+    selected_summary = next(
+        (item for item in hierarchy.projects if item.project_name == selected),
+        None,
+    )
+    choices = ProjectCatalogService.book_choices(
+        hierarchy.projects,
+        exclude_name=selected,
+    )
+    parent_value = (
+        selected_summary.parent_project_name
+        if selected_summary is not None
+        and selected_summary.relation_status == "valid"
+        else None
+    )
+    has_selection = bool(selected_summary)
+    is_chapter = bool(
+        selected_summary is not None and selected_summary.project_kind == "chapter"
+    )
+    if selected_summary is None:
+        status = "选择项目后，可在此设置或解除所属整书。"
+    elif selected_summary.relation_status == "valid":
+        status = f"当前所属整书：`{selected_summary.parent_project_name}`"
+    elif is_chapter:
+        status = f"⚠ {selected_summary.relation_message or '孤立章节'}"
+    else:
+        status = "当前项目是独立整书。"
+    return (
+        _update(
+            choices=choices,
+            value=parent_value,
+            interactive=has_selection and bool(choices),
+        ),
+        _update(interactive=has_selection and bool(choices)),
+        _update(interactive=is_chapter),
+        _update(value=status),
+    )
+
+
+def reconcile_bookshelf_hierarchy_selection(ss) -> tuple:
+    """Reset relationship controls after the canonical bookshelf selection changes."""
+    return _hierarchy_control_updates(ss)
+
+
+def bind_selected_chapter(project_name: str, parent_name: str, ss=None) -> str:
+    """Explicitly bind the selected project under the chosen book."""
+    if not project_name:
+        return "⚪ 请先从书架选择项目。"
+    try:
+        ProjectCatalogService.bind_chapter(project_name, parent_name)
+        return f"✅ 已将「{project_name}」设置为「{parent_name}」的章节。"
+    except Exception as exc:
+        return f"❌ 设置所属整书失败：{exc}"
+
+
+def unbind_selected_chapter(project_name: str, ss=None) -> str:
+    """Explicitly turn the selected chapter back into an independent book."""
+    if not project_name:
+        return "⚪ 请先从书架选择项目。"
+    try:
+        ProjectCatalogService.clear_chapter_parent(project_name)
+        return f"✅ 已解除「{project_name}」的章节关系；项目恢复为独立整书。"
+    except Exception as exc:
+        return f"❌ 解除章节关系失败：{exc}"
 
 
 # ── 打开项目 / 目录 ──
@@ -851,9 +941,9 @@ def refresh_project_catalog(search_query: str = "", p_sel_value: str = "") -> tu
     return bookshelf, _update(choices=choices, value=value), rows, trash_choices, status
 
 
-def refresh_bookshelf_management_view(
+def _refresh_bookshelf_management_state(
     search_query: str = "", p_sel_value: str = "", ss=None
-) -> tuple:
+) -> tuple[tuple, list]:
     """Refresh the catalog and reconcile the complete bookshelf management UI.
 
     ``refresh_project_catalog`` intentionally remains the stable five-output
@@ -918,7 +1008,7 @@ def refresh_bookshelf_management_view(
         else _BOOKSHELF_HINT
     )
     controls = _selection_controls_updates(ss, workflow_value or "")
-    return (
+    result = (
         bookshelf,
         p_sel_update,
         rows,
@@ -928,6 +1018,31 @@ def refresh_bookshelf_management_view(
         _update(value=selected_info),
         *controls[1:],
     )
+    return result, summaries
+
+
+def refresh_bookshelf_management_view(
+    search_query: str = "", p_sel_value: str = "", ss=None
+) -> tuple:
+    """Return the stable 25-output Bookshelf Management contract."""
+    result, _summaries = _refresh_bookshelf_management_state(
+        search_query, p_sel_value, ss
+    )
+    return result
+
+
+def refresh_bookshelf_management_view_with_hierarchy(
+    search_query: str = "", p_sel_value: str = "", ss=None
+) -> tuple:
+    """Refresh Bookshelf Management plus Phase B relationship controls.
+
+    The hierarchy controls are derived from the same Catalog snapshot as the
+    25 legacy outputs; no second scan is introduced on the main refresh path.
+    """
+    result, summaries = _refresh_bookshelf_management_state(
+        search_query, p_sel_value, ss
+    )
+    return (*result, *_hierarchy_control_updates(ss, summaries))
 
 
 def _format_size(value: int) -> str:

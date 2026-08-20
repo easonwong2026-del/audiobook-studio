@@ -18,10 +18,9 @@ import uuid
 from dataclasses import dataclass, field
 from typing import ClassVar, Optional, TextIO
 
-from lib import script_loader
-from lib import chapter_identity, project_paths
-from lib.types import ProjectMeta, ProjectSummary
+from lib import chapter_identity, project_paths, script_loader
 from lib.snapshot import ProjectSnapshot
+from lib.types import ProjectMeta, ProjectSummary
 
 from ._atomic import atomic_write as _atomic_write
 from .exceptions import ProjectNotFoundError
@@ -353,6 +352,11 @@ class ProjectRepository:
             "storage_version": meta.storage_version,
             "directories": meta.directories,
             "source_file": meta.source_file,
+            "project_id": meta.project_id,
+            "project_kind": meta.project_kind,
+            "parent_project_id": meta.parent_project_id,
+            "chapter_title": meta.chapter_title,
+            "chapter_order": meta.chapter_order,
         }
         _atomic_write(path, payload)
         # v2 项目保留「根权威 + 配置目录镜像」的历史行为；v3 已无根副本。
@@ -789,7 +793,9 @@ class ProjectRepository:
                                segments_status={seg.id: "pending" for ch in parsed_script.chapters for seg in ch.segments},
                                storage_version=project_paths.STORAGE_VERSION,
                                directories=project_paths.layout_manifest(tmp_dir),
-                               source_file=os.path.relpath(source_target, tmp_dir))
+                               source_file=os.path.relpath(source_target, tmp_dir),
+                               project_id=str(uuid.uuid4()),
+                               project_kind="book")
             # 先落权威 project.json（storage_version=3），后续 JSON 写入即可按 v3 解析。
             ProjectRepository._save_meta(tmp_dir, meta)
             bindings = {"bindings": {n: None for n in parsed_script.voices},
@@ -813,6 +819,60 @@ class ProjectRepository:
         project_dir = ProjectRepository._resolve_dir(name)
         if os.path.isdir(project_dir):
             shutil.rmtree(project_dir)
+
+    @staticmethod
+    def ensure_project_id(name: str) -> str:
+        """Return a stable identity, materializing it only on explicit use.
+
+        Normal Catalog scans never call this method.  A legacy project gets an
+        ID only when a relationship operation explicitly includes it.  The
+        metadata update itself uses the repository's existing atomic writer.
+        """
+        project_dir = ProjectRepository._resolve_dir(name)
+        meta = ProjectRepository._load_meta(project_dir)
+        current = str(meta.project_id or "").strip()
+        if current:
+            return current
+        meta.project_id = str(uuid.uuid4())
+        meta.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        ProjectRepository._save_meta(project_dir, meta)
+        return meta.project_id
+
+    @staticmethod
+    def set_project_relationship(
+        chapter_name: str,
+        parent_project_id: str,
+        *,
+        chapter_title: str | None = None,
+        chapter_order: int | None = None,
+    ) -> None:
+        """Persist one explicit chapter → book relationship atomically.
+
+        Validation of the relationship graph belongs to the Catalog service;
+        this repository method only owns the metadata write and keeps the
+        physical project directory untouched.
+        """
+        project_dir = ProjectRepository._resolve_dir(chapter_name)
+        meta = ProjectRepository._load_meta(project_dir)
+        meta.project_id = meta.project_id or str(uuid.uuid4())
+        meta.project_kind = "chapter"
+        meta.parent_project_id = str(parent_project_id or "") or None
+        meta.chapter_title = str(chapter_title or "").strip() or None
+        meta.chapter_order = chapter_order
+        meta.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        ProjectRepository._save_meta(project_dir, meta)
+
+    @staticmethod
+    def clear_project_relationship(name: str) -> None:
+        """Explicitly turn a chapter back into an independent book."""
+        project_dir = ProjectRepository._resolve_dir(name)
+        meta = ProjectRepository._load_meta(project_dir)
+        meta.project_kind = "book"
+        meta.parent_project_id = None
+        meta.chapter_title = None
+        meta.chapter_order = None
+        meta.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        ProjectRepository._save_meta(project_dir, meta)
 
     @staticmethod
     def archive_project(name: str) -> str:
@@ -1022,6 +1082,15 @@ class ProjectRepository:
                     failed=failed,
                     status=status,
                     progress=progress,
+                    project_id=str(getattr(meta, "project_id", "") or "") or None,
+                    project_kind=str(getattr(meta, "project_kind", "book") or "book"),
+                    parent_project_id=(
+                        str(getattr(meta, "parent_project_id", "") or "") or None
+                    ),
+                    chapter_title=(
+                        str(getattr(meta, "chapter_title", "") or "") or None
+                    ),
+                    chapter_order=getattr(meta, "chapter_order", None),
                 ))
             except Exception as exc:
                 logger.warning("list_project_summaries 读 %s 失败: %s", name, exc)
@@ -1033,6 +1102,7 @@ class ProjectRepository:
                     segments=0,
                     completed=0,
                     modified_at=None,
+                    project_kind="book",
                 ))
         return summaries
 
