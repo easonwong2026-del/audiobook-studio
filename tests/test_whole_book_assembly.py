@@ -489,6 +489,7 @@ def test_ui_has_dedicated_assembly_state_without_catalog_arity_growth():
     assert {
         "assembly_target_book",
         "assembly_analyze",
+        "assembly_dashboard",
         "assembly_plan_result",
         "assembly_plan_state",
         "assembly_resolution",
@@ -497,6 +498,7 @@ def test_ui_has_dedicated_assembly_state_without_catalog_arity_growth():
         "assembly_execute",
         "assembly_execution_result",
         "assembly_transaction_state",
+        "assembly_resume",
     } <= page.keys()
-    assert len(assembly_workflow_outputs(page)) == 10
-    assert len(refresh_assembly_workflow_controls(SessionState())) == 10
+    assert len(assembly_workflow_outputs(page)) == 12
+    assert len(refresh_assembly_workflow_controls(SessionState())) == 12

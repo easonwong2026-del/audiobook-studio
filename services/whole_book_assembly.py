@@ -1183,12 +1183,37 @@ class WholeBookAssemblyService:
         *,
         session: Any = None,
         fault_injection: Mapping[str, Any] | Callable[[str, str], None] | None = None,
+        assembly_id: str = "",
+        progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> BookAssemblyExecutionResult:
-        assembly_id = f"assembly-{uuid.uuid4().hex}"
+        assembly_id = str(assembly_id or f"assembly-{uuid.uuid4().hex}")
         started_at = _utc_now()
         resolution_document = _normalise_resolution_document(resolutions)
         chapter_results: list[BookAssemblyChapterResult] = []
         warnings = list(plan.warnings) if isinstance(plan, BookAssemblyPlan) else []
+
+        def report_progress(payload: Mapping[str, Any]) -> None:
+            if progress_callback is None:
+                return
+            try:
+                progress_callback(
+                    {
+                        "assembly_id": assembly_id,
+                        "target_book_id": getattr(plan, "target_book_id", ""),
+                        "target_book_name": getattr(plan, "target_book_name", ""),
+                        **dict(payload),
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001  # diagnostics must not affect execution
+                _ = exc
+
+        report_progress(
+            {
+                "event": "ASSEMBLY_STARTED",
+                "started_at": started_at,
+                "total_chapters": len(getattr(plan, "ordered_chapters", ()) or ()),
+            }
+        )
 
         def finish(
             status: str,
@@ -1212,7 +1237,7 @@ class WholeBookAssemblyService:
                 item.execution_result == CHAPTER_NOT_ATTEMPTED
                 for item in chapter_results
             )
-            return BookAssemblyExecutionResult(
+            result = BookAssemblyExecutionResult(
                 success=status == ASSEMBLY_SUCCEEDED,
                 status=status,
                 assembly_id=assembly_id,
@@ -1234,6 +1259,14 @@ class WholeBookAssemblyService:
                 total_segments_added=sum(item.imported_segment_count for item in chapter_results),
                 total_audio_copied=sum(item.imported_audio_count for item in chapter_results),
             )
+            report_progress(
+                {
+                    "event": "ASSEMBLY_FINISHED",
+                    "finished_at": result.finished_at,
+                    "result": result.as_dict(),
+                }
+            )
+            return result
 
         if not isinstance(plan, BookAssemblyPlan):
             return finish(
@@ -1303,6 +1336,16 @@ class WholeBookAssemblyService:
 
         successful_mutations = 0
         for index, chapter in enumerate(plan.ordered_chapters):
+            report_progress(
+                {
+                    "event": "CHAPTER_STARTED",
+                    "chapter_order": chapter.order,
+                    "chapter_project_id": chapter.chapter_project_id,
+                    "chapter_project_name": chapter.chapter_project_name,
+                    "completed_chapters": len(chapter_results),
+                    "total_chapters": len(plan.ordered_chapters),
+                }
+            )
             if chapter.relation_status != RELATION_VALID or not chapter.merge_plan:
                 chapter_results.append(
                     BookAssemblyChapterResult(

@@ -66,6 +66,28 @@ CONFIRMATION_SCHEMA_VERSION = "chapter-merge-confirmation-v1"
 CHAPTER_SELECTION_POLICY = "CHAPTER"
 WHOLE_BOOK_SELECTION_POLICY = "WHOLE_BOOK_ASSEMBLY"
 
+TRANSACTION_JOURNAL_ACTIVE_STAGES = frozenset(
+    {
+        MergeExecutionStage.VALIDATING.value,
+        MergeExecutionStage.BACKING_UP.value,
+        MergeExecutionStage.STAGING.value,
+        MergeExecutionStage.COMMITTING.value,
+        MergeExecutionStage.VERIFYING.value,
+        MergeExecutionStage.ROLLING_BACK.value,
+    }
+)
+TRANSACTION_JOURNAL_TERMINAL_STAGES = frozenset(
+    {
+        MergeExecutionStage.SUCCEEDED.value,
+        MergeExecutionStage.VALIDATION_FAILED.value,
+        MergeExecutionStage.BACKUP_FAILED.value,
+        MergeExecutionStage.STAGE_FAILED.value,
+        MergeExecutionStage.COMMIT_FAILED.value,
+        MergeExecutionStage.ROLLED_BACK.value,
+        MergeExecutionStage.ROLLBACK_FAILED.value,
+    }
+)
+
 
 class MergeExecutionError(RuntimeError):
     """Structured service error used for validation and transaction failures."""
@@ -316,6 +338,55 @@ def _journal_path(transaction_id: str) -> str:
 def _write_journal(path: str, payload: Mapping[str, Any]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     _write_json(path, dict(payload))
+
+
+def read_transaction_journals() -> tuple[dict[str, Any], ...]:
+    """Read durable merge journals for restart-safe operational diagnostics.
+
+    This is deliberately read-only.  It exposes the executor's existing
+    journal records to the operations layer without adding a second mutation
+    path or changing transaction recovery semantics.
+    """
+    root = _journal_root()
+    if not os.path.isdir(root):
+        return ()
+    records: list[dict[str, Any]] = []
+    for filename in sorted(os.listdir(root)):
+        if not filename.endswith(".json"):
+            continue
+        path = os.path.join(root, filename)
+        if not os.path.isfile(path):
+            continue
+        transaction_id = filename[:-5]
+        try:
+            with open(path, encoding="utf-8") as file:
+                value = json.load(file)
+            if not isinstance(value, dict):
+                raise TypeError("journal top-level must be an object")
+            record = dict(value)
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            record = {
+                "schema_version": "chapter-merge-transaction-v1",
+                "transaction_id": transaction_id,
+                "stage": "JOURNAL_UNREADABLE",
+                "journal_error": f"{type(exc).__name__}: {exc}",
+            }
+        record.setdefault("transaction_id", transaction_id)
+        record["journal_path"] = path
+        try:
+            record["_journal_mtime_ns"] = int(os.stat(path).st_mtime_ns)
+        except OSError:
+            record["_journal_mtime_ns"] = 0
+        records.append(record)
+    return tuple(
+        sorted(
+            records,
+            key=lambda item: (
+                str(item.get("updated_at") or item.get("started_at") or ""),
+                str(item.get("transaction_id") or ""),
+            ),
+        )
+    )
 
 
 def _maybe_inject(
@@ -1782,6 +1853,8 @@ __all__ = [
     "CONFIRMATION_SCHEMA_VERSION",
     "MERGE_FAILED_ROLLBACK_FAILED",
     "MERGE_FAILED_ROLLED_BACK",
+    "TRANSACTION_JOURNAL_ACTIVE_STAGES",
+    "TRANSACTION_JOURNAL_TERMINAL_STAGES",
     "WHOLE_BOOK_SELECTION_POLICY",
     "ChapterMergeExecutor",
     "MergeConfirmation",
@@ -1789,4 +1862,5 @@ __all__ = [
     "MergeExecutionResult",
     "MergeExecutionStage",
     "execute_merge",
+    "read_transaction_journals",
 ]

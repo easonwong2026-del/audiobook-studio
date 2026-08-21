@@ -195,12 +195,22 @@ def create_overview_page() -> dict:
                 value=None,
                 interactive=False,
             )
-            assembly_analyze = gr.Button(
-                "分析整书装配",
-                variant="secondary",
-                size="sm",
-                interactive=False,
+            assembly_dashboard = gr.Markdown(
+                "选择 Book 后，这里会从持久化 merge history / transaction journal 重建当前整书装配状态。"
             )
+            with gr.Row(equal_height=True):
+                assembly_analyze = gr.Button(
+                    "重新分析整书装配",
+                    variant="secondary",
+                    size="sm",
+                    interactive=False,
+                )
+                assembly_resume = gr.Button(
+                    "继续未完成章节",
+                    variant="primary",
+                    size="sm",
+                    interactive=False,
+                )
             assembly_plan_result = gr.Markdown(
                 "从书架选择一个 Book 后，可分析其关联 Chapter 的整书装配。"
             )
@@ -313,6 +323,7 @@ def create_overview_page() -> dict:
         "merge_transaction_state": merge_transaction_state,
         "assembly_target_book": assembly_target_book,
         "assembly_analyze": assembly_analyze,
+        "assembly_dashboard": assembly_dashboard,
         "assembly_plan_result": assembly_plan_result,
         "assembly_plan_state": assembly_plan_state,
         "assembly_resolution": assembly_resolution,
@@ -321,6 +332,7 @@ def create_overview_page() -> dict:
         "assembly_execute": assembly_execute,
         "assembly_execution_result": assembly_execution_result,
         "assembly_transaction_state": assembly_transaction_state,
+        "assembly_resume": assembly_resume,
         "bookshelf_archive": bookshelf_archive,
         "bookshelf_archive_confirm": bookshelf_archive_confirm,
         "bookshelf_msg": bookshelf_msg,

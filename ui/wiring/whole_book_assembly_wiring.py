@@ -14,6 +14,7 @@ def assembly_workflow_outputs(page: dict) -> list:
     return [
         page["assembly_target_book"],
         page["assembly_analyze"],
+        page["assembly_dashboard"],
         page["assembly_plan_result"],
         page["assembly_plan_state"],
         page["assembly_resolution"],
@@ -22,6 +23,7 @@ def assembly_workflow_outputs(page: dict) -> list:
         page["assembly_execute"],
         page["assembly_execution_result"],
         page["assembly_transaction_state"],
+        page["assembly_resume"],
     ]
 
 
@@ -41,6 +43,7 @@ def wire_whole_book_assembly(page: dict, deps: dict[str, Any]) -> None:
     execution_outputs = assembly_execution_outputs(page)
     plan_result = page["assembly_plan_result"]
     plan_state = page["assembly_plan_state"]
+    dashboard = page["assembly_dashboard"]
     target = page["assembly_target_book"]
     analyze = page["assembly_analyze"]
     resolution = page["assembly_resolution"]
@@ -49,16 +52,21 @@ def wire_whole_book_assembly(page: dict, deps: dict[str, Any]) -> None:
     execute = page["assembly_execute"]
     execution_result = page["assembly_execution_result"]
     transaction_state = page["assembly_transaction_state"]
+    resume = page["assembly_resume"]
 
     analyze_chain = analyze.click(
         assembly_handlers.analyze_assembly,
         [target, session],
-        [plan_result, plan_state],
+        [plan_result, plan_state, dashboard],
     )
     analyze_chain.then(
         assembly_handlers.prepare_assembly_execution_controls,
-        [plan_state],
+        [plan_state, session],
         execution_outputs,
+    ).then(
+        assembly_handlers.refresh_assembly_dashboard,
+        [target, resolution, session],
+        [dashboard, resume],
     )
 
     target.change(
@@ -69,21 +77,50 @@ def wire_whole_book_assembly(page: dict, deps: dict[str, Any]) -> None:
         assembly_handlers.clear_assembly_execution_controls,
         [],
         execution_outputs,
+    ).then(
+        assembly_handlers.refresh_assembly_dashboard,
+        [target, resolution, session],
+        [dashboard, resume],
     )
     resolution.change(
         assembly_handlers.invalidate_assembly_execution_state,
         [],
         [confirm, confirmation_state, execute, execution_result, transaction_state],
+    ).then(
+        assembly_handlers.refresh_assembly_dashboard,
+        [target, resolution, session],
+        [dashboard, resume],
     )
     confirm.change(
         assembly_handlers.confirm_assembly_plan,
         [confirm, target, plan_state, resolution, session],
         [confirmation_state, execute, execution_result, transaction_state],
+    ).then(
+        assembly_handlers.refresh_assembly_dashboard,
+        [target, resolution, session],
+        [dashboard, resume],
     )
     execute.click(
         assembly_handlers.execute_assembly_plan,
         [plan_state, resolution, confirmation_state, session],
         [execution_result, transaction_state, execute, confirm, confirmation_state],
+    ).then(
+        assembly_handlers.refresh_assembly_dashboard,
+        [target, resolution, session],
+        [dashboard, resume],
+    )
+    resume.click(
+        assembly_handlers.resume_assembly_plan,
+        [confirm, target, resolution, session],
+        [
+            dashboard,
+            execution_result,
+            transaction_state,
+            resume,
+            execute,
+            confirm,
+            confirmation_state,
+        ],
     )
 
 
