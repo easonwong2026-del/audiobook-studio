@@ -711,8 +711,9 @@ The frozen top candidate was re-audited without production edits. Baseline:
 - application import: PASS;
 - Gradio smoke: PASS.
 
-After this documentation-only change, run full pytest once more before the
-readiness commit. No historical lint cleanup is allowed.
+After this documentation-only change, full pytest was rerun before the
+readiness commit and produced the same passing baseline. No historical lint
+cleanup was performed.
 
 ## Candidate Status
 
