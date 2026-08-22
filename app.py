@@ -125,10 +125,12 @@ def create_project(name, script_file, ss):
         result = ProjectCreationService.create_from_structured_script(name, script_file)
         # 写入会话态（多标签各自独立，不共享全局可变 S）
         ss.set_project(result.project_name, None, {})
+        choices = ProjectService.scan_projects()
+        value = result.project_name if result.project_name in choices else None
         return "", None, (
             f"### ✅ 项目「{result.project_name}」创建成功！"
             "下一步：前往角色与声音。"
-        ), gr.update(choices=ProjectService.scan_projects(), value=result.project_name)
+        ), gr.update(choices=choices, value=value)
     except Exception as e:
         return name, None, f"### ❌ 创建失败: {e}", gr.update()
 
@@ -3707,8 +3709,11 @@ def restore_project_to_list(name):
     if not name or not str(name).strip():
         return gr.update(), "⚪ 请输入需要恢复的项目名称。"
     try:
-        ProjectStorageService.restore_to_list(str(name).strip())
-        return gr.update(choices=ProjectService.scan_projects(), value=str(name).strip()), "✅ 项目已恢复到项目列表。"
+        project_name = str(name).strip()
+        ProjectStorageService.restore_to_list(project_name)
+        choices = ProjectService.scan_projects()
+        value = project_name if project_name in choices else None
+        return gr.update(choices=choices, value=value), "✅ 项目已恢复到项目列表。"
     except Exception as exc:
         return gr.update(), f"❌ 恢复项目列表显示失败：{exc}"
 
@@ -3877,8 +3882,10 @@ def restore_archived_project(archive_id, _ss):
         result = ProjectStorageService.restore_archived(archive_id)
         name = result["project_name"]
         rows, choices, _status = refresh_archived_projects()
+        project_choices = ProjectService.scan_projects()
+        project_value = name if name in project_choices else None
         return (
-            gr.update(choices=ProjectService.scan_projects(), value=name),
+            gr.update(choices=project_choices, value=project_value),
             f"✅ 已恢复「{name}」，完整性检查通过；请点击“打开项目”。",
             rows,
             choices,
@@ -3932,10 +3939,11 @@ def select_project_from_bookshelf(rows, evt: gr.SelectData):
         return gr.update()
     try:
         rows = rows["data"] if isinstance(rows, dict) else rows
-        name = rows[evt.index[0]][0]
+        name = ProjectCatalogService.project_name_from_display(rows[evt.index[0]][0])
     except Exception:
         return gr.update()
-    return gr.update(value=name)
+    choices = ProjectService.scan_projects()
+    return gr.update(choices=choices, value=name if name in choices else None)
 
 
 def render_chapter_tree(project):
@@ -3945,10 +3953,11 @@ def render_chapter_tree(project):
     return _pm.build_chapter_tree(project)
 
 
-def refresh_projects_full():
-    """p_refresh 全量刷新：仅刷新 p_sel 选项（书架入口已统一到概览页）。"""
+def refresh_projects_full(name=""):
+    """p_refresh 全量刷新 p_sel choices and keep only a legal value."""
     choices = ProjectService.scan_projects()
-    return gr.update(choices=choices)
+    value = str(name or "") if str(name or "") in choices else None
+    return gr.update(choices=choices, value=value)
 
 
 # ── O5：合成前分段预览 / 勾选 ──
@@ -4249,9 +4258,9 @@ def refresh_overview(ss):
 
 def refresh_p_sel(name):
     """刷新项目下拉选项（catalog 数据源；选中项不在新 catalog 中则清空）。"""
-    choices = [s.project_name for s in ProjectCatalogService.scan()]
-    value = name if name in choices else None
-    return gr.update(choices=choices, value=value)
+    return catalog_ui.build_project_selector_update(
+        ProjectCatalogService.scan(), p_sel_value=name
+    )
 
 
 def _review_outputs():
@@ -4329,6 +4338,65 @@ def _open_chain_rest(event):
         catalog_ui.refresh_bookshelf_management_view_with_hierarchy,
         [bookshelf_search, p_sel, ss],
         catalog_management_outputs,
+    )
+    return e
+
+
+def _post_archive_reconcile(event):
+    """Refresh workflow surfaces after a successful archive only.
+
+    The archive wiring performs catalog/selection reconciliation before this
+    chain is attached.  This dedicated lifecycle therefore never consumes the
+    stale pre-archive ``p_sel`` value, and it is not registered on the first
+    confirmation or on a mutation guard rejection.
+    """
+    e = event
+    e = e.then(refresh_top_status, [ss], [top_status])
+    e = e.then(preview_chapters, [ss], _review_outputs())
+    e = e.then(preview_chapter_options, [ss], [e_chapter_sel])
+    e = e.then(
+        refresh_quality_workspace,
+        [e_quality_filter, e_chapter_sel, ss],
+        [e_quality_summary, e_seg_preview_sel, e_seg_regen_sel, e_segment_quality],
+    )
+    e = e.then(
+        recover_review_repair,
+        [ss],
+        [e_review_repair_id, e_review_repair_task_id, e_review_repair_project, review_repair_timer],
+    )
+    e = e.then(refresh_queue_list, [ss], [s_queue_list])
+    e = e.then(refresh_production_task, [ss], [s_task_status])
+    e = e.then(render_chapter_tree, [p_sel], [p_chapter_tree])
+    e = e.then(refresh_project_storage, [ss], [p_storage])
+    e = e.then(render_preview, [ss], [s_preview_df, s_chapters_sel])
+    e = e.then(
+        render_scope_controls,
+        [ss],
+        [
+            s_scope_mode,
+            s_chapter_scope_group,
+            s_chapters_sel,
+            s_segment_scope_group,
+            s_segment_chapter_filter,
+            s_segments_sel,
+            s_segment_selection_state,
+            s_preview_df,
+            s_scope_readiness,
+        ],
+    )
+    e = e.then(refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
+    e = e.then(refresh_categories, [], [v_bind_category, v_save_category])
+    e = e.then(refresh_production_voice_choices, [], [e_voice, utility_override_voice])
+    e = e.then(refresh_production_check, [ss], [production_check])
+    e = e.then(refresh_export_default_dir, [ss], [e_save_dir_hint])
+    e = e.then(
+        refresh_export_readiness,
+        [e_fmt, e_qa_policy, ss],
+        [e_readiness],
+    )
+    e = e.then(
+        refresh_overview, [ss],
+        [ov_status, ov_progress, ov_task, ov_issues, ov_bookshelf],
     )
     return e
 
@@ -5036,6 +5104,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
                     p_summary, v_table, v_role, v_role_title, v_lib, s_log, v_status,
                 ],
                 "open_chain_rest": _open_chain_rest,
+                "post_archive_reconcile": _post_archive_reconcile,
                 "goto_project": lambda: _goto("project"),
             },
         },
@@ -5045,7 +5114,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         {"session": ss},
     )
 
-    p_refresh_chain = p_refresh.click(refresh_projects_full, [], [p_sel])
+    p_refresh_chain = p_refresh.click(refresh_projects_full, [p_sel], [p_sel])
     p_refresh_chain.then(
         merge_ui.refresh_merge_workflow_controls,
         [ss],

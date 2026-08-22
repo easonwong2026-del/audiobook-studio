@@ -98,7 +98,7 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
             - ``management_outputs``: state-aware 25-output bookshelf refresh;
             - ``callbacks``: app.py 注入的回调，可选键：
               ``open_project`` / ``open_project_outputs`` / ``open_chain_rest`` /
-              ``goto_project`` / ``groups``；
+              ``post_archive_reconcile`` / ``goto_project`` / ``groups``；
             - ``groups``: 导航 ``_GROUPS``（供打开项目后切页）。
     """
     session = deps["session"]
@@ -291,33 +291,35 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
     unbind_chain = refresh_merge_after(unbind_chain)
 
     # ── 移入回收站：两步确认（确认态绑定项目名） ──
-    # 输出 4 元组（消息 / 确认态 / 选中项目 State / 选中信息 Markdown）：
-    # 首次确认与 guard 阻止不清 selection；成功后全清（handler 内完成）。
-    # 归档成功后统一刷新：先跑「打开项目」同款全链刷新（opened 被归档时
-    # ss 已 reset → 全部页面回空态；只归档 selected 时各页刷新为当前
-    # opened 项目状态），再跑目录类刷新（书架 / p_sel / 回收站）。
-    archive_chain = page["bookshelf_archive"].click(
-        catalog_handlers.archive_selected,
+    # 前四个输出保持既有 archive handler 契约；第五个是只在真正归档成功
+    # 时递增的 State revision。首次确认 / guard 阻止不会触发后续刷新链。
+    page["bookshelf_archive"].click(
+        catalog_handlers.archive_selected_with_event,
         [
             page["bookshelf_selected_proj"],
             page["bookshelf_archive_confirm"],
             session,
+            page["bookshelf_archive_event"],
         ],
         [
             page["bookshelf_msg"],
             page["bookshelf_archive_confirm"],
             page["bookshelf_selected_proj"],
             page["bookshelf_selected"],
+            page["bookshelf_archive_event"],
         ],
     )
-    if "open_chain_rest" in cb:
-        archive_chain = cb["open_chain_rest"](archive_chain)
-    archive_chain = archive_chain.then(
+
+    # Only a changed success revision reaches this event.  Reconcile catalog
+    # and p_sel before any workflow callback can consume the old project value.
+    archive_success_chain = page["bookshelf_archive_event"].change(
         management_refresh,
         [page["bookshelf_search"], deps["project_sel"], session],
         management_outputs,
     )
-    archive_chain = refresh_merge_after(archive_chain)
+    if "post_archive_reconcile" in cb:
+        archive_success_chain = cb["post_archive_reconcile"](archive_success_chain)
+    archive_success_chain = refresh_merge_after(archive_success_chain)
 
     # ── 全局：从备份恢复 ──
     restore_chain = page["bookshelf_restore"].click(

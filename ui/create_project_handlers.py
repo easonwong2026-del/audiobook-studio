@@ -204,10 +204,9 @@ def create_from_json(project_name, json_file, ss=None) -> tuple[str, dict]:
             "\n**下一步**：前往「角色与声音」完成声音绑定。"
             + format_creation_warnings(result.warnings)
         )
-        return message, _update(
-            choices=ProjectRepository.scan_projects(),
-            value=result.project_name,
-        )
+        choices = ProjectRepository.scan_projects()
+        value = result.project_name if result.project_name in choices else None
+        return message, _update(choices=choices, value=value)
     except ValueError as exc:
         return f"### ❌ 创建失败\n{html.escape(str(exc))}", _update()
     except Exception as exc:  # pragma: no cover - final UI safety net

@@ -95,9 +95,9 @@ def test_select_bookshelf_row_only_sets_selected(handler_workspace):
     assert ss.project == "opened_proj"
     assert ss.script == {"meta": {}}
     assert "阿尔法" in info
-    # p_sel remains the opened/current-workflow project; the selected shelf
-    # project is carried by bookshelf_selected_proj and SessionState.
-    assert p_sel_update.get("value") == "opened_proj"
+    # The selection handler defers p_sel to the following catalog-aware
+    # reconciliation so it never emits a value-only update.
+    assert p_sel_update.get("value") is None
 
 
 @pytest.mark.parametrize("column", range(4))
@@ -118,7 +118,7 @@ def test_select_bookshelf_row_uses_select_data_row_value_for_any_column(
     assert name == "alpha"
     assert ss.selected_project == "alpha"
     assert ss.project == "opened_proj"
-    assert p_sel_update.get("value") == "opened_proj"
+    assert p_sel_update.get("value") is None
 
 
 def test_select_bookshelf_row_accepts_real_gradio_select_data(handler_workspace):
@@ -139,7 +139,7 @@ def test_select_bookshelf_row_accepts_real_gradio_select_data(handler_workspace)
     assert result[0] == "alpha"
     assert ss.selected_project == "alpha"
     assert ss.project == "beta"
-    assert result[2].get("value") == "beta"
+    assert result[2].get("value") is None
 
 
 def test_select_bookshelf_row_maps_display_name_and_preserves_on_deselect(
@@ -160,7 +160,7 @@ def test_select_bookshelf_row_maps_display_name_and_preserves_on_deselect(
     assert "alpha" in info
     assert ss.selected_project == "alpha"
     assert ss.project == "beta"
-    assert p_sel_update.get("value") == "beta"
+    assert p_sel_update.get("value") is None
 
 
 def test_select_bookshelf_row_ignores_bad_event(handler_workspace):

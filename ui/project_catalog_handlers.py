@@ -54,6 +54,30 @@ def _update(**kwargs: Any) -> Any:
     return gr.update(**kwargs)
 
 
+def build_project_selector_update(
+    summaries=None, p_sel_value: str = "", ss=None
+) -> dict:
+    """Build a legal ``p_sel`` Dropdown update from one catalog snapshot.
+
+    ``p_sel`` is a compatibility/current-workflow control, not a second
+    selection source.  Its value must always be either absent/``None`` or a
+    member of the choices emitted in the same update.  When a session is
+    available, the opened project wins and the bookshelf selection is the
+    fallback; the legacy ``p_sel_value`` is only used for stateless callers.
+    """
+    if summaries is None:
+        summaries = ProjectCatalogService.scan()
+    choices = [item.project_name for item in summaries]
+    if ss is not None:
+        opened = str(getattr(ss, "project", "") or "")
+        selected = str(getattr(ss, "selected_project", "") or "")
+        candidates = (opened, selected)
+    else:
+        candidates = (str(p_sel_value or ""),)
+    value = next((candidate for candidate in candidates if candidate in choices), None)
+    return _update(choices=choices, value=value)
+
+
 def bind_open_project(callback) -> None:
     """供 app.py 注入 ``open_project``（书架「打开项目」唯一打开入口）。"""
     global _OPEN_PROJECT_CALLBACK
@@ -226,15 +250,14 @@ def select_bookshelf_row(rows, ss, evt: gr.SelectData) -> tuple[str, str, dict]:
     # be interpreted as an instruction to open another project.
     if selected is False:
         current = str(getattr(ss, "selected_project", "") or "")
-        workflow_value = str(getattr(ss, "project", "") or current)
         if current:
-            result = current, _selected_info(current, ss), _update(value=workflow_value)
+            result = current, _selected_info(current, ss), _update()
         else:
-            result = "", _BOOKSHELF_HINT, _update(value=workflow_value or None)
+            result = "", _BOOKSHELF_HINT, _update()
         logger.debug(
-            "bookshelf deselect preserved selection=%r workflow_value=%r",
+            "bookshelf deselect preserved selection=%r; p_sel deferred to "
+            "catalog-aware reconciliation",
             current,
-            workflow_value,
         )
         return result
 
@@ -270,17 +293,19 @@ def select_bookshelf_row(rows, ss, evt: gr.SelectData) -> tuple[str, str, dict]:
     if not name:
         return "", _BOOKSHELF_HINT, _update()
     ss.set_selected(name)
-    workflow_value = str(getattr(ss, "project", "") or name)
     logger.debug(
-        "bookshelf select applied selected_after=%r opened=%r workflow_value=%r",
+        "bookshelf select applied selected_after=%r opened=%r; p_sel deferred "
+        "to catalog-aware reconciliation",
         ss.selected_project,
         ss.project,
-        workflow_value,
     )
-    return name, _selected_info(name, ss), _update(value=workflow_value)
+    # Do not write a value-only update to p_sel.  The next reconciliation step
+    # emits choices and value atomically, so an initially empty Dropdown never
+    # enters the illegal ``value not in choices`` state.
+    return name, _selected_info(name, ss), _update()
 
 
-def _selection_controls_updates(ss, p_sel_value: str = "") -> tuple:
+def _selection_controls_updates(ss, p_sel_value: str = "", summaries=None) -> tuple:
     """Build the shared action/transient UI state for the current selection.
 
     The first item is the compatibility ``p_sel`` mirror.  The remaining
@@ -290,22 +315,10 @@ def _selection_controls_updates(ss, p_sel_value: str = "") -> tuple:
     confirmation state.
     """
     selected = str(getattr(ss, "selected_project", "") or "") if ss is not None else ""
-    opened = str(getattr(ss, "project", "") or "") if ss is not None else ""
-    # ``p_sel`` is the project-page/current-workflow control, not the
-    # bookshelf selection mirror. Once a project is opened, keep that page
-    # aligned with ``ss.project`` even when the bookshelf highlights another
-    # project; management actions continue to use ``selected_project``.
-    if opened:
-        workflow_value = opened
-    elif selected:
-        workflow_value = selected
-    elif ss is None:
-        workflow_value = str(p_sel_value or "")
-    else:
-        workflow_value = ""
+    p_sel_update = build_project_selector_update(summaries, p_sel_value, ss)
     action_update = _update(interactive=bool(selected))
     return (
-        _update(value=workflow_value or None),
+        p_sel_update,
         *(action_update for _ in BOOKSHELF_ACTION_KEYS),
         # archive confirmation
         _update(value=""),
@@ -344,7 +357,8 @@ def reconcile_bookshelf_selection(ss, p_sel_value: str = "") -> tuple:
     """Reset transient state and action enabled state after selection changes."""
     if ss is not None:
         ss.invalidate_archive_confirmation()
-    updates = _selection_controls_updates(ss, p_sel_value)
+    summaries = ProjectCatalogService.scan()
+    updates = _selection_controls_updates(ss, p_sel_value, summaries)
     logger.debug(
         "bookshelf selection reconciled selected=%r opened=%r p_sel=%r "
         "management_interactive=%r",
@@ -972,6 +986,26 @@ def archive_selected(
         return message, _update(value=""), noop, noop
 
 
+def archive_selected_with_event(
+    project_name: str, confirmed_project: str, ss, archive_event: int = 0
+) -> tuple:
+    """Archive handler plus a success-only revision for downstream UI refresh.
+
+    The ordinary four-output ``archive_selected`` contract remains intact for
+    direct callers.  The extra revision changes only after a real archive
+    succeeds; the Gradio ``State.change`` listener therefore does not run the
+    catalog/workflow refresh for a first confirmation or a guard rejection.
+    """
+    result = archive_selected(project_name, confirmed_project, ss)
+    try:
+        revision = int(archive_event or 0)
+    except (TypeError, ValueError):
+        revision = 0
+    if str(result[0] or "").startswith("✅"):
+        revision += 1
+    return (*result, revision)
+
+
 # ── 全局：从备份恢复 ──
 
 
@@ -1069,10 +1103,14 @@ def refresh_project_catalog(search_query: str = "", p_sel_value: str = "") -> tu
     bookshelf = render_bookshelf_rows(
         search_query, ProjectCatalogService.filter_projects(summaries, search_query)
     )
-    choices = [s.project_name for s in summaries]
-    value = str(p_sel_value or "") if str(p_sel_value or "") in choices else None
     rows, trash_choices, status = render_archived_projects()
-    return bookshelf, _update(choices=choices, value=value), rows, trash_choices, status
+    return (
+        bookshelf,
+        build_project_selector_update(summaries, p_sel_value),
+        rows,
+        trash_choices,
+        status,
+    )
 
 
 def _refresh_bookshelf_management_state(
@@ -1123,13 +1161,7 @@ def _refresh_bookshelf_management_state(
         # or production/session reference behind after reconciliation.
         ss.clear_opened()
         opened = ""
-    if opened and opened in choices:
-        workflow_value = opened
-    elif selected and selected in choices:
-        workflow_value = selected
-    else:
-        workflow_value = None
-    p_sel_update = _update(choices=choices, value=workflow_value)
+    p_sel_update = build_project_selector_update(summaries, p_sel_value, ss)
     rows, trash_choices, status = render_archived_projects()
 
     selected_summary = next(
@@ -1141,7 +1173,7 @@ def _refresh_bookshelf_management_state(
         if selected
         else _BOOKSHELF_HINT
     )
-    controls = _selection_controls_updates(ss, workflow_value or "")
+    controls = _selection_controls_updates(ss, p_sel_value, summaries)
     result = (
         bookshelf,
         p_sel_update,
@@ -1199,7 +1231,9 @@ __all__ = [
     "BOOKSHELF_ACTION_KEYS",
     "apply_project_search",
     "archive_selected",
+    "archive_selected_with_event",
     "bind_open_project",
+    "build_project_selector_update",
     "bind_selected_chapter",
     "cancel_selected_cleanup",
     "cancel_selected_storage_upgrade",

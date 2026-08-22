@@ -241,6 +241,9 @@ def create_overview_page() -> dict:
         bookshelf_cleanup_token = gr.State("")
         bookshelf_storage_token = gr.State("")
         bookshelf_archive_confirm = gr.State("")
+        # Monotonic success-only event; first confirmation and guard failures
+        # leave it unchanged, so archive reconciliation does not run early.
+        bookshelf_archive_event = gr.State(0)
         bookshelf_msg = gr.Markdown("")
 
         with gr.Accordion("从备份恢复", open=False), gr.Row():
@@ -337,6 +340,7 @@ def create_overview_page() -> dict:
         "assembly_resume": assembly_resume,
         "bookshelf_archive": bookshelf_archive,
         "bookshelf_archive_confirm": bookshelf_archive_confirm,
+        "bookshelf_archive_event": bookshelf_archive_event,
         "bookshelf_msg": bookshelf_msg,
         "bookshelf_restore_file": bookshelf_restore_file,
         "bookshelf_restore": bookshelf_restore,
