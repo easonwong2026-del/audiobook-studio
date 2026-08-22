@@ -94,11 +94,11 @@ def test_selection_controls_enable_actions_and_clear_all_transients(
     assert updates[0].get("value") == "beta"  # current workflow project
     for update in updates[1:10]:
         assert update.get("interactive") is True
-    assert updates[10].get("value") == ""  # archive confirmation
-    assert updates[11].get("value") == ""  # cleanup token
+    assert updates[10] == ""  # archive confirmation State value
+    assert updates[11] == ""  # cleanup token State value
     assert updates[12].get("visible") is False
     assert updates[13].get("visible") is False
-    assert updates[14].get("value") == ""  # storage token
+    assert updates[14] == ""  # storage token State value
     assert updates[15].get("visible") is False
     assert updates[16].get("visible") is False
     assert updates[17].get("visible") is False
@@ -127,7 +127,7 @@ def test_opened_project_wins_p_sel_while_bookshelf_selection_stays_independent(
 
     refreshed = handlers.refresh_bookshelf_management_view("", "alpha", ss)
     assert refreshed[1].get("value") == "beta"  # project-page workflow control
-    assert refreshed[5].get("value") == "alpha"  # bookshelf mirror
+    assert refreshed[5] == "alpha"  # bookshelf mirror State value
     assert "alpha" in refreshed[6].get("value", "")
     assert "beta" in refreshed[6].get("value", "")
 
@@ -135,7 +135,7 @@ def test_opened_project_wins_p_sel_while_bookshelf_selection_stays_independent(
 def test_selected_card_explicitly_distinguishes_opened_project(bookshelf_workspace):
     ss = SessionState(project="beta", script={"meta": {}})
     ss.set_selected("alpha")
-    _name, info, _mirror = handlers.select_bookshelf_row(
+    _name, info = handlers.select_bookshelf_row(
         {"data": [["alpha", 1, "0/1", "⚪未开始"]]}, ss, type("E", (), {"index": (0, 0)})()
     )
     assert "当前选择" in info
@@ -153,26 +153,27 @@ def test_refresh_preserves_valid_selection_and_filters(bookshelf_workspace):
     assert [row[0] for row in result[0]["data"]] == ["alpha"]
     assert result[1].get("choices") == ["alpha", "beta"]
     assert result[1].get("value") == "alpha"
-    assert result[5].get("value") == "alpha"
+    assert result[5] == "alpha"
     assert "阿尔法" in result[6].get("value", "")
     assert result[7].get("interactive") is True
     assert ss.selected_project == "alpha"
 
 
-def test_valid_refresh_keeps_selection_but_invalidates_archive_confirmation(
+def test_valid_refresh_keeps_selection_and_archive_confirmation(
     bookshelf_workspace,
 ):
     ss = SessionState()
     ss.set_selected("alpha")
     _message, confirmation, *_ = handlers.archive_selected("alpha", "", ss)
-    assert confirmation.get("value") == "alpha"
+    assert confirmation == "alpha"
     revision = ss.selection_revision
 
     result = handlers.refresh_bookshelf_management_view("阿尔法", "alpha", ss)
     assert ss.selected_project == "alpha"
     assert ss.selection_revision == revision
-    assert result[5].get("value") == "alpha"
-    assert result[16].get("value") == ""  # destructive confirmation is stale
+    assert result[5] == "alpha"
+    assert result[16].get("value") is None  # passive refresh preserves State
+    assert ss._archive_confirmation_revision == revision
 
 
 def test_state_aware_refresh_uses_one_catalog_snapshot(bookshelf_workspace, monkeypatch):
@@ -227,15 +228,15 @@ def test_refresh_removes_missing_selection_and_disables_actions(bookshelf_worksp
     handlers.archive_selected("alpha", "alpha", ss)
     result = handlers.refresh_bookshelf_management_view("", "alpha", ss)
     assert ss.selected_project is None
-    assert result[5].get("value") == ""
+    assert result[5] == ""
     assert "选择" in result[6].get("value", "")
     for update in result[7:16]:
         assert update.get("interactive") is False
-    assert result[16].get("value") == ""
-    assert result[17].get("value") == ""
+    assert result[16] == ""
+    assert result[17] == ""
     assert result[18].get("visible") is False
     assert result[19].get("visible") is False
-    assert result[20].get("value") == ""
+    assert result[20] == ""
     assert result[21].get("visible") is False
     assert result[22].get("visible") is False
     assert result[23].get("visible") is False
@@ -246,15 +247,15 @@ def test_archive_confirmation_is_invalidated_by_a_to_b_to_a(bookshelf_workspace)
     ss = SessionState()
     ss.set_selected("alpha")
     _msg, first_confirm, *_ = handlers.archive_selected("alpha", "", ss)
-    assert first_confirm.get("value") == "alpha"
+    assert first_confirm == "alpha"
 
     ss.set_selected("beta")
     ss.set_selected("alpha")
     msg, second_confirm, *_ = handlers.archive_selected(
-        "alpha", first_confirm.get("value"), ss
+        "alpha", first_confirm, ss
     )
     assert "确认将「alpha」移入回收站" in msg
-    assert second_confirm.get("value") == "alpha"
+    assert second_confirm == "alpha"
     assert os.path.isdir(bookshelf_workspace / "projects" / "alpha")
 
     msg, *_ = handlers.archive_selected("alpha", "alpha", ss)
@@ -282,10 +283,10 @@ def test_cleanup_transient_reset_after_selection_context_change(bookshelf_worksp
     ss.set_selected("beta")
     updates = handlers.reconcile_bookshelf_selection(ss, "beta")
     assert updates[0].get("value") == "beta"
-    assert updates[11].get("value") == ""
+    assert updates[11] == ""
     assert updates[12].get("visible") is False
     assert updates[13].get("visible") is False
-    assert updates[14].get("value") == ""
+    assert updates[14] == ""
     assert updates[15].get("visible") is False
     assert updates[16].get("visible") is False
 

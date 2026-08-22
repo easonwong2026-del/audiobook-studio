@@ -125,12 +125,16 @@ def create_project(name, script_file, ss):
         result = ProjectCreationService.create_from_structured_script(name, script_file)
         # 写入会话态（多标签各自独立，不共享全局可变 S）
         ss.set_project(result.project_name, None, {})
-        choices = ProjectService.scan_projects()
-        value = result.project_name if result.project_name in choices else None
+        choices = ProjectCatalogService.scan()
+        selector_update = catalog_ui.build_project_selector_update(
+            choices,
+            p_sel_value=result.project_name,
+            ss=ss,
+        )
         return "", None, (
             f"### ✅ 项目「{result.project_name}」创建成功！"
             "下一步：前往角色与声音。"
-        ), gr.update(choices=choices, value=value)
+        ), selector_update
     except Exception as e:
         return name, None, f"### ❌ 创建失败: {e}", gr.update()
 
@@ -549,7 +553,7 @@ def activate_production_timer():
 def delete_project(name, ss=None):
     """Archive a project by default; permanent deletion has a separate callback."""
     if not name:
-        update = gr.update(choices=ProjectService.scan_projects(), value=None)
+        update = catalog_ui.build_project_selector_update(ProjectCatalogService.scan())
         return (update, "⚪ 请先选择项目。") if ss is not None else update
     try:
         target = ProjectStorageService.archive(name)
@@ -563,7 +567,7 @@ def delete_project(name, ss=None):
     except Exception as exc:
         logger.exception("归档项目失败")
         message = f"❌ 归档项目失败：{exc}"
-    update = gr.update(choices=ProjectService.scan_projects(), value=None)
+    update = catalog_ui.build_project_selector_update(ProjectCatalogService.scan())
     return (update, message) if ss is not None else update
 
 
@@ -3700,7 +3704,10 @@ def hide_project_from_list(name, ss):
             ss.set_project(None, None, {})
             ss.set_snapshot(None)
             ss.synthesis = None
-        return gr.update(choices=ProjectService.scan_projects(), value=None), f"✅ 已仅从项目列表移除「{name}」，本地文件仍保留。"
+        return (
+            catalog_ui.build_project_selector_update(ProjectCatalogService.scan()),
+            f"✅ 已仅从项目列表移除「{name}」，本地文件仍保留。",
+        )
     except Exception as exc:
         return gr.update(), f"❌ 从项目列表移除失败：{exc}"
 
@@ -3711,9 +3718,12 @@ def restore_project_to_list(name):
     try:
         project_name = str(name).strip()
         ProjectStorageService.restore_to_list(project_name)
-        choices = ProjectService.scan_projects()
-        value = project_name if project_name in choices else None
-        return gr.update(choices=choices, value=value), "✅ 项目已恢复到项目列表。"
+        return (
+            catalog_ui.build_project_selector_update(
+                ProjectCatalogService.scan(), p_sel_value=project_name
+            ),
+            "✅ 项目已恢复到项目列表。",
+        )
     except Exception as exc:
         return gr.update(), f"❌ 恢复项目列表显示失败：{exc}"
 
@@ -3882,10 +3892,10 @@ def restore_archived_project(archive_id, _ss):
         result = ProjectStorageService.restore_archived(archive_id)
         name = result["project_name"]
         rows, choices, _status = refresh_archived_projects()
-        project_choices = ProjectService.scan_projects()
-        project_value = name if name in project_choices else None
         return (
-            gr.update(choices=project_choices, value=project_value),
+            catalog_ui.build_project_selector_update(
+                ProjectCatalogService.scan(), p_sel_value=name
+            ),
             f"✅ 已恢复「{name}」，完整性检查通过；请点击“打开项目”。",
             rows,
             choices,
@@ -3942,8 +3952,9 @@ def select_project_from_bookshelf(rows, evt: gr.SelectData):
         name = ProjectCatalogService.project_name_from_display(rows[evt.index[0]][0])
     except Exception:
         return gr.update()
-    choices = ProjectService.scan_projects()
-    return gr.update(choices=choices, value=name if name in choices else None)
+    return catalog_ui.build_project_selector_update(
+        ProjectCatalogService.scan(), p_sel_value=name
+    )
 
 
 def render_chapter_tree(project):
@@ -3955,9 +3966,9 @@ def render_chapter_tree(project):
 
 def refresh_projects_full(name=""):
     """p_refresh 全量刷新 p_sel choices and keep only a legal value."""
-    choices = ProjectService.scan_projects()
-    value = str(name or "") if str(name or "") in choices else None
-    return gr.update(choices=choices, value=value)
+    return catalog_ui.build_project_selector_update(
+        ProjectCatalogService.scan(), p_sel_value=name
+    )
 
 
 # ── O5：合成前分段预览 / 勾选 ──
@@ -4890,10 +4901,10 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     bookshelf_select_chain = ov_bookshelf.select(
         catalog_ui.select_bookshelf_row,
         [ov_bookshelf, ss],
-        [bookshelf_selected_proj, bookshelf_selected, p_sel],
+        [bookshelf_selected_proj, bookshelf_selected],
     ).then(
         catalog_ui.reconcile_bookshelf_selection,
-        [ss, p_sel],
+        [ss],
         selection_ui_outputs(ov_page, p_sel),
     ).then(
         catalog_ui.reconcile_bookshelf_hierarchy_selection,

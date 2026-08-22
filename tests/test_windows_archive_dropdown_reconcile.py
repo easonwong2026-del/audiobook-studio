@@ -83,9 +83,10 @@ def test_t1_selection_from_empty_dropdown_does_not_emit_invalid_value(
     archive_workspace,
 ):
     ss = SessionState()
-    _name, _info, p_sel_update = _select(ss, "alpha")
+    name, info = _select(ss, "alpha")
 
-    _assert_dropdown_update_is_valid(p_sel_update, previous_choices=[])
+    assert name == "alpha"
+    assert "当前选择" in info
 
 
 def test_t2_selected_a_opened_none_has_legal_value_and_choices(archive_workspace):
@@ -114,7 +115,7 @@ def test_t4_first_archive_click_is_confirmation_only(archive_workspace):
     )
 
     assert "确认将" in message
-    assert confirmation.get("value") == "alpha"
+    assert confirmation == "alpha"
     assert ss.selected_project == "alpha"
     assert (archive_workspace / "projects" / "alpha").is_dir()
 
@@ -222,11 +223,11 @@ def test_t11_a_to_b_to_a_confirmation_remains_stale_protected(archive_workspace)
     ss.set_selected("beta")
     ss.set_selected("alpha")
     message, next_confirmation, *_ = handlers.archive_selected(
-        "alpha", confirmation.get("value"), ss
+        "alpha", confirmation, ss
     )
 
     assert "确认将" in message
-    assert next_confirmation.get("value") == "alpha"
+    assert next_confirmation == "alpha"
     assert (archive_workspace / "projects" / "alpha").is_dir()
 
 
@@ -241,7 +242,12 @@ def test_t12_empty_catalog_selector_contract_is_explicit():
 def test_t13_manual_project_refresh_sanitizes_stale_value(monkeypatch):
     import app
 
-    monkeypatch.setattr(app.ProjectService, "scan_projects", lambda: ["beta"])
+    summary = type("Summary", (), {"project_name": "beta"})()
+    monkeypatch.setattr(
+        app.ProjectCatalogService,
+        "scan",
+        staticmethod(lambda: [summary]),
+    )
 
     update = app.refresh_projects_full("alpha")
 

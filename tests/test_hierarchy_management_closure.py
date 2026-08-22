@@ -335,7 +335,7 @@ def test_query_reconciles_selection_after_title_edit_but_keeps_opened(
     )
     assert ss.selected_project is None
     assert ss.project == "book"
-    assert refreshed[5].get("value") == ""
+    assert refreshed[5] == ""
     assert ss.catalog_query == "旧标题"
 
 

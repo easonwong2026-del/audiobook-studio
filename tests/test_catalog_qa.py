@@ -72,7 +72,7 @@ def test_qa_archive_two_step_bypass_when_selection_changes(qa_workspace):
     # 第一次点击（对 A）：仅提示，确认态记录为项目名 alpha
     msg1, state1, _sel1, _info1 = handlers.archive_selected("alpha", "", None)
     assert "确认将「alpha」移入回收站" in msg1
-    assert state1.get("value") == "alpha"
+    assert state1 == "alpha"
     assert os.path.isdir(alpha_dir)
 
     # 用户改选 B（确认态仍为 alpha，未复位——确认态绑定项目名，免疫改选）
@@ -81,15 +81,15 @@ def test_qa_archive_two_step_bypass_when_selection_changes(qa_workspace):
     assert ss.selected_project == "beta"
 
     # 第二次点击：confirmed_project=alpha != beta → 必须重新确认，B 不被归档
-    msg2, state2, _sel2, _info2 = handlers.archive_selected("beta", state1.get("value"), ss)
+    msg2, state2, _sel2, _info2 = handlers.archive_selected("beta", state1, ss)
     assert "确认将「beta」移入回收站" in msg2
-    assert state2.get("value") == "beta"
+    assert state2 == "beta"
     assert os.path.isdir(beta_dir)  # 关键：B 未被绕过两步确认归档
 
     # 对 B 确认后再点击 → 才归档 B
     msg3, state3, _sel3, _info3 = handlers.archive_selected("beta", "beta", ss)
     assert "已移入回收站" in msg3
-    assert state3.get("value") == ""
+    assert state3 == ""
     assert not os.path.isdir(beta_dir)
 
 

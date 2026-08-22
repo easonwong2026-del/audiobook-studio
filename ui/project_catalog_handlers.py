@@ -126,7 +126,7 @@ def render_bookshelf_rows(search_query: str = "", projects=None) -> dict:
     return _render_bookshelf_summaries(projects)
 
 
-def apply_project_search(query: str, ss=None) -> tuple[dict, str, dict]:
+def apply_project_search(query: str, ss=None) -> tuple[dict, str, str]:
     """搜索 → 渲染书架行 + 同步选中状态（含清除被过滤掉的 selected）。
 
     Args:
@@ -134,7 +134,7 @@ def apply_project_search(query: str, ss=None) -> tuple[dict, str, dict]:
         ss: 会话状态（可为 None，纯渲染用）。
 
     Returns:
-        ``(书架行 update, 选中信息 Markdown, 选中项目 State 复位 update)`` 三元组。
+        ``(书架行 update, 选中信息 Markdown, 选中项目 State 值)`` 三元组。
 
     选中项目如果被过滤出结果，则同步清空 ``ss.selected_project`` 与 UI 选中
     态，避免「搜索后书架看不到 A，但动作仍作用于 A」的幽灵状态；若选中项目
@@ -152,11 +152,11 @@ def apply_project_search(query: str, ss=None) -> tuple[dict, str, dict]:
     if selected and selected not in visible:
         if ss is not None:
             ss.clear_selected()
-        return styled, _BOOKSHELF_HINT, _update(value="")
+        return styled, _BOOKSHELF_HINT, ""
     if selected:
         info = _selected_info(selected, ss)
-        return styled, info, _update(value=selected)
-    return styled, _BOOKSHELF_HINT, _update(value="")
+        return styled, info, selected
+    return styled, _BOOKSHELF_HINT, ""
 
 
 def _selected_info(name: str, ss=None, summary=None) -> str:
@@ -214,7 +214,7 @@ def _selected_info(name: str, ss=None, summary=None) -> str:
     )
 
 
-def select_bookshelf_row(rows, ss, evt: gr.SelectData) -> tuple[str, str, dict]:
+def select_bookshelf_row(rows, ss, evt: gr.SelectData) -> tuple[str, str]:
     """书架 select → 只设 ``ss.selected_project``，绝不动 ``ss.project``。
 
     Args:
@@ -223,7 +223,11 @@ def select_bookshelf_row(rows, ss, evt: gr.SelectData) -> tuple[str, str, dict]:
         evt: gradio SelectData（优先使用 ``row_value``；由 gradio 自动追加为末参）。
 
     Returns:
-        ``(选中项目名, 选中信息 Markdown, p_sel 下拉同步 update)`` 三元组。
+        ``(选中项目名 State 值, 选中信息 Markdown)`` 二元组。
+
+    ``p_sel`` is deliberately not an output here. It is reconciled exactly
+    once by the following catalog-aware callback, after
+    ``ss.selected_project`` has been mutated.
     """
     selected = getattr(evt, "selected", None) if evt is not None else None
     row_value = getattr(evt, "row_value", None) if evt is not None else None
@@ -243,7 +247,7 @@ def select_bookshelf_row(rows, ss, evt: gr.SelectData) -> tuple[str, str, dict]:
     )
 
     if evt is None or ss is None:
-        return "", _BOOKSHELF_HINT, _update()
+        return "", _BOOKSHELF_HINT
 
     # Gradio may emit a deselect event when the already selected cell is
     # clicked again. Preserve the canonical selection; a deselect must never
@@ -251,9 +255,9 @@ def select_bookshelf_row(rows, ss, evt: gr.SelectData) -> tuple[str, str, dict]:
     if selected is False:
         current = str(getattr(ss, "selected_project", "") or "")
         if current:
-            result = current, _selected_info(current, ss), _update()
+            result = current, _selected_info(current, ss)
         else:
-            result = "", _BOOKSHELF_HINT, _update()
+            result = "", _BOOKSHELF_HINT
         logger.debug(
             "bookshelf deselect preserved selection=%r; p_sel deferred to "
             "catalog-aware reconciliation",
@@ -273,7 +277,7 @@ def select_bookshelf_row(rows, ss, evt: gr.SelectData) -> tuple[str, str, dict]:
     # Compatibility fallback for older Gradio payloads without row_value.
     if display_value is None:
         if event_index is None:
-            return "", _BOOKSHELF_HINT, _update()
+            return "", _BOOKSHELF_HINT
         try:
             data = rows["data"] if isinstance(rows, dict) else rows
             row_index = (
@@ -283,15 +287,15 @@ def select_bookshelf_row(rows, ss, evt: gr.SelectData) -> tuple[str, str, dict]:
             )
             display_value = data[row_index][0]
         except (IndexError, KeyError, TypeError):
-            return "", _BOOKSHELF_HINT, _update()
+            return "", _BOOKSHELF_HINT
 
     try:
         name = ProjectCatalogService.project_name_from_display(display_value)
     except (AttributeError, TypeError, ValueError):
-        return "", _BOOKSHELF_HINT, _update()
+        return "", _BOOKSHELF_HINT
     name = str(name or "")
     if not name:
-        return "", _BOOKSHELF_HINT, _update()
+        return "", _BOOKSHELF_HINT
     ss.set_selected(name)
     logger.debug(
         "bookshelf select applied selected_after=%r opened=%r; p_sel deferred "
@@ -299,13 +303,28 @@ def select_bookshelf_row(rows, ss, evt: gr.SelectData) -> tuple[str, str, dict]:
         ss.selected_project,
         ss.project,
     )
-    # Do not write a value-only update to p_sel.  The next reconciliation step
-    # emits choices and value atomically, so an initially empty Dropdown never
-    # enters the illegal ``value not in choices`` state.
-    return name, _selected_info(name, ss), _update()
+    return name, _selected_info(name, ss)
 
 
-def _selection_controls_updates(ss, p_sel_value: str = "", summaries=None) -> tuple:
+def _archive_confirmation_needs_reset(ss) -> bool:
+    """Return whether a UI-held archive token belongs to a stale selection."""
+    if ss is None:
+        return True
+    if getattr(ss, "_archive_confirmation_revision", None) is None:
+        # Emit a raw empty State value during the initial/no-confirmation
+        # render. A passive render with a live confirmation has a revision and
+        # is handled by the current-context branch below.
+        return True
+    return not ss.archive_confirmation_is_current()
+
+
+def _selection_controls_updates(
+    ss,
+    p_sel_value: str = "",
+    summaries=None,
+    *,
+    reset_archive_confirmation: bool = True,
+) -> tuple:
     """Build the shared action/transient UI state for the current selection.
 
     The first item is the compatibility ``p_sel`` mirror.  The remaining
@@ -320,14 +339,15 @@ def _selection_controls_updates(ss, p_sel_value: str = "", summaries=None) -> tu
     return (
         p_sel_update,
         *(action_update for _ in BOOKSHELF_ACTION_KEYS),
-        # archive confirmation
-        _update(value=""),
-        # cleanup token / confirm / cancel
-        _update(value=""),
+        # archive confirmation is a gr.State: raw values write it, while a
+        # no-op update preserves it during passive catalog rendering.
+        "" if reset_archive_confirmation else gr.skip(),
+        # cleanup token / confirm / cancel (the token is also a gr.State)
+        "",
         _update(visible=False),
         _update(visible=False),
         # storage token / confirm / cancel
-        _update(value=""),
+        "",
         _update(visible=False),
         _update(visible=False),
         # integrity repair and transient message
@@ -354,11 +374,14 @@ def selection_ui_output_keys() -> tuple[str, ...]:
 
 
 def reconcile_bookshelf_selection(ss, p_sel_value: str = "") -> tuple:
-    """Reset transient state and action enabled state after selection changes."""
-    if ss is not None:
-        ss.invalidate_archive_confirmation()
+    """Reconcile selection state and the single catalog-aware ``p_sel`` owner."""
     summaries = ProjectCatalogService.scan()
-    updates = _selection_controls_updates(ss, p_sel_value, summaries)
+    updates = _selection_controls_updates(
+        ss,
+        p_sel_value,
+        summaries,
+        reset_archive_confirmation=_archive_confirmation_needs_reset(ss),
+    )
     logger.debug(
         "bookshelf selection reconciled selected=%r opened=%r p_sel=%r "
         "management_interactive=%r",
@@ -893,7 +916,7 @@ def repair_selected_integrity(project_name: str) -> tuple[str, dict]:
 
 def archive_selected(
     project_name: str, confirmed_project: str, ss
-) -> tuple[str, dict, dict, dict]:
+) -> tuple[str, str, str, dict]:
     """移入回收站（两步确认，绑定项目名 + 连续 selection context）。
 
     第一次点击（``confirmed_project != project_name``）→ 显示「确认将项目移入
@@ -917,19 +940,19 @@ def archive_selected(
         ss: 会话状态（可能为 None）。
 
     Returns:
-        ``(消息, 确认状态 update, 选中项目 State update, 选中信息 Markdown update)``
+        ``(消息, 确认状态 State 值, 选中项目 State 值, 选中信息 Markdown update)``
         四元组。
     """
     noop = _update()
     if not project_name:
-        return "⚪ 请先从书架选择项目。", _update(value=""), noop, noop
+        return "⚪ 请先从书架选择项目。", "", noop, noop
     canonical_selected = str(getattr(ss, "selected_project", "") or "") if ss is not None else ""
     if canonical_selected and canonical_selected != project_name:
         if ss is not None:
             ss.invalidate_archive_confirmation()
         return (
             "⚠ 当前书架选择已变化，请重新选择项目后再确认。",
-            _update(value=""),
+            "",
             noop,
             noop,
         )
@@ -952,7 +975,7 @@ def archive_selected(
                 f"⚠ 确认将「{html.escape(project_name)}」移入回收站？"
                 "回收站内可恢复；再次点击「移入回收站」执行。"
             ),
-            _update(value=project_name),
+            project_name,
             noop,
             noop,
         )
@@ -971,8 +994,8 @@ def archive_selected(
             message = f"✅ 项目已移入回收站：`{target}`"
         return (
             message,
-            _update(value=""),
-            _update(value=""),
+            "",
+            "",
             _update(value=_BOOKSHELF_HINT),
         )
     except Exception as exc:
@@ -983,7 +1006,7 @@ def archive_selected(
         # guard 阻止：仅复位确认态，selection 一律保留
         if ss is not None:
             ss.clear_archive_confirmation()
-        return message, _update(value=""), noop, noop
+        return message, "", noop, noop
 
 
 def archive_selected_with_event(
@@ -1122,7 +1145,8 @@ def _refresh_bookshelf_management_state(
     catalog primitive.  This state-aware wrapper is the only UI reconciliation
     path: it preserves ``ss.catalog_query``, validates the canonical
     ``ss.selected_project`` against the freshly scanned/filter catalog, updates
-    the mirror/card/action states, and resets all transient confirmations.
+    the mirror/card/action states, and preserves a live archive confirmation
+    unless the selection context is stale.
 
     Returns 25 outputs in this order:
 
@@ -1140,9 +1164,6 @@ def _refresh_bookshelf_management_state(
         query = str(getattr(ss, "catalog_query", "") or "")
     if ss is not None:
         ss.set_catalog_query(query)
-        # A refresh re-scans the filesystem; any UI-held confirmation string
-        # must be treated as stale even when the selected row remains visible.
-        ss.invalidate_archive_confirmation()
 
     summaries = ProjectCatalogService.scan()
     visible_summaries = ProjectCatalogService.filter_projects(summaries, query)
@@ -1173,14 +1194,19 @@ def _refresh_bookshelf_management_state(
         if selected
         else _BOOKSHELF_HINT
     )
-    controls = _selection_controls_updates(ss, p_sel_value, summaries)
+    controls = _selection_controls_updates(
+        ss,
+        p_sel_value,
+        summaries,
+        reset_archive_confirmation=_archive_confirmation_needs_reset(ss),
+    )
     result = (
         bookshelf,
         p_sel_update,
         rows,
         trash_choices,
         status,
-        _update(value=selected),
+        selected,
         _update(value=selected_info),
         *controls[1:],
     )

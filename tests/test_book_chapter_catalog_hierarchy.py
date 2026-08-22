@@ -320,7 +320,7 @@ def test_child_row_selects_without_opening(hierarchy_workspace):
         index for index, row in enumerate(rows["data"]) if "chapter" in row[0]
     )
     ss = SessionState(project="book", script={"meta": {}}, bindings={})
-    name, info, _p_sel = handlers.select_bookshelf_row(
+    name, info = handlers.select_bookshelf_row(
         rows,
         ss,
         type("Event", (), {"index": (child_index, 0)})(),
@@ -341,7 +341,7 @@ def test_hierarchy_search_clears_hidden_selection_but_keeps_opened(hierarchy_wor
     ss.set_selected("chapter")
 
     _rows, _info, selected_update = handlers.apply_project_search("不存在", ss)
-    assert selected_update.get("value") == ""
+    assert selected_update == ""
     assert ss.selected_project is None
     assert ss.project == "book"
 
@@ -349,7 +349,7 @@ def test_hierarchy_search_clears_hidden_selection_but_keeps_opened(hierarchy_wor
     refreshed = handlers.refresh_bookshelf_management_view("第一章", "book", ss)
     assert ss.selected_project == "chapter"
     assert ss.project == "book"
-    assert refreshed[5].get("value") == "chapter"
+    assert refreshed[5] == "chapter"
 
 
 def test_archive_chapter_preserves_parent_and_restore_relinks(hierarchy_workspace):

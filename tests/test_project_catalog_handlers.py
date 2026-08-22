@@ -76,7 +76,7 @@ def test_apply_project_search_renders_filtered_rows(handler_workspace):
     names = {row[0] for row in bookshelf["data"]}
     assert names == {"alpha", "beta"}
     # 搜索后清除选中项目 State，避免管理动作作用于隐藏旧选中
-    assert selected_reset.get("value") == ""
+    assert selected_reset == ""
 
     filtered, _, _ = handlers.apply_project_search("ALPHA")
     assert [row[0] for row in filtered["data"]] == ["alpha"]
@@ -86,7 +86,7 @@ def test_apply_project_search_renders_filtered_rows(handler_workspace):
 def test_select_bookshelf_row_only_sets_selected(handler_workspace):
     ss = SessionState(project="opened_proj", script={"meta": {}}, bindings={})
     rows = _bookshelf_value([["alpha", 1, "0/1", "⚪未开始"]])
-    name, info, p_sel_update = handlers.select_bookshelf_row(
+    name, info = handlers.select_bookshelf_row(
         rows, ss, _FakeEvent(0)
     )
     assert name == "alpha"
@@ -95,9 +95,7 @@ def test_select_bookshelf_row_only_sets_selected(handler_workspace):
     assert ss.project == "opened_proj"
     assert ss.script == {"meta": {}}
     assert "阿尔法" in info
-    # The selection handler defers p_sel to the following catalog-aware
-    # reconciliation so it never emits a value-only update.
-    assert p_sel_update.get("value") is None
+    # p_sel is owned by the following catalog-aware reconciliation callback.
 
 
 @pytest.mark.parametrize("column", range(4))
@@ -113,12 +111,11 @@ def test_select_bookshelf_row_uses_select_data_row_value_for_any_column(
         value="0/1",
     )
 
-    name, _info, p_sel_update = handlers.select_bookshelf_row(rows, ss, event)
+    name, _info = handlers.select_bookshelf_row(rows, ss, event)
 
     assert name == "alpha"
     assert ss.selected_project == "alpha"
     assert ss.project == "opened_proj"
-    assert p_sel_update.get("value") is None
 
 
 def test_select_bookshelf_row_accepts_real_gradio_select_data(handler_workspace):
@@ -135,11 +132,10 @@ def test_select_bookshelf_row_accepts_real_gradio_select_data(handler_workspace)
 
     result = handlers.select_bookshelf_row([], ss, event)
 
-    assert len(result) == 3
+    assert len(result) == 2
     assert result[0] == "alpha"
     assert ss.selected_project == "alpha"
     assert ss.project == "beta"
-    assert result[2].get("value") is None
 
 
 def test_select_bookshelf_row_maps_display_name_and_preserves_on_deselect(
@@ -154,18 +150,17 @@ def test_select_bookshelf_row_maps_display_name_and_preserves_on_deselect(
         selected=False,
     )
 
-    name, info, p_sel_update = handlers.select_bookshelf_row([], ss, event)
+    name, info = handlers.select_bookshelf_row([], ss, event)
 
     assert name == "alpha"
     assert "alpha" in info
     assert ss.selected_project == "alpha"
     assert ss.project == "beta"
-    assert p_sel_update.get("value") is None
 
 
 def test_select_bookshelf_row_ignores_bad_event(handler_workspace):
     ss = SessionState()
-    name, info, _update = handlers.select_bookshelf_row(
+    name, info = handlers.select_bookshelf_row(
         _bookshelf_value([["alpha", 1, "0/1", "⚪未开始"]]), ss, None
     )
     assert name == ""
@@ -198,7 +193,7 @@ def test_archive_two_step_confirmation(handler_workspace, tmp_path):
     # 第一次点击：confirmed_project 为空（未确认）→ 仅提示，确认态记录 alpha
     msg1, state1, sel1, info1 = handlers.archive_selected("alpha", "", None)
     assert "确认将「alpha」移入回收站" in msg1
-    assert state1.get("value") == "alpha"
+    assert state1 == "alpha"
     # 第一次点击不清 selection（noop update）
     assert not sel1.get("value")
     # 第一次点击绝不归档
@@ -207,7 +202,7 @@ def test_archive_two_step_confirmation(handler_workspace, tmp_path):
     # 第二次点击：confirmed_project == alpha → 才归档，确认态复位
     msg2, state2, sel2, info2 = handlers.archive_selected("alpha", "alpha", None)
     assert "已移入回收站" in msg2
-    assert state2.get("value") == ""
+    assert state2 == ""
     assert not os.path.isdir(project_dir)
 
 
@@ -217,18 +212,18 @@ def test_archive_confirm_state_bound_to_project_name(handler_workspace):
     beta_dir = os.path.join(handler_workspace, "projects", "beta")
     # 对 A 第一次点击 → 确认态记录 alpha
     _msg1, state1, _sel1, _info1 = handlers.archive_selected("alpha", "", None)
-    assert state1.get("value") == "alpha"
+    assert state1 == "alpha"
     # 改选 B（确认态仍为 alpha，未复位）→ 对 B 点击 → 必须要求重新确认
-    msg2, state2, _sel2, _info2 = handlers.archive_selected("beta", state1.get("value"), None)
+    msg2, state2, _sel2, _info2 = handlers.archive_selected("beta", state1, None)
     assert "确认将「beta」移入回收站" in msg2
-    assert state2.get("value") == "beta"
+    assert state2 == "beta"
     # 关键：beta 未被归档（两步确认未被绕过）
     assert os.path.isdir(alpha_dir)
     assert os.path.isdir(beta_dir)
     # 对 B 确认后再点 → 才归档 B
     msg3, state3, _sel3, _info3 = handlers.archive_selected("beta", "beta", None)
     assert "已移入回收站" in msg3
-    assert state3.get("value") == ""
+    assert state3 == ""
     assert not os.path.isdir(beta_dir)
     # alpha 不受影响
     assert os.path.isdir(alpha_dir)
@@ -247,7 +242,7 @@ def test_archive_active_production_error_message(handler_workspace, monkeypatch)
     )
     msg, state, sel, info = handlers.archive_selected("alpha", "alpha", None)
     assert "项目正在生产，请先停止任务后再移入回收站" in msg
-    assert state.get("value") == ""
+    assert state == ""
     # guard 阻止时不清 selection（noop update）
     assert not sel.get("value")
     assert not info.get("value")
@@ -268,7 +263,7 @@ def test_archive_opened_project_resets_session(handler_workspace):
     assert ss.synthesis is None
     # archive 成功后 selected 全部清空
     assert ss.selected_project is None
-    assert sel.get("value") == ""
+    assert sel == ""
     assert "选择" in info.get("value", "")
 
 

@@ -142,7 +142,7 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
         )
         search_chain = search_chain.then(
             catalog_handlers.reconcile_bookshelf_selection,
-            [session, deps["project_sel"]],
+            [session],
             selection_outputs,
         )
         search_chain = search_chain.then(

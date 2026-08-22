@@ -97,7 +97,9 @@ class SessionState:
         """
         self.clear_selected()
         self.clear_opened()
-        self.clear_archive_confirmation()
+        # Keep the stale marker until the next catalog reconciliation clears
+        # the browser-side confirmation State as well.
+        self.invalidate_archive_confirmation()
 
     def clear_opened(self) -> None:
         """Clear the opened production/session assets without touching the query."""

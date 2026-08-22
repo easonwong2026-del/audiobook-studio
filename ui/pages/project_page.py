@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import gradio as gr
 
-from services import ProjectService
+from services.project_catalog import ProjectCatalogService
 
 
 def create_project_page() -> dict:
@@ -19,7 +19,10 @@ def create_project_page() -> dict:
             with gr.Row():
                 p_sel = gr.Dropdown(
                     label="项目",
-                    choices=ProjectService.scan_projects(),
+                    choices=[
+                        summary.project_name
+                        for summary in ProjectCatalogService.scan()
+                    ],
                     scale=4,
                 )
                 p_refresh = gr.Button("刷新", size="sm", scale=1)

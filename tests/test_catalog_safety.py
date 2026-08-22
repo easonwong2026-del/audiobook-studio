@@ -214,11 +214,11 @@ def test_archive_two_step_confirmation_contract(safety_workspace):
     project_dir = os.path.join(safety_workspace, "projects", "safety_book")
     msg1, state1, _sel1, _info1 = handlers.archive_selected("safety_book", "", None)
     assert "确认将「safety_book」移入回收站" in msg1
-    assert state1.get("value") == "safety_book"
+    assert state1 == "safety_book"
     assert os.path.isdir(project_dir)  # 第一次绝不归档
 
     msg2, state2, sel2, info2 = handlers.archive_selected("safety_book", "safety_book", None)
     assert "已移入回收站" in msg2
-    assert state2.get("value") == ""
-    assert sel2.get("value") == ""  # 成功后 selected 清空
+    assert state2 == ""
+    assert sel2 == ""  # 成功后 selected 清空
     assert not os.path.isdir(project_dir)
