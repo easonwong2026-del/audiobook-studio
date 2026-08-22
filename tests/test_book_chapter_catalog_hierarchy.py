@@ -297,15 +297,15 @@ def test_selected_opened_contract_survives_hierarchy_rows(hierarchy_workspace):
 
     ss = SessionState(project="book-b", script={"meta": {}}, bindings={})
     ss.set_selected("chapter-a1")
-    controls = handlers.reconcile_bookshelf_selection(ss, "chapter-a1")
+    handlers.reconcile_bookshelf_selection(ss, "chapter-a1")
     assert ss.selected_project == "chapter-a1"
     assert ss.project == "book-b"
-    assert controls[0].get("value") == "book-b"
+    assert handlers.reconcile_project_selector(ss).get("value") == "book-b"
 
     ss.set_project("chapter-b2", {"meta": {}}, {})
     ss.set_selected("book-a")
-    controls = handlers.reconcile_bookshelf_selection(ss, "book-a")
-    assert controls[0].get("value") == "chapter-b2"
+    handlers.reconcile_bookshelf_selection(ss, "book-a")
+    assert handlers.reconcile_project_selector(ss).get("value") == "chapter-b2"
     assert ss.selected_project == "book-a"
 
 

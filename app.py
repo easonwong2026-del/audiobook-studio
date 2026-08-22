@@ -88,8 +88,8 @@ from ui.shared import create_status_bar
 from ui.theme import LIGHT_CSS, THEME
 from ui.wiring.project_catalog_wiring import (
     bookshelf_management_outputs,
+    bookshelf_selection_context_outputs,
     hierarchy_outputs,
-    selection_ui_outputs,
     wire_project_catalog,
 )
 from ui.wiring.settings_wiring import wire_settings_page
@@ -553,7 +553,7 @@ def activate_production_timer():
 def delete_project(name, ss=None):
     """Archive a project by default; permanent deletion has a separate callback."""
     if not name:
-        update = catalog_ui.build_project_selector_update(ProjectCatalogService.scan())
+        update = catalog_ui.reconcile_project_selector(ss)
         return (update, "⚪ 请先选择项目。") if ss is not None else update
     try:
         target = ProjectStorageService.archive(name)
@@ -567,7 +567,7 @@ def delete_project(name, ss=None):
     except Exception as exc:
         logger.exception("归档项目失败")
         message = f"❌ 归档项目失败：{exc}"
-    update = catalog_ui.build_project_selector_update(ProjectCatalogService.scan())
+    update = catalog_ui.reconcile_project_selector(ss)
     return (update, message) if ss is not None else update
 
 
@@ -3705,23 +3705,23 @@ def hide_project_from_list(name, ss):
             ss.set_snapshot(None)
             ss.synthesis = None
         return (
-            catalog_ui.build_project_selector_update(ProjectCatalogService.scan()),
+            catalog_ui.reconcile_project_selector(ss),
             f"✅ 已仅从项目列表移除「{name}」，本地文件仍保留。",
         )
     except Exception as exc:
         return gr.update(), f"❌ 从项目列表移除失败：{exc}"
 
 
-def restore_project_to_list(name):
+def restore_project_to_list(name, ss=None):
     if not name or not str(name).strip():
         return gr.update(), "⚪ 请输入需要恢复的项目名称。"
     try:
         project_name = str(name).strip()
         ProjectStorageService.restore_to_list(project_name)
         return (
-            catalog_ui.build_project_selector_update(
-                ProjectCatalogService.scan(), p_sel_value=project_name
-            ),
+            catalog_ui.reconcile_project_selector(ss)
+            if ss is not None
+            else catalog_ui.build_project_selector_update(ProjectCatalogService.scan()),
             "✅ 项目已恢复到项目列表。",
         )
     except Exception as exc:
@@ -3885,7 +3885,7 @@ def refresh_archived_projects():
     )
 
 
-def restore_archived_project(archive_id, _ss):
+def restore_archived_project(archive_id, ss):
     if not archive_id:
         return gr.update(), "⚪ 请先选择回收站项目。", gr.update(), gr.update()
     try:
@@ -3893,9 +3893,7 @@ def restore_archived_project(archive_id, _ss):
         name = result["project_name"]
         rows, choices, _status = refresh_archived_projects()
         return (
-            catalog_ui.build_project_selector_update(
-                ProjectCatalogService.scan(), p_sel_value=name
-            ),
+            catalog_ui.reconcile_project_selector(ss),
             f"✅ 已恢复「{name}」，完整性检查通过；请点击“打开项目”。",
             rows,
             choices,
@@ -3944,17 +3942,14 @@ def refresh_bookshelf():
 
 
 def select_project_from_bookshelf(rows, evt: gr.SelectData):
-    """点选书架某行 → 回填 p_sel（项目页 Dropdown，唯一项目选择真相源）。"""
-    if evt is None or evt.index is None:
-        return gr.update()
-    try:
-        rows = rows["data"] if isinstance(rows, dict) else rows
-        name = ProjectCatalogService.project_name_from_display(rows[evt.index[0]][0])
-    except Exception:
-        return gr.update()
-    return catalog_ui.build_project_selector_update(
-        ProjectCatalogService.scan(), p_sel_value=name
-    )
+    """Legacy bookshelf callback retained as a no-op for old integrations.
+
+    The live bookshelf uses ``select_bookshelf_row``. A row click is a
+    management-selection event and must never write the project-page
+    ``p_sel`` Dropdown, so an accidental legacy registration is explicitly
+    ignored as well.
+    """
+    return gr.skip()
 
 
 def render_chapter_tree(project):
@@ -3964,11 +3959,9 @@ def render_chapter_tree(project):
     return _pm.build_chapter_tree(project)
 
 
-def refresh_projects_full(name=""):
-    """p_refresh 全量刷新 p_sel choices and keep only a legal value."""
-    return catalog_ui.build_project_selector_update(
-        ProjectCatalogService.scan(), p_sel_value=name
-    )
+def refresh_projects_full(ss=None):
+    """p_refresh refreshes p_sel from the opened workflow project only."""
+    return catalog_ui.reconcile_project_selector(ss)
 
 
 # ── O5：合成前分段预览 / 勾选 ──
@@ -4267,11 +4260,9 @@ def refresh_overview(ss):
     return (*_dashboard_snapshot(ss), catalog_ui.render_bookshelf_rows(query))
 
 
-def refresh_p_sel(name):
-    """刷新项目下拉选项（catalog 数据源；选中项不在新 catalog 中则清空）。"""
-    return catalog_ui.build_project_selector_update(
-        ProjectCatalogService.scan(), p_sel_value=name
-    )
+def refresh_p_sel(ss):
+    """Refresh p_sel from catalog plus the opened workflow project only."""
+    return catalog_ui.reconcile_project_selector(ss)
 
 
 def _review_outputs():
@@ -4297,6 +4288,10 @@ def _open_chain_rest(event):
     默认导出目录 / 概览 / 项目下拉。
     """
     e = event
+    # ``open_project`` has already established ``ss.project``. Reconcile the
+    # project-page selector before any downstream callback consumes ``p_sel``;
+    # bookshelf selection itself never reaches this chain.
+    e = e.then(refresh_p_sel, [ss], [p_sel])
     e = e.then(refresh_top_status, [ss], [top_status])
     e = e.then(preview_chapters, [ss], _review_outputs())
     e = e.then(preview_chapter_options, [ss], [e_chapter_sel])
@@ -4344,7 +4339,6 @@ def _open_chain_rest(event):
         refresh_overview, [ss],
         [ov_status, ov_progress, ov_task, ov_issues, ov_bookshelf],
     )
-    e = e.then(refresh_p_sel, [p_sel], [p_sel])
     e = e.then(
         catalog_ui.refresh_bookshelf_management_view_with_hierarchy,
         [bookshelf_search, p_sel, ss],
@@ -4903,9 +4897,9 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         [ov_bookshelf, ss],
         [bookshelf_selected_proj, bookshelf_selected],
     ).then(
-        catalog_ui.reconcile_bookshelf_selection,
+        catalog_ui.reconcile_bookshelf_selection_context,
         [ss],
-        selection_ui_outputs(ov_page, p_sel),
+        bookshelf_selection_context_outputs(ov_page),
     ).then(
         catalog_ui.reconcile_bookshelf_hierarchy_selection,
         [ss],
@@ -5125,7 +5119,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         {"session": ss},
     )
 
-    p_refresh_chain = p_refresh.click(refresh_projects_full, [p_sel], [p_sel])
+    p_refresh_chain = p_refresh.click(refresh_projects_full, [ss], [p_sel])
     p_refresh_chain.then(
         merge_ui.refresh_merge_workflow_controls,
         [ss],

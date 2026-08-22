@@ -10,7 +10,7 @@ E. archive opened 项目 → opened session 完全 reset（project/selected/
 F. archive selected A 而 opened B → B 完整保留（隔离）；
 G. archive 确认态绑定项目名 → A 的确认不能归档 B；
 H. 搜索 → 导航离开 → 返回 → query/filter 保留（ss.catalog_query 单一来源）；
-I. archive → p_sel/catalog 同步（p_sel 不再含 A）；
+I. archive → catalog 同步；p_sel 只代表 opened workflow state；
 J. restore → p_sel/catalog 同步（p_sel 恢复 A）；
 K. live active production archive 被阻止 → selected/opened 不变；
 L. restore duplicate 项目仍被拒绝。
@@ -245,9 +245,9 @@ def test_h_search_state_preserved_across_navigation(state_workspace):
 
 def test_i_archive_syncs_p_sel(state_workspace):
     ss = SessionState()
-    _select(ss, "alpha")  # p_sel 同步为 alpha（select 第三输出）
+    _select(ss, "alpha")  # bookshelf selection must not populate p_sel
     _msg, _c, _s, _i = handlers.archive_selected("alpha", "alpha", ss)
-    # 统一刷新：p_sel choices/value 不再含 A
+    # Stateless catalog refresh still sanitizes its explicit selector value.
     bookshelf, p_sel_update, _trash, _tc, _ts = handlers.refresh_project_catalog("", "alpha")
     assert "alpha" not in p_sel_update.get("choices", [])
     assert p_sel_update.get("value") is None

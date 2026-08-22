@@ -90,27 +90,26 @@ def test_selection_controls_enable_actions_and_clear_all_transients(
     ss = SessionState(project="beta")
     ss.set_selected("alpha")
     updates = handlers.reconcile_bookshelf_selection(ss, "alpha")
-    assert len(updates) == 19
-    assert updates[0].get("value") == "beta"  # current workflow project
-    for update in updates[1:10]:
+    assert len(updates) == 18
+    for update in updates[0:9]:
         assert update.get("interactive") is True
-    assert updates[10] == ""  # archive confirmation State value
-    assert updates[11] == ""  # cleanup token State value
+    assert updates[9] == ""  # archive confirmation State value
+    assert updates[10] == ""  # cleanup token State value
+    assert updates[11].get("visible") is False
     assert updates[12].get("visible") is False
-    assert updates[13].get("visible") is False
-    assert updates[14] == ""  # storage token State value
+    assert updates[13] == ""  # storage token State value
+    assert updates[14].get("visible") is False
     assert updates[15].get("visible") is False
     assert updates[16].get("visible") is False
-    assert updates[17].get("visible") is False
-    assert updates[18].get("value") == ""
+    assert updates[17].get("value") == ""
+    assert handlers.reconcile_project_selector(ss).get("value") == "beta"
 
     ss.clear_selected()
     cleared = handlers.reconcile_bookshelf_selection(ss, "alpha")
-    # p_sel falls back to the opened workflow project, never to the stale
-    # bookshelf mirror that was just cleared.
-    assert cleared[0].get("value") == "beta"
-    for update in cleared[1:10]:
+    assert len(cleared) == 18
+    for update in cleared[0:9]:
         assert update.get("interactive") is False
+    assert handlers.reconcile_project_selector(ss).get("value") == "beta"
 
 
 def test_opened_project_wins_p_sel_while_bookshelf_selection_stays_independent(
@@ -122,8 +121,8 @@ def test_opened_project_wins_p_sel_while_bookshelf_selection_stays_independent(
     updates = handlers.reconcile_bookshelf_selection(ss, "alpha")
     assert ss.project == "beta"
     assert ss.selected_project == "alpha"
-    assert updates[0].get("value") == "beta"
-    assert updates[1].get("interactive") is True
+    assert updates[0].get("interactive") is True
+    assert handlers.reconcile_project_selector(ss).get("value") == "beta"
 
     refreshed = handlers.refresh_bookshelf_management_view("", "alpha", ss)
     assert refreshed[1].get("value") == "beta"  # project-page workflow control
@@ -152,7 +151,7 @@ def test_refresh_preserves_valid_selection_and_filters(bookshelf_workspace):
     assert len(result) == 25
     assert [row[0] for row in result[0]["data"]] == ["alpha"]
     assert result[1].get("choices") == ["alpha", "beta"]
-    assert result[1].get("value") == "alpha"
+    assert result[1].get("value") is None
     assert result[5] == "alpha"
     assert "阿尔法" in result[6].get("value", "")
     assert result[7].get("interactive") is True
@@ -217,9 +216,10 @@ def test_search_filter_clears_p_sel_mirror_and_actions(bookshelf_workspace):
     handlers.apply_project_search("贝塔", ss)
     updates = handlers.reconcile_bookshelf_selection(ss, "alpha")
     assert ss.selected_project is None
-    assert updates[0].get("value") is None
-    for update in updates[1:10]:
+    assert updates[0].get("interactive") is False
+    for update in updates[0:9]:
         assert update.get("interactive") is False
+    assert handlers.reconcile_project_selector(ss).get("value") is None
 
 
 def test_refresh_removes_missing_selection_and_disables_actions(bookshelf_workspace):
@@ -282,13 +282,13 @@ def test_cleanup_transient_reset_after_selection_context_change(bookshelf_worksp
     # shared reconciliation contract to assert the reset semantics directly.
     ss.set_selected("beta")
     updates = handlers.reconcile_bookshelf_selection(ss, "beta")
-    assert updates[0].get("value") == "beta"
-    assert updates[11] == ""
+    assert updates[0].get("interactive") is True
+    assert updates[10] == ""
+    assert updates[11].get("visible") is False
     assert updates[12].get("visible") is False
-    assert updates[13].get("visible") is False
-    assert updates[14] == ""
+    assert updates[13] == ""
+    assert updates[14].get("visible") is False
     assert updates[15].get("visible") is False
-    assert updates[16].get("visible") is False
 
 
 def test_storage_handlers_and_wiring_have_four_outputs(monkeypatch):

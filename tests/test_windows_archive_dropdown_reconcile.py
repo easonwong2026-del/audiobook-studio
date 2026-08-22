@@ -94,8 +94,10 @@ def test_t2_selected_a_opened_none_has_legal_value_and_choices(archive_workspace
     _select(ss, "alpha")
     updates = handlers.reconcile_bookshelf_selection(ss, "alpha")
 
-    _assert_dropdown_update_is_valid(updates[0], previous_choices=[])
-    assert updates[0].get("value") == "alpha"
+    assert len(updates) == 18
+    selector = handlers.reconcile_project_selector(ss)
+    _assert_dropdown_update_is_valid(selector, previous_choices=[])
+    assert selector.get("value") is None
 
 
 def test_t3_selected_a_opened_b_keeps_b_in_legal_choices(archive_workspace):
@@ -103,8 +105,10 @@ def test_t3_selected_a_opened_b_keeps_b_in_legal_choices(archive_workspace):
     _select(ss, "alpha")
     updates = handlers.reconcile_bookshelf_selection(ss, "alpha")
 
-    _assert_dropdown_update_is_valid(updates[0], previous_choices=[])
-    assert updates[0].get("value") == "beta"
+    assert len(updates) == 18
+    selector = handlers.reconcile_project_selector(ss)
+    _assert_dropdown_update_is_valid(selector, previous_choices=[])
+    assert selector.get("value") == "beta"
 
 
 def test_t4_first_archive_click_is_confirmation_only(archive_workspace):
@@ -249,7 +253,7 @@ def test_t13_manual_project_refresh_sanitizes_stale_value(monkeypatch):
         staticmethod(lambda: [summary]),
     )
 
-    update = app.refresh_projects_full("alpha")
+    update = app.refresh_projects_full(SessionState(project="alpha"))
 
     assert update.get("choices") == ["beta"]
     assert update.get("value") is None
@@ -262,7 +266,7 @@ def test_t14_refresh_p_sel_emits_choices_with_legal_value(monkeypatch):
     summary = type("Summary", (), {"project_name": "beta"})()
     monkeypatch.setattr(app.ProjectCatalogService, "scan", lambda: [summary])
 
-    update = app.refresh_p_sel("beta")
+    update = app.refresh_p_sel(SessionState(project="beta"))
 
     assert update.get("choices") == ["beta"]
     assert update.get("value") == "beta"

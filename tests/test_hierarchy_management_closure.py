@@ -156,7 +156,7 @@ def test_reassign_is_single_operation_and_keeps_physical_dirs_and_session(
     assert chapter.relation_status == RELATION_VALID
     assert ss.project == "book-b"
     assert ss.selected_project == "chapter"
-    assert handlers.reconcile_bookshelf_selection(ss, "chapter")[0].get("value") == "book-b"
+    assert handlers.reconcile_project_selector(ss).get("value") == "book-b"
     assert {name: (project_root / name).resolve() for name in before_dirs} == before_dirs
 
 

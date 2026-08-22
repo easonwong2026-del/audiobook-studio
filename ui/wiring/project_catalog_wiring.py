@@ -61,17 +61,16 @@ def bookshelf_management_outputs(
         page["bookshelf_trash_status"],
         page["bookshelf_selected_proj"],
         page["bookshelf_selected"],
-        *selection_ui_outputs(page, project_sel)[1:],
+        *bookshelf_selection_context_outputs(page),
     ]
     if include_hierarchy:
         outputs.extend(hierarchy_outputs(page))
     return outputs
 
 
-def selection_ui_outputs(page: dict, project_sel) -> list:
-    """Return outputs matching ``reconcile_bookshelf_selection``."""
+def bookshelf_selection_context_outputs(page: dict) -> list:
+    """Return the p_sel-free output contract for bookshelf selection events."""
     return [
-        project_sel,
         *(page[key] for key in catalog_handlers.BOOKSHELF_ACTION_KEYS),
         page["bookshelf_archive_confirm"],
         page["bookshelf_cleanup_token"],
@@ -83,6 +82,11 @@ def selection_ui_outputs(page: dict, project_sel) -> list:
         page["bookshelf_integrity_repair"],
         page["bookshelf_msg"],
     ]
+
+
+def selection_ui_outputs(page: dict, _project_sel=None) -> list:
+    """Compatibility alias for the p_sel-free bookshelf context outputs."""
+    return bookshelf_selection_context_outputs(page)
 
 
 def wire_project_catalog(page: dict, deps: dict) -> None:
@@ -109,7 +113,7 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
         "management_refresh",
         catalog_handlers.refresh_bookshelf_management_view_with_hierarchy,
     )
-    selection_outputs = selection_ui_outputs(page, deps["project_sel"])
+    selection_outputs = bookshelf_selection_context_outputs(page)
     relationship_outputs = hierarchy_outputs(page)
     cleanup_handler_outputs = cleanup_outputs(page)
     storage_handler_outputs = storage_upgrade_outputs(page)
@@ -141,7 +145,7 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
             ],
         )
         search_chain = search_chain.then(
-            catalog_handlers.reconcile_bookshelf_selection,
+            catalog_handlers.reconcile_bookshelf_selection_context,
             [session],
             selection_outputs,
         )

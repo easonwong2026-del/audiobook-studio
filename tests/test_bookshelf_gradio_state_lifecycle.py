@@ -15,7 +15,7 @@ from services.session import SessionState
 from ui import project_catalog_handlers as handlers
 from ui.pages import project_page
 from ui.pages.overview_page import create_overview_page
-from ui.wiring.project_catalog_wiring import selection_ui_outputs
+from ui.wiring.project_catalog_wiring import bookshelf_selection_context_outputs
 
 ROOT = Path(__file__).parents[1]
 APP_PATH = ROOT / "app.py"
@@ -182,10 +182,10 @@ def test_real_gradio_archive_clicks_confirm_then_archive(lifecycle_workspace):
     assert not (lifecycle_workspace / "projects" / "alpha").is_dir()
 
 
-def test_real_gradio_bookshelf_click_a_then_b_uses_one_p_sel_owner(
+def test_real_gradio_bookshelf_click_a_then_b_never_updates_p_sel(
     lifecycle_workspace,
 ):
-    """The actual Dataframe.select chain never feeds stale p_sel back as input."""
+    """The actual Dataframe.select chain has no p_sel output or input."""
     rows = {
         "headers": ["项目", "章", "段进度", "状态"],
         "data": [
@@ -202,9 +202,9 @@ def test_real_gradio_bookshelf_click_a_then_b_uses_one_p_sel_owner(
             [page["ov_bookshelf"], session],
             [page["bookshelf_selected_proj"], page["bookshelf_selected"]],
         ).then(
-            handlers.reconcile_bookshelf_selection,
+            handlers.reconcile_bookshelf_selection_context,
             [session],
-            selection_ui_outputs(page, p_sel),
+            bookshelf_selection_context_outputs(page),
         )
 
     state = GradioSessionState(block)
@@ -224,13 +224,14 @@ def test_real_gradio_bookshelf_click_a_then_b_uses_one_p_sel_owner(
         state,
         event_data=event_a,
     )
-    assert first["data"][0] is None  # p_sel is not an intermediate output
+    assert len(first["data"]) == 2
+    assert p_sel.choices == []
+    assert p_sel.value is None
     reconciled_a = _run(block, 1, [None], state)
-    assert reconciled_a["data"][0]["choices"] == [
-        ["alpha", "alpha"],
-        ["beta", "beta"],
-    ]
-    assert reconciled_a["data"][0]["value"] == "alpha"
+    assert len(reconciled_a["data"]) == 18
+    assert p_sel.choices == []
+    assert p_sel.value is None
+    assert state[session._id].selected_project == "alpha"
 
     event_b = gr.SelectData(
         page["ov_bookshelf"],
@@ -243,7 +244,10 @@ def test_real_gradio_bookshelf_click_a_then_b_uses_one_p_sel_owner(
     )
     _run(block, 0, [rows, None], state, event_data=event_b)
     reconciled_b = _run(block, 1, [None], state)
-    assert reconciled_b["data"][0]["value"] == "beta"
+    assert len(reconciled_b["data"]) == 18
+    assert p_sel.choices == []
+    assert p_sel.value is None
+    assert state[session._id].selected_project == "beta"
 
 
 def test_bookshelf_selection_has_one_catalog_aware_p_sel_owner():
@@ -252,9 +256,9 @@ def test_bookshelf_selection_has_one_catalog_aware_p_sel_owner():
     end = source.index("# ── 概览页快捷操作", start)
     selection_block = source[start:end]
 
-    assert "[bookshelf_selected_proj, bookshelf_selected, p_sel]" not in selection_block
+    assert "p_sel" not in selection_block
     assert "[bookshelf_selected_proj, bookshelf_selected]" in selection_block
-    assert "reconcile_bookshelf_selection,\n        [ss]," in selection_block
+    assert "reconcile_bookshelf_selection_context,\n        [ss]," in selection_block
 
 
 def test_project_page_initial_selector_uses_catalog(monkeypatch):
@@ -289,6 +293,20 @@ def test_selection_handler_does_not_write_p_sel_before_reconciliation(lifecycle_
 
     assert result[:1] == ("alpha",)
     assert len(result) == 2
+
+
+def test_project_selector_uses_opened_workflow_state_only(lifecycle_workspace):
+    ss = SessionState()
+    ss.set_selected("alpha")
+
+    unopened = handlers.reconcile_project_selector(ss)
+    assert unopened.get("choices") == ["alpha", "beta"]
+    assert unopened.get("value") is None
+
+    ss.set_project("beta", {"meta": {}}, {})
+    opened = handlers.reconcile_project_selector(ss)
+    assert opened.get("choices") == ["alpha", "beta"]
+    assert opened.get("value") == "beta"
 
 
 def test_selection_transition_writes_raw_archive_state_and_passive_refresh_preserves_it(
