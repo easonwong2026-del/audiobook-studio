@@ -606,26 +606,65 @@ def refresh_role_list(search, current_role, ss):
 
 def refresh_role_summary(ss):
     """Refresh the role binding count after a save without reloading the page."""
-    if not ss or not ss.project:
-        return "打开项目后显示角色绑定状态。"
-    snap = _snap(ss)
-    if not snap:
-        return "打开项目后显示角色绑定状态。"
-    return _voice_cast_summary(snap)
+    return refresh_voice_cast_ui(ss)[0]
 
 
-def _voice_cast_summary(snap):
+def _legacy_voice_cast_summary(status):
+    """Render product language for projects using the legacy manual workflow."""
+    total = int(status.get("roles_total", 0) or 0)
+    bound = int(status.get("bound", 0) or 0)
+    unbound = int(status.get("unbound", max(total - bound, 0)) or 0)
+    if status.get("production_ready"):
+        return (
+            f"✅ 全部角色已绑定（{bound}/{total}）\n"
+            "兼容模式：旧版项目\n"
+            "当前声音方案已可用于生产，无需执行 Voice Cast 锁定。"
+        )
+    return (
+        f"⚠ 已绑定 {bound}/{total}，还有 {unbound} 个角色需要绑定声音。\n"
+        "兼容模式：旧版项目；完成绑定后才能进入生产。"
+    )
+
+
+def _legacy_voice_cast_status_from_snapshot(snap):
+    """Build the legacy display status from an already-loaded project snapshot."""
+    voices, _ = script_loader.resolve_collections(snap.script)
+    bound = 0
+    for role in voices:
+        value = (snap.bindings or {}).get(role)
+        if not value:
+            continue
+        path = str(value)
+        if not os.path.isabs(path):
+            try:
+                path = project_paths.resolve_relative(snap.project_dir, path)
+            except ValueError:
+                path = os.path.join(snap.project_dir, path)
+        if os.path.isfile(path):
+            bound += 1
+    total = len(voices)
+    return {
+        "mode": "legacy_manual",
+        "roles_total": total,
+        "bound": bound,
+        "unbound": total - bound,
+        "production_ready": bound == total,
+    }
+
+
+def _voice_cast_summary(snap, status=None):
     """Render shared Voice Cast state without exposing audio paths."""
-    # Legacy/manual projects already have the complete snapshot required for
-    # this display.  Avoid a second disk read during the normal open chain.
-    if not os.path.isfile(os.path.join(snap.project_dir, "character_roster.json")):
-        return format_role_management_summary(snap.script, snap.bindings)
+    # The open handler already has a complete snapshot.  Keep this first
+    # render read-free; the subsequent shared UI refresh uses the resolver for
+    # the authoritative status and the server-side finalize guard.
+    if status is None and not os.path.isfile(project_paths.character_roster(snap.project_dir)):
+        return _legacy_voice_cast_summary(_legacy_voice_cast_status_from_snapshot(snap))
     try:
-        status = VoiceCastResolver.get_voice_binding_status(snap.name)
-    except Exception:
+        status = status or VoiceCastResolver.get_voice_binding_status(snap.name)
+    except Exception:  # noqa: BLE001 - status fallback keeps legacy UI readable
         return format_role_management_summary(snap.script, snap.bindings)
     if status.get("mode") == "legacy_manual":
-        return format_role_management_summary(snap.script, snap.bindings)
+        return _legacy_voice_cast_summary(status)
     state = "已锁定" if status.get("cast_locked") else "草稿"
     return (
         f"全书角色：**{status.get('roles_total', 0)}** · "
@@ -634,11 +673,48 @@ def _voice_cast_summary(snap):
     )
 
 
+def refresh_voice_cast_ui(ss):
+    """Refresh the Voice Cast summary and finalize affordance together.
+
+    Legacy/manual projects use their existing script voice bindings as the
+    production contract.  They must never be presented with the formal cast
+    finalization action, even if an old browser still has that event wired.
+    """
+    hidden_finalize = gr.update(visible=False, interactive=False)
+    if not ss or not ss.project:
+        return "打开项目后显示角色绑定状态。", hidden_finalize
+    try:
+        status = VoiceCastResolver.get_voice_binding_status(ss.project)
+    except Exception:  # noqa: BLE001 - status fallback keeps stale UI safe
+        snap = _snap(ss)
+        if not snap:
+            return "打开项目后显示角色绑定状态。", hidden_finalize
+        return _voice_cast_summary(snap), hidden_finalize
+    if status.get("mode") == "legacy_manual":
+        return _legacy_voice_cast_summary(status), hidden_finalize
+    snap = _snap(ss)
+    if not snap:
+        return "打开项目后显示角色绑定状态。", gr.update(visible=True, interactive=True)
+    return _voice_cast_summary(snap, status), gr.update(visible=True, interactive=True)
+
+
 def finalize_voice_cast_ui(ss):
     """Gradio callback for the one-click Voice Cast finalization."""
     if not ss or not ss.project:
         return "请先打开项目。"
     try:
+        status = VoiceCastResolver.get_voice_binding_status(ss.project)
+        if status.get("mode") == "legacy_manual":
+            if status.get("production_ready"):
+                return (
+                    f"✅ 全部角色已绑定（{status.get('bound', 0)}/{status.get('roles_total', 0)}）。"
+                    "兼容模式：旧版项目，无需执行 Voice Cast 锁定，可直接进入生产。"
+                )
+            return (
+                f"⚠ 已绑定 {status.get('bound', 0)}/{status.get('roles_total', 0)}，"
+                f"还有 {status.get('unbound', 0)} 个角色需要绑定声音。"
+                "兼容模式：旧版项目，请先完成绑定。"
+            )
         result = VoiceCastResolver.finalize_voice_cast(ss.project)
         ss.invalidate_snapshot()
         return f"✅ 全书声音方案已锁定（{len(result.get('cast', {}).get('roles', {}))} 个角色）。"
@@ -4291,6 +4367,7 @@ def _open_chain_rest(event):
     # ``open_project`` has already established ``ss.project``. Reconcile the
     # project-page selector before any downstream callback consumes ``p_sel``;
     # bookshelf selection itself never reaches this chain.
+    e = e.then(refresh_voice_cast_ui, [ss], [v_status, v_cast_finalize])
     e = e.then(refresh_p_sel, [ss], [p_sel])
     e = e.then(refresh_top_status, [ss], [top_status])
     e = e.then(preview_chapters, [ss], _review_outputs())
@@ -4524,6 +4601,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             vce_page = create_voice_page()
             grp_voices = vce_page["group"]
             v_status = vce_page["v_status"]
+            v_cast_finalize = vce_page["v_cast_finalize"]
             v_table = vce_page["v_table"]
             v_role_search = vce_page["v_role_search"]
             v_role_title = vce_page["v_role_title"]
@@ -4831,7 +4909,8 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         [v_role_search, v_role, ss], [v_table]).then(
         refresh_voice_filters,
         [], [v_bind_category, v_lib_category, v_save_category]).then(
-        refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
+        refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category]).then(
+        refresh_voice_cast_ui, [ss], [v_status, v_cast_finalize])
     nav_synth.click(
         lambda: _goto("synth"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-synth')?.classList.add('active'); }").then(
@@ -4926,7 +5005,9 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         [v_role_search, v_role, ss], [v_table]).then(
         refresh_voice_filters,
         [], [v_bind_category, v_lib_category, v_save_category]).then(
-        refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
+        refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category]).then(
+        refresh_voice_cast_ui, [ss], [v_status, v_cast_finalize]
+    )
     ov_synth.click(
         lambda: _goto("synth"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-synth')?.classList.add('active'); }").then(
@@ -5063,6 +5144,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
                 "refresh_role_list": refresh_role_list,
                 "bind_voice": bind_voice,
                 "refresh_role_summary": refresh_role_summary,
+                "refresh_voice_cast_ui": refresh_voice_cast_ui,
                 "finalize_voice_cast": finalize_voice_cast_ui,
                 "play_lib_voice": play_lib_voice,
                 "save_to_lib": save_to_lib,

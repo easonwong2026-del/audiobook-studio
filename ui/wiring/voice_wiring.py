@@ -27,14 +27,23 @@ def wire_voice_page(page: dict, context: dict) -> None:
         [page["v_role_search"], page["v_role"], session],
         [page["v_table"]],
     )
-    page["v_bind"].click(
+    bind_chain = page["v_bind"].click(
         cb["bind_voice"],
         [page["v_role"], page["v_audio"], page["v_lib"], session],
         [
             page["v_bind_msg"], page["v_table"], page["v_lib"],
             page["v_role"], page["v_role_title"], page["v_current"],
         ],
-    ).then(cb["refresh_role_summary"], session, page["v_status"])
+    )
+    refresh_voice_ui = cb.get("refresh_voice_cast_ui")
+    if refresh_voice_ui:
+        bind_chain.then(
+            refresh_voice_ui,
+            session,
+            [page["v_status"], page["v_cast_finalize"]],
+        )
+    else:
+        bind_chain.then(cb["refresh_role_summary"], session, page["v_status"])
     page["v_cast_finalize"].click(
         cb["finalize_voice_cast"], session, page["v_status"]
     )
