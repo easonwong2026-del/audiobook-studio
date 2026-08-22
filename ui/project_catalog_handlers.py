@@ -194,25 +194,90 @@ def select_bookshelf_row(rows, ss, evt: gr.SelectData) -> tuple[str, str, dict]:
     """书架 select → 只设 ``ss.selected_project``，绝不动 ``ss.project``。
 
     Args:
-        rows: 书架 Dataframe 值（dict 或二维列表）。
+        rows: 书架 Dataframe 值（dict 或二维列表），只作为兼容 fallback。
         ss: 会话状态（原地 mutate ``selected_project``）。
-        evt: gradio SelectData（含 ``index``；由 gradio 自动追加为末参）。
+        evt: gradio SelectData（优先使用 ``row_value``；由 gradio 自动追加为末参）。
 
     Returns:
         ``(选中项目名, 选中信息 Markdown, p_sel 下拉同步 update)`` 三元组。
     """
-    if evt is None or evt.index is None:
+    selected = getattr(evt, "selected", None) if evt is not None else None
+    row_value = getattr(evt, "row_value", None) if evt is not None else None
+    event_value = getattr(evt, "value", None) if evt is not None else None
+    event_index = getattr(evt, "index", None) if evt is not None else None
+    selected_before = getattr(ss, "selected_project", None) if ss is not None else None
+    opened = getattr(ss, "project", None) if ss is not None else None
+    logger.debug(
+        "bookshelf select event index=%r row_value=%r value=%r selected=%r "
+        "selected_before=%r opened=%r",
+        event_index,
+        row_value,
+        event_value,
+        selected,
+        selected_before,
+        opened,
+    )
+
+    if evt is None or ss is None:
         return "", _BOOKSHELF_HINT, _update()
+
+    # Gradio may emit a deselect event when the already selected cell is
+    # clicked again. Preserve the canonical selection; a deselect must never
+    # be interpreted as an instruction to open another project.
+    if selected is False:
+        current = str(getattr(ss, "selected_project", "") or "")
+        workflow_value = str(getattr(ss, "project", "") or current)
+        if current:
+            result = current, _selected_info(current, ss), _update(value=workflow_value)
+        else:
+            result = "", _BOOKSHELF_HINT, _update(value=workflow_value or None)
+        logger.debug(
+            "bookshelf deselect preserved selection=%r workflow_value=%r",
+            current,
+            workflow_value,
+        )
+        return result
+
+    display_value = None
+    # SelectData.row_value is the event's complete row and remains reliable
+    # when the Dataframe input is styled or wrapped in a component update.
     try:
-        rows = rows["data"] if isinstance(rows, dict) else rows
-        name = ProjectCatalogService.project_name_from_display(rows[evt.index[0]][0])
-    except Exception:
+        if row_value is not None:
+            display_value = row_value[0]
+    except (IndexError, KeyError, TypeError):
+        display_value = None
+
+    # Compatibility fallback for older Gradio payloads without row_value.
+    if display_value is None:
+        if event_index is None:
+            return "", _BOOKSHELF_HINT, _update()
+        try:
+            data = rows["data"] if isinstance(rows, dict) else rows
+            row_index = (
+                event_index[0]
+                if isinstance(event_index, (list, tuple))
+                else event_index
+            )
+            display_value = data[row_index][0]
+        except (IndexError, KeyError, TypeError):
+            return "", _BOOKSHELF_HINT, _update()
+
+    try:
+        name = ProjectCatalogService.project_name_from_display(display_value)
+    except (AttributeError, TypeError, ValueError):
         return "", _BOOKSHELF_HINT, _update()
     name = str(name or "")
     if not name:
         return "", _BOOKSHELF_HINT, _update()
     ss.set_selected(name)
-    return name, _selected_info(name, ss), _update(value=name)
+    workflow_value = str(getattr(ss, "project", "") or name)
+    logger.debug(
+        "bookshelf select applied selected_after=%r opened=%r workflow_value=%r",
+        ss.selected_project,
+        ss.project,
+        workflow_value,
+    )
+    return name, _selected_info(name, ss), _update(value=workflow_value)
 
 
 def _selection_controls_updates(ss, p_sel_value: str = "") -> tuple:
@@ -279,7 +344,16 @@ def reconcile_bookshelf_selection(ss, p_sel_value: str = "") -> tuple:
     """Reset transient state and action enabled state after selection changes."""
     if ss is not None:
         ss.invalidate_archive_confirmation()
-    return _selection_controls_updates(ss, p_sel_value)
+    updates = _selection_controls_updates(ss, p_sel_value)
+    logger.debug(
+        "bookshelf selection reconciled selected=%r opened=%r p_sel=%r "
+        "management_interactive=%r",
+        getattr(ss, "selected_project", None) if ss is not None else None,
+        getattr(ss, "project", None) if ss is not None else None,
+        updates[0].get("value") if updates else None,
+        updates[1].get("interactive") if len(updates) > 1 else None,
+    )
+    return updates
 
 
 def _hierarchy_control_updates(ss, summaries=None) -> tuple:

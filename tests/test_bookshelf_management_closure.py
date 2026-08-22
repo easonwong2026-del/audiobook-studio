@@ -69,6 +69,7 @@ def _page_in_blocks():
 def test_initial_project_actions_are_disabled_and_transients_hidden():
     block, page = _page_in_blocks()
     try:
+        assert page["ov_bookshelf"].interactive is False
         for key in handlers.BOOKSHELF_ACTION_KEYS:
             assert page[key].interactive is False, key
         for key in (

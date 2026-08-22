@@ -4823,23 +4823,19 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         catalog_ui.select_bookshelf_row,
         [ov_bookshelf, ss],
         [bookshelf_selected_proj, bookshelf_selected, p_sel],
-    )
-    bookshelf_select_chain.then(
+    ).then(
         catalog_ui.reconcile_bookshelf_selection,
         [ss, p_sel],
         selection_ui_outputs(ov_page, p_sel),
-    )
-    bookshelf_select_chain.then(
+    ).then(
         catalog_ui.reconcile_bookshelf_hierarchy_selection,
         [ss],
         hierarchy_outputs(ov_page),
-    )
-    bookshelf_select_chain.then(
+    ).then(
         merge_ui.refresh_merge_workflow_controls,
         [ss],
         merge_planner_outputs,
-    )
-    bookshelf_select_chain.then(
+    ).then(
         assembly_ui.refresh_assembly_workflow_controls,
         [ss],
         assembly_outputs,

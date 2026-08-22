@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 
+import gradio as gr
 import pytest
 
 from repositories.project_repo import ProjectRepository
@@ -47,10 +48,21 @@ def handler_workspace(tmp_path, monkeypatch):
 
 
 class _FakeEvent:
-    """模拟 gr.SelectData：仅暴露 index。"""
+    """模拟 gr.SelectData，支持新旧 payload 形态。"""
 
-    def __init__(self, row: int) -> None:
-        self.index = (row, 0)
+    def __init__(
+        self,
+        row: int,
+        column: int = 0,
+        *,
+        row_value=None,
+        value=None,
+        selected: bool = True,
+    ) -> None:
+        self.index = (row, column)
+        self.row_value = row_value
+        self.value = value
+        self.selected = selected
 
 
 def _bookshelf_value(rows):
@@ -83,7 +95,72 @@ def test_select_bookshelf_row_only_sets_selected(handler_workspace):
     assert ss.project == "opened_proj"
     assert ss.script == {"meta": {}}
     assert "阿尔法" in info
-    assert p_sel_update.get("value") == "alpha"
+    # p_sel remains the opened/current-workflow project; the selected shelf
+    # project is carried by bookshelf_selected_proj and SessionState.
+    assert p_sel_update.get("value") == "opened_proj"
+
+
+@pytest.mark.parametrize("column", range(4))
+def test_select_bookshelf_row_uses_select_data_row_value_for_any_column(
+    handler_workspace, column
+):
+    ss = SessionState(project="opened_proj")
+    rows = _bookshelf_value([["stale-cell-value", 99, "99/99", "stale"]])
+    event = _FakeEvent(
+        0,
+        column,
+        row_value=["alpha", "1", "0/1", "⚪未开始"],
+        value="0/1",
+    )
+
+    name, _info, p_sel_update = handlers.select_bookshelf_row(rows, ss, event)
+
+    assert name == "alpha"
+    assert ss.selected_project == "alpha"
+    assert ss.project == "opened_proj"
+    assert p_sel_update.get("value") == "opened_proj"
+
+
+def test_select_bookshelf_row_accepts_real_gradio_select_data(handler_workspace):
+    ss = SessionState(project="beta")
+    event = gr.SelectData(
+        None,
+        {
+            "index": [0, 2],
+            "value": "0/1",
+            "selected": True,
+            "row_value": ["alpha", "1", "0/1", "⚪未开始"],
+        },
+    )
+
+    result = handlers.select_bookshelf_row([], ss, event)
+
+    assert len(result) == 3
+    assert result[0] == "alpha"
+    assert ss.selected_project == "alpha"
+    assert ss.project == "beta"
+    assert result[2].get("value") == "beta"
+
+
+def test_select_bookshelf_row_maps_display_name_and_preserves_on_deselect(
+    handler_workspace,
+):
+    ss = SessionState(project="beta")
+    ss.set_selected("alpha")
+    event = _FakeEvent(
+        0,
+        3,
+        row_value=["↳ 第一章 · beta", "1", "0/1", "章节 · ⚪未开始"],
+        selected=False,
+    )
+
+    name, info, p_sel_update = handlers.select_bookshelf_row([], ss, event)
+
+    assert name == "alpha"
+    assert "alpha" in info
+    assert ss.selected_project == "alpha"
+    assert ss.project == "beta"
+    assert p_sel_update.get("value") == "beta"
 
 
 def test_select_bookshelf_row_ignores_bad_event(handler_workspace):

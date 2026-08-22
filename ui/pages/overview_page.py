@@ -44,7 +44,9 @@ def create_overview_page() -> dict:
         ov_bookshelf = gr.Dataframe(
             headers=["项目", "章", "段进度", "状态"],
             datatype=["str", "str", "str", "str"],
-            interactive=True,
+            # 书架是导航/管理视图；行选择由 ``select`` 事件处理，不能进入
+            # spreadsheet 单元格编辑态。
+            interactive=False,
             label="最近项目",
             wrap=True,
         )
