@@ -1,14 +1,19 @@
 """Layer 7 Whole-book Assembly operations, restart, and safety coverage."""
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import gradio as gr
 import pytest
+from gradio.state_holder import SessionState as GradioSessionState
 
 from lib import project_paths
+from lib.types import ProjectSummary
 from repositories.project_repo import ProjectRepository
+from services.project_catalog import RELATION_STANDALONE, CatalogHierarchy
 from services.project_storage import ProjectStorageService
 from services.session import SessionState
 from services.whole_book_assembly import WholeBookAssemblyService
@@ -27,10 +32,16 @@ from services.whole_book_assembly_operations import (
     OPS_PARTIAL,
     WholeBookAssemblyOperationsService,
 )
+from ui import project_catalog_handlers as catalog_handlers
+from ui.chapter_merge_handlers import refresh_merge_workflow_controls
 from ui.pages.overview_page import create_overview_page
 from ui.whole_book_assembly_handlers import (
     refresh_assembly_workflow_controls,
     render_assembly_operations,
+)
+from ui.wiring.project_catalog_wiring import (
+    bookshelf_selection_context_outputs,
+    hierarchy_outputs,
 )
 from ui.wiring.whole_book_assembly_wiring import assembly_workflow_outputs
 
@@ -49,6 +60,23 @@ def _script(title: str, segment_id: str) -> dict:
             }
         ],
     }
+
+
+def _assert_dropdown_update_legal(update: dict) -> None:
+    """Every returned Dropdown value must be empty or one of its choices."""
+    choices = update.get("choices")
+    if choices is None:
+        return
+    values = []
+    for choice in choices:
+        if isinstance(choice, dict):
+            values.append(choice.get("value"))
+        elif isinstance(choice, (tuple, list)) and len(choice) >= 2:
+            values.append(choice[1])
+        else:
+            values.append(choice)
+    value = update.get("value")
+    assert value is None or value in values, (choices, value)
 
 
 @pytest.fixture
@@ -399,6 +427,231 @@ def test_operations_ui_dashboard_and_button_contract():
     assert len(controls) == 12
     assert controls[1]["interactive"] is False
     assert controls[-1]["interactive"] is False
+
+
+def test_eligible_book_target_update_keeps_value_inside_choices(operations_workspace):
+    operations_workspace["make_book"](("chapter-1",))
+    controls = refresh_assembly_workflow_controls(operations_workspace["selected"]())
+
+    _assert_dropdown_update_legal(controls[0])
+    assert controls[0]["choices"] == ["book"]
+    assert controls[0]["value"] == "book"
+    assert controls[1]["interactive"] is True
+
+
+def test_chapter_selection_clears_assembly_target_value(operations_workspace):
+    operations_workspace["make_book"](("chapter-1",))
+    controls = refresh_assembly_workflow_controls(
+        operations_workspace["selected"]("chapter-1")
+    )
+
+    _assert_dropdown_update_legal(controls[0])
+    assert controls[0]["value"] is None
+    assert controls[1]["interactive"] is False
+
+
+def test_selected_assembly_book_missing_from_catalog_clears_target(monkeypatch):
+    eligible = ProjectSummary(
+        project_name="stale-book",
+        title="Stale Book",
+        author="作者",
+        chapters=1,
+        segments=1,
+        completed=0,
+        modified_at=None,
+        project_id="stable-id",
+        project_kind="book",
+        relation_status=RELATION_STANDALONE,
+    )
+    empty_hierarchy = CatalogHierarchy(
+        projects=(),
+        books=(),
+        chapters=(),
+        orphan_chapters=(),
+    )
+    monkeypatch.setattr(
+        "ui.whole_book_assembly_handlers.ProjectCatalogService.scan_hierarchy",
+        staticmethod(lambda: empty_hierarchy),
+    )
+    monkeypatch.setattr(
+        "ui.whole_book_assembly_handlers.ProjectCatalogService.get_summary",
+        staticmethod(lambda _name: eligible),
+    )
+
+    session = SessionState()
+    session.set_selected("stale-book")
+    controls = refresh_assembly_workflow_controls(session)
+
+    _assert_dropdown_update_legal(controls[0])
+    assert controls[0]["choices"] == []
+    assert controls[0]["value"] is None
+    assert controls[1]["interactive"] is False
+
+
+def test_legacy_standalone_book_clears_ineligible_target_update(monkeypatch):
+    """A legacy Book stays manageable but is not an Assembly target."""
+    legacy = ProjectSummary(
+        project_name="legacy-book",
+        title="Legacy Book",
+        author="作者",
+        chapters=1,
+        segments=1,
+        completed=0,
+        modified_at=None,
+        project_id=None,
+        project_kind="book",
+        relation_status=RELATION_STANDALONE,
+    )
+    hierarchy = CatalogHierarchy(
+        projects=(legacy,),
+        books=(legacy,),
+        chapters=(),
+        orphan_chapters=(),
+    )
+    monkeypatch.setattr(
+        "ui.whole_book_assembly_handlers.ProjectCatalogService.scan_hierarchy",
+        staticmethod(lambda: hierarchy),
+    )
+    monkeypatch.setattr(
+        "ui.whole_book_assembly_handlers.ProjectCatalogService.scan",
+        staticmethod(lambda: [legacy]),
+    )
+    monkeypatch.setattr(
+        "ui.whole_book_assembly_handlers.ProjectCatalogService.get_summary",
+        staticmethod(lambda _name: legacy),
+    )
+
+    session = SessionState()
+    session.set_selected("legacy-book")
+    controls = refresh_assembly_workflow_controls(session)
+    target_update = controls[0]
+
+    assert target_update["choices"] == []
+    assert target_update["value"] is None
+    assert controls[1]["interactive"] is False
+    assert "尚不具备整书装配资格" in controls[2]
+
+    management = catalog_handlers.reconcile_bookshelf_selection_context(session)
+    assert all(update.get("interactive") is True for update in management[:9])
+
+
+def test_real_gradio_selection_to_assembly_keeps_legacy_target_legal(monkeypatch):
+    """The production-shaped downstream boundary accepts the safe empty value."""
+    legacy = ProjectSummary(
+        project_name="legacy-book",
+        title="Legacy Book",
+        author="作者",
+        chapters=1,
+        segments=1,
+        completed=0,
+        modified_at=None,
+        project_id=None,
+        project_kind="book",
+        relation_status=RELATION_STANDALONE,
+    )
+    hierarchy = CatalogHierarchy(
+        projects=(legacy,),
+        books=(legacy,),
+        chapters=(),
+        orphan_chapters=(),
+    )
+    monkeypatch.setattr(
+        "ui.whole_book_assembly_handlers.ProjectCatalogService.scan_hierarchy",
+        staticmethod(lambda: hierarchy),
+    )
+    monkeypatch.setattr(
+        "ui.whole_book_assembly_handlers.ProjectCatalogService.scan",
+        staticmethod(lambda: [legacy]),
+    )
+    monkeypatch.setattr(
+        "ui.whole_book_assembly_handlers.ProjectCatalogService.get_summary",
+        staticmethod(lambda _name: legacy),
+    )
+    monkeypatch.setattr(
+        "ui.whole_book_assembly_handlers.WholeBookAssemblyOperationsService.reconstruct",
+        staticmethod(lambda *_args, **_kwargs: SimpleNamespace(resume_allowed=False)),
+    )
+    monkeypatch.setattr(
+        "ui.whole_book_assembly_handlers.render_assembly_operations",
+        lambda _snapshot: "legacy assembly dashboard",
+    )
+
+    def select_legacy(session):
+        session.set_selected("legacy-book")
+        return session
+
+    def run(block, fn_index, inputs, state, *, event_data=None):
+        return asyncio.run(
+            block.process_api(
+                fn_index,
+                inputs,
+                state=state,
+                session_hash="assembly-test",
+                event_data=event_data,
+            )
+        )
+
+    with gr.Blocks() as block:
+        page = create_overview_page()
+        session = gr.State(SessionState())
+        select = gr.Button("select")
+        observed = gr.Textbox()
+        merge_outputs = [
+            page["merge_source_chapter"],
+            page["merge_target_book"],
+            page["merge_analyze"],
+            page["merge_plan_result"],
+            page["merge_plan_state"],
+            page["merge_resolution"],
+            page["merge_confirm"],
+            page["merge_confirmation_state"],
+            page["merge_execute"],
+            page["merge_execution_result"],
+            page["merge_transaction_state"],
+        ]
+        select.click(select_legacy, [session], [session]).then(
+            catalog_handlers.reconcile_bookshelf_selection_context,
+            [session],
+            bookshelf_selection_context_outputs(page),
+        ).then(
+            catalog_handlers.reconcile_bookshelf_hierarchy_selection,
+            [session],
+            hierarchy_outputs(page),
+        ).then(
+            refresh_merge_workflow_controls,
+            [session],
+            merge_outputs,
+        ).then(
+            refresh_assembly_workflow_controls,
+            [session],
+            assembly_workflow_outputs(page),
+        )
+        page["assembly_target_book"].change(
+            lambda value: value,
+            page["assembly_target_book"],
+            observed,
+        )
+
+    state = GradioSessionState(block)
+    run(block, 0, [None], state)
+    context_result = run(block, 1, [None], state)
+    assert all(item["interactive"] is True for item in context_result["data"][:9])
+
+    hierarchy_result = run(block, 2, [None], state)
+    _assert_dropdown_update_legal(hierarchy_result["data"][0])
+    assert hierarchy_result["data"][0]["value"] is None
+
+    merge_result = run(block, 3, [None], state)
+    _assert_dropdown_update_legal(merge_result["data"][0])
+    _assert_dropdown_update_legal(merge_result["data"][1])
+
+    assembly_result = run(block, 4, [None], state)
+    _assert_dropdown_update_legal(assembly_result["data"][0])
+    assert assembly_result["data"][0]["choices"] == []
+    assert assembly_result["data"][0]["value"] is None
+
+    observed = run(block, 5, [None], state)
+    assert observed["data"] == [None]
 
 
 def test_dashboard_render_exposes_operational_fields(operations_workspace):

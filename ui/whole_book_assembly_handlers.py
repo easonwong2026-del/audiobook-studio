@@ -41,23 +41,35 @@ def _update(**kwargs: Any) -> Any:
     return gr.update(**kwargs)
 
 
+def is_assembly_target_eligible(summary) -> bool:
+    """Return whether one catalog summary may be a Whole-book target.
+
+    Assembly requires the same stable identity that ``_book_names()`` exposes
+    to the target Dropdown. A legacy standalone Book without ``project_id`` is
+    still valid for bookshelf management and opening, but is not yet an
+    Assembly target.
+    """
+    return bool(
+        summary is not None
+        and summary.project_kind == "book"
+        and summary.relation_status == RELATION_STANDALONE
+        and summary.project_id
+    )
+
+
 def _book_names() -> list[str]:
     hierarchy = ProjectCatalogService.scan_hierarchy()
     return [
         item.project_name
         for item in hierarchy.books
-        if item.relation_status == RELATION_STANDALONE and item.project_id
+        if is_assembly_target_eligible(item)
     ]
 
 
 def _selected_book(ss) -> str:
     selected = str(getattr(ss, "selected_project", "") or "") if ss is not None else ""
     summary = ProjectCatalogService.get_summary(selected) if selected else None
-    if (
-        summary is not None
-        and summary.project_kind == "book"
-        and summary.relation_status == RELATION_STANDALONE
-    ):
+    if is_assembly_target_eligible(summary):
         return selected
     return ""
 
@@ -196,10 +208,23 @@ def _json_summary(value: Any) -> str:
 def refresh_assembly_workflow_controls(ss=None) -> tuple:
     """Refresh only Assembly-owned components; Catalog output arity is untouched."""
     books = _book_names()
+    selected = str(getattr(ss, "selected_project", "") or "") if ss is not None else ""
+    selected_summary = (
+        ProjectCatalogService.get_summary(selected) if selected else None
+    )
     target = _selected_book(ss)
+    if target not in books:
+        target = ""
     if target:
         snapshot = WholeBookAssemblyOperationsService.reconstruct(target, session=ss)
         summary = render_assembly_operations(snapshot)
+    elif (
+        selected_summary is not None
+        and selected_summary.project_kind == "book"
+        and selected_summary.relation_status == RELATION_STANDALONE
+        and not selected_summary.project_id
+    ):
+        summary = "当前项目可正常管理和打开，但尚不具备整书装配资格。"
     elif getattr(ss, "selected_project", None):
         summary = "当前选择不是可装配的 Book；请选择一个独立 Book 项目。"
     else:
@@ -502,6 +527,7 @@ __all__ = [
     "execute_assembly_plan",
     "invalidate_assembly_execution_state",
     "invalidate_assembly_plan",
+    "is_assembly_target_eligible",
     "prepare_assembly_execution_controls",
     "refresh_assembly_after_data_dir",
     "refresh_assembly_dashboard",

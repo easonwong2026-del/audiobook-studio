@@ -25,6 +25,14 @@ from ui.wiring.project_catalog_wiring import (
 )
 
 
+def _assert_dropdown_update_legal(update: dict) -> None:
+    choices = update.get("choices")
+    if choices is None:
+        return
+    value = update.get("value")
+    assert value is None or value in choices, (choices, value)
+
+
 def _script_file(tmp_path: Path, name: str, title: str | None = None) -> Path:
     path = tmp_path / f"{name}.json"
     path.write_text(
@@ -292,6 +300,7 @@ def test_hierarchy_controls_reflect_none_book_healthy_and_orphan_states(
 
     ss = SessionState()
     none = _refresh(ss)
+    _assert_dropdown_update_legal(none[25])
     assert none[29].get("value") == "未选择"
     assert none[26].get("interactive") is False
     assert none[30].get("interactive") is False
@@ -299,6 +308,7 @@ def test_hierarchy_controls_reflect_none_book_healthy_and_orphan_states(
 
     ss.set_selected("book")
     book = _refresh(ss)
+    _assert_dropdown_update_legal(book[25])
     assert book[29].get("value") == "整书"
     assert book[30].get("interactive") is False
     assert book[31].get("interactive") is False
@@ -306,6 +316,7 @@ def test_hierarchy_controls_reflect_none_book_healthy_and_orphan_states(
 
     ss.set_selected("chapter")
     healthy = _refresh(ss)
+    _assert_dropdown_update_legal(healthy[25])
     assert healthy[29].get("value") == "章节"
     assert healthy[30].get("value") == "第一章"
     assert healthy[31].get("value") == "2"
@@ -313,6 +324,7 @@ def test_hierarchy_controls_reflect_none_book_healthy_and_orphan_states(
 
     ss.set_selected("orphan")
     orphan = _refresh(ss)
+    _assert_dropdown_update_legal(orphan[25])
     assert orphan[25].get("choices") == ["book"]
     assert orphan[30].get("interactive") is True
     assert "未找到所属整书" in orphan[28].get("value", "")

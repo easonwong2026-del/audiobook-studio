@@ -27,6 +27,20 @@ from ui.pages.overview_page import create_overview_page
 from ui.wiring.project_catalog_wiring import bookshelf_management_outputs
 
 
+def _assert_dropdown_update_legal(update: dict) -> None:
+    choices = update.get("choices")
+    if choices is None:
+        return
+    values = [
+        choice[1]
+        if isinstance(choice, (tuple, list)) and len(choice) >= 2
+        else choice
+        for choice in choices
+    ]
+    value = update.get("value")
+    assert value is None or value in values, (choices, value)
+
+
 def _script(title: str, segment_ids: tuple[str, ...], roles=("旁白",)) -> dict:
     return {
         "meta": {"title": title, "author": "作者"},
@@ -400,9 +414,13 @@ def test_u1_u3_u4_u9_dedicated_ui_state_has_no_catalog_arity_growth(
 
     empty = refresh_merge_planner_controls(SessionState())
     assert len(empty) == 5
+    _assert_dropdown_update_legal(empty[0])
+    _assert_dropdown_update_legal(empty[1])
     ss = SessionState()
     ss.set_selected("chapter")
     populated = refresh_merge_planner_controls(ss)
+    _assert_dropdown_update_legal(populated[0])
+    _assert_dropdown_update_legal(populated[1])
     assert populated[0]["value"] == "chapter"
     assert populated[1]["value"] == "book"
     assert populated[2]["interactive"] is True
