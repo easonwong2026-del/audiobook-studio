@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
+from lib import project_paths
 from repositories.project_repo import ProjectRepository
 from repositories.project_storage_repo import ProjectStorageRepository
-from lib import project_paths
 
 
 def _script_file(tmp_path):
@@ -25,6 +26,30 @@ def _script_file(tmp_path):
     return path
 
 
+def _write_probe(path: Path, size: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"x" * size)
+
+
+def _manual_storage_project(tmp_path, monkeypatch, *, name: str, version: int | None):
+    data_root = tmp_path / f"data-{name}"
+    monkeypatch.setenv("AUDIOBOOK_STUDIO_DATA_DIR", str(data_root))
+    ProjectRepository.WORKSPACE_ROOT = str(data_root / "projects")
+    ProjectRepository.LEGACY_ROOT = str(data_root / "legacy")
+    ProjectRepository._INITIALIZED = True
+    project_dir = data_root / "projects" / name
+    project_dir.mkdir(parents=True)
+    manifest = {"project_name": name}
+    if version is not None:
+        manifest["storage_version"] = version
+    (project_dir / "project.json").write_text(
+        json.dumps(manifest, ensure_ascii=False), encoding="utf-8"
+    )
+    (project_dir / "structured_script.json").write_text("{}", encoding="utf-8")
+    (project_dir / "voice_bindings.json").write_text("{}", encoding="utf-8")
+    return data_root, project_dir
+
+
 @pytest.fixture
 def storage_project(tmp_path, monkeypatch):
     data_root = tmp_path / "data"
@@ -38,19 +63,117 @@ def storage_project(tmp_path, monkeypatch):
 
 def test_summary_is_recursive_and_preview_is_separate(storage_project):
     data_root, project_dir = storage_project
+    baseline = ProjectStorageRepository.summarize("storage_book")
     source_dir = project_paths.project_dir(str(project_dir), "source_book", create=True)
-    os.makedirs(os.path.join(source_dir, "nested"), exist_ok=True)
-    with open(os.path.join(source_dir, "nested", "raw.txt"), "w", encoding="utf-8") as f:
-        f.write("raw")
+    _write_probe(Path(source_dir) / "nested" / "raw.txt", 3)
+    _write_probe(
+        Path(project_paths.project_dir(str(project_dir), "chapter_data", create=True))
+        / "chapter.json",
+        5,
+    )
+    _write_probe(
+        Path(project_paths.project_dir(str(project_dir), "project_voices", create=True))
+        / "voice.wav",
+        7,
+    )
+    _write_probe(
+        Path(project_paths.project_dir(str(project_dir), "segments", create=True))
+        / "segment.wav",
+        11,
+    )
+    _write_probe(
+        Path(project_paths.project_dir(str(project_dir), "chapter_audio", create=True))
+        / "chapter.wav",
+        13,
+    )
+    _write_probe(
+        Path(project_paths.project_dir(str(project_dir), "merged_audio", create=True))
+        / "merged.wav",
+        17,
+    )
+    _write_probe(
+        Path(project_paths.project_dir(str(project_dir), "delivery_official", create=True))
+        / "official.mp3",
+        19,
+    )
+    _write_probe(
+        Path(project_paths.project_dir(str(project_dir), "delivery_supplement", create=True))
+        / "supplement.mp3",
+        23,
+    )
     preview_dir = data_root / "preview" / "storage_book" / "chapters"
     preview_dir.mkdir(parents=True, exist_ok=True)
     preview_dir.joinpath("preview.wav").write_bytes(b"preview")
 
     summary = ProjectStorageRepository.summarize("storage_book")
-    assert summary.source_bytes >= 3
+    assert summary.source_bytes == baseline.source_bytes + 3 + 5
+    assert summary.voices_bytes == baseline.voices_bytes + 7
+    assert summary.segments_bytes == baseline.segments_bytes + 11
+    assert summary.chapter_audio_bytes == baseline.chapter_audio_bytes + 13
+    assert summary.merged_audio_bytes == baseline.merged_audio_bytes + 17
+    assert summary.output_bytes == baseline.output_bytes + 19 + 23
     assert summary.preview_bytes == len(b"preview")
     assert summary.total_bytes >= summary.source_bytes + summary.preview_bytes
     assert summary.file_count >= 2
+
+
+def test_v1_summary_uses_legacy_semantic_paths_without_root_or_alias_duplicates(
+    tmp_path, monkeypatch
+):
+    _data_root, project_dir = _manual_storage_project(
+        tmp_path, monkeypatch, name="v1book", version=None
+    )
+    for directory in ("voices", "segments", "chapters", "output", "cache", "logs"):
+        (project_dir / directory).mkdir()
+    _write_probe(project_dir / "voices" / "voice.wav", 7)
+    _write_probe(project_dir / "segments" / "segment.wav", 11)
+    _write_probe(project_dir / "chapters" / "chapter.json", 13)
+    _write_probe(project_dir / "output" / "book.mp3", 17)
+
+    summary = ProjectStorageRepository.summarize("v1book")
+
+    assert project_paths.detect_storage_version(str(project_dir)) == 1
+    assert summary.source_bytes == 13
+    assert summary.voices_bytes == 7
+    assert summary.segments_bytes == 11
+    assert summary.chapter_audio_bytes == 0
+    assert summary.merged_audio_bytes == 0
+    assert summary.output_bytes == 17
+
+
+def test_v2_summary_uses_semantic_aliases_without_regression(tmp_path, monkeypatch):
+    _data_root, project_dir = _manual_storage_project(
+        tmp_path, monkeypatch, name="v2book", version=2
+    )
+    for directory in (
+        "02_原始文件",
+        "03_章节文本",
+        "04_角色与声音",
+        "05_分段音频",
+        "06_章节音频",
+        "07_合并音频",
+        "09_导出文件",
+        "cache",
+        "logs",
+    ):
+        (project_dir / directory).mkdir()
+    _write_probe(project_dir / "02_原始文件" / "book.json", 5)
+    _write_probe(project_dir / "03_章节文本" / "chapter.json", 7)
+    _write_probe(project_dir / "04_角色与声音" / "voice.wav", 11)
+    _write_probe(project_dir / "05_分段音频" / "segment.wav", 13)
+    _write_probe(project_dir / "06_章节音频" / "chapter.wav", 17)
+    _write_probe(project_dir / "07_合并音频" / "merged.wav", 19)
+    _write_probe(project_dir / "09_导出文件" / "exports" / "book.mp3", 23)
+
+    summary = ProjectStorageRepository.summarize("v2book")
+
+    assert project_paths.detect_storage_version(str(project_dir)) == 2
+    assert summary.source_bytes == 5 + 7
+    assert summary.voices_bytes == 11
+    assert summary.segments_bytes == 13
+    assert summary.chapter_audio_bytes == 17
+    assert summary.merged_audio_bytes == 19
+    assert summary.output_bytes == 23
 
 
 def test_cleanup_only_removes_temp_and_empty_segment_files(storage_project):
@@ -111,7 +234,7 @@ def test_archive_is_recoverable_and_path_is_bounded(storage_project):
 
 
 def test_recycle_bin_restore_rejects_name_conflict_and_permanent_delete_is_scoped(storage_project):
-    data_root, project_dir = storage_project
+    data_root, _project_dir = storage_project
     ProjectStorageRepository.archive_project("storage_book")
     archived = ProjectStorageRepository.list_archived_projects()
     assert len(archived) == 1
