@@ -7,7 +7,8 @@ Service 层（``ProjectStorageService`` / ``ProjectBackupService`` /
 核心不变式：
 - 书架点选只写 ``ss.selected_project``，**绝不动** ``ss.project``、不加载剧本；
 - 各管理动作 handler 收显式 ``project_name`` 参数，不再从 ``ss.project`` 读取；
-- ``refresh_project_catalog`` 是目录类组件全量刷新的唯一出口。
+- ``refresh_project_catalog`` 保持目录类组件的固定 5 元组低层契约；
+  ``refresh_bookshelf_management_view`` 是包含 selection reconciliation 的唯一 UI 出口。
 """
 from __future__ import annotations
 
@@ -30,10 +31,50 @@ _BOOKSHELF_HINT = (
     "从书架选择项目后，可对选中项目执行管理操作；「打开项目」才会进入工作流。"
 )
 
+# ``SessionState.selected_project`` is the canonical bookshelf-management
+# selection source. ``bookshelf_selected_proj`` is only the Gradio mirror used
+# by management-action inputs. ``p_sel`` belongs to the project-page workflow
+# and must not be mutated by an ordinary bookshelf row-selection event.
+BOOKSHELF_ACTION_KEYS = (
+    "bookshelf_open",
+    "bookshelf_open_dir",
+    "bookshelf_open_audio",
+    "bookshelf_open_delivery",
+    "bookshelf_backup",
+    "bookshelf_cleanup",
+    "bookshelf_storage",
+    "bookshelf_integrity",
+    "bookshelf_archive",
+)
+
 
 def _update(**kwargs: Any) -> Any:
     """构造 ``gr.update``（保持与 create_project_handlers 同名的轻量出口）。"""
     return gr.update(**kwargs)
+
+
+def build_project_selector_update(
+    summaries=None, p_sel_value: str = "", ss=None
+) -> dict:
+    """Build a legal ``p_sel`` Dropdown update from one catalog snapshot.
+
+    ``p_sel`` is the project-page workflow control, not a bookshelf-selection
+    mirror. Its value must always be either absent/``None`` or a member of the
+    choices emitted in the same update. When a session is available, only the
+    opened workflow project is eligible; ``selected_project`` is deliberately
+    not a fallback. The legacy ``p_sel_value`` is used only for stateless
+    callers that explicitly own the selector value.
+    """
+    if summaries is None:
+        summaries = ProjectCatalogService.scan()
+    choices = [item.project_name for item in summaries]
+    if ss is not None:
+        opened = str(getattr(ss, "project", "") or "")
+        candidates = (opened,)
+    else:
+        candidates = (str(p_sel_value or ""),)
+    value = next((candidate for candidate in candidates if candidate in choices), None)
+    return _update(choices=choices, value=value)
 
 
 def bind_open_project(callback) -> None:
@@ -58,11 +99,15 @@ def _empty_open_outputs() -> tuple:
 # ── 书架行渲染 ──
 
 
-def render_bookshelf_rows(search_query: str = "") -> dict:
-    """渲染书架 Dataframe（着色契约 dict，列：项目|章|段进度|状态）。"""
-    projects = ProjectCatalogService.search_projects(search_query or "")
+def _render_bookshelf_summaries(projects) -> dict:
+    """Render rows from an already-scanned catalog snapshot."""
     rows = [
-        [p.project_name, p.chapters, f"{p.completed}/{p.segments}", p.status]
+        [
+            ProjectCatalogService.display_name(p),
+            p.chapters,
+            f"{p.completed}/{p.segments}",
+            ProjectCatalogService.display_status(p),
+        ]
         for p in projects
     ]
     return df_style.style_dataframe(
@@ -73,7 +118,14 @@ def render_bookshelf_rows(search_query: str = "") -> dict:
     )
 
 
-def apply_project_search(query: str, ss=None) -> tuple[dict, str, dict]:
+def render_bookshelf_rows(search_query: str = "", projects=None) -> dict:
+    """渲染书架 Dataframe（着色契约 dict，列：项目|章|段进度|状态）。"""
+    if projects is None:
+        projects = ProjectCatalogService.search_projects(search_query or "")
+    return _render_bookshelf_summaries(projects)
+
+
+def apply_project_search(query: str, ss=None) -> tuple[dict, str, str]:
     """搜索 → 渲染书架行 + 同步选中状态（含清除被过滤掉的 selected）。
 
     Args:
@@ -81,7 +133,7 @@ def apply_project_search(query: str, ss=None) -> tuple[dict, str, dict]:
         ss: 会话状态（可为 None，纯渲染用）。
 
     Returns:
-        ``(书架行 update, 选中信息 Markdown, 选中项目 State 复位 update)`` 三元组。
+        ``(书架行 update, 选中信息 Markdown, 选中项目 State 值)`` 三元组。
 
     选中项目如果被过滤出结果，则同步清空 ``ss.selected_project`` 与 UI 选中
     态，避免「搜索后书架看不到 A，但动作仍作用于 A」的幽灵状态；若选中项目
@@ -91,59 +143,392 @@ def apply_project_search(query: str, ss=None) -> tuple[dict, str, dict]:
     if ss is not None:
         # 搜索 query 单一状态来源：导航离开/返回后仍保持过滤
         ss.set_catalog_query(query)
-    visible = {row[0] for row in (styled.get("data") or [])}
+    visible = {
+        ProjectCatalogService.project_name_from_display(row[0])
+        for row in (styled.get("data") or [])
+    }
     selected = ss.selected_project if ss is not None else None
     if selected and selected not in visible:
         if ss is not None:
             ss.clear_selected()
-        return styled, _BOOKSHELF_HINT, _update(value="")
+        return styled, _BOOKSHELF_HINT, ""
     if selected:
-        info = _selected_info(selected)
-        return styled, info, _update(value=selected)
-    return styled, _BOOKSHELF_HINT, _update(value="")
+        info = _selected_info(selected, ss)
+        return styled, info, selected
+    return styled, _BOOKSHELF_HINT, ""
 
 
-def _selected_info(name: str) -> str:
-    """渲染选中项目信息 Markdown（失败时降级为可管理提示）。"""
-    summary = ProjectCatalogService.get_summary(name)
+def _selected_info(name: str, ss=None, summary=None) -> str:
+    """渲染清晰区分 selected/opened 的当前选择卡片。"""
+    selected_label = html.escape(str(name or ""))
+    opened = str(getattr(ss, "project", "") or "") if ss is not None else ""
+    if opened and opened == str(name):
+        opened_text = f"当前工作项目：**`{html.escape(opened)}`**"
+    elif opened:
+        opened_text = (
+            f"当前工作项目：**`{html.escape(opened)}`**\n\n"
+            "当前选择尚未打开；点击「打开项目」后才会切换当前工作项目。"
+        )
+    else:
+        opened_text = (
+            "当前工作项目：**尚未打开**\n\n"
+            "点击「打开项目」后才会进入生产工作流。"
+        )
+    if summary is None:
+        summary = ProjectCatalogService.get_summary(name)
     if summary is None:
         return (
-            f"已选择项目：**`{html.escape(name)}`**\n"
-            "\n（项目摘要读取失败，仍可执行管理操作。）"
+            "### 当前选择\n"
+            f"**`{selected_label}`**\n\n"
+            "（项目摘要读取失败，仍可执行管理操作。）\n\n"
+            f"{opened_text}"
         )
+    if summary.project_kind == "chapter":
+        relationship_text = (
+            "- 项目类型：**章节**\n"
+            + (
+                f"- 所属整书：**`{html.escape(summary.parent_project_name)}`**\n"
+                if summary.relation_status == "valid"
+                and summary.parent_project_name
+                else f"- 层级状态：**{html.escape(summary.relation_message or '孤立章节')}**\n"
+            )
+            + (
+                f"- 章节标题：{html.escape(summary.chapter_title or '未设置')} · "
+                f"顺序：{summary.chapter_order if summary.chapter_order is not None else '未设置'}\n"
+            )
+        )
+    else:
+        relationship_text = "- 项目类型：**整书**\n"
     return (
-        f"已选择项目：**`{html.escape(name)}`**\n"
+        "### 当前选择\n"
+        f"**`{selected_label}`**\n"
         f"- 书名：{html.escape(summary.title)}\n"
         f"- 作者：{html.escape(summary.author)}\n"
         f"- 章：{summary.chapters} · 段：{summary.segments} · "
         f"已完成：{summary.completed} · 失败：{summary.failed}\n"
-        f"- 状态：{summary.status}"
+        f"- 状态：{summary.status}\n\n"
+        + relationship_text
+        + "\n"
+        f"{opened_text}"
     )
 
 
-def select_bookshelf_row(rows, ss, evt: gr.SelectData) -> tuple[str, str, dict]:
+def select_bookshelf_row(rows, ss, evt: gr.SelectData) -> tuple[str, str]:
     """书架 select → 只设 ``ss.selected_project``，绝不动 ``ss.project``。
 
     Args:
-        rows: 书架 Dataframe 值（dict 或二维列表）。
+        rows: 书架 Dataframe 值（dict 或二维列表），只作为兼容 fallback。
         ss: 会话状态（原地 mutate ``selected_project``）。
-        evt: gradio SelectData（含 ``index``；由 gradio 自动追加为末参）。
+        evt: gradio SelectData（优先使用 ``row_value``；由 gradio 自动追加为末参）。
 
     Returns:
-        ``(选中项目名, 选中信息 Markdown, p_sel 下拉同步 update)`` 三元组。
+        ``(选中项目名 State 值, 选中信息 Markdown)`` 二元组。
+
+    ``p_sel`` is deliberately not an output here. It is reconciled exactly
+    once by the following catalog-aware callback, after
+    ``ss.selected_project`` has been mutated.
     """
-    if evt is None or evt.index is None:
-        return "", _BOOKSHELF_HINT, _update()
+    selected = getattr(evt, "selected", None) if evt is not None else None
+    row_value = getattr(evt, "row_value", None) if evt is not None else None
+    event_value = getattr(evt, "value", None) if evt is not None else None
+    event_index = getattr(evt, "index", None) if evt is not None else None
+    selected_before = getattr(ss, "selected_project", None) if ss is not None else None
+    opened = getattr(ss, "project", None) if ss is not None else None
+    logger.debug(
+        "bookshelf select event index=%r row_value=%r value=%r selected=%r "
+        "selected_before=%r opened=%r",
+        event_index,
+        row_value,
+        event_value,
+        selected,
+        selected_before,
+        opened,
+    )
+
+    if evt is None or ss is None:
+        return "", _BOOKSHELF_HINT
+
+    # Gradio may emit a deselect event when the already selected cell is
+    # clicked again. Preserve the canonical selection; a deselect must never
+    # be interpreted as an instruction to open another project.
+    if selected is False:
+        current = str(getattr(ss, "selected_project", "") or "")
+        if current:
+            result = current, _selected_info(current, ss)
+        else:
+            result = "", _BOOKSHELF_HINT
+        logger.debug(
+            "bookshelf deselect preserved selection=%r; p_sel deferred to "
+            "catalog-aware reconciliation",
+            current,
+        )
+        return result
+
+    display_value = None
+    # SelectData.row_value is the event's complete row and remains reliable
+    # when the Dataframe input is styled or wrapped in a component update.
     try:
-        rows = rows["data"] if isinstance(rows, dict) else rows
-        name = rows[evt.index[0]][0]
-    except Exception:
-        return "", _BOOKSHELF_HINT, _update()
+        if row_value is not None:
+            display_value = row_value[0]
+    except (IndexError, KeyError, TypeError):
+        display_value = None
+
+    # Compatibility fallback for older Gradio payloads without row_value.
+    if display_value is None:
+        if event_index is None:
+            return "", _BOOKSHELF_HINT
+        try:
+            data = rows["data"] if isinstance(rows, dict) else rows
+            row_index = (
+                event_index[0]
+                if isinstance(event_index, (list, tuple))
+                else event_index
+            )
+            display_value = data[row_index][0]
+        except (IndexError, KeyError, TypeError):
+            return "", _BOOKSHELF_HINT
+
+    try:
+        name = ProjectCatalogService.project_name_from_display(display_value)
+    except (AttributeError, TypeError, ValueError):
+        return "", _BOOKSHELF_HINT
     name = str(name or "")
     if not name:
-        return "", _BOOKSHELF_HINT, _update()
+        return "", _BOOKSHELF_HINT
     ss.set_selected(name)
-    return name, _selected_info(name), _update(value=name)
+    logger.debug(
+        "bookshelf select applied selected_after=%r opened=%r; p_sel deferred "
+        "to catalog-aware reconciliation",
+        ss.selected_project,
+        ss.project,
+    )
+    return name, _selected_info(name, ss)
+
+
+def _archive_confirmation_needs_reset(ss) -> bool:
+    """Return whether a UI-held archive token belongs to a stale selection."""
+    if ss is None:
+        return True
+    if getattr(ss, "_archive_confirmation_revision", None) is None:
+        # Emit a raw empty State value during the initial/no-confirmation
+        # render. A passive render with a live confirmation has a revision and
+        # is handled by the current-context branch below.
+        return True
+    return not ss.archive_confirmation_is_current()
+
+
+def _selection_controls_updates(
+    ss,
+    summaries=None,
+    *,
+    reset_archive_confirmation: bool = True,
+) -> tuple:
+    """Build the shared action/transient UI state for the current selection.
+
+    This is the dedicated bookshelf-selection context contract. It contains
+    management action states, destructive transient states, and the bookshelf
+    message only; it intentionally has no ``p_sel`` output. Every
+    selection-context change uses this helper, so no individual button can
+    retain an old token or confirmation state.
+    """
+    selected = str(getattr(ss, "selected_project", "") or "") if ss is not None else ""
+    action_update = _update(interactive=bool(selected))
+    return (
+        *(action_update for _ in BOOKSHELF_ACTION_KEYS),
+        # archive confirmation is a gr.State: raw values write it, while a
+        # no-op update preserves it during passive catalog rendering.
+        "" if reset_archive_confirmation else gr.skip(),
+        # cleanup token / confirm / cancel (the token is also a gr.State)
+        "",
+        _update(visible=False),
+        _update(visible=False),
+        # storage token / confirm / cancel
+        "",
+        _update(visible=False),
+        _update(visible=False),
+        # integrity repair and transient message
+        _update(visible=False),
+        _update(value=""),
+    )
+
+
+def selection_ui_output_keys() -> tuple[str, ...]:
+    """Return the bookshelf-selection context output keys.
+
+    ``p_sel`` is intentionally absent: it is reconciled by the separate
+    project-page workflow selector owner.
+    """
+    return (
+        *BOOKSHELF_ACTION_KEYS,
+        "bookshelf_archive_confirm",
+        "bookshelf_cleanup_token",
+        "bookshelf_cleanup_confirm",
+        "bookshelf_cleanup_cancel",
+        "bookshelf_storage_token",
+        "bookshelf_storage_confirm",
+        "bookshelf_storage_cancel",
+        "bookshelf_integrity_repair",
+        "bookshelf_msg",
+    )
+
+
+def reconcile_bookshelf_selection_context(ss) -> tuple:
+    """Reconcile bookshelf-management state without touching ``p_sel``."""
+    summaries = ProjectCatalogService.scan()
+    updates = _selection_controls_updates(
+        ss,
+        summaries,
+        reset_archive_confirmation=_archive_confirmation_needs_reset(ss),
+    )
+    logger.debug(
+        "bookshelf selection context reconciled selected=%r opened=%r "
+        "management_interactive=%r",
+        getattr(ss, "selected_project", None) if ss is not None else None,
+        getattr(ss, "project", None) if ss is not None else None,
+        updates[0].get("interactive") if updates else None,
+    )
+    return updates
+
+
+def reconcile_bookshelf_selection(ss, *_legacy_args) -> tuple:
+    """Compatibility name for the p_sel-free bookshelf context reconciler.
+
+    Older callers may still pass the former ``p_sel_value`` argument. It is
+    ignored so those callers cannot accidentally re-couple bookshelf events
+    to the project-page selector.
+    """
+    return reconcile_bookshelf_selection_context(ss)
+
+
+def reconcile_project_selector(ss, summaries=None) -> dict:
+    """Reconcile the project-page selector from opened workflow state only."""
+    if summaries is None:
+        summaries = ProjectCatalogService.scan()
+    return build_project_selector_update(summaries, ss=ss)
+
+
+def _hierarchy_control_updates(ss, summaries=None) -> tuple:
+    """Render relationship controls from one normalized Catalog snapshot.
+
+    The first four outputs preserve the Phase B relationship-control order;
+    the four appended outputs are the Phase B.5 kind/title/order/update
+    controls.  Keeping the old prefix stable makes the dedicated hierarchy
+    path additive without changing the 25-output bookshelf contract.
+    """
+    if summaries is None:
+        summaries = ProjectCatalogService.scan()
+    hierarchy = ProjectCatalogService.hierarchy_from_summaries(summaries)
+    selected = str(getattr(ss, "selected_project", "") or "") if ss is not None else ""
+    selected_summary = next(
+        (item for item in hierarchy.projects if item.project_name == selected),
+        None,
+    )
+    choices = ProjectCatalogService.book_choices(
+        hierarchy.projects,
+        exclude_name=selected,
+    )
+    parent_value = (
+        selected_summary.parent_project_name
+        if selected_summary is not None
+        and selected_summary.relation_status == "valid"
+        else None
+    )
+    has_selection = bool(selected_summary)
+    is_chapter = bool(
+        selected_summary is not None and selected_summary.project_kind == "chapter"
+    )
+    if selected_summary is None:
+        status = "选择项目后，可在此设置或解除所属整书。"
+    elif selected_summary.relation_status == "valid":
+        status = f"当前所属整书：`{selected_summary.parent_project_name}`"
+    elif is_chapter:
+        status = f"⚠ {selected_summary.relation_message or '孤立章节'}"
+    else:
+        status = "当前项目是独立整书；选择所属整书可将其转换为章节。"
+    kind = "章节" if is_chapter else "整书" if selected_summary else "未选择"
+    title_value = (
+        selected_summary.chapter_title or ""
+        if is_chapter and selected_summary is not None
+        else ""
+    )
+    order_value = (
+        str(selected_summary.chapter_order)
+        if is_chapter and selected_summary is not None
+        and selected_summary.chapter_order is not None
+        else ""
+    )
+    return (
+        _update(
+            choices=choices,
+            value=parent_value,
+            interactive=has_selection and bool(choices),
+        ),
+        _update(interactive=has_selection and bool(choices)),
+        _update(interactive=is_chapter),
+        _update(value=status),
+        _update(value=kind),
+        _update(value=title_value, interactive=is_chapter),
+        _update(value=order_value, interactive=is_chapter),
+        _update(interactive=is_chapter),
+    )
+
+
+def reconcile_bookshelf_hierarchy_selection(ss) -> tuple:
+    """Reset relationship controls after the canonical bookshelf selection changes."""
+    return _hierarchy_control_updates(ss)
+
+
+def bind_selected_chapter(
+    project_name: str,
+    parent_name: str,
+    ss=None,
+    chapter_title: str | None = None,
+    chapter_order: object = None,
+) -> str:
+    """Explicitly bind/designate the selected project under the chosen book."""
+    if not project_name:
+        return "⚪ 请先从书架选择项目。"
+    try:
+        ProjectCatalogService.bind_chapter(
+            project_name,
+            parent_name,
+            chapter_title=chapter_title,
+            chapter_order=chapter_order,
+        )
+        return f"✅ 已将「{project_name}」设置为「{parent_name}」的章节。"
+    except Exception as exc:  # noqa: BLE001
+        return f"❌ 设置所属整书失败：{exc}"
+
+
+def update_selected_chapter(
+    project_name: str,
+    chapter_title: str | None,
+    chapter_order: object,
+    ss=None,
+) -> str:
+    """Explicitly update the selected chapter's display title and order."""
+    if not project_name:
+        return "⚪ 请先从书架选择项目。"
+    try:
+        ProjectCatalogService.update_chapter_metadata(
+            project_name,
+            chapter_title,
+            chapter_order,
+        )
+        return f"✅ 已更新「{project_name}」的章节标题和顺序。"
+    except Exception as exc:  # noqa: BLE001
+        return f"❌ 更新章节信息失败：{exc}"
+
+
+def unbind_selected_chapter(project_name: str, ss=None) -> str:
+    """Explicitly turn the selected chapter back into an independent book."""
+    if not project_name:
+        return "⚪ 请先从书架选择项目。"
+    try:
+        ProjectCatalogService.clear_chapter_parent(project_name)
+        return f"✅ 已解除「{project_name}」的章节关系；项目恢复为独立整书。"
+    except Exception as exc:
+        return f"❌ 解除章节关系失败：{exc}"
 
 
 # ── 打开项目 / 目录 ──
@@ -209,17 +594,25 @@ def create_selected_backup(project_name: str, target_dir: str = "") -> str:
 # ── 清理缓存（扫描 → token 确认两步） ──
 
 
-def scan_selected_cleanup(project_name: str) -> tuple[str, str, dict]:
-    """扫描选中项目清理候选（不要求打开），返回 (预览, token, 确认按钮可见性)。"""
+def scan_selected_cleanup(project_name: str) -> tuple[str, str, dict, dict]:
+    """扫描清理候选，统一返回 (消息, token, confirm, cancel) 四元组。"""
     if not project_name:
-        return "⚪ 请先从书架选择项目。", "", _update(visible=False)
+        return (
+            "⚪ 请先从书架选择项目。",
+            "",
+            _update(visible=False),
+            _update(visible=False),
+        )
     try:
         plan = ProjectStorageService.scan_cleanup(project_name)
         if not plan["candidates"]:
             return (
-                "✅ 当前没有可安全清理的缓存或临时文件。\n\n"
-                "不会删除 structured_script.json、原始文件、有效音频或导出文件。",
-                plan["token"],
+                (
+                    "✅ 当前没有可安全清理的缓存或临时文件。\n\n"
+                    "不会删除 structured_script.json、原始文件、有效音频或导出文件。"
+                ),
+                "",
+                _update(visible=False),
                 _update(visible=False),
             )
         from collections import Counter
@@ -235,8 +628,10 @@ def scan_selected_cleanup(project_name: str) -> tuple[str, str, dict]:
         )
         lines.extend([
             "",
-            "**不会删除**：structured_script.json、原始文件、已生成有效音频、"
-            "用户手工音频和导出文件。",
+            (
+                "**不会删除**：structured_script.json、原始文件、已生成有效音频、"
+                "用户手工音频和导出文件。"
+            ),
         ])
         lines.append("")
         lines.extend(
@@ -247,15 +642,30 @@ def scan_selected_cleanup(project_name: str) -> tuple[str, str, dict]:
             lines.append(
                 f"- … 其余 {len(plan['candidates']) - 30} 项已纳入同一确认令牌"
             )
-        return "\n".join(lines), plan["token"], _update(visible=True)
+        return (
+            "\n".join(lines),
+            plan["token"],
+            _update(visible=True),
+            _update(visible=True),
+        )
     except Exception as exc:
-        return f"❌ 扫描失败：{exc}", "", _update(visible=False)
+        return (
+            f"❌ 扫描失败：{exc}",
+            "",
+            _update(visible=False),
+            _update(visible=False),
+        )
 
 
-def execute_selected_cleanup(project_name: str, token: str) -> tuple[str, str, dict]:
-    """执行选中项目清理（token 确认后）。"""
+def execute_selected_cleanup(project_name: str, token: str) -> tuple[str, str, dict, dict]:
+    """执行清理并始终复位 token / confirm / cancel 状态。"""
     if not project_name:
-        return "⚪ 请先从书架选择项目。", "", _update(visible=False)
+        return (
+            "⚪ 请先从书架选择项目。",
+            "",
+            _update(visible=False),
+            _update(visible=False),
+        )
     try:
         result = ProjectStorageService.execute_cleanup(project_name, token)
         if result.get("stale"):
@@ -265,21 +675,40 @@ def execute_selected_cleanup(project_name: str, token: str) -> tuple[str, str, d
                     "⚠ 文件在确认前发生了变化，已重新扫描。请重新确认这次清理。",
                     plan.get("token", ""),
                     _update(visible=True),
+                    _update(visible=True),
                 )
-            return "✅ 文件已发生变化，当前没有可安全清理的内容。", "", _update(visible=False)
+            return (
+                "✅ 文件已发生变化，当前没有可安全清理的内容。",
+                "",
+                _update(visible=False),
+                _update(visible=False),
+            )
         return (
-            f"✅ 已清理 {result['removed_files']} 个安全文件，"
-            f"释放 {_format_size(result['removed_bytes'])}。",
+            (
+                f"✅ 已清理 {result['removed_files']} 个安全文件，"
+                f"释放 {_format_size(result['removed_bytes'])}。"
+            ),
             "",
+            _update(visible=False),
             _update(visible=False),
         )
     except Exception as exc:
-        return f"❌ 执行清理失败：{exc}", "", _update(visible=False)
+        return (
+            f"❌ 执行清理失败：{exc}",
+            "",
+            _update(visible=False),
+            _update(visible=False),
+        )
 
 
-def cancel_selected_cleanup() -> tuple[str, str, dict]:
+def cancel_selected_cleanup() -> tuple[str, str, dict, dict]:
     """取消清理：项目文件没有改变。"""
-    return "已取消清理。项目文件没有改变。", "", _update(visible=False)
+    return (
+        "已取消清理。项目文件没有改变。",
+        "",
+        _update(visible=False),
+        _update(visible=False),
+    )
 
 
 # ── 存储布局整理（扫描方案 → token 确认两步；v1/v2 → v3 显式迁移） ──
@@ -291,20 +720,28 @@ def _layout_label(version: int) -> str:
     )
 
 
-def scan_selected_storage_upgrade(project_name: str) -> tuple[str, str, dict]:
-    """扫描选中项目的存储布局整理方案（只读），返回 (预览, token, 确认按钮可见性)。
+def scan_selected_storage_upgrade(project_name: str) -> tuple[str, str, dict, dict]:
+    """扫描存储布局整理方案，统一返回 (消息, token, confirm, cancel) 四元组。
 
     仅 v1/v2 项目返回可执行方案；v3 项目显示已是最新版。打开项目不会自动迁移。
     """
     if not project_name:
-        return "⚪ 请先从书架选择项目。", "", _update(visible=False)
+        return (
+            "⚪ 请先从书架选择项目。",
+            "",
+            _update(visible=False),
+            _update(visible=False),
+        )
     try:
         plan = ProjectStorageService.plan_storage_upgrade(project_name)
         if plan.get("code") == "ALREADY_CURRENT":
             return (
-                f"✅ 项目已是 **{_layout_label(3)}**，无需整理。\n\n"
-                "打开项目不会自动迁移；只有 v1/v2 项目才需要显式整理。",
+                (
+                    f"✅ 项目已是 **{_layout_label(3)}**，无需整理。\n\n"
+                    "打开项目不会自动迁移；只有 v1/v2 项目才需要显式整理。"
+                ),
                 "",
+                _update(visible=False),
                 _update(visible=False),
             )
         if plan.get("blockers"):
@@ -316,7 +753,12 @@ def scan_selected_storage_upgrade(project_name: str) -> tuple[str, str, dict]:
                 for item in plan["blockers"][:10]
             )
             lines.append("\n请先停止相关任务后再整理。")
-            return "\n".join(lines), "", _update(visible=False)
+            return (
+                "\n".join(lines),
+                "",
+                _update(visible=False),
+                _update(visible=False),
+            )
         from services.project_storage import format_size
 
         lines = [
@@ -349,17 +791,37 @@ def scan_selected_storage_upgrade(project_name: str) -> tuple[str, str, dict]:
             "",
             "整理是不可逆的显式操作，但整理前会先创建完整备份；确认后执行。",
         ])
-        return "\n".join(lines), plan.get("token", ""), _update(visible=True)
+        return (
+            "\n".join(lines),
+            plan.get("token", ""),
+            _update(visible=True),
+            _update(visible=True),
+        )
     except Exception as exc:
-        return f"❌ 扫描整理方案失败：{exc}", "", _update(visible=False)
+        return (
+            f"❌ 扫描整理方案失败：{exc}",
+            "",
+            _update(visible=False),
+            _update(visible=False),
+        )
 
 
-def execute_selected_storage_upgrade(project_name: str, token: str) -> tuple[str, str, dict]:
-    """执行选中项目存储布局整理（token 确认后）。"""
+def execute_selected_storage_upgrade(project_name: str, token: str) -> tuple[str, str, dict, dict]:
+    """执行存储布局整理并始终复位 token / confirm / cancel 状态。"""
     if not project_name:
-        return "⚪ 请先从书架选择项目。", "", _update(visible=False)
+        return (
+            "⚪ 请先从书架选择项目。",
+            "",
+            _update(visible=False),
+            _update(visible=False),
+        )
     if not token:
-        return "⚪ 请先扫描整理方案再确认。", "", _update(visible=False)
+        return (
+            "⚪ 请先扫描整理方案再确认。",
+            "",
+            _update(visible=False),
+            _update(visible=False),
+        )
     try:
         result = ProjectStorageService.upgrade_storage(project_name, token)
         from services.project_storage import format_size
@@ -374,18 +836,28 @@ def execute_selected_storage_upgrade(project_name: str, token: str) -> tuple[str
             lines.append(
                 f"- 保留无法识别的根级内容：{len(result['unknown_paths'])} 项（99_系统数据/迁移保留/）。"
             )
-        return "\n".join(lines), "", _update(visible=False)
+        return (
+            "\n".join(lines),
+            "",
+            _update(visible=False),
+            _update(visible=False),
+        )
     except Exception as exc:
         if getattr(exc, "code", None) == "PROJECT_HAS_ACTIVE_PRODUCTION":
             message = "项目正在生产，请先停止任务后再整理"
         else:
             message = f"❌ 整理失败：{exc}"
-        return message, "", _update(visible=False)
+        return message, "", _update(visible=False), _update(visible=False)
 
 
-def cancel_selected_storage_upgrade() -> tuple[str, str, dict]:
+def cancel_selected_storage_upgrade() -> tuple[str, str, dict, dict]:
     """取消整理：项目文件没有改变。"""
-    return "已取消整理。项目文件没有改变。", "", _update(visible=False)
+    return (
+        "已取消整理。项目文件没有改变。",
+        "",
+        _update(visible=False),
+        _update(visible=False),
+    )
 
 
 # ── 诊断与修复 ──
@@ -412,8 +884,10 @@ def check_selected_integrity(project_name: str) -> tuple[str, dict]:
         )
         lines.extend([
             "",
-            "安全修复不会修改 structured_script.json、正常音频、用户手工音频、"
-            "角色绑定决定或有效导出成品。",
+            (
+                "安全修复不会修改 structured_script.json、正常音频、用户手工音频、"
+                "角色绑定决定或有效导出成品。"
+            ),
         ])
         return "\n".join(lines), _update(visible=bool(repairable))
     except Exception as exc:
@@ -441,8 +915,10 @@ def repair_selected_integrity(project_name: str) -> tuple[str, dict]:
             issue.get("repairable") for issue in report.get("issues", [])
         )
         return (
-            f"⚠ 已修复 {len(repaired)} 项；仍有 {report['issue_count']} 项问题，"
-            "请人工处理剩余项目。",
+            (
+                f"⚠ 已修复 {len(repaired)} 项；仍有 {report['issue_count']} 项问题，"
+                "请人工处理剩余项目。"
+            ),
             _update(visible=repairable),
         )
     except Exception as exc:
@@ -454,14 +930,13 @@ def repair_selected_integrity(project_name: str) -> tuple[str, dict]:
 
 def archive_selected(
     project_name: str, confirmed_project: str, ss
-) -> tuple[str, dict, dict, dict]:
-    """移入回收站（两步确认，确认态**绑定项目名**）。
+) -> tuple[str, str, str, dict]:
+    """移入回收站（两步确认，绑定项目名 + 连续 selection context）。
 
     第一次点击（``confirmed_project != project_name``）→ 显示「确认将项目移入
-    回收站？」，并把确认态记录为**当前项目名**；只有
-    ``confirmed_project == project_name`` 才真正调用
-    ``ProjectStorageService.archive``。确认态绑定项目名后，即使用户改选其他
-    项目，旧确认态只对旧项目名生效，**绝不会误归档新选项目**（QA 缺陷修复）。
+    回收站？」，并把确认态记录为当前项目名；同时由 ``SessionState`` 记录
+    selection revision。即使 A → B → A，旧的 UI 字符串也不能绕过 A 的新一轮
+    确认。
     若 ``ss.project == project_name`` → 安全 reset session（复用 delete_project
     既有逻辑）后再归档；active production 拦截由 archive 内部
     ``ensure_project_mutation_allowed`` 保证（P0）。
@@ -479,17 +954,42 @@ def archive_selected(
         ss: 会话状态（可能为 None）。
 
     Returns:
-        ``(消息, 确认状态 update, 选中项目 State update, 选中信息 Markdown update)``
+        ``(消息, 确认状态 State 值, 选中项目 State 值, 选中信息 Markdown update)``
         四元组。
     """
     noop = _update()
     if not project_name:
-        return "⚪ 请先从书架选择项目。", _update(value=""), noop, noop
-    if str(confirmed_project or "") != project_name:
+        return "⚪ 请先从书架选择项目。", "", noop, noop
+    canonical_selected = str(getattr(ss, "selected_project", "") or "") if ss is not None else ""
+    if canonical_selected and canonical_selected != project_name:
+        if ss is not None:
+            ss.invalidate_archive_confirmation()
         return (
-            f"⚠ 确认将「{html.escape(project_name)}」移入回收站？"
-            "回收站内可恢复；再次点击「移入回收站」执行。",
-            _update(value=project_name),
+            "⚠ 当前书架选择已变化，请重新选择项目后再确认。",
+            "",
+            noop,
+            noop,
+        )
+    confirmation_matches = str(confirmed_project or "") == project_name
+    # Preserve the old direct-handler compatibility case where callers provide
+    # the confirmed name without a prior UI confirmation.  Once a real UI
+    # confirmation has been tracked, however, the revision must still match.
+    if (
+        confirmation_matches
+        and ss is not None
+        and ss._archive_confirmation_revision is not None
+        and not ss.archive_confirmation_is_current()
+    ):
+        confirmation_matches = False
+    if not confirmation_matches:
+        if ss is not None:
+            ss.begin_archive_confirmation()
+        return (
+            (
+                f"⚠ 确认将「{html.escape(project_name)}」移入回收站？"
+                "回收站内可恢复；再次点击「移入回收站」执行。"
+            ),
+            project_name,
             noop,
             noop,
         )
@@ -497,20 +997,19 @@ def archive_selected(
         target = ProjectStorageService.archive(project_name)
         if ss is not None:
             if ss.project == project_name:
-                ss.set_project(None, None, {})
-                ss.set_snapshot(None)
-                ss.synthesis = None
+                ss.clear_opened()
                 message = f"✅ 项目已移入回收站，可从 `{_dirname(target)}` 恢复。"
             else:
                 message = f"✅ 项目已移入回收站：`{target}`"
             # 归档成功：无论是否 opened，selected 一律清空（A 不再可被动作指向）
             ss.clear_selected()
+            ss.clear_archive_confirmation()
         else:
             message = f"✅ 项目已移入回收站：`{target}`"
         return (
             message,
-            _update(value=""),
-            _update(value=""),
+            "",
+            "",
             _update(value=_BOOKSHELF_HINT),
         )
     except Exception as exc:
@@ -519,7 +1018,29 @@ def archive_selected(
         else:
             message = f"❌ 归档项目失败：{exc}"
         # guard 阻止：仅复位确认态，selection 一律保留
-        return message, _update(value=""), noop, noop
+        if ss is not None:
+            ss.clear_archive_confirmation()
+        return message, "", noop, noop
+
+
+def archive_selected_with_event(
+    project_name: str, confirmed_project: str, ss, archive_event: int = 0
+) -> tuple:
+    """Archive handler plus a success-only revision for downstream UI refresh.
+
+    The ordinary four-output ``archive_selected`` contract remains intact for
+    direct callers.  The extra revision changes only after a real archive
+    succeeds; the Gradio ``State.change`` listener therefore does not run the
+    catalog/workflow refresh for a first confirmation or a guard rejection.
+    """
+    result = archive_selected(project_name, confirmed_project, ss)
+    try:
+        revision = int(archive_event or 0)
+    except (TypeError, ValueError):
+        revision = 0
+    if str(result[0] or "").startswith("✅"):
+        revision += 1
+    return (*result, revision)
 
 
 # ── 全局：从备份恢复 ──
@@ -615,11 +1136,123 @@ def refresh_project_catalog(search_query: str = "", p_sel_value: str = "") -> tu
         ``(书架行 gr.update, p_sel choices gr.update[同一 catalog 生成],
             回收站表 rows, 回收站下拉 gr.update, 回收站状态文本)``
     """
-    bookshelf = render_bookshelf_rows(search_query)
-    choices = [s.project_name for s in ProjectCatalogService.scan()]
-    value = str(p_sel_value or "") if str(p_sel_value or "") in choices else None
+    summaries = ProjectCatalogService.scan()
+    bookshelf = render_bookshelf_rows(
+        search_query, ProjectCatalogService.filter_projects(summaries, search_query)
+    )
     rows, trash_choices, status = render_archived_projects()
-    return bookshelf, _update(choices=choices, value=value), rows, trash_choices, status
+    return (
+        bookshelf,
+        build_project_selector_update(summaries, p_sel_value),
+        rows,
+        trash_choices,
+        status,
+    )
+
+
+def _refresh_bookshelf_management_state(
+    search_query: str = "", p_sel_value: str = "", ss=None
+) -> tuple[tuple, list]:
+    """Refresh the catalog and reconcile the complete bookshelf management UI.
+
+    ``refresh_project_catalog`` intentionally remains the stable five-output
+    catalog primitive.  This state-aware wrapper is the only UI reconciliation
+    path: it preserves ``ss.catalog_query``, validates the canonical
+    ``ss.selected_project`` against the freshly scanned/filter catalog, updates
+    the mirror/card/action states, and preserves a live archive confirmation
+    unless the selection context is stale.
+
+    Returns 25 outputs in this order:
+
+    ``catalog(5), bookshelf_selected_proj, bookshelf_selected,`` followed by
+    the p_sel-free outputs named by ``selection_ui_output_keys()``.
+    """
+    query = str(search_query or "")
+    if ss is not None and (
+        search_query is None
+        or (not query and getattr(ss, "catalog_query", ""))
+    ):
+        # ``ss.catalog_query`` is the durable source.  A blank/stale textbox
+        # during navigation or a data-root refresh must not widen the catalog.
+        query = str(getattr(ss, "catalog_query", "") or "")
+    if ss is not None:
+        ss.set_catalog_query(query)
+
+    summaries = ProjectCatalogService.scan()
+    visible_summaries = ProjectCatalogService.filter_projects(summaries, query)
+    visible_names = {item.project_name for item in visible_summaries}
+    selected = str(getattr(ss, "selected_project", "") or "") if ss is not None else ""
+    if selected and selected not in visible_names:
+        if ss is not None:
+            ss.clear_selected()
+        selected = ""
+
+    bookshelf = render_bookshelf_rows(query, visible_summaries)
+    choices = [item.project_name for item in summaries]
+    opened = str(getattr(ss, "project", "") or "") if ss is not None else ""
+    if opened and opened not in choices and ss is not None:
+        # An externally removed opened project must not leave a stale snapshot
+        # or production/session reference behind after reconciliation.
+        ss.clear_opened()
+        opened = ""
+    p_sel_update = (
+        reconcile_project_selector(ss, summaries)
+        if ss is not None
+        else build_project_selector_update(summaries, p_sel_value)
+    )
+    rows, trash_choices, status = render_archived_projects()
+
+    selected_summary = next(
+        (item for item in visible_summaries if item.project_name == selected),
+        None,
+    )
+    selected_info = (
+        _selected_info(selected, ss, selected_summary)
+        if selected
+        else _BOOKSHELF_HINT
+    )
+    controls = _selection_controls_updates(
+        ss,
+        summaries,
+        reset_archive_confirmation=_archive_confirmation_needs_reset(ss),
+    )
+    result = (
+        bookshelf,
+        p_sel_update,
+        rows,
+        trash_choices,
+        status,
+        selected,
+        _update(value=selected_info),
+        *controls,
+    )
+    return result, summaries
+
+
+def refresh_bookshelf_management_view(
+    search_query: str = "", p_sel_value: str = "", ss=None
+) -> tuple:
+    """Return the stable 25-output Bookshelf Management contract."""
+    result, _summaries = _refresh_bookshelf_management_state(
+        search_query, p_sel_value, ss
+    )
+    return result
+
+
+def refresh_bookshelf_management_view_with_hierarchy(
+    search_query: str = "", p_sel_value: str = "", ss=None
+) -> tuple:
+    """Refresh Bookshelf Management plus Phase B/B.5 relationship controls.
+
+    The hierarchy controls are derived from the same Catalog snapshot as the
+    25 legacy outputs; no second scan is introduced on the main refresh path.
+    The resulting contract is 33 outputs: the stable 25-output bookshelf
+    prefix followed by eight dedicated hierarchy outputs.
+    """
+    result, summaries = _refresh_bookshelf_management_state(
+        search_query, p_sel_value, ss
+    )
+    return (*result, *_hierarchy_control_updates(ss, summaries))
 
 
 def _format_size(value: int) -> str:
@@ -637,9 +1270,13 @@ def _dirname(path: str) -> str:
 
 
 __all__ = [
+    "BOOKSHELF_ACTION_KEYS",
     "apply_project_search",
     "archive_selected",
+    "archive_selected_with_event",
     "bind_open_project",
+    "build_project_selector_update",
+    "bind_selected_chapter",
     "cancel_selected_cleanup",
     "cancel_selected_storage_upgrade",
     "check_selected_integrity",
@@ -651,7 +1288,11 @@ __all__ = [
     "open_selected_generated_audio",
     "open_selected_project",
     "permanently_delete_archived_global",
+    "reconcile_bookshelf_selection",
+    "reconcile_bookshelf_selection_context",
+    "reconcile_project_selector",
     "refresh_archived_projects_global",
+    "refresh_bookshelf_management_view",
     "refresh_project_catalog",
     "render_bookshelf_rows",
     "repair_selected_integrity",
@@ -660,4 +1301,7 @@ __all__ = [
     "scan_selected_cleanup",
     "scan_selected_storage_upgrade",
     "select_bookshelf_row",
+    "selection_ui_output_keys",
+    "unbind_selected_chapter",
+    "update_selected_chapter",
 ]

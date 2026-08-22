@@ -278,8 +278,31 @@ class ProjectStorageRepository:
         return sorted(entries, key=lambda item: (item.archived_at or 0, item.archive_id), reverse=True)
 
     @staticmethod
-    def _measure_category(project_dir: str, key: str) -> tuple[int, int, float | None]:
-        return _tree_measure(project_paths.project_dir(project_dir, key))
+    def _measure_unique_categories(project_dir: str, keys: tuple[str, ...]) -> int:
+        """Measure semantic directories once after version-specific resolution.
+
+        ``project_paths.directory_map`` is the compatibility boundary for v1,
+        v2, and v3.  Some legacy keys intentionally resolve to the project
+        root (an empty v1 path), while multiple logical keys can resolve to
+        one physical directory (for example both v1 delivery keys resolve to
+        ``output``).  Neither case should inflate a category statistic.
+        """
+        project_root = os.path.normcase(os.path.realpath(project_dir))
+        seen_paths: set[str] = set()
+        total = 0
+        for key in keys:
+            path = project_paths.project_dir(project_dir, key)
+            resolved_path = os.path.normcase(os.path.realpath(path))
+            if resolved_path == project_root:
+                continue
+            if not _inside(resolved_path, project_root):
+                logger.warning("跳过项目目录外的存储分类路径：%s", path)
+                continue
+            if resolved_path in seen_paths:
+                continue
+            seen_paths.add(resolved_path)
+            total += _tree_measure(path)[0]
+        return total
 
     @staticmethod
     def summarize(name: str) -> ProjectStorageSummary:
@@ -289,25 +312,37 @@ class ProjectStorageRepository:
             ProjectStorageRepository._preview_dir(safe_name)
         )
 
-        category_sizes: dict[str, int] = {}
-        version = project_paths.detect_storage_version(project_dir)
-        audio_keys = ("segments", "chapter_audio", "merged_audio")
-        source_keys = ("source_book", "chapter_data") if version >= 3 else ("source", "chapter_text")
-        voices_key = "project_voices" if version >= 3 else "voices"
-        output_keys = ("delivery_official", "delivery_supplement") if version >= 3 else ("exports",)
-        for key in (*audio_keys, *source_keys, voices_key, *output_keys):
-            category_sizes[key] = ProjectStorageRepository._measure_category(project_dir, key)[0]
+        category_sizes = {
+            "source": ProjectStorageRepository._measure_unique_categories(
+                project_dir, ("source_book", "chapter_data")
+            ),
+            "voices": ProjectStorageRepository._measure_unique_categories(
+                project_dir, ("project_voices",)
+            ),
+            "segments": ProjectStorageRepository._measure_unique_categories(
+                project_dir, ("segments",)
+            ),
+            "chapter_audio": ProjectStorageRepository._measure_unique_categories(
+                project_dir, ("chapter_audio",)
+            ),
+            "merged_audio": ProjectStorageRepository._measure_unique_categories(
+                project_dir, ("merged_audio",)
+            ),
+            "output": ProjectStorageRepository._measure_unique_categories(
+                project_dir, ("delivery_official", "delivery_supplement")
+            ),
+        }
 
         return ProjectStorageSummary(
             project_name=safe_name,
             project_dir=os.path.normpath(project_dir),
             total_bytes=root_bytes + preview_bytes,
-            source_bytes=sum(category_sizes.get(key, 0) for key in source_keys),
-            voices_bytes=category_sizes.get(voices_key, 0),
+            source_bytes=category_sizes["source"],
+            voices_bytes=category_sizes["voices"],
             segments_bytes=category_sizes.get("segments", 0),
             chapter_audio_bytes=category_sizes.get("chapter_audio", 0),
             merged_audio_bytes=category_sizes.get("merged_audio", 0),
-            output_bytes=sum(category_sizes.get(key, 0) for key in output_keys),
+            output_bytes=category_sizes["output"],
             preview_bytes=preview_bytes,
             file_count=root_count + preview_count,
             modified_at=max(root_mtime or 0.0, preview_mtime or 0.0) or None,

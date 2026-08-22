@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -26,8 +27,10 @@ from lib.tts_profile import resolve_profile
 from mcp_server.tools.production import plan_production, start_production
 from repositories.project_repo import ProjectRepository
 from repositories.task_repo import TaskRecord, TaskRepository
+from repositories.voice_cast_repo import VoiceCastRepository
 from services import ProductionJobError, ProductionJobService, ProjectService
 from services.review_audio import _segment_audio, _valid_wav_file
+from services.session import SessionState
 from services.voice_assets import VoiceAssetService
 from services.voice_cast import VoiceCastResolver
 
@@ -78,6 +81,23 @@ SCRIPT = {
 }
 
 
+LEGACY_SCRIPT = {
+    "meta": {"title": "旧版声音兼容测试", "author": "测试"},
+    "voices": {"旁白": {}, "黑衣人": {}, "秦川": {}},
+    "chapters": [
+        {
+            "id": "1",
+            "title": "第一章",
+            "segments": [
+                {"id": "1-001", "text": "旁白。", "role": "旁白"},
+                {"id": "1-002", "text": "黑衣人。", "role": "黑衣人"},
+                {"id": "1-003", "text": "秦川。", "role": "秦川"},
+            ],
+        }
+    ],
+}
+
+
 @pytest.fixture
 def vc_project(tmp_path, monkeypatch):
     """Voice Cast project with two bound roles and two library voices."""
@@ -116,6 +136,38 @@ def vc_project(tmp_path, monkeypatch):
         },
     )
     yield "vc"
+
+
+@pytest.fixture
+def legacy_manual_project(tmp_path, monkeypatch):
+    """Legacy project with script voices and manual file bindings only."""
+    data_dir = tmp_path / "legacy_data"
+    monkeypatch.setenv("AUDIOBOOK_STUDIO_DATA_DIR", str(data_dir))
+    monkeypatch.setattr(ProjectRepository, "WORKSPACE_ROOT", str(data_dir / "projects"))
+    monkeypatch.setattr(ProjectRepository, "LEGACY_ROOT", str(data_dir / "legacy"))
+    monkeypatch.setattr(ProjectRepository, "_INITIALIZED", True)
+    from lib import project_manager as pm
+
+    monkeypatch.setattr(pm, "WORKSPACE_ROOT", str(data_dir / "projects"))
+    monkeypatch.setattr(pm, "LEGACY_ROOT", str(data_dir / "legacy"))
+    monkeypatch.setattr(
+        TaskRepository,
+        "get_task_dir",
+        staticmethod(lambda: str(tmp_path / "task_records")),
+    )
+    ProjectService.create_project_from_data("legacy_manual", LEGACY_SCRIPT)
+    project_dir = ProjectRepository.get_project_dir("legacy_manual")
+    voice_dir = project_paths.project_dir(project_dir, "project_voices", create=True)
+    bindings = ProjectRepository.load_bindings(project_dir)
+    for role, filename in {
+        "旁白": "narrator.wav",
+        "黑衣人": "black_cloak.wav",
+        "秦川": "qinchuan.wav",
+    }.items():
+        path = _make_wav(os.path.join(voice_dir, filename))
+        bindings["bindings"][role] = path
+    ProjectRepository.save_bindings(project_dir, bindings)
+    yield "legacy_manual"
 
 
 def _speaker_fingerprint(project_name: str, role_id: str) -> str | None:
@@ -248,6 +300,148 @@ def test_legacy_project_without_voice_cast_is_not_gated(tmp_path, monkeypatch):
     assert state["mode"] == "legacy_manual"
     assert state["confirmed"] is True
     assert state["confirmation_required"] is False
+
+
+def test_legacy_manual_all_bound_uses_compat_ui_and_stale_finalize_guard(
+    legacy_manual_project, monkeypatch
+):
+    import app
+
+    project_dir = ProjectRepository.get_project_dir(legacy_manual_project)
+    assert not os.path.isfile(project_paths.character_roster(project_dir))
+    assert not os.path.isfile(project_paths.voice_cast(project_dir))
+    assert os.path.isfile(project_paths.voice_bindings(project_dir))
+
+    status = VoiceCastResolver.get_voice_binding_status(legacy_manual_project)
+    assert status["mode"] == "legacy_manual"
+    assert status["roles_total"] == 3
+    assert status["bound"] == 3
+    assert status["unbound"] == 0
+    assert status["production_ready"] is True
+
+    summary, finalize_update = app.refresh_voice_cast_ui(
+        SimpleNamespace(project=legacy_manual_project)
+    )
+    assert "全部角色已绑定" in summary
+    assert "兼容模式：旧版项目" in summary
+    assert "可用于生产" in summary
+    assert "CAST_NOT_READY" not in summary
+    assert finalize_update["visible"] is False
+    assert finalize_update["interactive"] is False
+
+    formal_calls = []
+    monkeypatch.setattr(
+        VoiceCastResolver,
+        "finalize_voice_cast",
+        staticmethod(lambda project: formal_calls.append(project)),
+    )
+    result = app.finalize_voice_cast_ui(SimpleNamespace(project=legacy_manual_project))
+    assert "CAST_NOT_READY" not in result
+    assert "无需执行 Voice Cast 锁定" in result
+    assert formal_calls == []
+
+
+def test_legacy_manual_partial_binding_is_productized_and_never_finalized(
+    legacy_manual_project, monkeypatch
+):
+    import app
+
+    project_dir = ProjectRepository.get_project_dir(legacy_manual_project)
+    bindings = ProjectRepository.load_bindings(project_dir)
+    bindings["bindings"]["秦川"] = None
+    ProjectRepository.save_bindings(project_dir, bindings)
+
+    status = VoiceCastResolver.get_voice_binding_status(legacy_manual_project)
+    assert status["mode"] == "legacy_manual"
+    assert status["bound"] == 2
+    assert status["unbound"] == 1
+    assert status["production_ready"] is False
+
+    summary, finalize_update = app.refresh_voice_cast_ui(
+        SimpleNamespace(project=legacy_manual_project)
+    )
+    assert "2/3" in summary
+    assert "还有 1 个角色需要绑定声音" in summary
+    assert "CAST_NOT_READY" not in summary
+    assert finalize_update["visible"] is False
+    assert finalize_update["interactive"] is False
+
+    formal_calls = []
+    monkeypatch.setattr(
+        VoiceCastResolver,
+        "finalize_voice_cast",
+        staticmethod(lambda project: formal_calls.append(project)),
+    )
+    result = app.finalize_voice_cast_ui(SimpleNamespace(project=legacy_manual_project))
+    assert "还有 1 个角色需要绑定声音" in result
+    assert "CAST_NOT_READY" not in result
+    assert formal_calls == []
+
+
+def test_legacy_manual_binding_refresh_and_reopen_preserve_compat_state(
+    legacy_manual_project,
+):
+    import app
+
+    project_dir = ProjectRepository.get_project_dir(legacy_manual_project)
+    bindings = ProjectRepository.load_bindings(project_dir)
+    bound_path = bindings["bindings"]["秦川"]
+    bindings["bindings"]["秦川"] = None
+    ProjectRepository.save_bindings(project_dir, bindings)
+    partial, _ = app.refresh_voice_cast_ui(SimpleNamespace(project=legacy_manual_project))
+    assert "2/3" in partial
+
+    bindings["bindings"]["秦川"] = bound_path
+    ProjectRepository.save_bindings(project_dir, bindings)
+    refreshed, finalize_update = app.refresh_voice_cast_ui(
+        SimpleNamespace(project=legacy_manual_project)
+    )
+    assert "3/3" in refreshed
+    assert "可用于生产" in refreshed
+    assert finalize_update["visible"] is False
+
+    reopened = ProjectService.open_project_as_snapshot(legacy_manual_project)
+    reopened_summary = app._voice_cast_summary(reopened)
+    assert "全部角色已绑定" in reopened_summary
+    confirmation = VoiceCastResolver.get_confirmation_state(legacy_manual_project)
+    assert confirmation["mode"] == "legacy_manual"
+    assert confirmation["confirmed"] is True
+    assert confirmation["confirmation_required"] is False
+
+
+def test_formal_voice_cast_incomplete_keeps_validation_and_finalize_gate(
+    vc_project,
+):
+    import app
+
+    project_dir = ProjectRepository.get_project_dir(vc_project)
+    cast = VoiceCastRepository.load_cast(project_dir)
+    cast["roles"]["role_xiaohong"]["voice_asset_id"] = None
+    cast["roles"]["role_xiaohong"]["voice_sha256"] = ""
+    VoiceCastRepository.save_cast(project_dir, cast)
+
+    status = VoiceCastResolver.get_voice_binding_status(vc_project)
+    assert status["mode"] == "voice_cast"
+    assert status["production_ready"] is False
+    session = SessionState(project=vc_project)
+    session.set_snapshot(ProjectService.open_project_as_snapshot(vc_project))
+    summary, finalize_update = app.refresh_voice_cast_ui(session)
+    assert "全书角色" in summary
+    assert finalize_update["visible"] is True
+    assert finalize_update["interactive"] is True
+
+    result = app.finalize_voice_cast_ui(session)
+    assert "CAST_NOT_READY" in result
+
+
+def test_formal_voice_cast_ready_still_finalizes_through_existing_path(vc_project):
+    import app
+
+    result = app.finalize_voice_cast_ui(SessionState(project=vc_project))
+    assert "全书声音方案已锁定" in result
+    status = VoiceCastResolver.get_voice_binding_status(vc_project)
+    assert status["mode"] == "voice_cast"
+    assert status["cast_locked"] is True
 
 
 # ---------------------------------------------------------------------------

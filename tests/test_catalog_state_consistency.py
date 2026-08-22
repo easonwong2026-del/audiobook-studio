@@ -10,7 +10,7 @@ E. archive opened 项目 → opened session 完全 reset（project/selected/
 F. archive selected A 而 opened B → B 完整保留（隔离）；
 G. archive 确认态绑定项目名 → A 的确认不能归档 B；
 H. 搜索 → 导航离开 → 返回 → query/filter 保留（ss.catalog_query 单一来源）；
-I. archive → p_sel/catalog 同步（p_sel 不再含 A）；
+I. archive → catalog 同步；p_sel 只代表 opened workflow state；
 J. restore → p_sel/catalog 同步（p_sel 恢复 A）；
 K. live active production archive 被阻止 → selected/opened 不变；
 L. restore duplicate 项目仍被拒绝。
@@ -84,7 +84,7 @@ def test_a_search_removes_selected_clears_everywhere(state_workspace):
     # 过滤结果只剩 beta
     assert [row[0] for row in bookshelf["data"]] == ["beta"]
     # UI selected 组件清空 + 信息回到提示
-    assert sel_update.get("value") == ""
+    assert sel_update == ""
     assert "选择" in info
     # SessionState.selected_project 同步清空（无幽灵）
     assert ss.selected_project is None
@@ -99,7 +99,7 @@ def test_a_search_keeps_selected_when_still_visible(state_workspace):
     # alpha 仍在过滤结果 → selected 保留
     assert [row[0] for row in bookshelf["data"]] == ["alpha"]
     assert ss.selected_project == "alpha"
-    assert sel_update.get("value") == "alpha"
+    assert sel_update == "alpha"
     assert "阿尔法" in info
 
 
@@ -111,7 +111,7 @@ def test_b_first_archive_click_keeps_selection(state_workspace):
     _select(ss, "alpha")
     msg, confirm, sel_update, info_update = handlers.archive_selected("alpha", "", ss)
     assert "确认将「alpha」移入回收站" in msg
-    assert confirm.get("value") == "alpha"  # 确认态记录项目名
+    assert confirm == "alpha"  # 确认态记录项目名
     # selection 不清（noop update）
     assert sel_update.get("value") is None
     assert info_update.get("value") is None
@@ -159,10 +159,10 @@ def test_d_successful_archive_selected_clears_everywhere(state_workspace):
     # SessionState.selected_project 清空
     assert ss.selected_project is None
     # UI selected 组件 + 信息清空
-    assert sel_update.get("value") == ""
+    assert sel_update == ""
     assert "选择" in info_update.get("value", "")
     # 确认态复位
-    assert confirm.get("value") == ""
+    assert confirm == ""
     # opened 不受影响（本场景未打开任何项目）
     assert ss.project is None
 
@@ -215,11 +215,11 @@ def test_g_confirmation_bound_to_project(state_workspace):
     beta_dir = os.path.join(state_workspace, "projects", "beta")
     # 对 A 第一次点击 → 确认态 = alpha
     _msg1, confirm1, _s1, _i1 = handlers.archive_selected("alpha", "", None)
-    assert confirm1.get("value") == "alpha"
+    assert confirm1 == "alpha"
     # 改选 B（确认态仍为 alpha）→ 第二次点击不能归档 B
-    msg2, confirm2, _s2, _i2 = handlers.archive_selected("beta", confirm1.get("value"), None)
+    msg2, confirm2, _s2, _i2 = handlers.archive_selected("beta", confirm1, None)
     assert "确认将「beta」移入回收站" in msg2
-    assert confirm2.get("value") == "beta"
+    assert confirm2 == "beta"
     assert os.path.isdir(beta_dir)  # B 未被绕过两步确认归档
     assert os.path.isdir(alpha_dir)
 
@@ -245,9 +245,9 @@ def test_h_search_state_preserved_across_navigation(state_workspace):
 
 def test_i_archive_syncs_p_sel(state_workspace):
     ss = SessionState()
-    _select(ss, "alpha")  # p_sel 同步为 alpha（select 第三输出）
+    _select(ss, "alpha")  # bookshelf selection must not populate p_sel
     _msg, _c, _s, _i = handlers.archive_selected("alpha", "alpha", ss)
-    # 统一刷新：p_sel choices/value 不再含 A
+    # Stateless catalog refresh still sanitizes its explicit selector value.
     bookshelf, p_sel_update, _trash, _tc, _ts = handlers.refresh_project_catalog("", "alpha")
     assert "alpha" not in p_sel_update.get("choices", [])
     assert p_sel_update.get("value") is None

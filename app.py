@@ -39,14 +39,13 @@ from services import (
     ProductionJobService,
     ProjectBackupService,
     ProjectCatalogService,
-    get_application_lifecycle,
     ProjectService,
     ProjectStorageService,
     QualityService,
-    RepairError,
-    RepairService,
     QuickTTSBusyError,
     QuickTTSService,
+    RepairError,
+    RepairService,
     RuntimeTTSService,
     SupplementService,
     SupplementTaskState,
@@ -54,13 +53,16 @@ from services import (
     VoiceCastError,
     VoiceCastResolver,
     WorkflowService,
+    get_application_lifecycle,
 )
 from services.project_storage import format_size
 from services.review_audio import ReviewAudioService
 from services.session import SessionState
 from services.synthesis import SynthesisState
+from ui import chapter_merge_handlers as merge_ui
 from ui import create_project_handlers as create_ui
 from ui import project_catalog_handlers as catalog_ui
+from ui import whole_book_assembly_handlers as assembly_ui
 from ui.components import (
     build_role_management_choices,
     create_production_navigation,
@@ -84,9 +86,18 @@ from ui.pages import (
 )
 from ui.shared import create_status_bar
 from ui.theme import LIGHT_CSS, THEME
-from ui.wiring.project_catalog_wiring import wire_project_catalog
+from ui.wiring.project_catalog_wiring import (
+    bookshelf_management_outputs,
+    bookshelf_selection_context_outputs,
+    hierarchy_outputs,
+    wire_project_catalog,
+)
 from ui.wiring.settings_wiring import wire_settings_page
 from ui.wiring.voice_wiring import wire_voice_page
+from ui.wiring.whole_book_assembly_wiring import (
+    assembly_workflow_outputs,
+    wire_whole_book_assembly,
+)
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 # 音色库外置于数据目录（默认 ~/AudiobookStudio/voice_library），与程序目录解耦。
@@ -114,10 +125,16 @@ def create_project(name, script_file, ss):
         result = ProjectCreationService.create_from_structured_script(name, script_file)
         # 写入会话态（多标签各自独立，不共享全局可变 S）
         ss.set_project(result.project_name, None, {})
+        choices = ProjectCatalogService.scan()
+        selector_update = catalog_ui.build_project_selector_update(
+            choices,
+            p_sel_value=result.project_name,
+            ss=ss,
+        )
         return "", None, (
             f"### ✅ 项目「{result.project_name}」创建成功！"
             "下一步：前往角色与声音。"
-        ), gr.update(choices=ProjectService.scan_projects(), value=result.project_name)
+        ), selector_update
     except Exception as e:
         return name, None, f"### ❌ 创建失败: {e}", gr.update()
 
@@ -536,7 +553,7 @@ def activate_production_timer():
 def delete_project(name, ss=None):
     """Archive a project by default; permanent deletion has a separate callback."""
     if not name:
-        update = gr.update(choices=ProjectService.scan_projects(), value=None)
+        update = catalog_ui.reconcile_project_selector(ss)
         return (update, "⚪ 请先选择项目。") if ss is not None else update
     try:
         target = ProjectStorageService.archive(name)
@@ -550,7 +567,7 @@ def delete_project(name, ss=None):
     except Exception as exc:
         logger.exception("归档项目失败")
         message = f"❌ 归档项目失败：{exc}"
-    update = gr.update(choices=ProjectService.scan_projects(), value=None)
+    update = catalog_ui.reconcile_project_selector(ss)
     return (update, message) if ss is not None else update
 
 
@@ -589,26 +606,65 @@ def refresh_role_list(search, current_role, ss):
 
 def refresh_role_summary(ss):
     """Refresh the role binding count after a save without reloading the page."""
-    if not ss or not ss.project:
-        return "打开项目后显示角色绑定状态。"
-    snap = _snap(ss)
-    if not snap:
-        return "打开项目后显示角色绑定状态。"
-    return _voice_cast_summary(snap)
+    return refresh_voice_cast_ui(ss)[0]
 
 
-def _voice_cast_summary(snap):
+def _legacy_voice_cast_summary(status):
+    """Render product language for projects using the legacy manual workflow."""
+    total = int(status.get("roles_total", 0) or 0)
+    bound = int(status.get("bound", 0) or 0)
+    unbound = int(status.get("unbound", max(total - bound, 0)) or 0)
+    if status.get("production_ready"):
+        return (
+            f"✅ 全部角色已绑定（{bound}/{total}）\n"
+            "兼容模式：旧版项目\n"
+            "当前声音方案已可用于生产，无需执行 Voice Cast 锁定。"
+        )
+    return (
+        f"⚠ 已绑定 {bound}/{total}，还有 {unbound} 个角色需要绑定声音。\n"
+        "兼容模式：旧版项目；完成绑定后才能进入生产。"
+    )
+
+
+def _legacy_voice_cast_status_from_snapshot(snap):
+    """Build the legacy display status from an already-loaded project snapshot."""
+    voices, _ = script_loader.resolve_collections(snap.script)
+    bound = 0
+    for role in voices:
+        value = (snap.bindings or {}).get(role)
+        if not value:
+            continue
+        path = str(value)
+        if not os.path.isabs(path):
+            try:
+                path = project_paths.resolve_relative(snap.project_dir, path)
+            except ValueError:
+                path = os.path.join(snap.project_dir, path)
+        if os.path.isfile(path):
+            bound += 1
+    total = len(voices)
+    return {
+        "mode": "legacy_manual",
+        "roles_total": total,
+        "bound": bound,
+        "unbound": total - bound,
+        "production_ready": bound == total,
+    }
+
+
+def _voice_cast_summary(snap, status=None):
     """Render shared Voice Cast state without exposing audio paths."""
-    # Legacy/manual projects already have the complete snapshot required for
-    # this display.  Avoid a second disk read during the normal open chain.
-    if not os.path.isfile(os.path.join(snap.project_dir, "character_roster.json")):
-        return format_role_management_summary(snap.script, snap.bindings)
+    # The open handler already has a complete snapshot.  Keep this first
+    # render read-free; the subsequent shared UI refresh uses the resolver for
+    # the authoritative status and the server-side finalize guard.
+    if status is None and not os.path.isfile(project_paths.character_roster(snap.project_dir)):
+        return _legacy_voice_cast_summary(_legacy_voice_cast_status_from_snapshot(snap))
     try:
-        status = VoiceCastResolver.get_voice_binding_status(snap.name)
-    except Exception:
+        status = status or VoiceCastResolver.get_voice_binding_status(snap.name)
+    except Exception:  # noqa: BLE001 - status fallback keeps legacy UI readable
         return format_role_management_summary(snap.script, snap.bindings)
     if status.get("mode") == "legacy_manual":
-        return format_role_management_summary(snap.script, snap.bindings)
+        return _legacy_voice_cast_summary(status)
     state = "已锁定" if status.get("cast_locked") else "草稿"
     return (
         f"全书角色：**{status.get('roles_total', 0)}** · "
@@ -617,11 +673,48 @@ def _voice_cast_summary(snap):
     )
 
 
+def refresh_voice_cast_ui(ss):
+    """Refresh the Voice Cast summary and finalize affordance together.
+
+    Legacy/manual projects use their existing script voice bindings as the
+    production contract.  They must never be presented with the formal cast
+    finalization action, even if an old browser still has that event wired.
+    """
+    hidden_finalize = gr.update(visible=False, interactive=False)
+    if not ss or not ss.project:
+        return "打开项目后显示角色绑定状态。", hidden_finalize
+    try:
+        status = VoiceCastResolver.get_voice_binding_status(ss.project)
+    except Exception:  # noqa: BLE001 - status fallback keeps stale UI safe
+        snap = _snap(ss)
+        if not snap:
+            return "打开项目后显示角色绑定状态。", hidden_finalize
+        return _voice_cast_summary(snap), hidden_finalize
+    if status.get("mode") == "legacy_manual":
+        return _legacy_voice_cast_summary(status), hidden_finalize
+    snap = _snap(ss)
+    if not snap:
+        return "打开项目后显示角色绑定状态。", gr.update(visible=True, interactive=True)
+    return _voice_cast_summary(snap, status), gr.update(visible=True, interactive=True)
+
+
 def finalize_voice_cast_ui(ss):
     """Gradio callback for the one-click Voice Cast finalization."""
     if not ss or not ss.project:
         return "请先打开项目。"
     try:
+        status = VoiceCastResolver.get_voice_binding_status(ss.project)
+        if status.get("mode") == "legacy_manual":
+            if status.get("production_ready"):
+                return (
+                    f"✅ 全部角色已绑定（{status.get('bound', 0)}/{status.get('roles_total', 0)}）。"
+                    "兼容模式：旧版项目，无需执行 Voice Cast 锁定，可直接进入生产。"
+                )
+            return (
+                f"⚠ 已绑定 {status.get('bound', 0)}/{status.get('roles_total', 0)}，"
+                f"还有 {status.get('unbound', 0)} 个角色需要绑定声音。"
+                "兼容模式：旧版项目，请先完成绑定。"
+            )
         result = VoiceCastResolver.finalize_voice_cast(ss.project)
         ss.invalidate_snapshot()
         return f"✅ 全书声音方案已锁定（{len(result.get('cast', {}).get('roles', {}))} 个角色）。"
@@ -3687,17 +3780,26 @@ def hide_project_from_list(name, ss):
             ss.set_project(None, None, {})
             ss.set_snapshot(None)
             ss.synthesis = None
-        return gr.update(choices=ProjectService.scan_projects(), value=None), f"✅ 已仅从项目列表移除「{name}」，本地文件仍保留。"
+        return (
+            catalog_ui.reconcile_project_selector(ss),
+            f"✅ 已仅从项目列表移除「{name}」，本地文件仍保留。",
+        )
     except Exception as exc:
         return gr.update(), f"❌ 从项目列表移除失败：{exc}"
 
 
-def restore_project_to_list(name):
+def restore_project_to_list(name, ss=None):
     if not name or not str(name).strip():
         return gr.update(), "⚪ 请输入需要恢复的项目名称。"
     try:
-        ProjectStorageService.restore_to_list(str(name).strip())
-        return gr.update(choices=ProjectService.scan_projects(), value=str(name).strip()), "✅ 项目已恢复到项目列表。"
+        project_name = str(name).strip()
+        ProjectStorageService.restore_to_list(project_name)
+        return (
+            catalog_ui.reconcile_project_selector(ss)
+            if ss is not None
+            else catalog_ui.build_project_selector_update(ProjectCatalogService.scan()),
+            "✅ 项目已恢复到项目列表。",
+        )
     except Exception as exc:
         return gr.update(), f"❌ 恢复项目列表显示失败：{exc}"
 
@@ -3859,7 +3961,7 @@ def refresh_archived_projects():
     )
 
 
-def restore_archived_project(archive_id, _ss):
+def restore_archived_project(archive_id, ss):
     if not archive_id:
         return gr.update(), "⚪ 请先选择回收站项目。", gr.update(), gr.update()
     try:
@@ -3867,7 +3969,7 @@ def restore_archived_project(archive_id, _ss):
         name = result["project_name"]
         rows, choices, _status = refresh_archived_projects()
         return (
-            gr.update(choices=ProjectService.scan_projects(), value=name),
+            catalog_ui.reconcile_project_selector(ss),
             f"✅ 已恢复「{name}」，完整性检查通过；请点击“打开项目”。",
             rows,
             choices,
@@ -3916,15 +4018,14 @@ def refresh_bookshelf():
 
 
 def select_project_from_bookshelf(rows, evt: gr.SelectData):
-    """点选书架某行 → 回填 p_sel（项目页 Dropdown，唯一项目选择真相源）。"""
-    if evt is None or evt.index is None:
-        return gr.update()
-    try:
-        rows = rows["data"] if isinstance(rows, dict) else rows
-        name = rows[evt.index[0]][0]
-    except Exception:
-        return gr.update()
-    return gr.update(value=name)
+    """Legacy bookshelf callback retained as a no-op for old integrations.
+
+    The live bookshelf uses ``select_bookshelf_row``. A row click is a
+    management-selection event and must never write the project-page
+    ``p_sel`` Dropdown, so an accidental legacy registration is explicitly
+    ignored as well.
+    """
+    return gr.skip()
 
 
 def render_chapter_tree(project):
@@ -3934,10 +4035,9 @@ def render_chapter_tree(project):
     return _pm.build_chapter_tree(project)
 
 
-def refresh_projects_full():
-    """p_refresh 全量刷新：仅刷新 p_sel 选项（书架入口已统一到概览页）。"""
-    choices = ProjectService.scan_projects()
-    return gr.update(choices=choices)
+def refresh_projects_full(ss=None):
+    """p_refresh refreshes p_sel from the opened workflow project only."""
+    return catalog_ui.reconcile_project_selector(ss)
 
 
 # ── O5：合成前分段预览 / 勾选 ──
@@ -4236,11 +4336,9 @@ def refresh_overview(ss):
     return (*_dashboard_snapshot(ss), catalog_ui.render_bookshelf_rows(query))
 
 
-def refresh_p_sel(name):
-    """刷新项目下拉选项（catalog 数据源；选中项不在新 catalog 中则清空）。"""
-    choices = [s.project_name for s in ProjectCatalogService.scan()]
-    value = name if name in choices else None
-    return gr.update(choices=choices, value=value)
+def refresh_p_sel(ss):
+    """Refresh p_sel from catalog plus the opened workflow project only."""
+    return catalog_ui.reconcile_project_selector(ss)
 
 
 def _review_outputs():
@@ -4264,6 +4362,75 @@ def _open_chain_rest(event):
     顺序与原 22 元组全量刷新契约一致，覆盖：顶栏 / 章节表 / 章节试听
     选项 / 队列列表 / 章节树 / 合成预览 / 音色库 / 分类下拉 / 生产检查 /
     默认导出目录 / 概览 / 项目下拉。
+    """
+    e = event
+    # ``open_project`` has already established ``ss.project``. Reconcile the
+    # project-page selector before any downstream callback consumes ``p_sel``;
+    # bookshelf selection itself never reaches this chain.
+    e = e.then(refresh_voice_cast_ui, [ss], [v_status, v_cast_finalize])
+    e = e.then(refresh_p_sel, [ss], [p_sel])
+    e = e.then(refresh_top_status, [ss], [top_status])
+    e = e.then(preview_chapters, [ss], _review_outputs())
+    e = e.then(preview_chapter_options, [ss], [e_chapter_sel])
+    e = e.then(
+        refresh_quality_workspace,
+        [e_quality_filter, e_chapter_sel, ss],
+        [e_quality_summary, e_seg_preview_sel, e_seg_regen_sel, e_segment_quality],
+    )
+    e = e.then(
+        recover_review_repair,
+        [ss],
+        [e_review_repair_id, e_review_repair_task_id, e_review_repair_project, review_repair_timer],
+    )
+    e = e.then(refresh_queue_list, [ss], [s_queue_list])
+    e = e.then(refresh_production_task, [ss], [s_task_status])
+    e = e.then(render_chapter_tree, [p_sel], [p_chapter_tree])
+    e = e.then(refresh_project_storage, [ss], [p_storage])
+    e = e.then(render_preview, [ss], [s_preview_df, s_chapters_sel])
+    e = e.then(
+        render_scope_controls,
+        [ss],
+        [
+            s_scope_mode,
+            s_chapter_scope_group,
+            s_chapters_sel,
+            s_segment_scope_group,
+            s_segment_chapter_filter,
+            s_segments_sel,
+            s_segment_selection_state,
+            s_preview_df,
+            s_scope_readiness,
+        ],
+    )
+    e = e.then(refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
+    e = e.then(refresh_categories, [], [v_bind_category, v_save_category])
+    e = e.then(refresh_production_voice_choices, [], [e_voice, utility_override_voice])
+    e = e.then(refresh_production_check, [ss], [production_check])
+    e = e.then(refresh_export_default_dir, [ss], [e_save_dir_hint])
+    e = e.then(
+        refresh_export_readiness,
+        [e_fmt, e_qa_policy, ss],
+        [e_readiness],
+    )
+    e = e.then(
+        refresh_overview, [ss],
+        [ov_status, ov_progress, ov_task, ov_issues, ov_bookshelf],
+    )
+    e = e.then(
+        catalog_ui.refresh_bookshelf_management_view_with_hierarchy,
+        [bookshelf_search, p_sel, ss],
+        catalog_management_outputs,
+    )
+    return e
+
+
+def _post_archive_reconcile(event):
+    """Refresh workflow surfaces after a successful archive only.
+
+    The archive wiring performs catalog/selection reconciliation before this
+    chain is attached.  This dedicated lifecycle therefore never consumes the
+    stale pre-archive ``p_sel`` value, and it is not registered on the first
+    confirmation or on a mutation guard rejection.
     """
     e = event
     e = e.then(refresh_top_status, [ss], [top_status])
@@ -4313,7 +4480,6 @@ def _open_chain_rest(event):
         refresh_overview, [ss],
         [ov_status, ov_progress, ov_task, ov_issues, ov_bookshelf],
     )
-    e = e.then(refresh_p_sel, [p_sel], [p_sel])
     return e
 
 
@@ -4355,6 +4521,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             ov_synth = ov_page["ov_synth"]
             ov_export = ov_page["ov_export"]
             bookshelf_search = ov_page["bookshelf_search"]
+            bookshelf_refresh = ov_page["bookshelf_refresh"]
             bookshelf_selected_proj = ov_page["bookshelf_selected_proj"]
             bookshelf_selected = ov_page["bookshelf_selected"]
             bookshelf_open = ov_page["bookshelf_open"]
@@ -4385,6 +4552,27 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             bookshelf_trash_confirm = ov_page["bookshelf_trash_confirm"]
             bookshelf_trash_delete = ov_page["bookshelf_trash_delete"]
             bookshelf_trash_status = ov_page["bookshelf_trash_status"]
+            merge_source_chapter = ov_page["merge_source_chapter"]
+            merge_target_book = ov_page["merge_target_book"]
+            merge_analyze = ov_page["merge_analyze"]
+            merge_plan_result = ov_page["merge_plan_result"]
+            merge_plan_state = ov_page["merge_plan_state"]
+            merge_resolution = ov_page["merge_resolution"]
+            merge_confirm = ov_page["merge_confirm"]
+            merge_confirmation_state = ov_page["merge_confirmation_state"]
+            merge_execute = ov_page["merge_execute"]
+            merge_execution_result = ov_page["merge_execution_result"]
+            merge_transaction_state = ov_page["merge_transaction_state"]
+            assembly_target_book = ov_page["assembly_target_book"]
+            assembly_analyze = ov_page["assembly_analyze"]
+            assembly_plan_result = ov_page["assembly_plan_result"]
+            assembly_plan_state = ov_page["assembly_plan_state"]
+            assembly_resolution = ov_page["assembly_resolution"]
+            assembly_confirm = ov_page["assembly_confirm"]
+            assembly_confirmation_state = ov_page["assembly_confirmation_state"]
+            assembly_execute = ov_page["assembly_execute"]
+            assembly_execution_result = ov_page["assembly_execution_result"]
+            assembly_transaction_state = ov_page["assembly_transaction_state"]
 
             # ───────── 新建项目 ─────────
             cr_page = create_create_project_page()
@@ -4413,6 +4601,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             vce_page = create_voice_page()
             grp_voices = vce_page["group"]
             v_status = vce_page["v_status"]
+            v_cast_finalize = vce_page["v_cast_finalize"]
             v_table = vce_page["v_table"]
             v_role_search = vce_page["v_role_search"]
             v_role_title = vce_page["v_role_title"]
@@ -4587,6 +4776,28 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             set_page = create_settings_page()
             grp_settings = set_page["group"]
 
+            # State-aware bookshelf refresh contract.  The low-level
+            # refresh_project_catalog five-tuple remains available for
+            # compatibility; all visible bookshelf management paths use this
+            # centralized reconciliation output list.
+            catalog_management_outputs = bookshelf_management_outputs(
+                ov_page, p_sel, include_hierarchy=True
+            )
+            merge_planner_outputs = [
+                merge_source_chapter,
+                merge_target_book,
+                merge_analyze,
+                merge_plan_result,
+                merge_plan_state,
+                merge_resolution,
+                merge_confirm,
+                merge_confirmation_state,
+                merge_execute,
+                merge_execution_result,
+                merge_transaction_state,
+            ]
+            assembly_outputs = assembly_workflow_outputs(ov_page)
+
     # 填充 _GROUPS（运行时装载，供 navigation._goto 使用）
     _GROUPS[:] = [
         grp_overview,
@@ -4663,10 +4874,25 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
 
     # 旧的全量刷新契约（22 元组）已移除（阶段三：open_project 首步 + _open_chain_rest 打开链）
 
-    nav_overview.click(
+    overview_nav_chain = nav_overview.click(
         lambda: _goto("overview"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-overview')?.classList.add('active'); }").then(
         refresh_overview, [ss], [ov_status, ov_progress, ov_task, ov_issues, ov_bookshelf])
+    overview_nav_chain.then(
+        catalog_ui.refresh_bookshelf_management_view_with_hierarchy,
+        [bookshelf_search, p_sel, ss],
+        catalog_management_outputs,
+    )
+    overview_nav_chain.then(
+        merge_ui.refresh_merge_workflow_controls,
+        [ss],
+        merge_planner_outputs,
+    )
+    overview_nav_chain.then(
+        assembly_ui.refresh_assembly_workflow_controls,
+        [ss],
+        assembly_outputs,
+    )
     nav_project.click(
         lambda: _goto("project"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-project')?.classList.add('active'); }")
@@ -4683,7 +4909,8 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         [v_role_search, v_role, ss], [v_table]).then(
         refresh_voice_filters,
         [], [v_bind_category, v_lib_category, v_save_category]).then(
-        refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
+        refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category]).then(
+        refresh_voice_cast_ui, [ss], [v_status, v_cast_finalize])
     nav_synth.click(
         lambda: _goto("synth"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-synth')?.classList.add('active'); }").then(
@@ -4744,10 +4971,26 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     )
 
     # ── 概览页：书架点选 → 只设 ss.selected_project（选择≠打开；打开需点按钮） ──
-    ov_bookshelf.select(
+    bookshelf_select_chain = ov_bookshelf.select(
         catalog_ui.select_bookshelf_row,
         [ov_bookshelf, ss],
-        [bookshelf_selected_proj, bookshelf_selected, p_sel],
+        [bookshelf_selected_proj, bookshelf_selected],
+    ).then(
+        catalog_ui.reconcile_bookshelf_selection_context,
+        [ss],
+        bookshelf_selection_context_outputs(ov_page),
+    ).then(
+        catalog_ui.reconcile_bookshelf_hierarchy_selection,
+        [ss],
+        hierarchy_outputs(ov_page),
+    ).then(
+        merge_ui.refresh_merge_workflow_controls,
+        [ss],
+        merge_planner_outputs,
+    ).then(
+        assembly_ui.refresh_assembly_workflow_controls,
+        [ss],
+        assembly_outputs,
     )
 
     # ── 概览页快捷操作：「打开项目」切页 → open_project 首步 → 打开链刷新 ──
@@ -4762,7 +5005,9 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         [v_role_search, v_role, ss], [v_table]).then(
         refresh_voice_filters,
         [], [v_bind_category, v_lib_category, v_save_category]).then(
-        refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
+        refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category]).then(
+        refresh_voice_cast_ui, [ss], [v_status, v_cast_finalize]
+    )
     ov_synth.click(
         lambda: _goto("synth"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-synth')?.classList.add('active'); }").then(
@@ -4851,18 +5096,39 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     )
     # 创建项目成功后统一刷新目录类组件（书架 / p_sel / 回收站）
     voice_create_chain.then(
-        catalog_ui.refresh_project_catalog,
-        [bookshelf_search, p_sel],
-        [ov_bookshelf, p_sel, bookshelf_trash_table, bookshelf_trash_sel, bookshelf_trash_status],
+        catalog_ui.refresh_bookshelf_management_view_with_hierarchy,
+        [bookshelf_search, p_sel, ss],
+        catalog_management_outputs,
+    )
+    voice_create_chain.then(
+        merge_ui.refresh_merge_workflow_controls,
+        [ss],
+        merge_planner_outputs,
+    )
+    voice_create_chain.then(
+        assembly_ui.refresh_assembly_workflow_controls,
+        [ss],
+        assembly_outputs,
     )
 
     # ═══════════ 设置页面 ═══════════
     wire_settings_page(
         set_page,
         catalog_refresh=(
-            catalog_ui.refresh_project_catalog,
-            [bookshelf_search, p_sel],
-            [ov_bookshelf, p_sel, bookshelf_trash_table, bookshelf_trash_sel, bookshelf_trash_status],
+            catalog_ui.refresh_bookshelf_management_view_with_hierarchy,
+            [bookshelf_search, p_sel, ss],
+            catalog_management_outputs,
+        ),
+        session=ss,
+        merge_refresh=(
+            merge_ui.refresh_merge_workflow_controls,
+            [ss],
+            merge_planner_outputs,
+        ),
+        assembly_refresh=(
+            assembly_ui.refresh_assembly_after_data_dir,
+            [set_page["s_data_dir"], ss],
+            assembly_outputs,
         ),
     )
 
@@ -4878,6 +5144,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
                 "refresh_role_list": refresh_role_list,
                 "bind_voice": bind_voice,
                 "refresh_role_summary": refresh_role_summary,
+                "refresh_voice_cast_ui": refresh_voice_cast_ui,
                 "finalize_voice_cast": finalize_voice_cast_ui,
                 "play_lib_voice": play_lib_voice,
                 "save_to_lib": save_to_lib,
@@ -4905,20 +5172,58 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
                 bookshelf_trash_sel,
                 bookshelf_trash_status,
             ],
+            "management_outputs": catalog_management_outputs,
+            "management_refresh": catalog_ui.refresh_bookshelf_management_view_with_hierarchy,
+            "merge_refresh": merge_ui.refresh_merge_workflow_controls,
+            "merge_outputs": merge_planner_outputs,
+            "assembly_refresh": assembly_ui.refresh_assembly_workflow_controls,
+            "assembly_outputs": assembly_outputs,
+            "merge_analyze": merge_ui.analyze_merge_plan,
+            "merge_invalidate": merge_ui.invalidate_merge_plan,
+            "merge_prepare_execution": merge_ui.prepare_merge_execution_controls,
+            "merge_clear_execution": merge_ui.clear_merge_execution_controls,
+            "merge_invalidate_execution": merge_ui.invalidate_merge_execution_state,
+            "merge_confirm": merge_ui.confirm_merge_plan,
+            "merge_execute": merge_ui.execute_merge_plan,
             "callbacks": {
                 "open_project": open_project,
                 "open_project_outputs": [
                     p_summary, v_table, v_role, v_role_title, v_lib, s_log, v_status,
                 ],
                 "open_chain_rest": _open_chain_rest,
+                "post_archive_reconcile": _post_archive_reconcile,
                 "goto_project": lambda: _goto("project"),
             },
         },
     )
+    wire_whole_book_assembly(
+        ov_page,
+        {"session": ss},
+    )
 
-    p_refresh.click(refresh_projects_full, [], [p_sel])
+    p_refresh_chain = p_refresh.click(refresh_projects_full, [ss], [p_sel])
+    p_refresh_chain.then(
+        merge_ui.refresh_merge_workflow_controls,
+        [ss],
+        merge_planner_outputs,
+    )
+    p_refresh_chain.then(
+        assembly_ui.refresh_assembly_workflow_controls,
+        [ss],
+        assembly_outputs,
+    )
     chain = p_open.click(open_project, [p_sel, ss], [p_summary, v_table, v_role, v_role_title, v_lib, s_log, v_status])
-    _open_chain_rest(chain)
+    chain = _open_chain_rest(chain)
+    chain.then(
+        merge_ui.refresh_merge_workflow_controls,
+        [ss],
+        merge_planner_outputs,
+    )
+    chain.then(
+        assembly_ui.refresh_assembly_workflow_controls,
+        [ss],
+        assembly_outputs,
+    )
     s_scope_mode.change(
         update_scope_visibility,
         [s_scope_mode],
@@ -5218,6 +5523,19 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         open_utility_folder,
         [utility_mode, utility_result_mode, utility_result_project, utility_wavs, ss],
         [utility_path],
+    )
+
+    # ── UI-ready 书架初始化：轻量 catalog 扫描，与 TTS prewarm 解耦 ──
+    # 仅读取项目摘要 / 回收站状态，不触碰模型、runtime 或生产任务。
+    app.load(
+        catalog_ui.refresh_bookshelf_management_view_with_hierarchy,
+        [bookshelf_search, p_sel, ss],
+        catalog_management_outputs,
+    )
+    app.load(
+        merge_ui.refresh_merge_workflow_controls,
+        [ss],
+        merge_planner_outputs,
     )
 
     # ── 后台预热：UI-ready 一次性事件（Gradio app.load）──

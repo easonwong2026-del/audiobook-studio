@@ -14,6 +14,8 @@ def create_voice_page() -> dict:
                     "确认并锁定全书声音方案",
                     variant="secondary",
                     size="sm",
+                    visible=False,
+                    interactive=False,
                 )
                 v_role_search = gr.Textbox(
                     label="搜索角色",

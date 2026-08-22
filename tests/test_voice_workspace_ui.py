@@ -149,6 +149,18 @@ def test_role_list_selection_loads_right_hand_configuration(monkeypatch):
     assert result[4] == "*当前绑定音频：未选择*"
 
 
+def test_voice_cast_finalize_starts_hidden_until_formal_project_is_open():
+    import gradio as gr
+
+    from ui.pages.voice_page import create_voice_page
+
+    with gr.Blocks():
+        page = create_voice_page()
+    finalize = page["v_cast_finalize"]
+    assert finalize.visible is False
+    assert finalize.interactive is False
+
+
 def test_production_check_parses_snapshot_raw_script(monkeypatch):
     import app
 
