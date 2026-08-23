@@ -241,3 +241,104 @@ Round 2A 修改前真实 baseline：
 ## Remaining cleanup candidates after Round 2A
 
 - 仅保留 Round 1 deferred 项和 `project_manager` 中有真实 compatibility caller 的 wrappers；不要把“模块较大”或 vulture unused 作为删除理由。
+
+---
+
+# Repository Entropy Cleanup Round 2B — Voice Presentation Helpers Boundary Extraction
+
+日期：2026-08-23
+Baseline：`67a4b0bf7dbd6d893df7fea48f7f4e083a2d95da`（PR #56 squash merge commit，当前最新 `origin/main`）
+分支：`refactor/voice-presentation-boundary-r2b`
+
+## 启动与引用证据
+
+PR #56 状态为 `MERGED`，merge commit 已进入 `origin/main`；未要求 Round 2A 原 head `ee6211fce8f2bbc90fab66b2b5e506ba5c05077d` 成为 main ancestor。main 内容验证通过：app 两条链使用 `project_view_ui.render_chapter_tree`、`ui/project_view_handlers.py` 存在、app 无 `render_chapter_tree` 定义、`lib.project_manager.build_chapter_tree` 已退出；启动前工作树 clean。
+
+修改前 baseline：
+
+- Full suite：`1261 passed, 26 skipped, 76 warnings`，51.02s；coverage `18119` statements / 81%。
+- Windows selected workflow 同款集合：`329 passed, 19 warnings`，9.75s。
+- A–I helper fixture 输出已在 `tests/test_voice_presentation_boundary.py` 中逐 tuple 记录，覆盖全未绑定、部分绑定、分类、多角色同分类、未绑定/未分类 tail、bound-only、description、name-only、空 metadata。
+
+| symbol/file | category | baseline callers | replacement | compatibility reason | delete_now | risk | evidence |
+|---|---|---|---|---|---:|---|---|
+| `lib.project_manager.build_role_choices` | MISPLACED | 仅 `ui/components/voice_binding.py` 直接生产调用；无测试直接调用、无 MCP/scripts/re-export/dynamic caller | `ui.components.voice_binding.build_role_choices` | 未发现 external/public compatibility contract；原始 commit 只引入纯 UI helper | yes | low | 全仓 `rg` + AST/import inspection；唯一生产路径是 voice presentation module |
+| `lib.project_manager.build_bound_role_choices` | MISPLACED | `ui/components/voice_binding.py`；`tests/test_supplement.py` 有一个内部测试直接调用 | `ui.components.voice_binding.build_bound_role_choices` | 测试是仓内契约，已迁移到 UI-owned helper；无 external/MCP/script caller | yes | low | qualified alias 搜索仅命中上述 UI caller、内部测试和历史 docs；无 re-export |
+| `ui.components.voice_binding.format_role_choices` | live UI formatter | 测试及潜在 UI consumers | 内部直接调用同模块 `build_role_choices` | description/name formatting contract 保持 | no | low | G/H/I fixture 输出逐 tuple 等价 |
+| `ui.components.voice_binding.format_bound_role_choices` | live UI formatter | `app.refresh_supplement_roles`、voice UI tests | 内部直接调用同模块 `build_bound_role_choices` | Voice Cast / supplement dropdown contract 保持 | no | medium | existing voice workspace + supplement tests |
+
+## Caller graph
+
+修改前：
+
+```
+app.refresh_supplement_roles
+  -> ui.components.voice_binding.format_bound_role_choices
+     -> _pm.build_bound_role_choices
+        -> lib.project_manager.build_bound_role_choices
+
+ui.components.voice_binding.format_role_choices
+  -> _pm.build_role_choices
+     -> lib.project_manager.build_role_choices
+
+tests/test_supplement.py
+  -> pm.build_bound_role_choices   [internal test contract only]
+```
+
+修改后：
+
+```
+app.refresh_supplement_roles
+  -> ui.components.voice_binding.format_bound_role_choices
+     -> ui.components.voice_binding.build_bound_role_choices
+
+ui.components.voice_binding.format_role_choices
+  -> ui.components.voice_binding.build_role_choices
+
+tests/test_supplement.py / boundary fixtures
+  -> ui.components.voice_binding.build_bound_role_choices
+```
+
+`ui/components/voice_binding.py` 已完全退出对 `lib.project_manager` 的该项依赖；`lib/project_manager.py` 仍保留其他 compatibility wrappers，特别是 `services/synthesis.py -> pm`，本轮没有处理。
+
+## Behavior equivalence
+
+- `build_role_choices`：category precedence、明确分类先行、未绑定/未分类 tail 顺序、同 category 内排序、原始 role value 全部与 baseline 一致。
+- `build_bound_role_choices`：只返回 truthy binding，保持 `script["voices"]` 顺序，label/value 一致。
+- `format_role_choices`：description 优先、name fallback、空 metadata fallback 以及 category label 均逐 tuple 一致。
+- `format_bound_role_choices`：bound filtering、description/name formatting、原始 role value 均逐 tuple 一致。
+- 未修改 Voice Cast bind/unbind、`voice_bindings.json`、role_categories 持久化、reference audio、supplement synthesis、Quick TTS、engine 或 runtime。
+
+## Round 2B change summary
+
+### Confirmed deleted
+
+- `lib/project_manager.py::build_role_choices`。
+- `lib/project_manager.py::build_bound_role_choices`。
+- `ui/components/voice_binding.py` 的 `from lib import project_manager as _pm`。
+
+### Added / moved ownership
+
+- `ui/components/voice_binding.py` 直接拥有两个纯 presentation helper。
+- `format_role_choices` / `format_bound_role_choices` 改为同模块直接调用。
+- `tests/test_supplement.py` 改为验证 UI-owned helper；新增 A–I baseline/candidate fixture 和 ownership tests。
+
+### Retained compatibility
+
+- `lib/project_manager.py` 其他 wrapper 全部保留。
+- `app.select_project_from_bookshelf`、Round 1/2A deferred candidates 保持不变。
+- Voice Cast persistence/workflow contracts 保持不变。
+
+### Deferred / frozen
+
+- `hide_project_from_list`、`restore_project_to_list`、`migrate_project_copy`、`select_project_from_bookshelf`。
+- startup/runtime、Storage、Catalog hierarchy、Merge/Assembly、QA/Repair、Export、MCP、Voice Cast workflow 和依赖版本。
+
+## Round 2B verification
+
+- Targeted voice presentation/workspace/supplement tests：`59 passed, 1 skipped, 20 warnings`。
+- Candidate full pytest：`1272 passed, 26 skipped, 76 warnings`，51.33s；coverage `18098` statements / 81%。相对 baseline 多出的 11 个通过项来自本轮 A–I 行为/结构测试；无 candidate-only failure。
+- Windows selected workflow 同款集合：`329 passed, 19 warnings`，8.30s；warnings 数量与 baseline 一致。
+- `python -m compileall -q .`：pass。
+- Ruff changed Python files `--select F`：pass。
+- `git diff --check`：pass。

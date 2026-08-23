@@ -3029,7 +3029,7 @@ def refresh_supplement_roles(ss):
     """补录角色下拉懒刷新：仅列已绑定音色的角色（未开项目/未绑定时禁用并提示）。
 
     约定：补录角色下拉 ``sup_role`` 只列「已绑定音色角色」，用
-    ``project_manager.build_bound_role_choices(script, bindings)``；刷新时机为
+    ``ui.components.voice_binding.build_bound_role_choices(script, bindings)``；刷新时机为
     进入“生产与质检”阶段时懒刷新；刷新时机与打开项目链路解耦（阶段三重构后已无 22 元组契约）。
     """
     if not ss or not ss.project or not ss.script:
