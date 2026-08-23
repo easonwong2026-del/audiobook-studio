@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from ui import voice_handlers
+from ui.components import voice_binding
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +16,8 @@ APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
 APP_TREE = ast.parse(APP_SOURCE)
 HANDLERS_SOURCE = (ROOT / "ui" / "voice_handlers.py").read_text(encoding="utf-8")
 HANDLERS_TREE = ast.parse(HANDLERS_SOURCE)
+VOICE_COMPONENT_SOURCE = (ROOT / "ui" / "components" / "voice_binding.py").read_text(encoding="utf-8")
+VOICE_COMPONENT_TREE = ast.parse(VOICE_COMPONENT_SOURCE)
 WIRING_SOURCE = (ROOT / "ui" / "wiring" / "voice_wiring.py").read_text(encoding="utf-8")
 
 MOVED = (
@@ -37,6 +40,7 @@ def _top_level_functions(tree):
 
 APP_FUNCTIONS = _top_level_functions(APP_TREE)
 HANDLER_FUNCTIONS = _top_level_functions(HANDLERS_TREE)
+VOICE_COMPONENT_FUNCTIONS = _top_level_functions(VOICE_COMPONENT_TREE)
 
 
 def _snapshot(script, bindings):
@@ -63,11 +67,36 @@ def test_frozen_cross_domain_handlers_and_library_state_remain_in_app():
         "finalize_voice_cast_ui",
         "preview_bound_voice",
         "refresh_production_voice_choices",
-        "_role_config_title",
         "_lib_path",
         "_lib_voices",
     ):
         assert name in APP_FUNCTIONS, f"frozen app contract moved unexpectedly: {name}"
+
+
+def test_role_config_title_has_one_shared_presentation_owner():
+    assert "_role_config_title" not in APP_FUNCTIONS
+    assert "_role_config_title" not in HANDLER_FUNCTIONS
+    assert "format_role_config_title" in VOICE_COMPONENT_FUNCTIONS
+    assert "format_role_config_title(role, voice, dest)" in ast.unparse(APP_FUNCTIONS["bind_voice"])
+    assert "format_role_config_title(role, voice, binding)" in ast.unparse(
+        HANDLER_FUNCTIONS["select_role_from_list"]
+    )
+    for forbidden in ("gradio", "import app", "services", "VoiceCastResolver", "RuntimeTTSService"):
+        assert forbidden not in VOICE_COMPONENT_SOURCE
+
+
+@pytest.mark.parametrize(
+    ("role", "voice", "binding", "expected"),
+    [
+        (None, None, None, "### 当前角色配置\n请从左侧角色列表选择角色。"),
+        ("旁白", {"description": "沉稳男中音", "name": "Ignored"}, "/tmp/narrator.wav", "### 当前角色：旁白\n沉稳男中音\n✅ 已绑定"),
+        ("妈妈", {"name": "温柔女声"}, None, "### 当前角色：妈妈\n温柔女声\n⚠ 待绑定"),
+        ("配角", {}, "", "### 当前角色：配角\n⚠ 待绑定"),
+        ("配角", {}, "/tmp/side.wav", "### 当前角色：配角\n✅ 已绑定"),
+    ],
+)
+def test_shared_role_config_title_exact_behavior(role, voice, binding, expected):
+    assert voice_binding.format_role_config_title(role, voice, binding) == expected
 
 
 def test_live_voice_wiring_uses_module_qualified_low_risk_owners():

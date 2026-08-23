@@ -513,7 +513,7 @@ choices、voice library rows、browser selection、save 4-tuple 和 playback out
 | `app.select_voice_from_browser` | DUPLICATE | `voice_wiring` browser select callback（baseline） | `ui.voice_handlers.select_voice_from_browser` | dict/list rows、missing-file fallback 和 selected value 不变 | yes（app 定义） | low | invalid/normal/existing/missing browser fixtures |
 | `app.refresh_categories` | DUPLICATE | open/archive chains（baseline） | `ui.voice_handlers.refresh_categories` | 绑定/保存分类 choices/value 不变 | yes（app 定义） | low | chain order test + category regression |
 | `app.refresh_voice_filters` | DUPLICATE | nav/overview chains（baseline） | `ui.voice_handlers.refresh_voice_filters` | 三个 dropdown 输出顺序和值不变 | yes（app 定义） | low | module-qualified chain audit + filter fixture |
-| `ui.voice_handlers._role_config_title` | COMPAT-adjacent duplicate helper | only new `select_role_from_list` | private local formatting helper | `app._role_config_title` must remain for frozen `bind_voice` caller | no (app copy retained) | medium | baseline AST caller audit: `bind_voice` loads app helper; no app import in new module |
+| `ui.components.voice_binding.format_role_config_title` | LIVE presentation owner | `app.bind_voice`, `ui.voice_handlers.select_role_from_list` | none | pure shared formatter; no compatibility surface | no | low | final AST/rg audit shows one definition and two callers; exact-output fixtures |
 | `app._lib_path` | COMPAT / cross-domain state | `bind_voice`, `preview_bound_voice`, QA repair override, Supplement, Quick TTS/Utility | none in this round | shared dynamic voice-library root and runtime/utility callers | no | high | full-repo AST/rg caller graph; explicit retention test |
 | `app._lib_voices` | COMPAT / cross-domain state | open-project choices, save/utility choices and production paths | none in this round | existing app-level choice consumers remain live | no | medium | full-repo AST/rg caller graph; explicit retention test |
 | `app.bind_voice`, Voice Cast UI/finalization | FROZEN | Voice Cast wiring, persistence/finalization and legacy compatibility | none | explicitly out of scope; state and file contracts cross domains | no | high | Voice Cast tests and app ownership assertions |
@@ -539,7 +539,7 @@ Cross-domain state intentionally remains app-owned:
 app._lib_path       -> bind_voice / RuntimeTTS preview / QA repair /
                        Supplement / Quick TTS / Utility
 app._lib_voices     -> open-project role choices / production and utility choices
-app._role_config_title -> bind_voice (frozen Voice Cast-adjacent path)
+ui.components.voice_binding.format_role_config_title -> app.bind_voice / ui.voice_handlers.select_role_from_list
 ```
 
 `_open_chain_rest` and `_post_archive_reconcile` retain the exact order
@@ -564,8 +564,8 @@ API and event order; only `app.py` injection values now point to the new module.
 
 - `bind_voice`, `refresh_role_summary`, `refresh_voice_cast_ui`,
   `finalize_voice_cast_ui`, `preview_bound_voice`, `refresh_production_voice_choices`.
-- `_lib_path`, `_lib_voices`, and app `_role_config_title` because their caller graphs
-  cross Voice Cast, runtime, QA, Supplement, Quick TTS/Utility, or opened-project flows.
+- `_lib_path` and `_lib_voices` because their caller graphs cross Voice Cast, runtime, QA,
+  Supplement, Quick TTS/Utility, or opened-project flows.
 - `ui/components/voice_binding.py` remains pure presentation helpers; no wiring moved
   there. `lib/project_manager.py` and all compatibility wrappers remain untouched.
 
@@ -581,8 +581,8 @@ API and event order; only `app.py` injection values now point to the new module.
 ### Remaining cleanup candidates
 
 - Settings residual candidates require a separate caller/compatibility round.
-- `_role_config_title` app duplicate can only be revisited after frozen `bind_voice` is
-  migrated or given a stable UI-owned formatting dependency.
+- Role configuration title formatting is no longer a cleanup candidate: the shared
+  `ui.components.voice_binding.format_role_config_title` owner is now used by both callers.
 - `_lib_path` / `_lib_voices` require a cross-domain ownership design before any move.
 
 ## Behavior-equivalence fixtures and verification
@@ -624,3 +624,13 @@ Candidate verification:
 - GitHub Actions: Ubuntu Python 3.10 `pass`; Windows Python 3.10 selected workflow
   tests `pass`.
 - Final worktree: clean.
+
+## Round 3C final formatter cleanup
+
+The duplicate `_role_config_title` implementations found in the PR review were removed.
+`ui/components/voice_binding.py::format_role_config_title` is now the sole presentation
+owner. `app.bind_voice` and `ui.voice_handlers.select_role_from_list` call it directly;
+the Voice Cast business path is otherwise unchanged. Exact fixtures cover `role=None`,
+description-first formatting, name fallback, no metadata, bound, and unbound outputs.
+The shared component remains free of Gradio, app, services, VoiceCastResolver, and
+RuntimeTTSService dependencies.

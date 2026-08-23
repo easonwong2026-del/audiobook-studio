@@ -13,6 +13,7 @@ import gradio as gr
 
 from lib import config, dataframe_style as df_style, voice_lib
 from services.project import ProjectService
+from ui.components import format_role_config_title
 from ui.components.voice_binding import build_role_management_choices
 
 
@@ -40,18 +41,6 @@ def refresh_role_list(search, current_role, ss):
     return gr.update(choices=choices, value=selected)
 
 
-def _role_config_title(role, voice, binding):
-    """生成右侧当前角色标题，避免再次提供角色选择控件。"""
-    if not role:
-        return "### 当前角色配置\n请从左侧角色列表选择角色。"
-    description = str(
-        (voice or {}).get("description") or (voice or {}).get("name") or ""
-    ).strip()
-    detail = f"\n{description}" if description else ""
-    status = "✅ 已绑定" if binding else "⚠ 待绑定"
-    return f"### 当前角色：{role}{detail}\n{status}"
-
-
 def select_role_from_list(role, ss):
     """选择角色列表项后加载该角色的绑定状态和右侧配置。"""
     empty = (
@@ -69,7 +58,7 @@ def select_role_from_list(role, ss):
     current = f"当前绑定音频：{os.path.basename(binding)}" if binding else "当前绑定音频：未选择"
     return (
         role,
-        _role_config_title(role, voice, binding),
+        format_role_config_title(role, voice, binding),
         gr.update(value=binding),
         gr.update(value=None),
         f"*{current}*",

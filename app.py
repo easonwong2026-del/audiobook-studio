@@ -67,6 +67,7 @@ from ui.components import (
     build_role_management_choices,
     create_production_navigation,
     empty_dashboard_html,
+    format_role_config_title,
     format_bound_role_choices,
     format_role_label,
     format_role_management_summary,
@@ -691,16 +692,6 @@ def finalize_voice_cast_ui(ss):
         return f"❌ 锁定失败：{exc}"
 
 
-def _role_config_title(role, voice, binding):
-    """生成右侧当前角色标题，避免再次提供角色选择控件。"""
-    if not role:
-        return "### 当前角色配置\n请从左侧角色列表选择角色。"
-    description = str((voice or {}).get("description") or (voice or {}).get("name") or "").strip()
-    detail = f"\n{description}" if description else ""
-    status = "✅ 已绑定" if binding else "⚠ 待绑定"
-    return f"### 当前角色：{role}{detail}\n{status}"
-
-
 def _lib_voices():
     return voice_lib.voice_names()
 def _lib_path(n):
@@ -753,7 +744,7 @@ def bind_voice(role, audio_file, from_lib, ss):
         ),
         gr.update(),
         role,
-        _role_config_title(role, voice, dest),
+        format_role_config_title(role, voice, dest),
         f"*当前绑定音频：{os.path.basename(dest)}*",
     )
 
