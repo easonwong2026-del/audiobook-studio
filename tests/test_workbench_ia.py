@@ -6,7 +6,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from lib.types import ProjectSummary
-from services.project_catalog import ProjectCatalogService
+from services.project_catalog import (
+    RELATION_INVALID,
+    RELATION_ORPHAN,
+    ProjectCatalogService,
+)
 from services.session import SessionState
 from ui import project_catalog_handlers as handlers
 from ui.navigation import NAV_ITEMS
@@ -131,6 +135,89 @@ def test_search_keeps_parent_context_and_never_changes_opened_project(monkeypatc
     assert ss.selected_project is None
     assert ss.project == "book"
     assert ss.script == {"sentinel": "opened-book"}
+
+
+def test_search_uses_full_catalog_child_count_for_visible_book_row(monkeypatch):
+    book = _summary("book", project_id="book-id", title="完整作品")
+    chapters = [
+        _summary(
+            f"chapter-{order}",
+            kind="chapter",
+            project_id=f"chapter-{order}-id",
+            parent_id="book-id",
+            title=f"第{order}章项目",
+            chapter_title=f"第{order}章",
+            chapter_order=order,
+        )
+        for order in (1, 2, 3)
+    ]
+    catalog = [book, *chapters]
+    scan_calls = 0
+
+    def scan(_cls):
+        nonlocal scan_calls
+        scan_calls += 1
+        return catalog
+
+    monkeypatch.setattr(ProjectCatalogService, "scan", classmethod(scan))
+
+    ss = SessionState(project="chapter-2", script={"sentinel": "opened"})
+    ss.set_selected("book")
+    rendered, _info, selected_state = handlers.apply_project_search("第3章", ss)
+
+    names = [
+        ProjectCatalogService.project_name_from_display(row[0])
+        for row in rendered["data"]
+    ]
+    assert names == ["book", "chapter-3"]
+    assert rendered["data"][0][1] == "整书 · 关联 3 个章节项目"
+    assert selected_state == "book"
+    assert ss.selected_project == "book"
+    assert ss.project == "chapter-2"
+    assert ss.script == {"sentinel": "opened"}
+    assert scan_calls == 1
+
+
+def test_inspector_relation_warning_distinguishes_orphan_and_invalid(monkeypatch):
+    orphan = _summary(
+        "orphan",
+        kind="chapter",
+        project_id="orphan-id",
+        title="孤立章节",
+        chapter_title="孤立章节",
+    )
+    invalid = _summary(
+        "invalid",
+        kind="chapter",
+        project_id="invalid-id",
+        parent_id="invalid-id",
+        title="无效章节",
+        chapter_title="无效章节",
+    )
+    hierarchy = ProjectCatalogService.hierarchy_from_summaries([orphan, invalid])
+    by_name = {item.project_name: item for item in hierarchy.projects}
+    assert by_name["orphan"].relation_status == RELATION_ORPHAN
+    assert by_name["invalid"].relation_status == RELATION_INVALID
+    monkeypatch.setattr(
+        ProjectCatalogService,
+        "scan",
+        classmethod(lambda cls: [orphan, invalid]),
+    )
+
+    ss = SessionState(project="opened", script={"sentinel": "opened"})
+    ss.set_selected("orphan")
+    _rows, orphan_info, _selected = handlers.apply_project_search("孤立", ss)
+    assert "⚠ 未归属章节 · 未设置所属整书" in orphan_info
+    assert "⚠ 关系无效" not in orphan_info
+    assert ss.project == "opened"
+    assert ss.selected_project == "orphan"
+
+    ss.set_selected("invalid")
+    _rows, invalid_info, _selected = handlers.apply_project_search("无效", ss)
+    assert "⚠ 关系无效 · 章节不能将自己设为所属整书" in invalid_info
+    assert "⚠ 未归属章节" not in invalid_info
+    assert ss.project == "opened"
+    assert ss.selected_project == "invalid"
 
 
 def test_row_select_updates_only_selected_and_inspector_names_both_contexts(monkeypatch):

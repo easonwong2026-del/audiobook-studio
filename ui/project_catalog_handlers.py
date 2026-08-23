@@ -136,20 +136,41 @@ def _structure_label(summary, hierarchy) -> str:
     return f"⚠ {summary.relation_message or '章节关系待诊断'}"
 
 
-def _render_bookshelf_summaries(projects) -> dict:
+def _chapter_relation_warning(summary) -> str:
+    """Render the selected Chapter relation warning without changing Catalog state."""
+    message = html.escape(summary.relation_message or "关系待诊断")
+    if summary.relation_status == RELATION_ORPHAN:
+        return f"⚠ 未归属章节 · {message}"
+    if summary.relation_status == RELATION_INVALID:
+        return f"⚠ 关系无效 · {message}"
+    return f"⚠ {message}"
+
+
+def _render_bookshelf_summaries(projects, *, catalog_summaries=None) -> dict:
     """Render rows from an already-scanned catalog snapshot."""
-    projects = list(projects or [])
-    hierarchy = ProjectCatalogService.hierarchy_from_summaries(projects)
-    projects = list(hierarchy.projects)
+    visible_projects = list(projects or [])
+    snapshot = (
+        list(catalog_summaries)
+        if catalog_summaries is not None
+        else visible_projects
+    )
+    hierarchy = ProjectCatalogService.hierarchy_from_summaries(snapshot)
+    normalized_by_name = {
+        summary.project_name: summary for summary in hierarchy.projects
+    }
     rows = [
         [
-            ProjectCatalogService.display_name(p),
-            _structure_label(p, hierarchy),
-            f"{p.completed}/{p.segments}",
-            ProjectCatalogService.display_status(p),
-            _format_modified_at(p.modified_at),
+            ProjectCatalogService.display_name(
+                normalized_by_name.get(project.project_name, project)
+            ),
+            _structure_label(
+                normalized_by_name.get(project.project_name, project), hierarchy
+            ),
+            f"{project.completed}/{project.segments}",
+            ProjectCatalogService.display_status(project),
+            _format_modified_at(project.modified_at),
         ]
-        for p in projects
+        for project in visible_projects
     ]
     return df_style.style_dataframe(
         rows,
@@ -159,11 +180,20 @@ def _render_bookshelf_summaries(projects) -> dict:
     )
 
 
-def render_bookshelf_rows(search_query: str = "", projects=None) -> dict:
+def render_bookshelf_rows(
+    search_query: str = "", projects=None, *, catalog_summaries=None
+) -> dict:
     """渲染书架 Dataframe（项目|结构|段进度|状态|最近修改）。"""
     if projects is None:
-        projects = ProjectCatalogService.search_projects(search_query or "")
-    return _render_bookshelf_summaries(projects)
+        if catalog_summaries is None:
+            projects = ProjectCatalogService.search_projects(search_query or "")
+        else:
+            projects = ProjectCatalogService.filter_projects(
+                catalog_summaries, search_query or ""
+            )
+    return _render_bookshelf_summaries(
+        projects, catalog_summaries=catalog_summaries
+    )
 
 
 def apply_project_search(query: str, ss=None) -> tuple[dict, str, str]:
@@ -182,7 +212,9 @@ def apply_project_search(query: str, ss=None) -> tuple[dict, str, str]:
     """
     summaries = ProjectCatalogService.scan()
     visible_summaries = ProjectCatalogService.filter_projects(summaries, query or "")
-    styled = render_bookshelf_rows(query, visible_summaries)
+    styled = render_bookshelf_rows(
+        query, visible_summaries, catalog_summaries=summaries
+    )
     if ss is not None:
         # 搜索 query 单一状态来源：导航离开/返回后仍保持过滤
         ss.set_catalog_query(query)
@@ -245,7 +277,7 @@ def _selected_info(name: str, ss=None, summary=None, *, summaries=None) -> str:
                     f"- 所属整书：`{html.escape(summary.parent_project_name)}`"
                     if summary.relation_status == RELATION_VALID
                     and summary.parent_project_name
-                    else f"- 关系警告：**⚠ 未归属章节** · {html.escape(summary.relation_message or '关系无效')}"
+                    else f"- 关系警告：**{_chapter_relation_warning(summary)}**"
                 ),
                 f"- 章节顺序：{summary.chapter_order if summary.chapter_order is not None else '未设置'}",
             ]
@@ -1202,7 +1234,9 @@ def refresh_project_catalog(search_query: str = "", p_sel_value: str = "") -> tu
     """
     summaries = ProjectCatalogService.scan()
     bookshelf = render_bookshelf_rows(
-        search_query, ProjectCatalogService.filter_projects(summaries, search_query)
+        search_query,
+        ProjectCatalogService.filter_projects(summaries, search_query),
+        catalog_summaries=summaries,
     )
     rows, trash_choices, status = render_archived_projects()
     return (
@@ -1251,7 +1285,9 @@ def _refresh_bookshelf_management_state(
             ss.clear_selected()
         selected = ""
 
-    bookshelf = render_bookshelf_rows(query, visible_summaries)
+    bookshelf = render_bookshelf_rows(
+        query, visible_summaries, catalog_summaries=summaries
+    )
     choices = [item.project_name for item in summaries]
     opened = str(getattr(ss, "project", "") or "") if ss is not None else ""
     if opened and opened not in choices and ss is not None:
