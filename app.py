@@ -551,27 +551,6 @@ def activate_production_timer():
     """Turn on the 1s polling timer after a start/cancel action."""
     return gr.Timer(active=True)
 
-def apply_data_dir(new_dir):
-    """应用用户指定的数据保存位置（持久化到 config.json，本会话立即生效）。"""
-    if not new_dir or not new_dir.strip():
-        return "⚠ 请填写保存位置", config.get_data_dir()
-    try:
-        d = os.path.normpath(ProjectService.set_data_dir(new_dir.strip()))
-        return f"✅ 数据目录已设置为：{d}（本会话立即生效）", d
-    except Exception as e:
-        return f"❌ 设置失败：{e}", config.get_data_dir()
-
-
-def open_data_dir():
-    """在资源管理器中打开当前数据目录。"""
-    d = config.get_data_dir()
-    os.makedirs(d, exist_ok=True)
-    try:
-        os.startfile(d)
-    except OSError as exc:
-        logger.warning("打开数据目录失败: %s", exc)
-    return ""
-
 def refresh_role_summary(ss):
     """Refresh the role binding count after a save without reloading the page."""
     return refresh_voice_cast_ui(ss)[0]

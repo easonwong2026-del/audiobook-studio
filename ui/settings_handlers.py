@@ -15,6 +15,11 @@ from repositories.config_repo import ConfigRepository
 from repositories.project_repo import ProjectRepository
 from repositories.task_repo import TaskRepository
 from services import ProjectService
+from services.environment_diagnostics import (
+    diagnostics_table,
+    diagnostics_to_markdown,
+    run_environment_diagnostics,
+)
 
 logger = logging.getLogger(__name__)
 _CONFIG_PATH_AT_IMPORT = str(getattr(ConfigRepository, "CONFIG_PATH", "") or "")
@@ -603,3 +608,13 @@ def open_data_dir() -> str:
         return f"✅ 已打开数据目录：`{data_dir}`"
     except (OSError, ValueError, RuntimeError) as exc:
         return f"❌ 打开数据目录失败：{html.escape(str(exc))}"
+
+
+def run_diagnostics_ui():
+    report = run_environment_diagnostics()
+    symbol = {"ok": "✅", "warning": "⚠️", "error": "❌"}.get(report["status"], "❓")
+    return (
+        f"### {symbol} 总体状态：{report['status']}",
+        diagnostics_table(report),
+        diagnostics_to_markdown(report),
+    )
