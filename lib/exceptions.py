@@ -15,7 +15,7 @@ class ExportError(Exception):
     （https://ffmpeg.org/download.html）、以及「可改用 WAV 格式」的建议。
 
     ``services.export.ExportService`` 原样透传给上层，最终由
-    ``app.do_export`` 的 ``except Exception`` 捕获并显式展示给用户，
+    ``ui.export_handlers.do_export`` 的 ``except Exception`` 捕获并显式展示给用户，
     取代原先「静默回退 WAV」导致 UI 收不到信号的行为（R2）。
     """
     pass

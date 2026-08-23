@@ -17,10 +17,21 @@ APP_PATH = os.path.join(PROJECT_ROOT, "app.py")
 with open(APP_PATH, encoding="utf-8") as f:
     SRC = f.read()
 TREE = ast.parse(SRC)
+EXPORT_HANDLERS_PATH = os.path.join(PROJECT_ROOT, "ui", "export_handlers.py")
+with open(EXPORT_HANDLERS_PATH, encoding="utf-8") as f:
+    EXPORT_HANDLERS_SRC = f.read()
+EXPORT_HANDLERS_TREE = ast.parse(EXPORT_HANDLERS_SRC)
 
 
 def find_func(name):
     for node in TREE.body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    return None
+
+
+def find_export_func(name):
+    for node in EXPORT_HANDLERS_TREE.body:
         if isinstance(node, ast.FunctionDef) and node.name == name:
             return node
     return None
@@ -51,8 +62,9 @@ def test_gr_state_present():
 def test_services_imported_and_used():
     assert "from services" in SRC or "import services" in SRC, \
         "app.py 应引入 services 层"
-    for svc in ("ProjectService", "ExportService", "ProductionJobService"):
+    for svc in ("ProjectService", "ProductionJobService"):
         assert svc in SRC, f"app.py 未使用 {svc}"
+    assert "ExportService" in EXPORT_HANDLERS_SRC, "Export UI owner 未使用 ExportService"
 
 
 def test_handlers_take_ss():
@@ -67,8 +79,8 @@ def test_handlers_take_ss():
 
 
 def test_do_export_signature_with_vararg():
-    fn = find_func("do_export")
-    assert fn is not None, "未定义 do_export"
+    fn = find_export_func("do_export")
+    assert fn is not None, "ui/export_handlers.py 未定义 do_export"
     names = _arg_ids_with_vararg(fn)
     # 前三参位置不变，ss 通过 *args 吸收以满足 glue 测试（零改动 60 旧测试）
     assert names[:3] == ["fmt", "bitrate", "output_dir"], names
@@ -77,12 +89,12 @@ def test_do_export_signature_with_vararg():
 
 def test_do_export_subtitles_defined_and_wired():
     """O1 字幕走全新 handler do_export_subtitles，且首参为 ss、已接线。"""
-    fn = find_func("do_export_subtitles")
-    assert fn is not None, "app.py 未定义 do_export_subtitles"
+    fn = find_export_func("do_export_subtitles")
+    assert fn is not None, "ui/export_handlers.py 未定义 do_export_subtitles"
     names = _arg_ids_with_vararg(fn)
     assert names[0] == "ss", f"do_export_subtitles 首参应为 ss（实际：{names}）"
     # 接线：导出页「生成字幕」按钮 → do_export_subtitles
-    assert "e_subtitle_btn.click(do_export_subtitles" in SRC, \
+    assert "e_subtitle_btn.click(export_ui.do_export_subtitles" in SRC, \
         "O1 字幕按钮未接线到 do_export_subtitles"
 
 

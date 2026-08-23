@@ -20,6 +20,10 @@ APP_PATH = os.path.join(PROJECT_ROOT, "app.py")
 with open(APP_PATH, encoding="utf-8") as f:
     SRC = f.read()
 TREE = ast.parse(SRC)
+EXPORT_HANDLERS_PATH = os.path.join(PROJECT_ROOT, "ui", "export_handlers.py")
+with open(EXPORT_HANDLERS_PATH, encoding="utf-8") as f:
+    EXPORT_HANDLERS_SRC = f.read()
+EXPORT_HANDLERS_TREE = ast.parse(EXPORT_HANDLERS_SRC)
 VOICE_WIRING_PATH = os.path.join(PROJECT_ROOT, "ui", "wiring", "voice_wiring.py")
 with open(VOICE_WIRING_PATH, encoding="utf-8") as f:
     VOICE_WIRING_SRC = f.read()
@@ -35,6 +39,13 @@ VOICE_HANDLERS_TREE = ast.parse(VOICE_HANDLERS_SRC)
 
 def find_func(name):
     for node in TREE.body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    return None
+
+
+def find_export_func(name):
+    for node in EXPORT_HANDLERS_TREE.body:
         if isinstance(node, ast.FunctionDef) and node.name == name:
             return node
     return None
@@ -206,10 +217,12 @@ def test_o13_chapter_sel_change_preview_chapter():
 
 # ── 红线回归：既有关键 handler 仍定义、接线未变 ──
 def test_redline_core_handlers_still_defined():
-    for fn in ("create_project", "do_export", "preview_bound_voice",
-               "do_export_subtitles", "refresh_top_status", "refresh_queue_list",
+    for fn in ("create_project", "preview_bound_voice",
+               "refresh_top_status", "refresh_queue_list",
                "pause_synthesis", "resume_synthesis", "open_project"):
         assert find_func(fn) is not None, f"红线 handler 未定义: {fn}"
+    for fn in ("do_export", "do_export_subtitles"):
+        assert find_export_func(fn) is not None, f"Export handler 未定义: {fn}"
 
 
 def test_redline_p_open_chain_preserves_top_status_preview_queue():

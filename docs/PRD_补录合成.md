@@ -125,7 +125,7 @@ errors = script_loader.validate_script(script)   # 复用角色未定义 / 缺�
 
 ## 6. 待确认问题（已在本功能内给出默认决策）
 
-1. **落盘位置**：默认项目 `output/`（经 `_safe_path_for_file_component` 保证 Gradio 可服务）；不强制用户自定目录。
+1. **落盘位置**：默认项目 `output/`（经 `ui.file_component_paths.safe_path_for_file_component` 保证 Gradio 可服务）；不强制用户自定目录。
 2. **缺音重合成是否回写整本**：默认仅导出独立片段，不回写 `segments` / `project.json`（符合「单独导出」）；P2-1 回写留作可选。
 3. **整本缓存隔离**：补录产物默认不写 `segments/` 与 `project.json`（保持整本状态独立）。
 4. **文本拆分**：P0 按行拆分；按标点拆分留 P1 可选（默认 `。！？；`）。
@@ -141,7 +141,7 @@ errors = script_loader.validate_script(script)   # 复用角色未定义 / 缺�
 - **参考音频路径**：`voice_bindings.json` 的 `bindings[role]=path`；读取 `ProjectService.open_project` → `voice_bindings["bindings"][role]`；会话态 `ss.bindings`（`app.py` `open_project` 写入）。
 - **单段合成**：`lib/tts_engine.py::synthesize_segment(text, speaker_audio, emotion, emo_alpha, speech_rate, output_path, max_tokens, pinyin_hints, num_beams)`；`init_engine()`（全局单例 `_tts`）。现成范例 `app.py::regenerate_segment`：`init_engine` → 逐句 `synthesize_segment` → 写缓存键路径 → `empty_cache`。
 - **拼接 + 导出复用**：`lib/audio_pipeline.py` 新增 `export_supplement(paths, out_path, format, bitrate, target_lufs, insert_silence_sec, ...)`，复用「归一 → LUFS → ffmpeg」三段，不依赖整本 script。
-- **Gradio 下载路径白名单**：`app.py::_safe_path_for_file_component` 确保导出文件落在 `allowed_paths` 内。
+- **Gradio 下载路径白名单**：`ui.file_component_paths.safe_path_for_file_component` 确保导出文件落在 `allowed_paths` 内。
 - **小 JSON 校验复用**：`lib/script_loader.py::from_dict` + `validate_script`（别名容错 + 诊断）。
 - **UI / Tab 接线范式**：侧边栏 nav 按钮 + Group 显隐（`app.py`）；打开项目刷新角色下拉 `build_role_choices`；会话态 `services/session.py::SessionState`。
 - **配置 / 目录**：`config.get_data_dir()`、`config.get_preview_dir()`；项目目录 `ProjectService.get_project_dir(name)`。

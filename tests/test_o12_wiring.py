@@ -104,5 +104,5 @@ def test_red_line_do_export_wiring_unchanged():
 
 
 def test_red_line_subtitle_and_top_status_wiring_unchanged():
-    assert "e_subtitle_btn.click(do_export_subtitles" in SRC, "O1 字幕红线被改动"
+    assert "e_subtitle_btn.click(export_ui.do_export_subtitles" in SRC, "O1 字幕红线被改动"
     assert ".then(refresh_top_status" in SRC, "O11 顶栏刷新红线被改动"
