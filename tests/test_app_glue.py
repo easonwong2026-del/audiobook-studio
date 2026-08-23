@@ -3,7 +3,7 @@
 通过 AST 解析 + 字符串断言验证：
   - B5: create_project 的 return 均为 4 元组；p_create.click 的 outputs 仅 4 个且 p_sel 只出现一次
   - B4: do_export(fmt, bitrate, output_dir) 签名存在；e_go.click(do_export, [e_fmt, e_br, e_save_dir], ...) 含 e_br
-  - B10: save_to_lib 的 return 为 3 元组且 outputs 含 e_voice
+  - B10: save_to_lib 的 return 为 4 元组且 outputs 含 e_voice
   - D4: preview_bound_voice 函数被定义，且 v_preview_btn.click(preview_bound_voice, ...) 接线
   - B12: from lib import script_loader 已 import；create_project 内调用 load_script / validate_script
 """
@@ -23,6 +23,10 @@ VOICE_WIRING_PATH = os.path.join(PROJECT_ROOT, "ui", "wiring", "voice_wiring.py"
 with open(VOICE_WIRING_PATH, encoding="utf-8") as f:
     VOICE_WIRING_SRC = f.read()
 VOICE_WIRING_TREE = ast.parse(VOICE_WIRING_SRC)
+VOICE_HANDLERS_PATH = os.path.join(PROJECT_ROOT, "ui", "voice_handlers.py")
+with open(VOICE_HANDLERS_PATH, encoding="utf-8") as f:
+    VOICE_HANDLERS_SRC = f.read()
+VOICE_HANDLERS_TREE = ast.parse(VOICE_HANDLERS_SRC)
 
 
 def has_import_from(module, name):
@@ -36,6 +40,13 @@ def has_import_from(module, name):
 
 def find_func(name):
     for node in TREE.body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    return None
+
+
+def find_voice_func(name):
+    for node in VOICE_HANDLERS_TREE.body:
         if isinstance(node, ast.FunctionDef) and node.name == name:
             return node
     return None
@@ -135,9 +146,9 @@ def test_json_create_reuses_open_project_and_full_voice_refresh_chain():
     assert any(len(node.args[2].elts) == 7 for node in open_calls), (
         "创建后的 open_project 必须返回完整 7 项页面状态"
     )
-    assert "refresh_voice_filters" in SRC
-    assert "refresh_voice_lib" in SRC
-    assert "refresh_role_list" in SRC
+    assert "voice_ui.refresh_voice_filters" in SRC
+    assert "voice_ui.refresh_voice_lib" in SRC
+    assert "voice_ui.refresh_role_list" in SRC
     assert '"refresh_role_summary": refresh_role_summary' in SRC
 
 
@@ -162,7 +173,7 @@ def test_do_export_wiring():
 
 def test_save_to_lib_returns_4tuple():
     """save_to_lib 5.2 增 v_save_category 刷新，返回 4 元组（含分类下拉更新）。"""
-    fn = find_func("save_to_lib")
+    fn = find_voice_func("save_to_lib")
     assert fn is not None, "未找到 save_to_lib 函数"
     returns = [n for n in ast.walk(fn)
                if isinstance(n, ast.Return) and isinstance(n.value, ast.Tuple)]

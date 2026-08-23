@@ -134,15 +134,15 @@ def test_role_management_choices_keep_role_value_and_multiline_summary():
 
 
 def test_role_list_selection_loads_right_hand_configuration(monkeypatch):
-    import app
+    from ui import voice_handlers as voice_ui
 
     snapshot = SimpleNamespace(
         script={"voices": {"旁白": {"description": "沉稳男中音"}, "妈妈": {"description": "温柔女声"}}},
         bindings={"旁白": "/tmp/narrator.wav", "妈妈": None},
     )
     session = SimpleNamespace(project="demo", bindings=snapshot.bindings)
-    monkeypatch.setattr(app, "_snap", lambda _session: snapshot)
-    result = app.select_role_from_list("妈妈", session)
+    monkeypatch.setattr(voice_ui, "_snapshot", lambda _session: snapshot)
+    result = voice_ui.select_role_from_list("妈妈", session)
     assert result[0] == "妈妈"
     assert "当前角色：妈妈" in result[1]
     assert result[2]["value"] is None

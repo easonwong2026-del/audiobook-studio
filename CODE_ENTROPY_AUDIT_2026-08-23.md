@@ -478,3 +478,159 @@ after:  p_refresh -> catalog_ui.reconcile_project_selector
 - 生产代码净减少 57 行；新增/更新测试只锁定本轮边界，不改业务语义。
 - changed production files 仅 `app.py` 与 `ui/project_view_handlers.py`；无 forbidden module
   或依赖变更。
+
+---
+
+# Repository Entropy Cleanup Round 3C — Voice Asset UI Boundary Extraction
+
+日期：2026-08-23
+
+Baseline：`c70f5edc9a84243da77cc332af2f92fb7c932419`（PR #58 squash merge，当前
+`origin/main`）。PR #58 状态为 `MERGED`，其 squash merge commit 已进入当前
+`main`；没有要求原始 PR head `14d2bd78bd35df41f8eb695bf037c16cc09717cc`
+成为 main ancestor。启动时工作树 clean，Round 3C 分支为
+`refactor/voice-asset-boundary-r3c`。
+
+## Baseline evidence and full caller audit
+
+修改前已对 `app.py`、`ui/voice_handlers.py`、`ui/wiring/voice_wiring.py`、
+`ui/components/voice_binding.py`、services、repositories、lib、tests、MCP、scripts
+和 docs 做 `rg` + AST 审计，并补查 `getattr`、字符串 callback key、monkeypatch、
+import/re-export。Baseline full pytest 为 `1278 passed, 26 skipped, 76 warnings`
+（50.34s）；Windows selected workflow 同款集合为 `329 passed, 19 warnings`
+（9.50s）。Baseline Voice Asset fixture 已记录 role list、role selection、category
+choices、voice library rows、browser selection、save 4-tuple 和 playback outputs。
+
+| symbol/file | category | current callers | replacement | compatibility reason | delete_now | risk | evidence |
+|---|---|---|---|---|---:|---|---|
+| `app.refresh_role_list` | DUPLICATE | nav Voices、overview Voices、create chain（baseline） | `ui.voice_handlers.refresh_role_list` | 无独立 legacy/public API；仍由相同 voice wiring callback key 使用 | yes（app 定义） | low | baseline AST/rg 仅命中上述 live chains；candidate owner tests + A–G fixtures |
+| `app.select_role_from_list` | DUPLICATE | `voice_wiring` callback dict（baseline）及旧 direct test | `ui.voice_handlers.select_role_from_list` | callback key 保持不变；7 输出契约保持 | yes（app 定义） | low | callback mapping、AST owner test、bound/unbound/invalid fixture |
+| `app.play_lib_voice` | DUPLICATE | `voice_wiring` `v_lib.change` callback（baseline） | `ui.voice_handlers.play_lib_voice` | 播放路径/None fallback 不变 | yes（app 定义） | low | callback mapping + existing/missing path fixture |
+| `app._save_category_choices` | DUPLICATE | save/refresh category helpers 与 category tests（baseline） | `ui.voice_handlers._save_category_choices` | “未分类”与“— 新建 —” choices 语义不变 | yes（app 定义） | low | direct output fixture、category dropdown regression tests |
+| `app.save_to_lib` | DUPLICATE | `voice_wiring` save callback（baseline） | `ui.voice_handlers.save_to_lib` | `ProjectService.save_to_lib`、消息和四元组 outputs 不变 | yes（app 定义） | medium | ValueError/success fixtures、B10 wiring output test |
+| `app.filter_vlib_by_category` | DUPLICATE | `voice_wiring` category change callback（baseline） | `ui.voice_handlers.filter_vlib_by_category` | `voice_lib.voice_names(category)` contract 不变 | yes（app 定义） | low | callback mapping + filter fixture |
+| `app.refresh_voice_lib` | DUPLICATE | open/archive/nav/overview chains + browser wiring（baseline） | `ui.voice_handlers.refresh_voice_lib` | Dataframe 4-column schema、style 和 category value 不变 | yes（app 定义） | medium | caller order audit + rows/schema fixture |
+| `app.select_voice_from_browser` | DUPLICATE | `voice_wiring` browser select callback（baseline） | `ui.voice_handlers.select_voice_from_browser` | dict/list rows、missing-file fallback 和 selected value 不变 | yes（app 定义） | low | invalid/normal/existing/missing browser fixtures |
+| `app.refresh_categories` | DUPLICATE | open/archive chains（baseline） | `ui.voice_handlers.refresh_categories` | 绑定/保存分类 choices/value 不变 | yes（app 定义） | low | chain order test + category regression |
+| `app.refresh_voice_filters` | DUPLICATE | nav/overview chains（baseline） | `ui.voice_handlers.refresh_voice_filters` | 三个 dropdown 输出顺序和值不变 | yes（app 定义） | low | module-qualified chain audit + filter fixture |
+| `ui.components.voice_binding.format_role_config_title` | LIVE presentation owner | `app.bind_voice`, `ui.voice_handlers.select_role_from_list` | none | pure shared formatter; no compatibility surface | no | low | final AST/rg audit shows one definition and two callers; exact-output fixtures |
+| `app._lib_path` | COMPAT / cross-domain state | `bind_voice`, `preview_bound_voice`, QA repair override, Supplement, Quick TTS/Utility | none in this round | shared dynamic voice-library root and runtime/utility callers | no | high | full-repo AST/rg caller graph; explicit retention test |
+| `app._lib_voices` | COMPAT / cross-domain state | open-project choices, save/utility choices and production paths | none in this round | existing app-level choice consumers remain live | no | medium | full-repo AST/rg caller graph; explicit retention test |
+| `app.bind_voice`, Voice Cast UI/finalization | FROZEN | Voice Cast wiring, persistence/finalization and legacy compatibility | none | explicitly out of scope; state and file contracts cross domains | no | high | Voice Cast tests and app ownership assertions |
+| `app.refresh_production_voice_choices` | MISPLACED but retained | production + utility/supplement workflows | future boundary round | crosses review/utility/production choices | no | high | direct live callers and forbidden-scope audit |
+| `app.apply_data_dir`, `app.open_data_dir` | deferred residual candidates | settings wiring / legacy settings integration | future Settings round | strong dead/duplicate candidates, but not proven safe in this round | no | medium | recorded for follow-up; no mutation made |
+
+## Caller graph before / after
+
+Low-risk Voice Asset callbacks:
+
+```text
+before: nav_voices / ov_voices / voice_create_chain / _open_chain_rest /
+        _post_archive_reconcile / voice_wiring
+        -> app.<callback>
+
+after:  same event chains and same callback keys
+        -> ui.voice_handlers.<callback>
+```
+
+Cross-domain state intentionally remains app-owned:
+
+```text
+app._lib_path       -> bind_voice / RuntimeTTS preview / QA repair /
+                       Supplement / Quick TTS / Utility
+app._lib_voices     -> open-project role choices / production and utility choices
+ui.components.voice_binding.format_role_config_title -> app.bind_voice / ui.voice_handlers.select_role_from_list
+```
+
+`_open_chain_rest` and `_post_archive_reconcile` retain the exact order
+`refresh_voice_lib → refresh_categories → refresh_production_voice_choices`; only the
+first two callback owners changed to `voice_ui.*`. `selected_project` remains isolated
+from opened `p_sel` in both chains. `ui/wiring/voice_wiring.py` keeps its callback-dict
+API and event order; only `app.py` injection values now point to the new module.
+
+## Round 3C change summary
+
+### Confirmed moved/deleted from app ownership
+
+- Removed the ten low-risk UI callback definitions listed in the table from `app.py`.
+- Added `ui/voice_handlers.py` as their single live implementation owner; it does not
+  import `app`, `ProductionRuntime`, `RuntimeTTSService`, or `VoiceCastResolver`.
+- Updated nav, overview, create, open/archive reconciliation chains and the Voice Page
+  callback map to module-qualified `voice_ui.*` owners.
+- No HTML labels, output order, state icons, disk format, storage semantics, runtime,
+  Voice Cast, engine, QA, export, utility, MCP, or dependency changes.
+
+### Retained compatibility / frozen code
+
+- `bind_voice`, `refresh_role_summary`, `refresh_voice_cast_ui`,
+  `finalize_voice_cast_ui`, `preview_bound_voice`, `refresh_production_voice_choices`.
+- `_lib_path` and `_lib_voices` because their caller graphs cross Voice Cast, runtime, QA,
+  Supplement, Quick TTS/Utility, or opened-project flows.
+- `ui/components/voice_binding.py` remains pure presentation helpers; no wiring moved
+  there. `lib/project_manager.py` and all compatibility wrappers remain untouched.
+
+### Deferred / frozen hotspots
+
+- Settings residual candidates `app.apply_data_dir` / `app.open_data_dir` are recorded,
+  not deleted.
+- `app.py` remains a HOTSPOT; no broad split or formatting pass was performed.
+- ProductionRuntime/startup state machine, TaskRepository, Storage v1/v2/v3,
+  Chapter Merge, Whole-book Assembly, QA/Repair, Export, Quick TTS, Voice Cast legacy
+  compatibility, MCP public contract and dependencies remain frozen.
+
+### Remaining cleanup candidates
+
+- Settings residual candidates require a separate caller/compatibility round.
+- Role configuration title formatting is no longer a cleanup candidate: the shared
+  `ui.components.voice_binding.format_role_config_title` owner is now used by both callers.
+- `_lib_path` / `_lib_voices` require a cross-domain ownership design before any move.
+
+## Behavior-equivalence fixtures and verification
+
+The new `tests/test_voice_asset_boundary.py` locks baseline/candidate outputs for:
+
+- role list: no project, no snapshot, search match/no match, current-role retention;
+- role selection: invalid/unbound/bound role, description/name fallback and seven outputs;
+- category choices and refresh/filter dropdown value contracts;
+- voice-library search/category rows, four-column headers, browser dict/list/invalid rows,
+  existing/missing playback paths;
+- save `ValueError` and success message/choices/four-output tuple.
+
+Candidate verification:
+
+- Targeted Round 3C + related wiring tests: `86 passed, 20 warnings`.
+- Full pytest: `1292 passed, 26 skipped, 76 warnings`，52.74s；coverage
+  `18098` statements / `81%`。相对 baseline 增加的通过项来自本轮结构/行为契约，
+  无 candidate-only failure。
+- Windows selected workflow: `329 passed, 19 warnings`，8.89s；与 baseline 集合
+  和 warning 数量一致。
+- `python -m compileall -q .`: pass（仓库 `.venv-test` Python）。
+- Ruff changed Python files `--select F`: `All checks passed!`。
+- `git diff --check`: pass。
+
+## LOC / scope accounting
+
+- `app.py`: `5298` lines at baseline → `5182` lines after extraction (net `-116`).
+- New `ui/voice_handlers.py`: `162` lines; this is an ownership extraction, so total
+  production LOC changes by `+46` while the app hotspot shrinks by 116 lines.
+- Round 3C production files: `app.py`, `ui/voice_handlers.py`; tests only add/update
+  boundary contracts and do not alter production behavior.
+
+## Delivery
+
+- Commit: `b3ca249725808262dfd39dd13d8cd00e11f4fdeb`
+- Branch: `refactor/voice-asset-boundary-r3c`
+- Pull request: [#59](https://github.com/easonwong2026-del/audiobook-studio/pull/59)
+- GitHub Actions: Ubuntu Python 3.10 `pass`; Windows Python 3.10 selected workflow
+  tests `pass`.
+- Final worktree: clean.
+
+## Round 3C final formatter cleanup
+
+The duplicate `_role_config_title` implementations found in the PR review were removed.
+`ui/components/voice_binding.py::format_role_config_title` is now the sole presentation
+owner. `app.bind_voice` and `ui.voice_handlers.select_role_from_list` call it directly;
+the Voice Cast business path is otherwise unchanged. Exact fixtures cover `role=None`,
+description-first formatting, name fallback, no metadata, bound, and unbound outputs.
+The shared component remains free of Gradio, app, services, VoiceCastResolver, and
+RuntimeTTSService dependencies.

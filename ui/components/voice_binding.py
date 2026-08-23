@@ -46,6 +46,16 @@ def format_role_label(role: str, voice: dict | None = None) -> str:
     return f"{role}（{description}）"
 
 
+def format_role_config_title(role, voice, binding):
+    """生成当前角色配置标题，保持角色页的既有文案与状态图标。"""
+    if not role:
+        return "### 当前角色配置\n请从左侧角色列表选择角色。"
+    description = str((voice or {}).get("description") or (voice or {}).get("name") or "").strip()
+    detail = f"\n{description}" if description else ""
+    status = "✅ 已绑定" if binding else "⚠ 待绑定"
+    return f"### 当前角色：{role}{detail}\n{status}"
+
+
 def build_role_management_rows(
     script: dict | None,
     bindings: dict | None,
