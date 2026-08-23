@@ -19,6 +19,10 @@ APP_PATH = os.path.join(PROJECT_ROOT, "app.py")
 with open(APP_PATH, encoding="utf-8") as f:
     SRC = f.read()
 TREE = ast.parse(SRC)
+EXPORT_HANDLERS_PATH = os.path.join(PROJECT_ROOT, "ui", "export_handlers.py")
+with open(EXPORT_HANDLERS_PATH, encoding="utf-8") as f:
+    EXPORT_HANDLERS_SRC = f.read()
+EXPORT_HANDLERS_TREE = ast.parse(EXPORT_HANDLERS_SRC)
 VOICE_WIRING_PATH = os.path.join(PROJECT_ROOT, "ui", "wiring", "voice_wiring.py")
 with open(VOICE_WIRING_PATH, encoding="utf-8") as f:
     VOICE_WIRING_SRC = f.read()
@@ -40,6 +44,13 @@ def has_import_from(module, name):
 
 def find_func(name):
     for node in TREE.body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    return None
+
+
+def find_export_func(name):
+    for node in EXPORT_HANDLERS_TREE.body:
         if isinstance(node, ast.FunctionDef) and node.name == name:
             return node
     return None
@@ -153,8 +164,8 @@ def test_json_create_reuses_open_project_and_full_voice_refresh_chain():
 
 
 def test_do_export_signature():
-    fn = find_func("do_export")
-    assert fn is not None, "未找到 do_export 函数"
+    fn = find_export_func("do_export")
+    assert fn is not None, "未找到 ui/export_handlers.py 的 do_export 函数"
     arg_names = [a.arg for a in fn.args.args]
     print(f"[B4] do_export 形参 = {arg_names}")
     assert arg_names == ["fmt", "bitrate", "output_dir"], f"do_export 形参错误: {arg_names}"

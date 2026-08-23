@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""QA 验证：导出路径安全性 — _safe_path_for_file_component 三态行为。
+"""QA 验证：导出路径安全性 — shared safe-path adapter 三态行为。
 
-从真实 app.py 源码（AST）提取该函数并执行，确保被测的是实际提交的源码。
+直接调用真实的 ui.file_component_paths.safe_path_for_file_component owner。
 使用隔离临时数据目录，不触碰用户真实文件。
 
 本脚本可与 pytest 配合使用（``python -m pytest qa_verify_export_safe_path.py -v``），
@@ -10,12 +10,10 @@
 
 from __future__ import annotations
 
-import ast
 import os
 import shutil
 import sys
 import tempfile
-import time
 
 # 加入项目路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -30,28 +28,8 @@ from lib import config  # noqa: E402
 
 print(f"[setup] DATA_DIR    = {DATA_DIR}")
 
-# ──────────── 从真实 app.py 提取函数（AST，确保测的是真源码）────────────
-APP_PATH = os.path.join(os.path.dirname(__file__), "app.py")
-with open(APP_PATH, encoding="utf-8") as f:
-    src = f.read()
-
-tree = ast.parse(src)
-func_src = None
-for node in tree.body:
-    if (
-        isinstance(node, ast.FunctionDef)
-        and node.name == "_safe_path_for_file_component"
-    ):
-        func_src = ast.get_source_segment(src, node)
-        break
-
-assert func_src is not None, (
-    "未在 app.py 中找到 _safe_path_for_file_component 定义"
-)
-
-ns: dict = {"os": os, "shutil": shutil, "tempfile": tempfile, "time": time, "config": config}
-exec(compile(func_src, "<app.py:_safe_path_for_file_component>", "exec"), ns)
-safe_path = ns["_safe_path_for_file_component"]
+# ──────────── 调用真实 shared owner ────────────
+from ui.file_component_paths import safe_path_for_file_component as safe_path
 
 print(f"[setup] gettempdir  = {tempfile.gettempdir()}")
 print(f"[setup] data_dir()  = {config.get_data_dir()}")
@@ -97,7 +75,7 @@ results.append(("None 分支", ret3 is None, f"返回={ret3}"))
 # ──────────── 报告 ────────────
 print()
 print("=" * 60)
-print("  _safe_path_for_file_component ���态验证")
+print("  safe_path_for_file_component ���态验证")
 print("=" * 60)
 all_ok = True
 for name, ok, detail in results:

@@ -753,3 +753,180 @@ Candidate:
   ownership cleanup 净减少 21 行；新增测试与审计记录不改变运行时行为。
 - Final worktree：clean；分支 `refactor/settings-residual-boundary-r3d` 已推送并跟踪
   `origin/refactor/settings-residual-boundary-r3d`。
+
+---
+
+# Repository Entropy Round 3E — Post-Cleanup Ownership Re-Audit
+
+日期：2026-08-23
+
+Round 3E 以 PR #60 squash merge 后的 `81653416ad970014b4b273f1942eedf1c37e8c08`
+为审计基线。复核了 Round 3A–3D 的 ownership 结果、app.py 剩余 callback、UI
+modules、services、tests、scripts、MCP 和 docs；没有回退已经完成的 Project View、
+Voice Asset 或 Settings ownership。Formal Export 被确认仍是 app.py 中下一块完整
+implementation boundary；QA/Review、Voice Cast、Utility、Runtime 和 Storage 均标记
+为 deferred/frozen，不在本轮修改。
+
+## Re-audit result
+
+| area | result | Round 3F disposition |
+|---|---|---|
+| Project Catalog / Project View / Chapter Tree | 唯一 owner 已稳定 | frozen |
+| Voice Asset / shared role presentation | 唯一 owner 已稳定 | frozen |
+| Settings / diagnostics | handler owner 已稳定，repository imports 仍是 deferred debt | frozen/deferred |
+| Formal Export UI observer/callbacks | 仍集中在 app.py，且 wiring 与业务 observer 混合 | selected for Round 3F |
+| Supplement / Quick TTS safe-file adaptation | 与 Formal Export 共用 app helper | shared-owner extraction only |
+| QA/Review / Voice Cast / Utility business logic / Runtime / Storage | 非本轮 boundary | frozen |
+
+No Round 3E production code was changed; this section records the selection evidence only.
+
+---
+
+# Repository Entropy Round 3F — Formal Export UI Boundary Extraction
+
+日期：2026-08-23
+
+Baseline：`81653416ad970014b4b273f1942eedf1c37e8c08`（PR #60 squash merge，当前
+`origin/main`）。分支：`refactor/export-ui-boundary-r3f`。
+
+## Before caller audit and graph
+
+对 baseline 的 `app.py`、`ui/**`、`services/**`、`repositories/**`、`tests/**`、
+`scripts/**`、`mcp_server/**`、`docs/**` 和 `qa_verify_export_safe_path.py` 做了 `rg`、
+AST、import alias、`getattr`、monkeypatch、动态字符串以及 Gradio
+`.click/.change/.tick/.then/.load` 审计。未发现通过 `getattr`、动态 import 或 MCP
+字符串调用这些 app callbacks 的兼容契约；测试中的旧 `app.*` 引用属于需要随 owner
+迁移的结构/行为契约。
+
+```text
+before:
+app.py
+  ├─ _EXPORT_ACTIVE_STATUSES / _EXPORT_TERMINAL_STATUSES / _EXPORT_STATUS_LABELS
+  ├─ _remember_export_ui_state / _export_ui_reset / _resolve_export_ui_artifact
+  ├─ _copy_export_ui_artifact / _export_ui_values
+  ├─ refresh_export_status / open_export_location / do_export
+  ├─ refresh_export_readiness / do_export_subtitles / refresh_export_default_dir
+  └─ _safe_path_for_file_component
+       ├─ Formal Export (_export_ui_values → download output)
+       ├─ do_supplement_export
+       └─ do_quick_tts_export
+
+  Gradio Export callbacks (timer/readiness/start/open/subtitle/default-dir)
+  └─ bare app-local functions above
+
+after:
+app.py
+  └─ composition/wiring only
+       ├─ export_ui.refresh_export_default_dir
+       ├─ export_ui.refresh_export_readiness
+       ├─ export_ui.refresh_export_status
+       ├─ export_ui.do_export
+       ├─ export_ui.open_export_location
+       └─ export_ui.do_export_subtitles
+
+ui/export_handlers.py
+  └─ all Formal Export UI state, observers, guards, manifest adapter and subtitle callback
+       └─ ExportService / ProjectService / QualityService / WorkflowService
+          └─ ui.file_component_paths.safe_path_for_file_component
+
+ui/file_component_paths.py
+  └─ one shared Gradio File safe-path adapter
+       ├─ Formal Export
+       ├─ do_supplement_export
+       └─ do_quick_tts_export
+```
+
+## Ownership and frozen behavior
+
+- All 13 listed Export symbols moved from `app.py` to `ui/export_handlers.py`; no app
+  trampoline or duplicate implementation remains.
+- `do_export(fmt, bitrate, output_dir, *args)` retains the exact positional compatibility
+  contract, including `qa_policy`, `ss`, `active_task_id`, and `active_output_dir`.
+- SessionState fields `_export_ui_task_id`, `_export_ui_output_dir`, and
+  `_export_ui_project` remain tracking pointers only; durable authority remains
+  `ExportService`/`TaskRepository`.
+- Pending/running/cancelling/pausing/paused/recovering second-click guard, `EXPORT_ACTIVE`
+  race extraction, project-switch isolation, unknown-state polling, and timer transitions
+  are unchanged.
+- Done still requires ready delivery manifest, matching `export_id`, a relative artifact
+  resolved through `project_paths.resolve_relative`, an existing non-empty file, and only
+  then shows `✅ 导出成功`.
+- Optional user copy remains non-fatal; `open_export_location` still requires done + ready
+  manifest and uses `lib.procutil.open_in_folder`.
+- `refresh_export_readiness`, subtitle formats (`srt`/`lrc`/`both`/`none`), and default-dir
+  fallback/messages are unchanged.
+- `app.launch(allowed_paths=[config.get_data_dir()])` is unchanged.
+- Supplement and Quick TTS diffs only redirect the shared safe-path call; their output
+  directories, naming, bitrate, format, messages, synthesis, runtime, preview and folder
+  opening are untouched.
+- No changes to `services/export.py` business logic, QA/Review, Voice Cast, Utility
+  business logic, ProductionRuntime, Storage, MCP contract, dependencies or user-facing
+  copy.
+
+## Safe-path equivalence
+
+The baseline AST body of `app._safe_path_for_file_component` and the candidate body of
+`ui.file_component_paths.safe_path_for_file_component` match after owner-name normalization.
+The helper preserves:
+
+- `None`/invalid-file passthrough;
+- data-dir subtree passthrough;
+- external-file copy to `tempfile.gettempdir()` with source retained;
+- timestamp suffix for duplicate temp names;
+- `commonpath` `ValueError` as external-path handling;
+- copy-failure fallback to the original path;
+- real absolute/commonpath traversal behavior.
+
+## Tests and fixtures
+
+`tests/test_export_ui_boundary.py` proves unique owners, forbidden app/service imports,
+unchanged event graph/timer, exact `do_export` signature, allowed-path wiring, utility-only
+redirects, and safe-path internal/external/None/missing/traversal/duplicate/copy-failure/
+`commonpath` behavior. Existing `tests/test_export_ux.py` now patches the real
+`ui.export_handlers` owner and retains these fixtures:
+
+- start → pending; active second click; `EXPORT_ACTIVE` race;
+- project switch isolation; pending → running → done/error/cancelled/interrupted/
+  needs_attention/unknown polling;
+- done + ready manifest success; done + not-ready manifest no false success;
+- open location; legacy v1/v2 artifacts; optional copy success/failure;
+- subtitle generation and no-window folder opening.
+
+`tests/qa_allowed_paths_test.py` and `qa_verify_export_safe_path.py` now exercise the real
+shared helper owner instead of extracting a function from `app.py`.
+
+## Validation
+
+Baseline:
+
+- Full pytest: `1313 passed, 26 skipped, 76 warnings`，47.55s。
+- Windows selected workflow: `329 passed, 19 warnings`，8.70s。
+
+Candidate (serial, authoritative run):
+
+- Full pytest: `1323 passed, 26 skipped, 76 warnings`，45.93s。
+- Windows selected workflow: `329 passed, 19 warnings`，8.69s。
+- Export targeted set: `54 passed, 1 skipped`。
+- Boundary/structural set: `56 passed`。
+- Safe-path QA script: pass。
+- `python -m compileall -q .`: pass。
+- Ruff changed Python files `--select F`: pass。
+- `git diff --check`: pass。
+
+An exploratory parallel full+Windows invocation exposed existing process-level runtime/TTS
+task contention; its two failures were runtime initialization/wait tests. The required
+serial rerun passed with baseline warning count and no candidate-only regression.
+
+## LOC and deferred scope
+
+- `app.py`: `5152` → `4668` lines（减少 `484`）。
+- New `ui/export_handlers.py`: `466` lines。
+- New `ui/file_component_paths.py`: `39` lines。
+- Production ownership net: `+21` lines (implementation moved into two neutral owners while
+  the app hotspot shrinks); full commit also includes boundary tests, QA ownership updates,
+  docs and this audit section.
+- Retained in `app.py`: UI component variables, page construction and event composition only;
+  no Formal Export handler definitions remain.
+- Deferred: QA/Review generation-fence callbacks, Voice Cast, Utility handler extraction,
+  direct repository dependencies elsewhere, Storage migration, Runtime/Prewarm and any
+  `export_wiring.py` split.

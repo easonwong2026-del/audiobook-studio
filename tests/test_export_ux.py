@@ -25,7 +25,7 @@ from services.export_naming import (
 )
 
 
-def _install_export_backend(monkeypatch, app, task, manifest=None, start_result=None):
+def _install_export_backend(monkeypatch, export_ui, task, manifest=None, start_result=None):
     """Install a tiny persistent-state double for the Export UI callbacks."""
     state = {"task": dict(task)}
 
@@ -42,7 +42,7 @@ def _install_export_backend(monkeypatch, app, task, manifest=None, start_result=
         def get_delivery_manifest(*_args, **_kwargs):
             return dict(manifest) if isinstance(manifest, dict) else manifest
 
-    monkeypatch.setattr(app, "ExportService", Backend)
+    monkeypatch.setattr(export_ui, "ExportService", Backend)
     return state
 
 
@@ -135,11 +135,11 @@ def test_build_export_path_and_unique_combined(tmp_path):
 
 # ── durable Export task → UI status chain ──────────────────────────────────
 def test_export_start_returns_durable_task_and_immediate_pending(monkeypatch):
-    import app
+    from ui import export_handlers as export_ui
 
     task = {"task_id": "export-1", "project": "book", "status": "pending"}
-    _install_export_backend(monkeypatch, app, task)
-    result = app.do_export("mp3", "192k", "", "require_passed", _session())
+    _install_export_backend(monkeypatch, export_ui, task)
+    result = export_ui.do_export("mp3", "192k", "", "require_passed", _session())
 
     assert result[0] is None
     assert "等待导出" in result[1]
@@ -149,20 +149,20 @@ def test_export_start_returns_durable_task_and_immediate_pending(monkeypatch):
 
 
 def test_second_export_click_keeps_existing_active_task(monkeypatch):
-    import app
+    from ui import export_handlers as export_ui
 
     task = {"task_id": "export-active", "project": "book", "status": "running"}
-    _install_export_backend(monkeypatch, app, task)
+    _install_export_backend(monkeypatch, export_ui, task)
     session = _session()
-    app.refresh_export_status("export-active", "", session)
+    export_ui.refresh_export_status("export-active", "", session)
     start_calls = []
 
     def unexpected_start(*_args, **_kwargs):
         start_calls.append(True)
         raise AssertionError("a second export must not be started while one is active")
 
-    monkeypatch.setattr(app.ExportService, "start_export", unexpected_start)
-    result = app.do_export(
+    monkeypatch.setattr(export_ui.ExportService, "start_export", unexpected_start)
+    result = export_ui.do_export(
         "mp3",
         "192k",
         "",
@@ -178,10 +178,10 @@ def test_second_export_click_keeps_existing_active_task(monkeypatch):
 
 
 def test_export_active_race_error_keeps_backend_task(monkeypatch):
-    import app
+    from ui import export_handlers as export_ui
 
     task = {"task_id": "export-race", "project": "book", "status": "running"}
-    _install_export_backend(monkeypatch, app, task)
+    _install_export_backend(monkeypatch, export_ui, task)
 
     class ActiveExportError(RuntimeError):
         def __init__(self):
@@ -197,8 +197,8 @@ def test_export_active_race_error_keeps_backend_task(monkeypatch):
     def reject_second_start(*_args, **_kwargs):
         raise ActiveExportError()
 
-    monkeypatch.setattr(app.ExportService, "start_export", reject_second_start)
-    result = app.do_export("mp3", "192k", "", "require_passed", _session())
+    monkeypatch.setattr(export_ui.ExportService, "start_export", reject_second_start)
+    result = export_ui.do_export("mp3", "192k", "", "require_passed", _session())
 
     assert result[2] == "export-race"
     assert "正在导出" in result[1]
@@ -207,15 +207,15 @@ def test_export_active_race_error_keeps_backend_task(monkeypatch):
 
 
 def test_export_tracking_does_not_bleed_into_new_project(monkeypatch):
-    import app
+    from ui import export_handlers as export_ui
 
     task = {"task_id": "export-old-project", "project": "book", "status": "running"}
-    _install_export_backend(monkeypatch, app, task)
+    _install_export_backend(monkeypatch, export_ui, task)
     session = _session()
-    app.refresh_export_status("export-old-project", "", session)
+    export_ui.refresh_export_status("export-old-project", "", session)
 
     session.project = "another-book"
-    result = app.refresh_export_status("export-old-project", "", session)
+    result = export_ui.refresh_export_status("export-old-project", "", session)
 
     assert result[2] == ""
     assert result[3] == ""
@@ -224,17 +224,17 @@ def test_export_tracking_does_not_bleed_into_new_project(monkeypatch):
 
 
 def test_export_refresh_keeps_pending_and_running_active(monkeypatch):
-    import app
+    from ui import export_handlers as export_ui
 
     task = {"task_id": "export-2", "project": "book", "status": "pending"}
-    state = _install_export_backend(monkeypatch, app, task)
-    pending = app.refresh_export_status("export-2", "", _session())
+    state = _install_export_backend(monkeypatch, export_ui, task)
+    pending = export_ui.refresh_export_status("export-2", "", _session())
     assert "等待导出" in pending[1]
     assert pending[5].active is True
     assert pending[6]["interactive"] is False
 
     state["task"]["status"] = "running"
-    running = app.refresh_export_status("export-2", "", _session())
+    running = export_ui.refresh_export_status("export-2", "", _session())
     assert "正在导出" in running[1]
     assert running[5].active is True
     assert running[6]["interactive"] is False
@@ -258,17 +258,17 @@ def _ready_manifest(tmp_path, *, version=3, relative_path="03_导出成品/正�
 
 
 def test_done_refresh_reads_ready_manifest_and_shows_final_artifact(monkeypatch, tmp_path):
-    import app
+    from ui import export_handlers as export_ui
 
     project_dir, artifact, manifest = _ready_manifest(tmp_path)
     task = {
         "task_id": "export-3", "project": "book", "status": "done",
         "manifest_id": "manifest-1",
     }
-    _install_export_backend(monkeypatch, app, task, manifest)
-    monkeypatch.setattr(app.ProjectService, "get_project_dir", lambda _name: str(project_dir))
-    monkeypatch.setattr(app, "_safe_path_for_file_component", lambda path: path)
-    result = app.refresh_export_status("export-3", "", _session())
+    _install_export_backend(monkeypatch, export_ui, task, manifest)
+    monkeypatch.setattr(export_ui.ProjectService, "get_project_dir", lambda _name: str(project_dir))
+    monkeypatch.setattr(export_ui.file_component_paths, "safe_path_for_file_component", lambda path: path)
+    result = export_ui.refresh_export_status("export-3", "", _session())
 
     assert result[0] == str(artifact)
     assert "✅ 导出成功" in result[1]
@@ -280,14 +280,14 @@ def test_done_refresh_reads_ready_manifest_and_shows_final_artifact(monkeypatch,
 
 
 def test_error_and_cancelled_are_terminal_without_success_artifact(monkeypatch):
-    import app
+    from ui import export_handlers as export_ui
 
     error_task = {
         "task_id": "export-error", "project": "book", "status": "error",
         "error": {"code": "EXPORT_ERROR", "message": "ffmpeg failed"},
     }
-    _install_export_backend(monkeypatch, app, error_task)
-    error = app.refresh_export_status("export-error", "", _session())
+    _install_export_backend(monkeypatch, export_ui, error_task)
+    error = export_ui.refresh_export_status("export-error", "", _session())
     assert error[0] is None
     assert "导出失败" in error[1]
     assert "✅ 导出成功" not in error[1]
@@ -297,8 +297,8 @@ def test_error_and_cancelled_are_terminal_without_success_artifact(monkeypatch):
     cancelled_task = {
         "task_id": "export-cancelled", "project": "book", "status": "cancelled",
     }
-    _install_export_backend(monkeypatch, app, cancelled_task)
-    cancelled = app.refresh_export_status("export-cancelled", "", _session())
+    _install_export_backend(monkeypatch, export_ui, cancelled_task)
+    cancelled = export_ui.refresh_export_status("export-cancelled", "", _session())
     assert cancelled[0] is None
     assert "导出已取消" in cancelled[1]
     assert "失败" not in cancelled[1]
@@ -307,7 +307,7 @@ def test_error_and_cancelled_are_terminal_without_success_artifact(monkeypatch):
 
 
 def test_stale_running_ui_is_corrected_by_durable_done_state(monkeypatch, tmp_path):
-    import app
+    from ui import export_handlers as export_ui
 
     project_dir, artifact, manifest = _ready_manifest(tmp_path)
     task = {
@@ -315,21 +315,21 @@ def test_stale_running_ui_is_corrected_by_durable_done_state(monkeypatch, tmp_pa
         "manifest_id": "manifest-1",
     }
     manifest["export_id"] = task["task_id"]
-    state = _install_export_backend(monkeypatch, app, task, manifest)
-    monkeypatch.setattr(app.ProjectService, "get_project_dir", lambda _name: str(project_dir))
-    monkeypatch.setattr(app, "_safe_path_for_file_component", lambda path: path)
-    active = app.refresh_export_status("export-stale", "", _session())
+    state = _install_export_backend(monkeypatch, export_ui, task, manifest)
+    monkeypatch.setattr(export_ui.ProjectService, "get_project_dir", lambda _name: str(project_dir))
+    monkeypatch.setattr(export_ui.file_component_paths, "safe_path_for_file_component", lambda path: path)
+    active = export_ui.refresh_export_status("export-stale", "", _session())
     assert "正在导出" in active[1]
 
     state["task"]["status"] = "done"
-    completed = app.refresh_export_status("export-stale", "", _session())
+    completed = export_ui.refresh_export_status("export-stale", "", _session())
     assert completed[0] == str(artifact)
     assert "✅ 导出成功" in completed[1]
     assert "正在导出" not in completed[1]
 
 
 def test_done_before_manifest_ready_never_claims_success(monkeypatch, tmp_path):
-    import app
+    from ui import export_handlers as export_ui
 
     project_dir, _artifact, manifest = _ready_manifest(tmp_path)
     manifest["ready"] = False
@@ -337,9 +337,9 @@ def test_done_before_manifest_ready_never_claims_success(monkeypatch, tmp_path):
         "task_id": "export-not-ready", "project": "book", "status": "done",
         "manifest_id": "manifest-1",
     }
-    _install_export_backend(monkeypatch, app, task, manifest)
-    monkeypatch.setattr(app.ProjectService, "get_project_dir", lambda _name: str(project_dir))
-    result = app.refresh_export_status("export-not-ready", "", _session())
+    _install_export_backend(monkeypatch, export_ui, task, manifest)
+    monkeypatch.setattr(export_ui.ProjectService, "get_project_dir", lambda _name: str(project_dir))
+    result = export_ui.refresh_export_status("export-not-ready", "", _session())
 
     assert result[0] is None
     assert "尚未就绪" in result[1]
@@ -348,7 +348,7 @@ def test_done_before_manifest_ready_never_claims_success(monkeypatch, tmp_path):
 
 
 def test_open_export_location_uses_resolved_artifact_directory(monkeypatch, tmp_path):
-    import app
+    from ui import export_handlers as export_ui
 
     project_dir, artifact, manifest = _ready_manifest(tmp_path)
     task = {
@@ -356,12 +356,12 @@ def test_open_export_location_uses_resolved_artifact_directory(monkeypatch, tmp_
         "manifest_id": "manifest-1",
     }
     manifest["export_id"] = task["task_id"]
-    _install_export_backend(monkeypatch, app, task, manifest)
-    monkeypatch.setattr(app.ProjectService, "get_project_dir", lambda _name: str(project_dir))
+    _install_export_backend(monkeypatch, export_ui, task, manifest)
+    monkeypatch.setattr(export_ui.ProjectService, "get_project_dir", lambda _name: str(project_dir))
     opened = []
     monkeypatch.setattr("lib.procutil.open_in_folder", lambda path: opened.append(path) or True)
 
-    message = app.open_export_location("export-open", "", _session())
+    message = export_ui.open_export_location("export-open", "", _session())
 
     assert opened == [str(artifact.parent)]
     assert str(artifact.parent) in message
@@ -378,7 +378,7 @@ def test_open_export_location_uses_resolved_artifact_directory(monkeypatch, tmp_
 def test_export_artifact_resolver_keeps_legacy_v1_v2_paths(
     monkeypatch, tmp_path, version, relative_path
 ):
-    import app
+    from ui import export_handlers as export_ui
 
     project_dir = tmp_path / f"legacy-{version}"
     artifact = project_dir / Path(*relative_path.split("/"))
@@ -395,13 +395,13 @@ def test_export_artifact_resolver_keeps_legacy_v1_v2_paths(
     }
     _install_export_backend(
         monkeypatch,
-        app,
+        export_ui,
         {"task_id": "export-legacy", "project": "book", "status": "done"},
         manifest,
     )
-    monkeypatch.setattr(app.ProjectService, "get_project_dir", lambda _name: str(project_dir))
+    monkeypatch.setattr(export_ui.ProjectService, "get_project_dir", lambda _name: str(project_dir))
 
-    resolved, reason = app._resolve_export_ui_artifact(
+    resolved, reason = export_ui._resolve_export_ui_artifact(
         "book", "export-legacy", {"task_id": "export-legacy"}
     )
 
