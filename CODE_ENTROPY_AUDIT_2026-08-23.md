@@ -634,3 +634,111 @@ the Voice Cast business path is otherwise unchanged. Exact fixtures cover `role=
 description-first formatting, name fallback, no metadata, bound, and unbound outputs.
 The shared component remains free of Gradio, app, services, VoiceCastResolver, and
 RuntimeTTSService dependencies.
+
+---
+
+# Repository Entropy Round 3D — Settings Residual & Wiring Boundary Cleanup
+
+日期：2026-08-23
+
+Baseline：`dd827e65fba613dd11fb7ad617303c7e0c0ceb69`（PR #59 squash merge，当前
+`origin/main`）。PR #59 已确认 `MERGED`；没有使用旧 PR head ancestry 作为启动条件。
+Round 3D 分支：`refactor/settings-residual-boundary-r3d`。
+
+## Before caller audit
+
+在修改前对 `app.py`、`ui/**`、services、repositories、lib、tests、scripts、MCP 和
+docs 做了 `rg` + AST 审计，并检查 import alias、`getattr`、monkeypatch、动态字符串
+以及 Gradio `click/change/load/then` wiring。
+
+| symbol | baseline owner | production callers / evidence | category |
+|---|---|---|---|
+| `app.apply_data_dir` | `app.py` | 只有定义命中；正式按钮 wiring 是 `settings_handlers.apply_data_dir`；无 import/getattr/monkeypatch/script/MCP caller | DEAD / DUPLICATE |
+| `app.open_data_dir` | `app.py` | 只有定义命中；正式按钮 wiring 是 `settings_handlers.open_data_dir`；无 production/test/dynamic caller | DEAD / DUPLICATE |
+| `settings_handlers.apply_data_dir` | `ui/settings_handlers.py` | `ui/wiring/settings_wiring.py::s_data_apply.click`，以及 data-root/catalog tests | LIVE authority |
+| `settings_handlers.open_data_dir` | `ui/settings_handlers.py` | `ui/wiring/settings_wiring.py::s_data_open.click` | LIVE authority |
+| `settings_wiring.run_diagnostics_ui` | `ui/wiring/settings_wiring.py` | `s_diagnostics_run.click` 唯一 wiring caller；内部调用 environment diagnostics service | MISPLACED presentation |
+| `run_environment_diagnostics` / `diagnostics_table` / `diagnostics_to_markdown` | `services/environment_diagnostics.py` | diagnostics tests、acceptance script 和 wiring-local aggregator | service + presentation inputs |
+
+旧 app data-dir callbacks 与正式 authority 已经语义分叉：旧 `apply_data_dir` 不接
+SessionState、空输入返回当前 config 路径且不 reset；旧 `open_data_dir` 仅 Windows
+`os.startfile` 并吞掉 OSError。正式 `settings_handlers` 实现负责跨平台打开、HTML
+escape、空路径契约和 `reset_for_data_root`，因此不能保留 app trampoline。
+
+## Caller graph before / after
+
+```text
+before:
+app.apply_data_dir       [zero live caller]
+app.open_data_dir       [zero live caller]
+
+settings_wiring
+  ├─ settings_handlers.apply_data_dir
+  ├─ settings_handlers.open_data_dir
+  └─ local run_diagnostics_ui
+       └─ run_environment_diagnostics
+          diagnostics_table
+          diagnostics_to_markdown
+
+after:
+app.py                   [no Settings data-dir callbacks]
+
+settings_wiring
+  ├─ settings_handlers.apply_data_dir
+  ├─ settings_handlers.open_data_dir
+  └─ settings_handlers.run_diagnostics_ui
+       └─ run_environment_diagnostics
+          diagnostics_table
+          diagnostics_to_markdown
+```
+
+The `s_data_apply → catalog refresh → merge refresh → assembly refresh` chain and its
+ordering are unchanged. No selected/opened/catalog-query semantics were modified.
+
+## Round 3D changes
+
+- Deleted `app.apply_data_dir` and `app.open_data_dir`; no compatibility wrapper was
+  added because the full caller audit proved zero live or dynamic callers.
+- Moved `run_diagnostics_ui` into `ui/settings_handlers.py` without changing its status
+  emoji mapping, three-tuple output, report/table/Markdown order, or exception behavior.
+- `ui/wiring/settings_wiring.py` now only composes events and directly references
+  `settings_handlers.run_diagnostics_ui`; it no longer imports the diagnostics service.
+- `ui/settings_handlers.py` continues to directly import `ConfigRepository`,
+  `ProjectRepository`, and `TaskRepository`; this remains deferred architecture debt.
+- No TTS engine, prewarm, runtime, storage, catalog, Voice Asset, Voice Cast, MCP, or
+  dependency changes. `ui/pages/settings_page.py` is unchanged.
+
+## Behavior fixtures and verification
+
+Added `tests/test_settings_residual_boundary.py` covering:
+
+- empty, successful, no-session, exception, reset-for-data-root, and catalog-query
+  preservation contracts for `apply_data_dir`;
+- Windows/macOS/Linux open-folder commands and escaped failure output;
+- diagnostics `ok`/`warning`/`error`/unknown status symbols, shared report identity,
+  one-call-per-renderer, and strict three-output order;
+- AST ownership and unchanged data-dir refresh-chain composition.
+
+Baseline:
+
+- Full pytest: `1298 passed, 26 skipped, 76 warnings`，45.84s。
+- Windows selected workflow: `329 passed, 19 warnings`，10.14s。
+
+Candidate:
+
+- Targeted Settings/data-root/environment/TTS/prewarm/catalog tests: `123 passed, 12 warnings`。
+- Full pytest: `1313 passed, 26 skipped, 76 warnings`，47.67s；新增测试无 candidate-only failure。
+- Windows selected workflow: `329 passed, 19 warnings`，8.98s。
+- `python -m compileall -q .`: pass。
+- Ruff changed Python files `--select F`: pass。
+- `git diff --check`: pass。
+
+## LOC / deferred findings
+
+- `app.py`: `5173` → `5152` lines（减少 21）。
+- `ui/settings_handlers.py`: `605` → `620` lines（承接 diagnostics owner，增加 15）。
+- `ui/wiring/settings_wiring.py`: `113` → `98` lines（减少 15）。
+- Round 3D production diff：`16 insertions / 37 deletions`，净减少 21 行。
+- Deferred：`ui/settings_handlers.py` 直接依赖 `ConfigRepository`、`ProjectRepository`、
+  `TaskRepository`；本轮不创建 SettingsService/DiagnosticsService/facade，也不处理
+  `_snapshot`/`app._snap`、TTS engine、prewarm、runtime 或 data-root semantics。

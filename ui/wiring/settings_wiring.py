@@ -1,22 +1,7 @@
 """设置页事件接线；包含本地数据、TTS 引擎、项目残留和环境诊断。"""
 from __future__ import annotations
 
-from services.environment_diagnostics import (
-    diagnostics_table,
-    diagnostics_to_markdown,
-    run_environment_diagnostics,
-)
 from ui import settings_handlers
-
-
-def run_diagnostics_ui():
-    report = run_environment_diagnostics()
-    symbol = {"ok": "✅", "warning": "⚠️", "error": "❌"}.get(report["status"], "❓")
-    return (
-        f"### {symbol} 总体状态：{report['status']}",
-        diagnostics_table(report),
-        diagnostics_to_markdown(report),
-    )
 
 
 def wire_settings_page(
@@ -98,7 +83,7 @@ def wire_settings_page(
         [page["s_orphan_table"], page["s_orphan_name"]],
     )
     page["s_diagnostics_run"].click(
-        run_diagnostics_ui,
+        settings_handlers.run_diagnostics_ui,
         [],
         [
             page["s_diagnostics_status"],
