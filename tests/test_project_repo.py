@@ -275,8 +275,8 @@ class TestProjectRepository:
             ProjectRepository.WORKSPACE_ROOT = orig_ws
             ProjectRepository.LEGACY_ROOT = orig_lg
 
-    def test_list_projects(self, tmp_path):
-        """list_projects 返回项目摘要列表。"""
+    def test_list_project_summaries(self, tmp_path):
+        """list_project_summaries 返回目录权威摘要。"""
         orig_ws = ProjectRepository.WORKSPACE_ROOT
         orig_lg = ProjectRepository.LEGACY_ROOT
         try:
@@ -286,12 +286,16 @@ class TestProjectRepository:
             script_path = _make_minimal_script(tmp_path, "script6.json")
             ProjectRepository.create_project("list_test", script_path)
 
-            summaries = ProjectRepository.list_projects()
-            names = [s["name"] for s in summaries]
+            summaries = ProjectRepository.list_project_summaries()
+            names = [summary.project_name for summary in summaries]
             assert "list_test" in names
-            s = next(s for s in summaries if s["name"] == "list_test")
-            assert s["total"] == 2
-            assert s["done"] == 0
+            summary = next(
+                summary
+                for summary in summaries
+                if summary.project_name == "list_test"
+            )
+            assert summary.segments == 2
+            assert summary.completed == 0
         finally:
             ProjectRepository.WORKSPACE_ROOT = orig_ws
             ProjectRepository.LEGACY_ROOT = orig_lg

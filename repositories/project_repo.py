@@ -1094,37 +1094,6 @@ class ProjectRepository:
         ProjectRepository._save_meta(project_dir, meta)
 
     @staticmethod
-    def list_projects() -> list[dict]:
-        """扫描所有项目并产出多书摘要（O4 书架用，纯函数无 gradio）。
-
-        Returns:
-            项目摘要字典列表，按项目名排序。
-        """
-        summaries: list[dict] = []
-        for name in ProjectRepository.scan_projects():
-            try:
-                project_dir = ProjectRepository._resolve_dir(name)
-                meta = ProjectRepository._load_meta(project_dir)
-            except Exception as exc:
-                logger.warning("list_projects 读 %s 失败: %s", name, exc)
-                continue
-            total = getattr(meta, "total_segments", 0) or 0
-            done = getattr(meta, "completed_count", 0) or 0
-            failed = getattr(meta, "failed_count", 0) or 0
-            status = ProjectRepository._project_status(total, done, failed)
-            progress = (done / total) if total else 0.0
-            summaries.append({
-                "name": name,
-                "chapters": getattr(meta, "total_chapters", 0) or 0,
-                "done": done,
-                "failed": failed,
-                "total": total,
-                "progress": progress,
-                "status": status,
-            })
-        return summaries
-
-    @staticmethod
     def list_project_summaries() -> list[ProjectSummary]:
         """扫描全部项目并产出统一轻量摘要（书架 / Dropdown / 搜索共用）。
 

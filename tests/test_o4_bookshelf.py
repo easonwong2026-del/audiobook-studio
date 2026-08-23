@@ -1,8 +1,7 @@
 """O4 书架 + 章节树：纯函数单测（无 gradio / 无 torch / 无 GPU）。
 
 验证（设计 §6 O4 / §12.3）：
-- ProjectService.list_projects() 返回多书摘要 dict 列表（含 name/chapters/done/
-  failed/total/progress/status），状态色块推导正确；
+- ProjectCatalogService.scan() 通过统一目录权威链返回多书摘要，状态色块推导正确；
 - pm.build_chapter_tree(project) 产出 HTML 含 <details> 与各章标题 / 段 ID。
 
 用 tmp_path + monkeypatch(WORKSPACE_ROOT) 建最少 4 个状态各异的假项目
@@ -19,8 +18,8 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 import lib.project_manager as pm  # noqa: E402
-from services.project import ProjectService  # noqa: E402
 from repositories.project_repo import ProjectRepository  # noqa: E402
+from services.project_catalog import ProjectCatalogService  # noqa: E402
 
 
 SCRIPT = {
@@ -63,36 +62,36 @@ def workspace(tmp_path, monkeypatch):
     return str(tmp_path)
 
 
-def test_list_projects_returns_summaries(workspace):
-    summaries = ProjectService.list_projects()
-    by_name = {s["name"]: s for s in summaries}
+def test_catalog_returns_summaries(workspace):
+    summaries = ProjectCatalogService.scan()
+    by_name = {summary.project_name: summary for summary in summaries}
     assert set(by_name) == {"p_pending", "p_progress", "p_done", "p_failed"}, \
         f"书架应含 4 个假项目，实际: {sorted(by_name)}"
-    # 每个摘要含全部关键字段
-    for s in summaries:
-        for k in ("name", "chapters", "done", "failed", "total", "progress", "status"):
-            assert k in s, f"摘要缺少字段 {k}: {s}"
-        assert s["chapters"] == 2, s
-        assert s["total"] == 3, s
+    for summary in summaries:
+        assert summary.chapters == 2, summary
+        assert summary.segments == 3, summary
 
 
-def test_list_projects_status_derivation(workspace):
-    summaries = {s["name"]: s for s in ProjectService.list_projects()}
+def test_catalog_status_derivation(workspace):
+    summaries = {
+        summary.project_name: summary
+        for summary in ProjectCatalogService.scan()
+    }
     # 全 pending -> 未开始
-    assert summaries["p_pending"]["status"] == "⚪未开始"
-    assert summaries["p_pending"]["done"] == 0
-    assert summaries["p_pending"]["progress"] == 0.0
+    assert summaries["p_pending"].status == "⚪未开始"
+    assert summaries["p_pending"].completed == 0
+    assert summaries["p_pending"].progress == 0.0
     # 1 done / 0 failed -> 进行中
-    assert summaries["p_progress"]["status"] == "🟢进行中"
-    assert summaries["p_progress"]["done"] == 1
-    assert abs(summaries["p_progress"]["progress"] - 1 / 3) < 1e-9
+    assert summaries["p_progress"].status == "🟢进行中"
+    assert summaries["p_progress"].completed == 1
+    assert abs(summaries["p_progress"].progress - 1 / 3) < 1e-9
     # 全 done -> 完成
-    assert summaries["p_done"]["status"] == "✅完成"
-    assert summaries["p_done"]["done"] == 3
-    assert summaries["p_done"]["progress"] == 1.0
+    assert summaries["p_done"].status == "✅完成"
+    assert summaries["p_done"].completed == 3
+    assert summaries["p_done"].progress == 1.0
     # 1 failed / 0 done -> 有失败
-    assert summaries["p_failed"]["status"] == "🔴有失败"
-    assert summaries["p_failed"]["failed"] == 1
+    assert summaries["p_failed"].status == "🔴有失败"
+    assert summaries["p_failed"].failed == 1
 
 
 def test_build_chapter_tree_html(workspace):

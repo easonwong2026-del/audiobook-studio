@@ -121,19 +121,6 @@ def set_synthesis_overrides(name: str, overrides: dict) -> None:
     return _repository().set_synthesis_overrides(name, overrides)
 
 
-def list_projects() -> list[dict]:
-    """扫描所有项目并产出多书摘要（O4 书架用，纯函数无 gradio）。
-
-    逐项目读 ``project.json`` meta（轻量，不读剧本），产出
-    ``{name, chapters, done, failed, total, progress, status}`` 摘要。
-    状态色块（§11.7）：✅完成 / 🟢进行中 / 🟡部分 / ⚪未开始 / 🔴有失败。
-
-    Returns:
-        项目摘要字典列表，按项目名排序。
-    """
-    return _repository().list_projects()
-
-
 def _project_status(total: int, done: int, failed: int) -> str:
     """Compatibility wrapper for the shared bookshelf status derivation."""
     return _repository()._project_status(total, done, failed)
