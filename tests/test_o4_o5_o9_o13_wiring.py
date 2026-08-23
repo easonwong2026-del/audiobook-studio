@@ -24,6 +24,9 @@ VOICE_WIRING_PATH = os.path.join(PROJECT_ROOT, "ui", "wiring", "voice_wiring.py"
 with open(VOICE_WIRING_PATH, encoding="utf-8") as f:
     VOICE_WIRING_SRC = f.read()
 VOICE_WIRING_TREE = ast.parse(VOICE_WIRING_SRC)
+PROJECT_VIEW_PATH = os.path.join(PROJECT_ROOT, "ui", "project_view_handlers.py")
+with open(PROJECT_VIEW_PATH, encoding="utf-8") as f:
+    PROJECT_VIEW_SRC = f.read()
 
 
 def find_func(name):
@@ -85,9 +88,12 @@ def test_o4_bookshelf_components_defined():
     # V3.1：书架组件从 p_bookshelf 改名 ov_bookshelf（概览页书架）
     for comp in ("ov_bookshelf", "p_chapter_tree"):
         assert comp in SRC, f"O4 组件未定义: {comp}"
-    for fn in ("select_project_from_bookshelf", "render_chapter_tree",
-               "refresh_projects_full"):
+    for fn in ("select_project_from_bookshelf", "refresh_projects_full"):
         assert find_func(fn) is not None, f"O4 handler 未定义: {fn}"
+    assert "def render_chapter_tree(" in PROJECT_VIEW_SRC, \
+        "Project View handler 应位于 ui.project_view_handlers"
+    assert "project_view_ui.render_chapter_tree" in SRC, \
+        "项目页打开链应委托 Project View handler"
     assert find_func("refresh_bookshelf") is None, \
         "旧书架刷新 handler 不应在 app.py 中复活"
 
@@ -95,7 +101,7 @@ def test_o4_bookshelf_components_defined():
 def test_o4_p_open_click_appends_bookshelf_then():
     # V3.1：p_open.click / ov_open.click / ov_bookshelf.select 三条入口统一走
     # 打开项目统一链路（方案 A），目录刷新由 Project Catalog 接管，
-    # render_chapter_tree 仍服务项目页章节树。
+    # Project View handler 仍服务项目页章节树。
     # 校验刷新链覆盖 ov_bookshelf / p_chapter_tree。
     assert "ov_bookshelf" in SRC, \
         "ov_bookshelf 组件缺失（书架刷新未在打开链路中覆盖）"

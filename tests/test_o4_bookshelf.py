@@ -2,7 +2,7 @@
 
 验证（设计 §6 O4 / §12.3）：
 - ProjectCatalogService.scan() 通过统一目录权威链返回多书摘要，状态色块推导正确；
-- pm.build_chapter_tree(project) 产出 HTML 含 <details> 与各章标题 / 段 ID。
+- Project View handler 产出 HTML 含 <details>、各章标题、段 ID 和状态图标。
 
 用 tmp_path + monkeypatch(WORKSPACE_ROOT) 建最少 4 个状态各异的假项目
 （仿 test_progress 约定，不依赖 GPU / 真实模型）。
@@ -20,6 +20,7 @@ if PROJECT_ROOT not in sys.path:
 import lib.project_manager as pm  # noqa: E402
 from repositories.project_repo import ProjectRepository  # noqa: E402
 from services.project_catalog import ProjectCatalogService  # noqa: E402
+from ui.project_view_handlers import render_chapter_tree  # noqa: E402
 
 
 SCRIPT = {
@@ -94,8 +95,8 @@ def test_catalog_status_derivation(workspace):
     assert summaries["p_failed"].failed == 1
 
 
-def test_build_chapter_tree_html(workspace):
-    html = pm.build_chapter_tree("p_pending")
+def test_render_chapter_tree_html(workspace):
+    html = render_chapter_tree("p_pending")
     assert "<details>" in html, "章节树应含 <details> 折叠结构"
     assert "第一章" in html, "应出现第一章标题"
     assert "第二章" in html, "应出现第二章标题"
@@ -105,7 +106,25 @@ def test_build_chapter_tree_html(workspace):
     assert "0/2" in html, "章节摘要应显示完成进度"
 
 
-def test_build_chapter_tree_missing_project_returns_placeholder(workspace):
+def test_render_chapter_tree_missing_project_returns_placeholder(workspace):
     # 不存在项目 -> 返回提示文本（不抛异常）
-    html = pm.build_chapter_tree("no_such_project")
+    html = render_chapter_tree("no_such_project")
     assert "未打开项目" in html
+
+
+def test_render_chapter_tree_preserves_status_icons_and_counts(workspace):
+    """Round 2A keeps the baseline HTML/status contract byte-for-byte."""
+    assert render_chapter_tree("") == "<i>未打开项目</i>"
+    assert render_chapter_tree("p_progress") == (
+        "<details><summary>📖 第 1 章 · 001 · 第一章（1/2 完成）</summary>\n"
+        "<div style='margin-left:18px;font-size:13px'>✅ <b>1-001</b> [旁白] A</div>\n"
+        "<div style='margin-left:18px;font-size:13px'>⬜ <b>1-002</b> [旁白] B</div>\n"
+        "</details>\n"
+        "<details><summary>📖 第 2 章 · 002 · 第二章（0/1 完成）</summary>\n"
+        "<div style='margin-left:18px;font-size:13px'>⬜ <b>2-001</b> [旁白] C</div>\n"
+        "</details>"
+    )
+    failed = render_chapter_tree("p_failed")
+    assert "❌ <b>1-001</b>" in failed
+    assert "⬜ <b>1-002</b>" in failed and "⬜ <b>2-001</b>" in failed
+    assert "0/2 完成" in failed and "0/1 完成" in failed

@@ -96,7 +96,7 @@ def test_open_chain_rest_untouched():
     # 仍覆盖打开项目后的工作流关键刷新
     for marker in (
         "refresh_top_status", "preview_chapters", "refresh_queue_list",
-        "render_chapter_tree", "render_preview", "refresh_voice_lib",
+        "project_view_ui.render_chapter_tree", "render_preview", "refresh_voice_lib",
         "refresh_production_check", "refresh_export_default_dir",
         "refresh_overview", "refresh_p_sel",
     ):

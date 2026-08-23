@@ -4,15 +4,11 @@
 向后兼容打开旧版存放在程序内 workspace/projects 的历史项目。
 """
 from __future__ import annotations
-import logging
 
 from .types import ProjectMeta
 from .snapshot import ProjectSnapshot
-from . import chapter_identity
 from . import config as _cfg
 from repositories.project_repo import ProjectRepository
-
-logger = logging.getLogger(__name__)
 
 # WORKSPACE_ROOT 保持为模块级可变变量（测试用 monkeypatch 覆盖）；
 # 初值从配置读取，使项目默认存到程序目录之外。
@@ -124,45 +120,6 @@ def set_synthesis_overrides(name: str, overrides: dict) -> None:
 def _project_status(total: int, done: int, failed: int) -> str:
     """Compatibility wrapper for the shared bookshelf status derivation."""
     return _repository()._project_status(total, done, failed)
-
-
-def build_chapter_tree(project: str) -> str:
-    """产出章节折叠树 HTML（<details>，无 gradio，O4 右栏展示）。
-
-    读取项目 meta（段完成态）+ 剧本（章节/段结构），生成原生折叠树：
-    每章一个 ``<details>``，summary 显示「第N章 标题（完成/总）」，内部列出
-    每段（状态图标 + 段 ID + 角色 + 文本预览）。
-
-    Args:
-        project: 项目名。
-
-    Returns:
-        HTML 字符串；项目不存在时返回提示文本。
-    """
-    try:
-        meta, script, _ = open_project(project)
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.warning("build_chapter_tree 读 %s 失败: %s", project, exc)
-        return "<i>未打开项目</i>"
-    status_map = meta.segments_status
-    lines = []
-    for chapter_index, ch in enumerate(script.get("chapters", [])):
-        segs = ch.get("segments", [])
-        done_n = sum(1 for s in segs if status_map.get(s["id"]) == "done")
-        lines.append(
-            f"<details><summary>📖 {chapter_identity.chapter_label(ch, chapter_index, len(script.get('chapters', [])))}（{done_n}/{len(segs)} 完成）</summary>"
-        )
-        for seg in segs:
-            sid = seg["id"]
-            st = status_map.get(sid, "pending")
-            icon = "✅" if st == "done" else ("❌" if st == "failed" else "⬜")
-            text = (seg.get("text", "") or "")[:40]
-            lines.append(
-                f"<div style='margin-left:18px;font-size:13px'>"
-                f"{icon} <b>{sid}</b> [{seg.get('role', '')}] {text}</div>"
-            )
-        lines.append("</details>")
-    return "\n".join(lines)
 
 
 def get_synthesis_selections(name: str) -> dict:
