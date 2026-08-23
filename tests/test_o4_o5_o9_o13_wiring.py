@@ -88,8 +88,10 @@ def test_o4_bookshelf_components_defined():
     # V3.1：书架组件从 p_bookshelf 改名 ov_bookshelf（概览页书架）
     for comp in ("ov_bookshelf", "p_chapter_tree"):
         assert comp in SRC, f"O4 组件未定义: {comp}"
-    for fn in ("select_project_from_bookshelf", "refresh_projects_full"):
+    for fn in ("select_project_from_bookshelf",):
         assert find_func(fn) is not None, f"O4 handler 未定义: {fn}"
+    assert "catalog_ui.reconcile_project_selector" in SRC, \
+        "项目页 selector 刷新应直接使用 Project Catalog authority"
     assert "def render_chapter_tree(" in PROJECT_VIEW_SRC, \
         "Project View handler 应位于 ui.project_view_handlers"
     assert "project_view_ui.render_chapter_tree" in SRC, \

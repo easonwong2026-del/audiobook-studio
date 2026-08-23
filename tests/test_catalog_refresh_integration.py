@@ -98,7 +98,7 @@ def test_open_chain_rest_untouched():
         "refresh_top_status", "preview_chapters", "refresh_queue_list",
         "project_view_ui.render_chapter_tree", "render_preview", "refresh_voice_lib",
         "refresh_production_check", "refresh_export_default_dir",
-        "refresh_overview", "refresh_p_sel",
+        "refresh_overview", "catalog_ui.reconcile_project_selector",
     ):
         assert marker in src, f"_open_chain_rest 应保留 {marker} 刷新"
 

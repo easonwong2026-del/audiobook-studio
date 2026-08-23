@@ -238,6 +238,8 @@ Round 2A 修改前真实 baseline：
 - Ruff changed Python files `--select F`：pass（`All checks passed!`）。
 - `git diff --check`：pass。
 
+---
+
 ## Remaining cleanup candidates after Round 2A
 
 - 仅保留 Round 1 deferred 项和 `project_manager` 中有真实 compatibility caller 的 wrappers；不要把“模块较大”或 vulture unused 作为删除理由。
@@ -342,3 +344,137 @@ tests/test_supplement.py / boundary fixtures
 - `python -m compileall -q .`：pass。
 - Ruff changed Python files `--select F`：pass。
 - `git diff --check`：pass。
+
+---
+
+# Repository Entropy Cleanup Round 3B — Project Page Residual Boundary Cleanup
+
+日期：2026-08-23
+
+Baseline：`137577f438f9999f96b1118f932dd1686f77a479`（PR #57 squash merge，当前最新 `origin/main`）
+
+分支：`refactor/project-page-residual-r3b`
+
+## 启动与审计证据
+
+PR #57 已确认 `MERGED`，`merge_commit_sha` 为上述 baseline，且已进入当前
+`origin/main`；没有要求 squash 前的 PR head `933abc42...` 成为 main ancestor。
+启动时工作树 clean。Round 2B 内容验证通过：`ui/components/voice_binding.py`
+拥有 role presentation helpers，`lib/project_manager.py` 不再定义它们。
+
+在修改前对 Python、tests、scripts、MCP、docs 和 wiring 做了 `rg` + AST 审计，
+并额外检查动态 `getattr`、字符串索引、monkeypatch 和 import/re-export。以下旧
+Project Page symbols 没有隐藏调用；唯一生产引用均列在表内。
+
+| symbol/file | category | current callers | replacement | compatibility reason | delete_now | risk | evidence |
+|---|---|---|---|---|---:|---|---|
+| `app.refresh_project_storage` | MISPLACED → extracted | `_open_chain_rest`、`_post_archive_reconcile` 两条 live chain | `ui.project_view_handlers.refresh_project_storage` | 无独立兼容 API；Project View 仍需同一 UI callback | yes（app 定义） | medium | baseline AST/rg 仅命中两条 `.then`；empty/normal/exception 输出逐字测试 |
+| `app.refresh_projects_full` | DUPLICATE | `p_refresh.click` 唯一调用 | `catalog_ui.reconcile_project_selector` | 无；薄 wrapper 不属于 public contract | yes | low | baseline 只有定义与按钮引用；candidate 直接接 Catalog authority |
+| `app.refresh_p_sel` | DUPLICATE | `_open_chain_rest` 唯一调用 | `catalog_ui.reconcile_project_selector` | 无；薄 wrapper 不属于 public contract | yes | low | baseline 只有定义与打开链引用；candidate 直接接 Catalog authority |
+| `app.clear_project_view` | DEAD | 无生产、测试、MCP、脚本或动态 caller | 项目页初始空态 / live open chain | 旧项目页无清除事件，控制仍只保留 Python alias | yes | low | AST 无 `Load` 引用；`project_page.py` 不渲染旧资产控件 |
+| `app.open_project_folder` | DUPLICATE | 无 caller | `catalog_handlers.open_selected_directory` | 旧项目页目录按钮已移至 Catalog | yes | low | 无 `.click/.then`、import、getattr 或 monkeypatch 引用；Catalog handler live wiring |
+| `app.clear_project_cache` | DUPLICATE | 无 caller | Catalog cleanup (`scan_selected_cleanup` / `execute_selected_cleanup`) | 清理服务和磁盘语义仍由 `ProjectStorageService` 保留 | yes | medium | 无生产/测试/MCP/scripts/dynamic caller；Catalog cleanup 直连同一 Service |
+| `app.delete_project` | DUPLICATE | 无 caller | `catalog_handlers.archive_selected` | 旧即时 archive callback 不再是 UI/public contract；底层 archive 未改 | yes | medium | 无 live Gradio wiring、测试契约、MCP/scripts/dynamic caller；项目页旧删除控件不渲染 |
+| `ui.project_view_handlers.refresh_project_storage` | live owner | 两条 Project View chain | — | 当前 Project View storage summary 唯一 UI owner | no | low | 只调用 `ProjectStorageService.format_summary`，不触碰 Repository/disk |
+| `catalog_ui.reconcile_project_selector` | live authority | `p_refresh`、打开链 selector reconcile | — | Project Catalog selector contract | no | low | AST 输入 `[ss]`、输出 `[p_sel]`；selected/opened isolation tests |
+
+## Caller graph before / after
+
+Storage summary：
+
+```text
+before: _open_chain_rest / _post_archive_reconcile
+        -> app.refresh_project_storage
+        -> ProjectStorageService.format_summary
+
+after:  _open_chain_rest / _post_archive_reconcile
+        -> project_view_ui.refresh_project_storage
+        -> ProjectStorageService.format_summary
+```
+
+Selector reconciliation：
+
+```text
+before: p_refresh -> app.refresh_projects_full -> catalog_ui.reconcile_project_selector
+        open chain -> app.refresh_p_sel -> catalog_ui.reconcile_project_selector
+
+after:  p_refresh -> catalog_ui.reconcile_project_selector
+        open chain -> catalog_ui.reconcile_project_selector
+```
+
+`p_sel` 仍只由 opened workflow project reconcile；bookshelf row selection 仍只写
+`ss.selected_project`，不写 `p_sel`，也不触发 Project View chain。
+
+## Round 3B change summary
+
+### Confirmed deleted
+
+- `app.py::delete_project`
+- `app.py::clear_project_view`
+- `app.py::open_project_folder`
+- `app.py::clear_project_cache`
+- `app.py::refresh_projects_full`
+- `app.py::refresh_p_sel`
+- `app.py::refresh_project_storage`（实现迁移至 UI-owned handler，非行为删除）
+- `app.py` 中仅供 `clear_project_cache` 使用的 `format_size` import。
+
+### Added / moved ownership
+
+- `ui/project_view_handlers.py::refresh_project_storage`，保留原输入、输出、fallback、
+  exception logging 和 `ProjectStorageService.format_summary` 调用。
+- `_open_chain_rest`、`_post_archive_reconcile` 改接 `project_view_ui.refresh_project_storage`。
+- `p_refresh` 与打开链 selector 改为直接接入 `catalog_ui.reconcile_project_selector`。
+- 新增 Round 3B AST/行为结构测试；既有 selector/Windows wiring tests 改为验证
+  Catalog authority，而不是已删除的 app wrapper。
+
+### Retained compatibility
+
+- `app.select_project_from_bookshelf`：源码明确标记为 old-integration no-op，继续保留。
+- `app.hide_project_from_list`、`restore_project_to_list`、`migrate_project_copy`：仍是
+  deferred legacy surfaces，语义与 live Catalog archive/Storage v3 不等价。
+- `lib/project_manager.py` 未整体删除；尤其保留 `services/synthesis.py -> pm.open_project`
+  以及 mutable roots、snapshot、status、synthesis、Voice Cast 等 wrapper。
+- `ProjectService.delete_project`、`ProjectRepository.delete_project` 和 MCP public
+  `list_projects` contract 未触碰。
+
+### Deferred / frozen
+
+- `app.py` 仍是 HOTSPOT；本轮不做下一轮拆分。
+- ProductionRuntime、startup state machine、TaskRepository、watchdog/recovery、IndexTTS、
+  engine/prewarm、Voice Cast、Storage v1/v2/v3 resolver/migration、Chapter Merge、Whole
+  Book Assembly、QA/Repair、Export、Supplement、Quick TTS、MCP contract 和 dependencies
+  均未修改。
+
+### Remaining cleanup candidates
+
+- `hide_project_from_list` / `restore_project_to_list`：需要独立决定 hidden-catalog 磁盘语义
+  的正式退役，不可用 Archive/Recycle Bin 冒充等价替代。
+- `migrate_project_copy`：copy-to-new-root 与 Storage v3 原位迁移不是同一契约。
+- `app.select_project_from_bookshelf`：只有在 old integrations 兼容契约被明确退役后再评估。
+- `lib/project_manager.py` 私有兼容 wrappers：需专门 compatibility/deprecation round。
+
+## Round 3B verification
+
+修改前 baseline（以当前 `main` 实测）：
+
+- Full pytest：`1272 passed, 26 skipped, 76 warnings`，50.13s。
+- Windows selected workflow 同款集合：`329 passed, 19 warnings`，9.70s。
+- `refresh_project_storage` baseline 输出：空态、`SUMMARY:alpha` normal path、以及
+  `#### 项目存储\n❌ 无法读取项目目录：baseline boom` exception fallback 已记录并固化。
+
+修改后：
+
+- Targeted Round 3B + related wiring：`51 passed`。
+- Full pytest：`1278 passed, 26 skipped, 76 warnings`，51.90s；无 candidate-only failure。
+- Windows selected workflow 同款集合：`329 passed, 19 warnings`，8.42s。
+- `python -m compileall -q .`（使用仓库 `.venv-test` Python）：pass。
+- Ruff changed Python files `--select F`：`All checks passed!`。
+- `git diff --check`：pass。
+
+## LOC / scope
+
+- `app.py`：5367 → 5298 行（净减少 69 行；删除 73 行、接线/import 调整增加 4 行）。
+- `ui/project_view_handlers.py`：55 → 67 行（增加 12 行，承接 storage summary owner）。
+- 生产代码净减少 57 行；新增/更新测试只锁定本轮边界，不改业务语义。
+- changed production files 仅 `app.py` 与 `ui/project_view_handlers.py`；无 forbidden module
+  或依赖变更。

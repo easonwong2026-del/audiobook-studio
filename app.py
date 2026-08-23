@@ -54,7 +54,6 @@ from services import (
     WorkflowService,
     get_application_lifecycle,
 )
-from services.project_storage import format_size
 from services.review_audio import ReviewAudioService
 from services.session import SessionState
 from services.synthesis import SynthesisState
@@ -549,27 +548,6 @@ def refresh_production_task_tick(ss):
 def activate_production_timer():
     """Turn on the 1s polling timer after a start/cancel action."""
     return gr.Timer(active=True)
-
-def delete_project(name, ss=None):
-    """Archive a project by default; permanent deletion has a separate callback."""
-    if not name:
-        update = catalog_ui.reconcile_project_selector(ss)
-        return (update, "⚪ 请先选择项目。") if ss is not None else update
-    try:
-        target = ProjectStorageService.archive(name)
-        if ss is not None and ss.project == name:
-            ss.set_project(None, None, {})
-            ss.set_snapshot(None)
-            ss.synthesis = None
-            message = f"✅ 项目已移入回收站，可从 `{os.path.dirname(target)}` 恢复。"
-        else:
-            message = f"✅ 项目已移入回收站：`{target}`"
-    except Exception as exc:
-        logger.exception("归档项目失败")
-        message = f"❌ 归档项目失败：{exc}"
-    update = catalog_ui.reconcile_project_selector(ss)
-    return (update, message) if ss is not None else update
-
 
 def apply_data_dir(new_dir):
     """应用用户指定的数据保存位置（持久化到 config.json，本会话立即生效）。"""
@@ -3733,43 +3711,6 @@ def open_segments_folder(ss):
     return f"✅ 已打开分段音频目录：`{sd}`" if ok else f"❌ 打开目录失败：`{sd}`"
 
 
-def refresh_project_storage(ss):
-    """Show the active project root and the recursive storage summary."""
-    if not ss or not ss.project:
-        return "项目目录、存储占用和完整性状态会显示在这里。"
-    try:
-        return ProjectStorageService.format_summary(ss.project)
-    except Exception as exc:
-        logger.warning("读取项目存储信息失败: %s", exc)
-        return f"#### 项目存储\n❌ 无法读取项目目录：{exc}"
-
-
-def clear_project_view():
-    return (
-        "选择一个项目并点击“打开项目”后显示书名、作者、章节、片段和合成进度。",
-        "打开项目后显示数据占用和最近修改时间。",
-        "<div class='inline-empty'>打开项目后在这里查看章节结构。</div>",
-    )
-
-
-def open_project_folder(ss):
-    if not ss or not ss.project:
-        return "⚪ 请先打开项目。"
-    _ok, message = ProjectStorageService.open_directory(ss.project)
-    return ("✅ " if _ok else "❌ ") + message
-
-
-def clear_project_cache(ss):
-    """Clear only the external preview cache; never touch source or audio."""
-    if not ss or not ss.project:
-        return "⚪ 请先打开项目。"
-    try:
-        result = ProjectStorageService.clear_preview_cache(ss.project)
-        return f"✅ 已清理试听缓存 {result['files']} 个文件（{format_size(result['bytes'])}）；原始文件和音频未受影响。"
-    except Exception as exc:
-        return f"❌ 清理试听缓存失败：{exc}"
-
-
 def hide_project_from_list(name, ss):
     """Hide a project from the bookshelf without touching its local files."""
     if not name:
@@ -3827,11 +3768,6 @@ def select_project_from_bookshelf(rows, evt: gr.SelectData):
     ignored as well.
     """
     return gr.skip()
-
-
-def refresh_projects_full(ss=None):
-    """p_refresh refreshes p_sel from the opened workflow project only."""
-    return catalog_ui.reconcile_project_selector(ss)
 
 
 # ── O5：合成前分段预览 / 勾选 ──
@@ -4130,11 +4066,6 @@ def refresh_overview(ss):
     return (*_dashboard_snapshot(ss), catalog_ui.render_bookshelf_rows(query))
 
 
-def refresh_p_sel(ss):
-    """Refresh p_sel from catalog plus the opened workflow project only."""
-    return catalog_ui.reconcile_project_selector(ss)
-
-
 def _review_outputs():
     """Return the complete review-page callback contract in one stable order."""
     return [
@@ -4162,7 +4093,7 @@ def _open_chain_rest(event):
     # project-page selector before any downstream callback consumes ``p_sel``;
     # bookshelf selection itself never reaches this chain.
     e = e.then(refresh_voice_cast_ui, [ss], [v_status, v_cast_finalize])
-    e = e.then(refresh_p_sel, [ss], [p_sel])
+    e = e.then(catalog_ui.reconcile_project_selector, [ss], [p_sel])
     e = e.then(refresh_top_status, [ss], [top_status])
     e = e.then(preview_chapters, [ss], _review_outputs())
     e = e.then(preview_chapter_options, [ss], [e_chapter_sel])
@@ -4179,7 +4110,7 @@ def _open_chain_rest(event):
     e = e.then(refresh_queue_list, [ss], [s_queue_list])
     e = e.then(refresh_production_task, [ss], [s_task_status])
     e = e.then(project_view_ui.render_chapter_tree, [p_sel], [p_chapter_tree])
-    e = e.then(refresh_project_storage, [ss], [p_storage])
+    e = e.then(project_view_ui.refresh_project_storage, [ss], [p_storage])
     e = e.then(render_preview, [ss], [s_preview_df, s_chapters_sel])
     e = e.then(
         render_scope_controls,
@@ -4243,7 +4174,7 @@ def _post_archive_reconcile(event):
     e = e.then(refresh_queue_list, [ss], [s_queue_list])
     e = e.then(refresh_production_task, [ss], [s_task_status])
     e = e.then(project_view_ui.render_chapter_tree, [p_sel], [p_chapter_tree])
-    e = e.then(refresh_project_storage, [ss], [p_storage])
+    e = e.then(project_view_ui.refresh_project_storage, [ss], [p_storage])
     e = e.then(render_preview, [ss], [s_preview_df, s_chapters_sel])
     e = e.then(
         render_scope_controls,
@@ -4995,7 +4926,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         {"session": ss},
     )
 
-    p_refresh_chain = p_refresh.click(refresh_projects_full, [ss], [p_sel])
+    p_refresh_chain = p_refresh.click(catalog_ui.reconcile_project_selector, [ss], [p_sel])
     p_refresh_chain.then(
         merge_ui.refresh_merge_workflow_controls,
         [ss],

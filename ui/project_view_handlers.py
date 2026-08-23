@@ -10,8 +10,20 @@ import logging
 
 from lib import chapter_identity
 from services.project import ProjectService
+from services.project_storage import ProjectStorageService
 
 logger = logging.getLogger(__name__)
+
+
+def refresh_project_storage(ss) -> str:
+    """Show the active project root and the recursive storage summary."""
+    if not ss or not ss.project:
+        return "项目目录、存储占用和完整性状态会显示在这里。"
+    try:
+        return ProjectStorageService.format_summary(ss.project)
+    except Exception as exc:
+        logger.warning("读取项目存储信息失败: %s", exc)
+        return f"#### 项目存储\n❌ 无法读取项目目录：{exc}"
 
 
 def render_chapter_tree(project: str | None) -> str:
