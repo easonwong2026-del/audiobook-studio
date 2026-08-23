@@ -3,7 +3,7 @@
 覆盖：
 - 引擎互斥锁 _ENGINE_LOCK（RLock 递归不死锁、多线程串行化、锁内合成返回路径、
   OOM 递归切分重入锁不死锁）；
-- project_manager.build_bound_role_choices（仅返回已绑定角色）；
+- ui.components.voice_binding.build_bound_role_choices（仅返回已绑定角色）；
 - audio_pipeline.export_supplement（哑 wav 拼接 + LUFS + ffmpeg 转码；无 ffmpeg
   则 pytest.skip）；
 - services.supplement.SupplementService（monkeypatch 假引擎写哑 wav：split_lines /
@@ -26,9 +26,9 @@ from scipy.io import wavfile
 
 from lib import tts_engine
 from lib import audio_pipeline
-from lib import project_manager as pm
 from lib.exceptions import ExportError
 from services.supplement import SupplementService
+from ui.components.voice_binding import build_bound_role_choices
 
 
 # ───────────────────────── 引擎互斥锁 ─────────────────────────
@@ -101,20 +101,20 @@ def test_synthesize_segment_under_lock_returns_path(tmp_path, monkeypatch):
 def test_build_bound_role_choices_only_bound():
     script = {"voices": {"旁白": {}, "小明": {}, "配角": {}}}
     bindings = {"旁白": "/a.wav", "小明": "", "配角": None}
-    choices = pm.build_bound_role_choices(script, bindings)
+    choices = build_bound_role_choices(script, bindings)
     assert [v for _, v in choices] == ["旁白"]
     assert all(lbl.startswith("【已绑定】") for lbl, _ in choices)
 
 
 def test_build_bound_role_choices_empty_when_none():
     script = {"voices": {"A": {}, "B": {}}}
-    assert pm.build_bound_role_choices(script, {"A": None}) == []
-    assert pm.build_bound_role_choices(script, {}) == []
+    assert build_bound_role_choices(script, {"A": None}) == []
+    assert build_bound_role_choices(script, {}) == []
 
 
 def test_build_bound_role_choices_order_preserved():
     script = {"voices": {"z": {}, "a": {}, "m": {}}}
-    choices = pm.build_bound_role_choices(script, {"z": "1", "a": "2", "m": "3"})
+    choices = build_bound_role_choices(script, {"z": "1", "a": "2", "m": "3"})
     assert [v for _, v in choices] == ["z", "a", "m"]
 
 

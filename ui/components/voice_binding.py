@@ -5,7 +5,36 @@
 """
 from __future__ import annotations
 
-from lib import project_manager as _pm
+
+def build_role_choices(
+    script: dict,
+    bindings: dict,
+    role_categories: dict | None = None,
+) -> list[tuple]:
+    """构造角色分组 choices：(label, value)。"""
+    role_categories = role_categories or {}
+    groups: dict[str, list[str]] = {}
+    for role in script.get("voices", {}).keys():
+        cat = role_categories.get(role)
+        if not cat:
+            cat = "未绑定" if not bindings.get(role) else "未分类"
+        groups.setdefault(cat, []).append(role)
+    bound = [category for category in groups if category not in ("未绑定", "未分类")]
+    tail = [category for category in ("未绑定", "未分类") if category in groups]
+    choices: list[tuple] = []
+    for category in bound + tail:
+        for role in sorted(groups[category]):
+            choices.append((f"【{category}】{role}", role))
+    return choices
+
+
+def build_bound_role_choices(script: dict, bindings: dict) -> list[tuple]:
+    """构造补录页的已绑定角色 choices，保持剧本 voice 顺序。"""
+    choices: list[tuple] = []
+    for role in script.get("voices", {}).keys():
+        if bindings.get(role):
+            choices.append((f"【已绑定】{role}", role))
+    return choices
 
 
 def format_role_label(role: str, voice: dict | None = None) -> str:
@@ -71,7 +100,7 @@ def format_role_choices(
 ) -> list[tuple[str, str]]:
     """保留业务层分组和值，仅替换下拉显示标签。"""
     voices = script.get("voices", {}) or {}
-    choices = _pm.build_role_choices(script, bindings, role_categories)
+    choices = build_role_choices(script, bindings, role_categories)
     formatted: list[tuple[str, str]] = []
     for category_label, role in choices:
         role_label = format_role_label(role, voices.get(role))
@@ -86,7 +115,7 @@ def format_role_choices(
 def format_bound_role_choices(script: dict, bindings: dict) -> list[tuple[str, str]]:
     """将补录页的已绑定角色 choices 同样显示为角色描述格式。"""
     voices = script.get("voices", {}) or {}
-    choices = _pm.build_bound_role_choices(script, bindings)
+    choices = build_bound_role_choices(script, bindings)
     return [
         (f"【已绑定】{format_role_label(role, voices.get(role))}", role)
         for _, role in choices

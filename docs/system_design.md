@@ -618,8 +618,8 @@ graph TD
 | `pm.set_synthesis_overrides()` | app.py `do_synthesis` 内 | `lib/project_manager.py`→json.dump | `ProjectRepository.set_synthesis_overrides()`（原子写） |
 | `pm.get_synthesis_selections()` | app.py `render_preview` 内 | `lib/project_manager.py` | `ProjectRepository.get_synthesis_selections()` |
 | `pm.set_synthesis_selections()` | app.py `do_synthesis` 内 | `lib/project_manager.py`→json.dump | `ProjectRepository.set_synthesis_selections()`（原子写） |
-| `pm.build_role_choices()` | app.py `open_project`, `bind_voice` | `lib/project_manager.py`（纯函数） | **不变**（纯业务查询，无 I/O） |
-| `pm.build_bound_role_choices()` | app.py `refresh_supplement_roles` | `lib/project_manager.py`（纯函数） | **不变** |
+| `build_role_choices()` | `ui/components/voice_binding.py::format_role_choices` | `ui/components/voice_binding.py`（纯展示函数） | UI-owned category/value choices |
+| `build_bound_role_choices()` | `ui/components/voice_binding.py::format_bound_role_choices`、`app.py::refresh_supplement_roles` | `ui/components/voice_binding.py`（纯展示函数） | UI-owned bound-role choices |
 | `Project View.render_chapter_tree()` | app.py 打开/归档刷新链 | `ui/project_view_handlers.py`（UI HTML + `ProjectService.open_project()`） | → `ProjectService.open_project()` + 章节树 HTML |
 | `pm.WORKSPACE_ROOT` | `ProjectService.set_data_dir()` | 模块级变量 | `ProjectRepository.WORKSPACE_ROOT` |
 
@@ -629,7 +629,7 @@ graph TD
 |------|------|------|
 | **改移** | Service 层调用 | T03/T05 直接改调用目标 |
 | **保持旧包装** | `lib/config.py` 的公有函数（可能被 launcher.py 等外部调用） | 内部实现改为调 ConfigRepository，签名不变 |
-| **纯函数不动** | `pm.build_role_choices()`, `pm.build_bound_role_choices()` | 原地保留，不迁移（无 I/O 的查询函数不属于 Repository 职责） |
+| **UI presentation helper** | `build_role_choices()`, `build_bound_role_choices()` | 迁移到 `ui/components/voice_binding.py`；不进入 `ProjectRepository` 或 `project_manager` |
 
 ---
 
