@@ -57,7 +57,7 @@ def test_services_imported_and_used():
 
 def test_handlers_take_ss():
     """核心 handler 均接 ss（do_export 用 *args 吸收 ss）。"""
-    for h in ["create_project", "save_to_lib", "do_synthesis", "preview_bound_voice",
+    for h in ["create_project", "do_synthesis", "preview_bound_voice",
               "bind_voice", "open_project", "regenerate_segment", "preview_chapters",
               "play_segment", "cancel"]:
         fn = find_func(h)

@@ -1,7 +1,7 @@
 """O4/O5/O9/O13 AST 契约复核（app.py 无法 import，因顶层 import gradio）。
 
 通过 AST + 字符串断言验证本次新增组件 / handler 已定义并正确接线，且既有红线
-handler（create_project / save_to_lib / do_export / preview_bound_voice /
+handler（create_project / do_export / preview_bound_voice /
 do_export_subtitles / refresh_top_status / refresh_queue_list / pause_synthesis /
 resume_synthesis）接线未变、do_synthesis 首参仍为 ss。
 
@@ -27,10 +27,21 @@ VOICE_WIRING_TREE = ast.parse(VOICE_WIRING_SRC)
 PROJECT_VIEW_PATH = os.path.join(PROJECT_ROOT, "ui", "project_view_handlers.py")
 with open(PROJECT_VIEW_PATH, encoding="utf-8") as f:
     PROJECT_VIEW_SRC = f.read()
+VOICE_HANDLERS_PATH = os.path.join(PROJECT_ROOT, "ui", "voice_handlers.py")
+with open(VOICE_HANDLERS_PATH, encoding="utf-8") as f:
+    VOICE_HANDLERS_SRC = f.read()
+VOICE_HANDLERS_TREE = ast.parse(VOICE_HANDLERS_SRC)
 
 
 def find_func(name):
     for node in TREE.body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    return None
+
+
+def find_voice_func(name):
+    for node in VOICE_HANDLERS_TREE.body:
         if isinstance(node, ast.FunctionDef) and node.name == name:
             return node
     return None
@@ -149,7 +160,7 @@ def test_o9_voice_lib_browser_components_defined():
     for comp in ("v_lib_search", "v_lib_category", "v_lib_browser"):
         assert comp in SRC, f"O9 组件未定义: {comp}"
     for fn in ("refresh_voice_lib", "select_voice_from_browser"):
-        assert find_func(fn) is not None, f"O9 handler 未定义: {fn}"
+        assert find_voice_func(fn) is not None, f"O9 handler 未定义: {fn}"
 
 
 def test_o9_p_open_click_appends_refresh_voice_lib():
@@ -195,7 +206,7 @@ def test_o13_chapter_sel_change_preview_chapter():
 
 # ── 红线回归：既有关键 handler 仍定义、接线未变 ──
 def test_redline_core_handlers_still_defined():
-    for fn in ("create_project", "save_to_lib", "do_export", "preview_bound_voice",
+    for fn in ("create_project", "do_export", "preview_bound_voice",
                "do_export_subtitles", "refresh_top_status", "refresh_queue_list",
                "pause_synthesis", "resume_synthesis", "open_project"):
         assert find_func(fn) is not None, f"红线 handler 未定义: {fn}"

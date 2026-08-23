@@ -61,6 +61,7 @@ from ui import chapter_merge_handlers as merge_ui
 from ui import create_project_handlers as create_ui
 from ui import project_catalog_handlers as catalog_ui
 from ui import project_view_handlers as project_view_ui
+from ui import voice_handlers as voice_ui
 from ui import whole_book_assembly_handlers as assembly_ui
 from ui.components import (
     build_role_management_choices,
@@ -570,18 +571,6 @@ def open_data_dir():
         logger.warning("打开数据目录失败: %s", exc)
     return ""
 
-def refresh_role_list(search, current_role, ss):
-    """按搜索词刷新角色管理列表，同时保留仍可见的当前角色。"""
-    if not ss or not ss.project:
-        return gr.update(choices=[], value=None)
-    snap = _snap(ss)
-    if not snap:
-        return gr.update(choices=[], value=None)
-    choices = build_role_management_choices(snap.script, snap.bindings, search)
-    selected = current_role if any(value == current_role for _, value in choices) else None
-    return gr.update(choices=choices, value=selected)
-
-
 def refresh_role_summary(ss):
     """Refresh the role binding count after a save without reloading the page."""
     return refresh_voice_cast_ui(ss)[0]
@@ -711,27 +700,6 @@ def _role_config_title(role, voice, binding):
     status = "✅ 已绑定" if binding else "⚠ 待绑定"
     return f"### 当前角色：{role}{detail}\n{status}"
 
-
-def select_role_from_list(role, ss):
-    """选择角色列表项后加载该角色的绑定状态和右侧配置。"""
-    if not ss or not ss.project or not role:
-        return gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
-    role = str(role)
-    snap = _snap(ss)
-    if not snap or role not in (snap.script.get("voices", {}) or {}):
-        return gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
-    binding = snap.bindings.get(role)
-    voice = snap.script.get("voices", {}).get(role, {})
-    current = f"当前绑定音频：{os.path.basename(binding)}" if binding else "当前绑定音频：未选择"
-    return (
-        role,
-        _role_config_title(role, voice, binding),
-        gr.update(value=binding),
-        gr.update(value=None),
-        f"*{current}*",
-        None,
-        "",
-    )
 
 def _lib_voices():
     return voice_lib.voice_names()
@@ -3664,43 +3632,6 @@ def play_supplement_preview(which, sup_wavs, ss):
     return wavs[0]
 
 
-def play_lib_voice(choice):
-    fp=_lib_path(choice) if choice else None
-    return fp if fp and os.path.isfile(fp) else None
-
-def _save_category_choices(cats: list[str] | None) -> list[str]:
-    """构建保存分类下拉的可选值：真实分类 ∪ {未分类} + “— 新建 —”占位。
-
-    “未分类”是合法业务值（``voice_lib._category_of`` 对无下划线前缀文件的
-    默认分类，同时也是保存时的默认分类）。当音色库只有带前缀文件时
-    ``voice_lib.list_categories()`` 不含“未分类”，若此时 value 仍为
-    “未分类”，Gradio 会告警 value-not-in-choices，因此必须始终把“未分类”
-    放进 choices（去重，不改变已有分类语义）。
-    """
-    base = [str(c) for c in (cats or []) if str(c)]
-    if "未分类" not in base:
-        base.insert(0, "未分类")
-    return base + ["— 新建 —"]
-
-
-def save_to_lib(recorded, uploaded, name, category, ss):
-    """保存到音色库（业务委托 ProjectService.save_to_lib，支持分类前缀）。"""
-    try:
-        dest = ProjectService.save_to_lib(recorded, uploaded, name, category=category or "")
-    except ValueError as e:
-        return str(e), gr.update(), gr.update(), gr.update()
-    # 刷新所有依赖音色列表的组件（绑定下拉 + 浏览器 + 试听页换音色 + 分类下拉）
-    cats = voice_lib.list_categories()
-    return (f"已保存至音色库: {os.path.basename(dest)}",
-            gr.update(choices=_lib_voices()),
-            gr.update(choices=_lib_voices()),
-            gr.update(choices=_save_category_choices(cats), value=category or "未分类"))
-
-
-def filter_vlib_by_category(category):
-    """按分类筛选音色库 → 返回可选音色列表（供绑定区 v_lib 使用）。"""
-    return gr.update(choices=voice_lib.voice_names(category or None), value=None)
-
 def open_segments_folder(ss):
     if not ss.project: return "请先打开项目"
     d = ProjectService.get_project_dir(ss.project)
@@ -3810,29 +3741,6 @@ def render_preview(ss):
 
 
 # ── O9：音色库浏览 / 搜索 ──
-def refresh_voice_lib(search, category):
-    """刷新音色库浏览器（Dataframe 行 + 分类下拉选项）。"""
-    voices = voice_lib.scan_voice_library(search=search or "", category=category)
-    rows = []
-    for v in voices:
-        rows.append([v["name"], v["category"], v["size_kb"], v["path"]])
-    cats = voice_lib.list_categories()
-    return df_style.style_dataframe(rows, df_style.VOICE_HEADERS, status_col=None), gr.update(choices=cats, value=category)
-
-
-def select_voice_from_browser(rows, evt: gr.SelectData):
-    """点选音色库某行 → 回填 v_lib（触发既有 v_lib.change 自动试听）+ 喂共享试听器。"""
-    if evt is None or evt.index is None:
-        return gr.update(), None
-    try:
-        rows = rows["data"] if isinstance(rows, dict) else rows
-        name = rows[evt.index[0]][0]
-    except Exception:
-        return gr.update(), None
-    path = _lib_path(name)
-    return gr.update(value=name), (path if path and os.path.isfile(path) else None)
-
-
 # ── O13：章节级合并试听 ──
 def preview_chapter_options(ss):
     """刷新章节合并试听下拉选项。"""
@@ -3869,30 +3777,6 @@ def preview_chapter(ss, chapter_id):
 # ═══════════ UI ═══════════
 
 # ═══════════ 页面级刷新辅助（打开项目统一链路复用） ═══════════
-
-def refresh_categories():
-    """刷新绑定/保存分类下拉（v_bind_category / v_save_category）。"""
-    cats = voice_lib.list_categories()
-    return (
-        gr.update(choices=cats or ["未分类"]),
-        gr.update(
-            choices=_save_category_choices(cats),
-            value="未分类",
-        ),
-    )
-
-
-def refresh_voice_filters():
-    """一次扫描结果刷新绑定筛选、资产筛选和新声音分类。"""
-    cats = voice_lib.list_categories()
-    filter_choices = cats or ["未分类"]
-    save_choices = _save_category_choices(cats)
-    return (
-        gr.update(choices=filter_choices, value=None),
-        gr.update(choices=filter_choices, value=None),
-        gr.update(choices=save_choices, value="未分类"),
-    )
-
 
 def refresh_production_voice_choices():
     """进入生产区时按需刷新临时替换声音，避免启动时重复扫描音色目录。"""
@@ -4127,8 +4011,8 @@ def _open_chain_rest(event):
             s_scope_readiness,
         ],
     )
-    e = e.then(refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
-    e = e.then(refresh_categories, [], [v_bind_category, v_save_category])
+    e = e.then(voice_ui.refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
+    e = e.then(voice_ui.refresh_categories, [], [v_bind_category, v_save_category])
     e = e.then(refresh_production_voice_choices, [], [e_voice, utility_override_voice])
     e = e.then(refresh_production_check, [ss], [production_check])
     e = e.then(refresh_export_default_dir, [ss], [e_save_dir_hint])
@@ -4191,8 +4075,8 @@ def _post_archive_reconcile(event):
             s_scope_readiness,
         ],
     )
-    e = e.then(refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
-    e = e.then(refresh_categories, [], [v_bind_category, v_save_category])
+    e = e.then(voice_ui.refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
+    e = e.then(voice_ui.refresh_categories, [], [v_bind_category, v_save_category])
     e = e.then(refresh_production_voice_choices, [], [e_voice, utility_override_voice])
     e = e.then(refresh_production_check, [ss], [production_check])
     e = e.then(refresh_export_default_dir, [ss], [e_save_dir_hint])
@@ -4630,11 +4514,11 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     nav_voices.click(
         lambda: _goto("voices"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-voices')?.classList.add('active'); }").then(
-        refresh_role_list,
+        voice_ui.refresh_role_list,
         [v_role_search, v_role, ss], [v_table]).then(
-        refresh_voice_filters,
+        voice_ui.refresh_voice_filters,
         [], [v_bind_category, v_lib_category, v_save_category]).then(
-        refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category]).then(
+        voice_ui.refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category]).then(
         refresh_voice_cast_ui, [ss], [v_status, v_cast_finalize])
     nav_synth.click(
         lambda: _goto("synth"), None, _GROUPS,
@@ -4726,11 +4610,11 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     ov_voices.click(
         lambda: _goto("voices"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-voices')?.classList.add('active'); }").then(
-        refresh_role_list,
+        voice_ui.refresh_role_list,
         [v_role_search, v_role, ss], [v_table]).then(
-        refresh_voice_filters,
+        voice_ui.refresh_voice_filters,
         [], [v_bind_category, v_lib_category, v_save_category]).then(
-        refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category]).then(
+        voice_ui.refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category]).then(
         refresh_voice_cast_ui, [ss], [v_status, v_cast_finalize]
     )
     ov_synth.click(
@@ -4817,7 +4701,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     )
     voice_create_chain = _open_chain_rest(voice_create_chain)
     voice_create_chain.then(
-        refresh_role_list, [v_role_search, v_role, ss], [v_table],
+        voice_ui.refresh_role_list, [v_role_search, v_role, ss], [v_table],
     )
     # 创建项目成功后统一刷新目录类组件（书架 / p_sel / 回收站）
     voice_create_chain.then(
@@ -4865,17 +4749,17 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             "session": ss,
             "production_voice": e_voice,
             "callbacks": {
-                "select_role_from_list": select_role_from_list,
-                "refresh_role_list": refresh_role_list,
+                "select_role_from_list": voice_ui.select_role_from_list,
+                "refresh_role_list": voice_ui.refresh_role_list,
                 "bind_voice": bind_voice,
                 "refresh_role_summary": refresh_role_summary,
                 "refresh_voice_cast_ui": refresh_voice_cast_ui,
                 "finalize_voice_cast": finalize_voice_cast_ui,
-                "play_lib_voice": play_lib_voice,
-                "save_to_lib": save_to_lib,
-                "filter_vlib_by_category": filter_vlib_by_category,
-                "refresh_voice_lib": refresh_voice_lib,
-                "select_voice_from_browser": select_voice_from_browser,
+                "play_lib_voice": voice_ui.play_lib_voice,
+                "save_to_lib": voice_ui.save_to_lib,
+                "filter_vlib_by_category": voice_ui.filter_vlib_by_category,
+                "refresh_voice_lib": voice_ui.refresh_voice_lib,
+                "select_voice_from_browser": voice_ui.select_voice_from_browser,
                 "preview_bound_voice": preview_bound_voice,
             },
         },
