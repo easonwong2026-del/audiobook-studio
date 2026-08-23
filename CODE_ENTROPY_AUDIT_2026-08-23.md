@@ -615,3 +615,12 @@ Candidate verification:
   production LOC changes by `+46` while the app hotspot shrinks by 116 lines.
 - Round 3C production files: `app.py`, `ui/voice_handlers.py`; tests only add/update
   boundary contracts and do not alter production behavior.
+
+## Delivery
+
+- Commit: `b3ca249725808262dfd39dd13d8cd00e11f4fdeb`
+- Branch: `refactor/voice-asset-boundary-r3c`
+- Pull request: [#59](https://github.com/easonwong2026-del/audiobook-studio/pull/59)
+- GitHub Actions: Ubuntu Python 3.10 `pass`; Windows Python 3.10 selected workflow
+  tests `pass`.
+- Final worktree: clean.
