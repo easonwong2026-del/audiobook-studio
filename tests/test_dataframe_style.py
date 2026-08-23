@@ -15,8 +15,6 @@
 import os
 import sys
 
-import pytest
-
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
@@ -203,5 +201,5 @@ def test_exported_constants_present():
     assert df.ICON_COLORS["✅"] == df.APPLE_GREEN
     assert len(df.ICON_COLORS) == 7, "ICON_COLORS 应有 7 个键"
     assert len(df.STATUS_WORD_COLORS) == 5, "STATUS_WORD_COLORS 应有 5 个键"
-    assert df.BOOKSHELF_HEADERS == ["项目", "章", "段进度", "状态"]
+    assert df.BOOKSHELF_HEADERS == ["项目", "结构", "段进度", "状态", "最近修改"]
     assert df.VOICE_HEADERS == ["名称", "分类", "大小(KB)", "试听"]

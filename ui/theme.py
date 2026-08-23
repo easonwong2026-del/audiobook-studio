@@ -410,6 +410,9 @@ button:hover, .gr-button:hover {{ transform:translateY(-1px)!important; }}
 }}
 
 /* ===== 主工作区（浅色 + 大圆角 + 统一分区间距） ===== */
+.app-shell-row {{ width:100%!important; max-width:100%!important; align-items:flex-start!important; flex-wrap:nowrap!important; gap:16px!important; }}
+.app-shell-row > .sidebar {{ flex:0 0 260px!important; width:260px!important; min-width:260px!important; max-width:260px!important; }}
+.app-shell-row > .main-area {{ flex:1 1 auto!important; width:auto!important; min-width:0!important; }}
 .main-area {{ border:none!important; flex:1 1 0!important; width:0!important; max-width:none!important; min-width:0!important; padding:8px 20px 24px!important; background:transparent!important; box-sizing:border-box!important; overflow-x:hidden!important; }}
 .main-area > * {{ width:100%!important; max-width:100%!important; min-width:0!important; box-sizing:border-box!important; }}
 .main-area > .gr-group,
@@ -489,6 +492,35 @@ button[aria-label*="Play"] {{ border-radius:999px!important; background:{ACCENT}
 ::-webkit-scrollbar-track {{ background:transparent; }}
 
 /* ===== 工作台 ===== */
+.workbench-toolbar {{ align-items:end!important; gap:14px!important; margin-bottom:14px!important; flex-wrap:wrap!important; }}
+.workbench-heading {{ min-width:220px!important; }}
+.workbench-heading .prose h2 {{ margin:0!important; color:{TEXT_PRIMARY}!important; font-size:26px!important; letter-spacing:-.03em!important; }}
+.workbench-subtitle {{ color:{TEXT_MUTED}!important; font-size:12px!important; margin:4px 0 0!important; }}
+.workbench-search {{ min-width:240px!important; }}
+.workbench-search label {{ margin-bottom:4px!important; }}
+.workbench-new-project {{ min-width:118px!important; }}
+.workbench-global-tools {{ margin-bottom:14px!important; }}
+.workbench-split-row {{ align-items:flex-start!important; gap:16px!important; }}
+.workbench-split-row > .bookshelf-panel {{ flex:1.7 1 0!important; min-width:0!important; }}
+.workbench-split-row > .selected-inspector {{ flex:1 1 0!important; min-width:300px!important; }}
+.bookshelf-panel,.selected-inspector {{ border:1px solid {BORDER}!important; border-radius:16px!important; background:{PANEL}!important; padding:16px!important; box-sizing:border-box!important; }}
+.bookshelf-heading-row {{ align-items:center!important; margin-bottom:0!important; }}
+.bookshelf-heading-row .prose h3 {{ margin:0!important; }}
+.bookshelf-help {{ color:{TEXT_MUTED}!important; font-size:12px!important; margin:0 0 10px!important; }}
+.bookshelf-table {{ min-width:0!important; }}
+.selected-inspector > .prose:first-child h3 {{ margin:0 0 12px!important; }}
+.selected-project-summary {{ border:1px solid {BORDER}; border-radius:12px; background:{CARD}; padding:12px 14px; min-height:150px; }}
+.selected-project-summary .prose {{ margin:0!important; }}
+.selected-project-summary h3 {{ color:{ACCENT_DEEP}!important; font-size:14px!important; margin:8px 0 4px!important; }}
+.selected-project-summary h3:first-child {{ margin-top:0!important; }}
+.selected-project-summary p,.selected-project-summary li {{ font-size:12px!important; line-height:1.45!important; }}
+.inspector-open-project {{ width:100%!important; margin:12px 0 8px!important; }}
+.inspector-relation-status {{ padding:8px 10px!important; border-radius:9px!important; background:#fbfdf9!important; border:1px solid #e4ebe1!important; font-size:12px!important; }}
+.inspector-accordion {{ border:1px solid #e6ebe6!important; border-radius:12px!important; margin-top:12px!important; }}
+.selected-inspector > .gr-markdown h4 {{ margin-top:18px!important; margin-bottom:8px!important; }}
+.selected-inspector .gr-row {{ gap:8px!important; flex-wrap:wrap!important; }}
+.selected-inspector .gr-row > * {{ min-width:0!important; }}
+.selected-inspector .gr-dropdown,.selected-inspector .gr-textbox {{ min-width:0!important; }}
 .workbench-status {{ margin-bottom:4px!important; }}
 .workbench-hero {{ min-height:148px; display:flex; justify-content:space-between; align-items:center; gap:24px; padding:24px 26px; border-radius:16px; color:#ffffff; background:linear-gradient(125deg,#24392c 0%,#355642 100%); overflow:hidden; }}
 .workbench-hero .eyebrow {{ color:{ACCENT}; font-size:11px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }}
@@ -609,6 +641,9 @@ button[aria-label*="Play"] {{ border-radius:999px!important; background:{ACCENT}
   .sidebar {{ min-width:100%!important; margin:0 0 12px!important;
     border-radius:20px!important;
   }}
+  .app-shell-row {{ flex-wrap:wrap!important; }}
+  .app-shell-row > .sidebar {{ flex:1 1 100%!important; width:100%!important; max-width:100%!important; }}
+  .app-shell-row > .main-area {{ flex:1 1 100%!important; width:100%!important; }}
   .dashboard-metrics {{ grid-template-columns:1fr; }}
   .workbench-hero {{ padding:22px; }}.hero-progress {{ display:none; }}
   .main-area {{ width:100%!important; padding:8px 12px 20px!important; }}
@@ -618,7 +653,8 @@ button[aria-label*="Play"] {{ border-radius:999px!important; background:{ACCENT}
   .voice-config-footer > * {{ flex:1 1 100%!important; min-width:0!important; }}
   .voice-config-footer .voice-bind-action {{ flex:1 1 100%!important; width:100%!important; }}
   .voice-binding-steps {{ grid-template-columns:1fr!important; }}
-  .workbench-main-row > *, .stage-row > *, .voice-step-card {{ min-width:100%!important; }}
+  .workbench-main-row > *, .workbench-split-row > *, .stage-row > *, .voice-step-card {{ min-width:100%!important; }}
+  .workbench-toolbar > * {{ min-width:100%!important; }}
 }}
 @media (max-width: 1180px) and (min-width: 901px) {{
   .gradio-container {{ padding:16px!important; }}

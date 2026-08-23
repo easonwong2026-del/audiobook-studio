@@ -72,7 +72,7 @@ def _bookshelf_value(rows):
 
 def test_apply_project_search_renders_filtered_rows(handler_workspace):
     bookshelf, hint, selected_reset = handlers.apply_project_search("")
-    assert bookshelf["headers"] == ["项目", "章", "段进度", "状态"]
+    assert bookshelf["headers"] == ["项目", "结构", "段进度", "状态", "最近修改"]
     names = {row[0] for row in bookshelf["data"]}
     assert names == {"alpha", "beta"}
     # 搜索后清除选中项目 State，避免管理动作作用于隐藏旧选中
@@ -273,7 +273,7 @@ def test_refresh_project_catalog_contract(handler_workspace):
     assert isinstance(result, tuple)
     assert len(result) == 5
     bookshelf, p_sel_update, trash_rows, trash_choices, trash_status = result
-    assert bookshelf["headers"] == ["项目", "章", "段进度", "状态"]
+    assert bookshelf["headers"] == ["项目", "结构", "段进度", "状态", "最近修改"]
     assert {row[0] for row in bookshelf["data"]} == {"alpha", "beta"}
     assert p_sel_update.get("choices") == ["alpha", "beta"]
     assert isinstance(trash_rows, list)
