@@ -85,15 +85,17 @@ def test_o4_bookshelf_components_defined():
     # V3.1：书架组件从 p_bookshelf 改名 ov_bookshelf（概览页书架）
     for comp in ("ov_bookshelf", "p_chapter_tree"):
         assert comp in SRC, f"O4 组件未定义: {comp}"
-    for fn in ("refresh_bookshelf", "select_project_from_bookshelf",
-               "render_chapter_tree", "refresh_projects_full"):
+    for fn in ("select_project_from_bookshelf", "render_chapter_tree",
+               "refresh_projects_full"):
         assert find_func(fn) is not None, f"O4 handler 未定义: {fn}"
+    assert find_func("refresh_bookshelf") is None, \
+        "旧书架刷新 handler 不应在 app.py 中复活"
 
 
 def test_o4_p_open_click_appends_bookshelf_then():
     # V3.1：p_open.click / ov_open.click / ov_bookshelf.select 三条入口统一走
-    # 打开项目统一链路（方案 A），其中内联 refresh_bookshelf 与 render_chapter_tree，
-    # 不再在 .then 链上暴露。
+    # 打开项目统一链路（方案 A），目录刷新由 Project Catalog 接管，
+    # render_chapter_tree 仍服务项目页章节树。
     # 校验刷新链覆盖 ov_bookshelf / p_chapter_tree。
     assert "ov_bookshelf" in SRC, \
         "ov_bookshelf 组件缺失（书架刷新未在打开链路中覆盖）"

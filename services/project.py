@@ -122,11 +122,6 @@ class ProjectService:
         return ProjectRepository.load_snapshot(name)
 
     @staticmethod
-    def list_projects() -> list[dict]:
-        """O4：扫描所有项目并产出多书摘要。"""
-        return ProjectRepository.list_projects()
-
-    @staticmethod
     def create_project_from_data(name: str, script: dict) -> Any:
         """Create a project from an in-memory structured script."""
         from services.project_creation import ProjectCreationService

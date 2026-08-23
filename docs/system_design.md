@@ -22,7 +22,7 @@ app.py → services/*.py → repositories/*.py (NEW) → 磁盘 JSON
 - Repository 方法均用 `@staticmethod` 或模块级函数（无实例状态，与既有的 `ProjectService` 风格一致）
 - 写入 JSON 全部使用 **临时文件 + fsync + os.replace** 原子替换
 - 错误处理：文件不存 → `FileNotFoundError`，JSON 损坏 → 明确的异常信息（不含 `except Exception: pass`）
-- `OperationResult` 仅用于可选返回，核心操作直接 raise 明确异常
+- 核心操作直接 raise 明确异常；未形成调用链的 `OperationResult` 原型已退役
 
 ### 2. File List
 
