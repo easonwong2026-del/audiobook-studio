@@ -168,3 +168,76 @@ integration monkeypatch，`ProjectService.set_data_dir` 也会同步它们。
   `tests/test_storage_migration_rollback.py`；
 - live wiring：`tests/test_app_wiring.py`、
   `tests/test_catalog_refresh_integration.py`。
+
+---
+
+# Repository Entropy Cleanup Round 2A — Project View / Chapter Tree Boundary Extraction
+
+日期：2026-08-23
+Baseline：`aa9151566abcb722cd3f29efe9dbd04d0a6ee62f`（PR #55 squash merge commit，当前最新 `main`）
+分支：`refactor/project-view-boundary-r2a`
+
+## 启动门槛与基线证据
+
+PR #55 已确认 `MERGED`，其 `merge_commit_sha` 为 `aa9151566abcb722cd3f29efe9dbd04d0a6ee62f`，且该 commit 即当前 `origin/main`；不要求 squash 前的 PR head `d7b262c94ba064ca2554008ff5b97fd75a8c41b3` 成为 main ancestor。启动前工作树 clean，内容验证为 PR #55 的 Round 1 清理已包含在该 main commit 中。
+
+Round 2A 修改前真实 baseline：
+
+- Full suite：`1255 passed, 26 skipped, 76 warnings`，50.33s；coverage 81%（`18142` statements）。
+- Windows selected workflow 同款集合（`PYTHONUTF8=1`）：`329 passed, 19 warnings`，9.92s。
+
+## Chapter Tree 全仓引用审计
+
+在未修改的 `aa9151566...` 基线上，对 Python、测试、MCP、scripts、docs、动态导入/属性访问和 monkeypatch 进行了 `rg`/AST 审计：
+
+| symbol/file | category | current callers | replacement | compatibility reason | delete_now | risk | evidence |
+|---|---|---|---|---|---:|---|---|
+| `app.render_chapter_tree` | MISPLACED → extracted | `_open_chain_rest`、`_post_archive_reconcile` 两条 live `.then` | `ui.project_view_handlers.render_chapter_tree` | 无独立外部兼容契约；原 app callback 只委托 pm renderer | yes | medium | baseline `rg` 只有上述两条生产 wiring；Round 2A 后 app 无同名 FunctionDef，两个链仍以 `[p_sel] → [p_chapter_tree]` 接线 |
+| `lib.project_manager.build_chapter_tree` | MISPLACED → deleted | 仅 `app.render_chapter_tree` 与 O4 tests；无 services/MCP/scripts/dynamic caller | `Project View handler` + `ProjectService.open_project` | 不属于 `services/synthesis.py` 等 compatibility surface | yes | medium | baseline 全仓 alias 搜索仅命中定义、app 委托、O4 tests/docs；新 handler 输出与 baseline fixture 完全一致 |
+| `ui.project_view_handlers.render_chapter_tree` | live replacement | `_open_chain_rest`、`_post_archive_reconcile` | — | 当前 Project View 唯一 HTML owner | no | low | AST wiring tests + exact HTML/status tests |
+| `services.ProjectService.open_project` | COMPAT/live read boundary | Project View handler 及既有 project flows | `ProjectRepository.load_project` | service/public compatibility API，保留 mutable-root/legacy load 语义 | no | high | handler 只走 service；禁止 app/ui 直接 open/json |
+| `app.select_project_from_bookshelf` | COMPAT | old integrations only；live bookshelf 不调用 | `catalog_handlers.select_bookshelf_row` | 源码明确为 legacy no-op；selected/opened 隔离契约仍需保留 | no | low | Round 1 结构契约及现有 selected/opened tests |
+
+## Round 2A 行为与边界证明
+
+- 新 handler 保留空态 `<i>未打开项目</i>`、`<details>` 顺序、`chapter_identity.chapter_label`、完成计数、✅/❌/⬜ 状态图标、segment id/role/text（40 字预览）和异常 fallback。
+- 同一临时项目 fixture 的 baseline `pm.build_chapter_tree()` 与 candidate `render_chapter_tree()` 输出逐字相同；测试固化 `p_progress` 的完整 HTML，并覆盖 empty/missing/done/failed/pending/count。
+- `_open_chain_rest` 与 `_post_archive_reconcile` 仍按原事件顺序消费 `p_sel`，输出 `p_chapter_tree`；没有读取 `selected_project`，所以 bookshelf selection 不会加载或改写 Project View。
+- Archive/open reconcile 的既有 state tests 保留；本轮只替换 callback owner，不改事件输入、输出、状态机或磁盘格式。
+- `lib/project_manager.py` 仍保留全部其他 compatibility wrappers；特别是 `services/synthesis.py -> pm` import、Storage/legacy roots、Voice Cast 等均未改。
+
+## Round 2A 变更清单
+
+### Confirmed deleted
+
+- `app.py::render_chapter_tree`（7 行旧委托函数）。
+- `lib/project_manager.py::build_chapter_tree` 及其仅为该 renderer 服务的 `logging`、`chapter_identity` import（45 行实现/import 减少）。
+
+### Added / moved ownership
+
+- 新增 `ui/project_view_handlers.py::render_chapter_tree`，只通过 `ProjectService.open_project()` 读取，保留原 HTML 行为。
+- 两条 app 刷新链只改为 `project_view_ui.render_chapter_tree`，不改变链顺序或契约。
+
+### Retained compatibility
+
+- `lib/project_manager.py` 未整体删除；`open_project`、snapshot、status、synthesis、role 等 wrappers 继续保留。
+- `app.select_project_from_bookshelf` 继续作为 old-integration no-op。
+- `ProjectCatalogService`/`project_catalog_handlers`/catalog wiring 和 Round 1 删除项未在本轮重做。
+
+### Deferred / frozen
+
+- `hide_project_from_list`、`restore_project_to_list`、`migrate_project_copy` 仍按 Round 1 结论 deferred。
+- `app.py` 仍是 HOTSPOT；本轮未拆分其他 handlers，未触碰 ProductionRuntime、startup state machine、Storage v1/v2/v3、Merge/Assembly、QA/Repair、Export、Quick TTS、Voice Cast、MCP contract。
+
+## Round 2A verification
+
+- Targeted boundary/O4/catalog tests：`37 passed`。
+- Candidate full pytest：`1261 passed, 26 skipped, 76 warnings`，51.32s；coverage `18119` statements / 81%。相对 baseline 多出的 6 个通过项来自本轮新增结构/行为测试；无 candidate-only failure。
+- Windows selected workflow 同款集合：`329 passed, 19 warnings`，8.38s；与 baseline 同样无失败。
+- `python -m compileall -q .`：pass。
+- Ruff changed Python files `--select F`：pass（`All checks passed!`）。
+- `git diff --check`：pass。
+
+## Remaining cleanup candidates after Round 2A
+
+- 仅保留 Round 1 deferred 项和 `project_manager` 中有真实 compatibility caller 的 wrappers；不要把“模块较大”或 vulture unused 作为删除理由。

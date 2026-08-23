@@ -61,6 +61,7 @@ from services.synthesis import SynthesisState
 from ui import chapter_merge_handlers as merge_ui
 from ui import create_project_handlers as create_ui
 from ui import project_catalog_handlers as catalog_ui
+from ui import project_view_handlers as project_view_ui
 from ui import whole_book_assembly_handlers as assembly_ui
 from ui.components import (
     build_role_management_choices,
@@ -3828,13 +3829,6 @@ def select_project_from_bookshelf(rows, evt: gr.SelectData):
     return gr.skip()
 
 
-def render_chapter_tree(project):
-    """渲染章节折叠树 HTML（O4 右栏）。project 为空返回提示。"""
-    if not project:
-        return "<i>未打开项目</i>"
-    return _pm.build_chapter_tree(project)
-
-
 def refresh_projects_full(ss=None):
     """p_refresh refreshes p_sel from the opened workflow project only."""
     return catalog_ui.reconcile_project_selector(ss)
@@ -4184,7 +4178,7 @@ def _open_chain_rest(event):
     )
     e = e.then(refresh_queue_list, [ss], [s_queue_list])
     e = e.then(refresh_production_task, [ss], [s_task_status])
-    e = e.then(render_chapter_tree, [p_sel], [p_chapter_tree])
+    e = e.then(project_view_ui.render_chapter_tree, [p_sel], [p_chapter_tree])
     e = e.then(refresh_project_storage, [ss], [p_storage])
     e = e.then(render_preview, [ss], [s_preview_df, s_chapters_sel])
     e = e.then(
@@ -4248,7 +4242,7 @@ def _post_archive_reconcile(event):
     )
     e = e.then(refresh_queue_list, [ss], [s_queue_list])
     e = e.then(refresh_production_task, [ss], [s_task_status])
-    e = e.then(render_chapter_tree, [p_sel], [p_chapter_tree])
+    e = e.then(project_view_ui.render_chapter_tree, [p_sel], [p_chapter_tree])
     e = e.then(refresh_project_storage, [ss], [p_storage])
     e = e.then(render_preview, [ss], [s_preview_df, s_chapters_sel])
     e = e.then(

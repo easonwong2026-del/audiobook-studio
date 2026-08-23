@@ -620,7 +620,7 @@ graph TD
 | `pm.set_synthesis_selections()` | app.py `do_synthesis` 内 | `lib/project_manager.py`→json.dump | `ProjectRepository.set_synthesis_selections()`（原子写） |
 | `pm.build_role_choices()` | app.py `open_project`, `bind_voice` | `lib/project_manager.py`（纯函数） | **不变**（纯业务查询，无 I/O） |
 | `pm.build_bound_role_choices()` | app.py `refresh_supplement_roles` | `lib/project_manager.py`（纯函数） | **不变** |
-| `pm.build_chapter_tree()` | app.py `render_chapter_tree` | `lib/project_manager.py`（含 I/O） | → `ProjectRepository.load_project()` + 纯函数 |
+| `Project View.render_chapter_tree()` | app.py 打开/归档刷新链 | `ui/project_view_handlers.py`（UI HTML + `ProjectService.open_project()`） | → `ProjectService.open_project()` + 章节树 HTML |
 | `pm.WORKSPACE_ROOT` | `ProjectService.set_data_dir()` | 模块级变量 | `ProjectRepository.WORKSPACE_ROOT` |
 
 ### "改移" vs "保持" vs "双写"
@@ -656,5 +656,5 @@ graph TD
 | R1 | **原子写跨盘失败**：`os.replace(tmp, path)` 在 tmp 和 path 不在同一文件系统时报 `OSError` | 配置/项目数据损坏 | 所有 tmp 文件在同一目录（`path + ".tmp"`），天然同盘。确认 config.json 与 program dir 同盘；project.json 与 project dir 同盘。 |
 | R2 | **config.py 被多处直接调用**（app.py:key-up, launcher.py, lib/ 内各模块） | 切换中间态时 config 行为不一致 | `lib/config.py` 保持所有公有函数签名不变，内部实现改为委托 `ConfigRepository`。不存在"两套"——始终是 `lib/config.py` 调 `ConfigRepository`。 |
 | R3 | **阶段三快照加载入口依赖 services/project.py**，T03 改了打开逻辑 | 快照加载与项目打开不同步 | `ProjectRepository.load_snapshot()` 内部调 `load_project()` + `ProjectSnapshot.build()`，与阶段三的 `pm.load_snapshot` 逻辑等价。`services/session.py` 的 `ensure_snapshot` / `reload_if_stale` 不需要改（快照类无变化）。 |
-| R4 | **`build_chapter_tree` 在 lib/project_manager.py 中依赖 `open_project`** | T03 后旧 pm.open_project 不再被调，但 build_chapter_tree 是纯 UI 查询 | 保持 `pm.build_chapter_tree` 不变（它仍然直接调 `pm.open_project`，而 `pm.open_project` 仍然存在）。或改为调 `ProjectRepository`。推荐前者（最小改动）。 |
+| R4 | **Project View 章节树的 I/O 与 HTML ownership** | Round 2A 已将章节树迁移到 `ui/project_view_handlers.py`，通过 `ProjectService.open_project()` 读取；`lib/project_manager.py` 不再包含 HTML renderer | 保持 `ProjectService.open_project()` 的兼容包装与既有章节树 HTML/状态契约；app 只保留 `.then(project_view_ui.render_chapter_tree, ...)` 接线。 |
 | R5 | **测试隔离**：conftest.py 设置了 `AUDIOBOOK_STUDIO_DATA_DIR` 环境变量，但 `config_repo.py` 如何知道 CONFIG_PATH？ | ConfigRepository 写到了程序目录的 config.json 而非临时目录 | `ConfigRepository.CONFIG_PATH` 保持与 `lib/config.py` 一致（`os.path.join(PROGRAM_DIR, "config.json")`）。测试通过 `monkeypatch.setattr(ConfigRepository, "CONFIG_PATH", str(tmp_path / "config.json"))` 隔离。 |
