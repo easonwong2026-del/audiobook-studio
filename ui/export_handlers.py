@@ -57,6 +57,22 @@ def _export_ui_reset(message: str, *, task_id: str = "", output_dir: str = ""):
     )
 
 
+def _export_ui_noop():
+    """Do not let a stale callback overwrite a newer project's UI state."""
+    return (gr.skip(),) * 7
+
+
+def _export_ui_callback_is_current(ss, project: str, task_id: str) -> bool:
+    """Return whether an in-flight callback still owns the session pointer."""
+    current_project = str(getattr(ss, "project", None) or "") if ss else ""
+    if current_project != project:
+        return False
+    if not task_id:
+        return True
+    current_task_id = str(getattr(ss, "_export_ui_task_id", "") or "") if ss else ""
+    return current_task_id == task_id
+
+
 def _resolve_export_ui_artifact(
     project_name: str,
     task_id: str,
@@ -124,18 +140,28 @@ def _copy_export_ui_artifact(artifact_path: str, output_dir: str) -> tuple[str, 
         return artifact_path, f"另存到指定位置失败：{exc}"
 
 
-def _export_ui_values(task_id: str, output_dir: str, ss):
+def _export_ui_values(task_id: str, output_dir: str, ss, *, allow_new_task: bool = False):
     """Read one durable export task and render all Export-only UI outputs."""
     identifier = str(task_id or "").strip()
     requested_dir = str(output_dir or "").strip()
     session_project = str(getattr(ss, "project", None) or "") if ss else ""
     tracked_project = str(getattr(ss, "_export_ui_project", "") or "") if ss else ""
-    if session_project and tracked_project and tracked_project != session_project:
+    tracked_task_id = str(getattr(ss, "_export_ui_task_id", "") or "") if ss else ""
+    if not allow_new_task and session_project and tracked_project and tracked_project != session_project:
         _remember_export_ui_state(ss, "", "", session_project)
         return _export_ui_reset(
             "当前项目没有已提交的导出任务。",
             output_dir="",
         )
+    if (
+        not allow_new_task
+        and session_project
+        and tracked_project == session_project
+        and identifier != tracked_task_id
+    ):
+        # A timer callback may still carry the previous component value after
+        # the project-open reconciliation has already cleared the pointer.
+        return _export_ui_noop()
     _remember_export_ui_state(ss, identifier, requested_dir, session_project)
     if not identifier:
         return _export_ui_reset("当前没有已提交的导出任务。", output_dir=requested_dir)
@@ -145,11 +171,16 @@ def _export_ui_values(task_id: str, output_dir: str, ss):
             identifier,
         )
     except Exception as exc:  # noqa: BLE001 - UI must surface any read failure
+        if not _export_ui_callback_is_current(ss, session_project, identifier):
+            return _export_ui_noop()
         return _export_ui_reset(
             f"❌ 导出状态读取失败：{exc}",
             task_id=identifier,
             output_dir=requested_dir,
         )
+
+    if not _export_ui_callback_is_current(ss, session_project, identifier):
+        return _export_ui_noop()
 
     status = str(task.get("status") or "unknown").lower()
     if status in _EXPORT_ACTIVE_STATUSES:
@@ -174,6 +205,8 @@ def _export_ui_values(task_id: str, output_dir: str, ss):
     _remember_export_ui_state(ss, identifier, requested_dir, project_name)
     if status == "done":
         artifact, reason = _resolve_export_ui_artifact(project_name, identifier, task)
+        if not _export_ui_callback_is_current(ss, session_project, identifier):
+            return _export_ui_noop()
         if artifact is None:
             return _export_ui_reset(
                 f"⚠ 导出任务已完成，但最终成品尚未就绪。\n{reason}",
@@ -183,6 +216,8 @@ def _export_ui_values(task_id: str, output_dir: str, ss):
         artifact_path, copy_warning = _copy_export_ui_artifact(
             artifact["path"], requested_dir
         )
+        if not _export_ui_callback_is_current(ss, session_project, identifier):
+            return _export_ui_noop()
         lines = [
             "✅ 导出成功",
             f"文件：{os.path.basename(artifact_path)}",
@@ -250,6 +285,30 @@ def _export_ui_values(task_id: str, output_dir: str, ss):
 
 def refresh_export_status(task_id: str, output_dir: str, ss):
     """Export-only timer callback backed by the durable task repository."""
+    return _export_ui_values(task_id, output_dir, ss)
+
+
+def reconcile_export_state(task_id: str, output_dir: str, ss):
+    """Reconcile the complete Export UI boundary with the opened project.
+
+    This callback is used by project-open and Export navigation chains.  It
+    never adopts an arbitrary hidden task id: the hidden component state must
+    agree with the session's tracked project/task pointer, otherwise the UI is
+    explicitly cleared without touching durable export history.
+    """
+    session_project = str(getattr(ss, "project", None) or "") if ss else ""
+    tracked_project = str(getattr(ss, "_export_ui_project", "") or "") if ss else ""
+    tracked_task_id = str(getattr(ss, "_export_ui_task_id", "") or "") if ss else ""
+    identifier = str(task_id or "").strip()
+    if not session_project:
+        _remember_export_ui_state(ss, "", "", "")
+        return _export_ui_reset("当前项目没有已提交的导出任务。", output_dir="")
+    if tracked_project != session_project or identifier != tracked_task_id:
+        _remember_export_ui_state(ss, "", "", session_project)
+        return _export_ui_reset(
+            "当前项目没有已提交的导出任务。",
+            output_dir="",
+        )
     return _export_ui_values(task_id, output_dir, ss)
 
 
@@ -339,7 +398,12 @@ def do_export(fmt, bitrate, output_dir, *args):
         # Re-read the durable task immediately.  This also handles an
         # idempotent replay that is already done without trusting a stale
         # local/UI result payload.
-        return _export_ui_values(export_id, requested_dir, ss)
+        return _export_ui_values(
+            export_id,
+            requested_dir,
+            ss,
+            allow_new_task=True,
+        )
     except Exception as e:  # noqa: BLE001 - start errors must become UI state
         # The durable task may have become active between the guard read and
         # start_export().  Preserve that task instead of stopping its polling.
@@ -365,6 +429,7 @@ def do_export(fmt, bitrate, output_dir, *args):
                         candidate_task_id,
                         active_output_dir or requested_dir,
                         ss,
+                        allow_new_task=True,
                     )
             except Exception as lookup_error:  # noqa: BLE001 - retain the original start error
                 logger.debug("active export lookup after start failure failed: %s", lookup_error)
