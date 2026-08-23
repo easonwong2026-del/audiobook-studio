@@ -244,16 +244,14 @@ def test_t12_empty_catalog_selector_contract_is_explicit():
 
 
 def test_t13_manual_project_refresh_sanitizes_stale_value(monkeypatch):
-    import app
-
     summary = type("Summary", (), {"project_name": "beta"})()
     monkeypatch.setattr(
-        app.ProjectCatalogService,
+        handlers.ProjectCatalogService,
         "scan",
         staticmethod(lambda: [summary]),
     )
 
-    update = app.refresh_projects_full(SessionState(project="alpha"))
+    update = handlers.reconcile_project_selector(SessionState(project="alpha"))
 
     assert update.get("choices") == ["beta"]
     assert update.get("value") is None
@@ -261,12 +259,10 @@ def test_t13_manual_project_refresh_sanitizes_stale_value(monkeypatch):
 
 
 def test_t14_refresh_p_sel_emits_choices_with_legal_value(monkeypatch):
-    import app
-
     summary = type("Summary", (), {"project_name": "beta"})()
-    monkeypatch.setattr(app.ProjectCatalogService, "scan", lambda: [summary])
+    monkeypatch.setattr(handlers.ProjectCatalogService, "scan", lambda: [summary])
 
-    update = app.refresh_p_sel(SessionState(project="beta"))
+    update = handlers.reconcile_project_selector(SessionState(project="beta"))
 
     assert update.get("choices") == ["beta"]
     assert update.get("value") == "beta"

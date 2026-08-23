@@ -34,4 +34,5 @@ def test_open_chain_wires_all_pages():
     assert ".then(\n        refresh_overview, [ss]," in SRC, "缺失 refresh_overview 接线"
     for component in ("ov_status", "ov_progress", "ov_task", "ov_issues", "ov_bookshelf"):
         assert component in SRC, f"工作台刷新未覆盖 {component}"
-    assert ".then(refresh_p_sel, [ss], [p_sel])" in SRC, "缺失 refresh_p_sel 接线"
+    assert ".then(catalog_ui.reconcile_project_selector, [ss], [p_sel])" in SRC, \
+        "打开链应直接接入 Project Catalog selector authority"
