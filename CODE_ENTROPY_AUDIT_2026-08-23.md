@@ -930,3 +930,19 @@ serial rerun passed with baseline warning count and no candidate-only regression
 - Deferred: QA/Review generation-fence callbacks, Voice Cast, Utility handler extraction,
   direct repository dependencies elsewhere, Storage migration, Runtime/Prewarm and any
   `export_wiring.py` split.
+
+## Delivery
+
+- Commit：`e4d11bf2c24a770ef2b9dd8bdb1f7a9ee08f51e3`
+  (`refactor: extract formal export ui boundary`)。
+- Branch：`refactor/export-ui-boundary-r3f`。
+- PR：[#61](https://github.com/easonwong2026-del/audiobook-studio/pull/61)，标题为
+  `refactor: extract formal export UI boundary (Round 3F)`。
+- GitHub CI：Ubuntu Python 3.10 ✅（2m21s）；Windows Python 3.10 selected workflow ✅
+  （2m42s）。
+- Final diff stat：15 files changed, 1024 insertions(+), 635 deletions(-)。其中
+  `app.py` 减少 484 行；Formal Export 与 safe-path 实现迁入两个唯一 owner。
+- `services/export.py`、ProductionRuntime、TaskRepository、Storage、QA、Voice Cast、
+  Utility business logic、MCP contract 和依赖均未修改。
+- Final worktree：clean；分支已推送并跟踪
+  `origin/refactor/export-ui-boundary-r3f`。
