@@ -197,6 +197,56 @@ def test_inflight_project_a_timer_is_noop_after_project_b_opens(monkeypatch):
     assert calls == [("A", "export-a")]
 
 
+def test_validated_export_active_race_adopts_new_task_after_project_reconcile(monkeypatch):
+    """A validated EXPORT_ACTIVE task becomes B's new UI tracking authority."""
+    calls = []
+    durable = {"task_id": "export-race", "project": "B", "status": "running"}
+
+    class ActiveExportError(RuntimeError):
+        def __init__(self):
+            super().__init__("export already active")
+            self.plan = {
+                "blockers": [{
+                    "code": "EXPORT_ACTIVE",
+                    "task_id": "export-race",
+                    "status": "running",
+                }]
+            }
+
+    class Backend:
+        @staticmethod
+        def start_export(*_args, **_kwargs):
+            raise ActiveExportError()
+
+        @staticmethod
+        def get_export_task(project, task_id):
+            calls.append((project, task_id))
+            return dict(durable)
+
+    monkeypatch.setattr(export_ui, "ExportService", Backend)
+    session = SimpleNamespace(
+        project="B",
+        _export_ui_project="B",
+        _export_ui_task_id="",
+        _export_ui_output_dir="",
+    )
+
+    result = export_ui.do_export("mp3", "192k", "", "require_passed", session)
+
+    assert result[2] == "export-race"
+    assert "正在导出" in result[1]
+    assert result[5].active is True
+    assert result[4]["interactive"] is False
+    assert result[6]["interactive"] is False
+    assert session._export_ui_project == "B"
+    assert session._export_ui_task_id == "export-race"
+    assert calls == [("B", "export-race"), ("B", "export-race")]
+    assert not all(
+        isinstance(value, dict) and value.get("__type__") == "update"
+        for value in result
+    )
+
+
 def _function(name: str):
     return next(
         node

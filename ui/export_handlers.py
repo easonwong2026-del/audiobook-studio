@@ -429,6 +429,7 @@ def do_export(fmt, bitrate, output_dir, *args):
                         candidate_task_id,
                         active_output_dir or requested_dir,
                         ss,
+                        allow_new_task=True,
                     )
             except Exception as lookup_error:  # noqa: BLE001 - retain the original start error
                 logger.debug("active export lookup after start failure failed: %s", lookup_error)
