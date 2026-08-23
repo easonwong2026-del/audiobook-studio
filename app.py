@@ -3459,6 +3459,19 @@ def _open_chain_rest(event):
     默认导出目录 / 概览 / 项目下拉。
     """
     e = event
+    e = e.then(
+        export_ui.reconcile_export_state,
+        [e_export_task_id, e_export_output_dir, ss],
+        [
+            e_out,
+            e_path,
+            e_export_task_id,
+            e_export_output_dir,
+            e_open,
+            e_export_timer,
+            e_go,
+        ],
+    )
     # ``open_project`` has already established ``ss.project``. Reconcile the
     # project-page selector before any downstream callback consumes ``p_sel``;
     # bookshelf selection itself never reaches this chain.
@@ -3528,6 +3541,19 @@ def _post_archive_reconcile(event):
     confirmation or on a mutation guard rejection.
     """
     e = event
+    e = e.then(
+        export_ui.reconcile_export_state,
+        [e_export_task_id, e_export_output_dir, ss],
+        [
+            e_out,
+            e_path,
+            e_export_task_id,
+            e_export_output_dir,
+            e_open,
+            e_export_timer,
+            e_go,
+        ],
+    )
     e = e.then(refresh_top_status, [ss], [top_status])
     e = e.then(preview_chapters, [ss], _review_outputs())
     e = e.then(preview_chapter_options, [ss], [e_chapter_sel])
@@ -4032,7 +4058,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-export')?.classList.add('active'); }").then(
         export_ui.refresh_export_default_dir, [ss], [e_save_dir_hint]).then(
         export_ui.refresh_export_readiness, [e_fmt, e_qa_policy, ss], [e_readiness]).then(
-        export_ui.refresh_export_status,
+        export_ui.reconcile_export_state,
         [e_export_task_id, e_export_output_dir, ss],
         [
             e_out,
@@ -4128,7 +4154,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-export')?.classList.add('active'); }").then(
         export_ui.refresh_export_default_dir, [ss], [e_save_dir_hint]).then(
         export_ui.refresh_export_readiness, [e_fmt, e_qa_policy, ss], [e_readiness]).then(
-        export_ui.refresh_export_status,
+        export_ui.reconcile_export_state,
         [e_export_task_id, e_export_output_dir, ss],
         [
             e_out,
