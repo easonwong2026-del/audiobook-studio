@@ -742,3 +742,14 @@ Candidate:
 - Deferred：`ui/settings_handlers.py` 直接依赖 `ConfigRepository`、`ProjectRepository`、
   `TaskRepository`；本轮不创建 SettingsService/DiagnosticsService/facade，也不处理
   `_snapshot`/`app._snap`、TTS engine、prewarm、runtime 或 data-root semantics。
+
+## Delivery
+
+- Commit：`c43e677` (`refactor: close settings residual boundary`)。
+- PR：[#60](https://github.com/easonwong2026-del/audiobook-studio/pull/60)，标题为
+  `refactor: close settings residual boundary (Round 3D)`。
+- GitHub CI：Ubuntu Python 3.10 ✅；Windows Python 3.10 selected workflow ✅。
+- Final commit diff stat：5 files changed, 305 insertions(+), 37 deletions(-)。其中生产
+  ownership cleanup 净减少 21 行；新增测试与审计记录不改变运行时行为。
+- Final worktree：clean；分支 `refactor/settings-residual-boundary-r3d` 已推送并跟踪
+  `origin/refactor/settings-residual-boundary-r3d`。
