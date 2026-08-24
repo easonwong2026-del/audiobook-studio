@@ -6,7 +6,7 @@ monkeypatch tts_engine.synthesize_segment 为带 sleep 的桩（仿 test_synthes
 1) pause(state) -> status=="paused"、completed<total、暂停窗口内（0.7s）completed 不增长
    （段边界挂起，进行中段跑完后停，不杀进程）；
 2) resume(state) -> status=="running" -> 最终 status=="done"、completed==total；
-3) 暂停期间未反向写 meta：pm.open_project(project).meta.segments_status 仅含 done/pending，
+3) 暂停期间未反向写 meta：ProjectRepository.load_project(project).meta.segments_status 仅含 done/pending，
    无 cancelled 等异常态（O12 不污染断点续跑真相源）。
 
 无需 GPU / 真实模型；与现有 107 测试一致，全绿可复现。
@@ -25,10 +25,10 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-import lib.project_manager as pm  # noqa: E402
 import lib.tts_engine as tts_engine  # noqa: E402
 from services.synthesis import SynthesisState, SynthesisService  # noqa: E402
 from lib import progress as prog  # noqa: E402
+from repositories.project_repo import ProjectRepository  # noqa: E402
 
 
 SCRIPT = {
@@ -48,11 +48,13 @@ SCRIPT = {
 
 @pytest.fixture
 def project(tmp_path, monkeypatch):
-    monkeypatch.setattr(pm, "WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(ProjectRepository, "WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(ProjectRepository, "LEGACY_ROOT", str(tmp_path / "legacy"))
+    monkeypatch.setattr(ProjectRepository, "_INITIALIZED", True)
     sp = tmp_path / "s.json"
     sp.write_text(json.dumps(SCRIPT, ensure_ascii=False), encoding="utf-8")
-    pm.create_project("pr", str(sp))
-    d = pm.get_project_dir("pr")
+    ProjectRepository.create_project("pr", str(sp))
+    d = ProjectRepository.get_project_dir("pr")
     vo = os.path.join(project_paths.project_dir(d, "project_voices", create=True), "ref.wav")
     _dummy(vo)
     bp = project_paths.project_file(d, "voice_bindings")
@@ -85,7 +87,7 @@ def test_pause_resume_full_cycle(project, monkeypatch):
     state = SynthesisState(task_id="t1", project=project)
     # O3 数据源：do_synthesis 同款初始化
     state.segment_states = prog.build_segment_states(project)
-    SynthesisService.start(state, project, _bindings(pm.get_project_dir(project)))
+    SynthesisService.start(state, project, _bindings(ProjectRepository.get_project_dir(project)))
 
     # 轮询直到至少完成 1 段且仍在运行
     deadline = time.time() + 15
@@ -108,7 +110,7 @@ def test_pause_resume_full_cycle(project, monkeypatch):
     assert c1 == c2, f"暂停期间 completed 不应增长: {c1} -> {c2}"
 
     # meta 未被暂停污染：仅 done/pending，无 cancelled 异常态
-    meta, _, _ = pm.open_project(project)
+    meta, _, _ = ProjectRepository.load_project(project)
     for seg_id, st in meta.segments_status.items():
         assert st in ("done", "pending"), f"暂停期间 meta 出现非预期态 {seg_id}={st}"
     assert sum(1 for v in meta.segments_status.values() if v == "done") == state.completed
@@ -131,7 +133,7 @@ def test_segment_states_data_source_updates_during_run(project, monkeypatch):
     SynthesisService.reset_executor()
     state = SynthesisState(task_id="t2", project=project)
     state.segment_states = prog.build_segment_states(project)
-    SynthesisService.start(state, project, _bindings(pm.get_project_dir(project)))
+    SynthesisService.start(state, project, _bindings(ProjectRepository.get_project_dir(project)))
 
     deadline = time.time() + 15
     while state.status not in ("done", "cancelled", "error") and time.time() < deadline:

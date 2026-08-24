@@ -25,11 +25,6 @@ def _repository() -> type[ProjectRepository]:
     return ProjectRepository
 
 
-def _resolve_dir(name: str) -> str:
-    """Compatibility wrapper for the canonical repository resolver."""
-    return _repository().get_project_dir(name)
-
-
 def scan_projects() -> list[str]:
     """Compatibility wrapper for :meth:`ProjectRepository.scan_projects`."""
     return _repository().scan_projects()
@@ -68,79 +63,3 @@ def update_segment_status(name: str, seg_id: str, status: str):
 def get_remaining(name: str) -> list[str]:
     """Compatibility wrapper for the canonical recovery query."""
     return _repository().get_remaining(name)
-
-
-def _meta_path(project_dir: str) -> str:
-    return _repository()._meta_path(project_dir)
-
-
-def _load_meta(project_dir: str) -> ProjectMeta:
-    return _repository()._load_meta(project_dir)
-
-
-def _repair_meta(project_dir: str, meta: ProjectMeta):
-    return _repository()._repair_meta(project_dir, meta)
-
-
-def _save_meta(project_dir: str, meta: ProjectMeta):
-    return _repository()._save_meta(project_dir, meta)
-
-
-def get_synthesis_overrides(name: str) -> dict:
-    """读取项目的全局合成覆盖参数（``synthesis_overrides.json``）。
-
-    该文件与 ``structured_script.json`` 解耦（非破坏性，不动源剧本）。
-    文件不存在或解析失败时返回 ``{}``。
-
-    Args:
-        name: 项目名。
-
-    Returns:
-        覆盖参数字典（键见 ``set_synthesis_overrides``），缺省为 ``{}``。
-    """
-    return _repository().get_synthesis_overrides(name)
-
-
-def set_synthesis_overrides(name: str, overrides: dict) -> None:
-    """持久化全局合成覆盖参数到 ``synthesis_overrides.json``。
-
-    非破坏性：仅写独立的覆盖文件，不改动 ``structured_script.json`` 源剧本。
-
-    Args:
-        name: 项目名。
-        overrides: 覆盖参数字典，约定键：
-            - ``emotion``: str 或 None（None=按剧本）。
-            - ``override``: bool，是否覆盖 alpha / rate。
-            - ``emo_alpha``: float。
-            - ``speech_rate``: float。
-    """
-    return _repository().set_synthesis_overrides(name, overrides)
-
-
-def _project_status(total: int, done: int, failed: int) -> str:
-    """Compatibility wrapper for the shared bookshelf status derivation."""
-    return _repository()._project_status(total, done, failed)
-
-
-def get_synthesis_selections(name: str) -> dict:
-    """读取项目的合成章节勾选持久化（``synthesis_selections.json``）。
-
-    非破坏性：与 ``synthesis_overrides.json`` 同构的独立文件。不存在/解析失败返回 ``{}``。
-
-    Args:
-        name: 项目名。
-
-    Returns:
-        勾选字典（含 ``chapters`` 键为选中章节 id 列表），缺省为 ``{}``。
-    """
-    return _repository().get_synthesis_selections(name)
-
-
-def set_synthesis_selections(name: str, selections: dict) -> None:
-    """持久化合成章节勾选到 ``synthesis_selections.json``（非破坏性，同构 overrides）。
-
-    Args:
-        name: 项目名。
-        selections: 勾选字典（约定含 ``chapters`` 键，值为选中章节 id 列表）。
-    """
-    return _repository().set_synthesis_selections(name, selections)

@@ -25,7 +25,6 @@ from datetime import datetime, timezone
 
 import pytest
 
-from lib import project_manager as pm
 from repositories.project_repo import ProjectRepository
 from repositories.task_repo import (
     RuntimePendingSignal,
@@ -57,8 +56,6 @@ def hotpath_roots(tmp_path, monkeypatch):
     ProjectRepository.WORKSPACE_ROOT = str(tmp_path / "projects")
     ProjectRepository.LEGACY_ROOT = str(tmp_path / "legacy")
     ProjectRepository._INITIALIZED = True
-    monkeypatch.setattr(pm, "WORKSPACE_ROOT", ProjectRepository.WORKSPACE_ROOT)
-    monkeypatch.setattr(pm, "LEGACY_ROOT", ProjectRepository.LEGACY_ROOT)
     yield
     TaskRepository.reset_schema_cache()
 

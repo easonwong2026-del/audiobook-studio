@@ -5,7 +5,6 @@ import pytest
 
 import app
 from lib import progress as synth_progress
-from lib import project_manager as pm
 from mcp_server.server import _TOOLS, handle_request
 from repositories.project_repo import ProjectRepository
 from repositories.task_repo import TaskRepository
@@ -31,8 +30,6 @@ def scope_project(tmp_path, monkeypatch):
     monkeypatch.setattr(ProjectRepository, "WORKSPACE_ROOT", str(data_dir / "projects"))
     monkeypatch.setattr(ProjectRepository, "LEGACY_ROOT", str(data_dir / "legacy"))
     monkeypatch.setattr(ProjectRepository, "_INITIALIZED", True)
-    monkeypatch.setattr(pm, "WORKSPACE_ROOT", str(data_dir / "projects"))
-    monkeypatch.setattr(pm, "LEGACY_ROOT", str(data_dir / "legacy"))
     monkeypatch.setattr(
         TaskRepository,
         "get_task_dir",

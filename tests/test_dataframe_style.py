@@ -9,7 +9,7 @@
   5. status_color_map 命中校验：✅→#30D158、✅完成→#30D158 等（ICON_COLORS / STATUS_WORD_COLORS）。
   6. 未命中 status_color_map 的单元格回落 default_text（默认 #E8E8ED，可自定义）。
   7. 空 data（如 []）返回合法 dict，styling == []，不抛异常。
-  8. STATUS_WORD_COLORS 的键集合与 lib.project_manager._project_status 实际产出一致。
+  8. STATUS_WORD_COLORS 的键集合与 ProjectRepository._project_status 实际产出一致。
   9. 纪律红线：本模块禁止 import gradio（源码中不得出现 gradio 导入）。
 """
 import os
@@ -20,6 +20,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 import lib.dataframe_style as df  # noqa: E402
+from repositories.project_repo import ProjectRepository  # noqa: E402
 
 # 供多用例复用的样例数据（O4 书架形态：状态在第 4 列，索引 3）
 BOOKSHELF_ROWS = [
@@ -161,16 +162,14 @@ def test_empty_data_returns_valid_dict():
 
 def test_status_word_colors_keys_match_project_status():
     """契约 8：STATUS_WORD_COLORS 键集合 == _project_status 实际产出集合。"""
-    import lib.project_manager as pm  # noqa: E402
-
     # 枚举 _project_status 各分支的代表输入
     samples = [
-        pm._project_status(total=0, done=0, failed=0),                       # ⚪未开始
-        pm._project_status(total=3, done=0, failed=1),                       # 🔴有失败
-        pm._project_status(total=3, done=3, failed=0),                       # ✅完成
-        pm._project_status(total=3, done=1, failed=1),                       # 🟡部分
-        pm._project_status(total=3, done=0, failed=0),                       # ⚪未开始
-        pm._project_status(total=3, done=2, failed=0),                       # 🟢进行中
+        ProjectRepository._project_status(total=0, done=0, failed=0),       # ⚪未开始
+        ProjectRepository._project_status(total=3, done=0, failed=1),       # 🔴有失败
+        ProjectRepository._project_status(total=3, done=3, failed=0),       # ✅完成
+        ProjectRepository._project_status(total=3, done=1, failed=1),       # 🟡部分
+        ProjectRepository._project_status(total=3, done=0, failed=0),       # ⚪未开始
+        ProjectRepository._project_status(total=3, done=2, failed=0),       # 🟢进行中
     ]
     produced = set(samples)
     assert produced == set(df.STATUS_WORD_COLORS.keys()), (

@@ -110,10 +110,6 @@ def vc_project(tmp_path, monkeypatch):
     monkeypatch.setattr(ProjectRepository, "WORKSPACE_ROOT", str(data_dir / "projects"))
     monkeypatch.setattr(ProjectRepository, "LEGACY_ROOT", str(data_dir / "legacy"))
     monkeypatch.setattr(ProjectRepository, "_INITIALIZED", True)
-    from lib import project_manager as pm
-
-    monkeypatch.setattr(pm, "WORKSPACE_ROOT", str(data_dir / "projects"))
-    monkeypatch.setattr(pm, "LEGACY_ROOT", str(data_dir / "legacy"))
     monkeypatch.setattr(
         TaskRepository,
         "get_task_dir",
@@ -146,10 +142,6 @@ def legacy_manual_project(tmp_path, monkeypatch):
     monkeypatch.setattr(ProjectRepository, "WORKSPACE_ROOT", str(data_dir / "projects"))
     monkeypatch.setattr(ProjectRepository, "LEGACY_ROOT", str(data_dir / "legacy"))
     monkeypatch.setattr(ProjectRepository, "_INITIALIZED", True)
-    from lib import project_manager as pm
-
-    monkeypatch.setattr(pm, "WORKSPACE_ROOT", str(data_dir / "projects"))
-    monkeypatch.setattr(pm, "LEGACY_ROOT", str(data_dir / "legacy"))
     monkeypatch.setattr(
         TaskRepository,
         "get_task_dir",
@@ -277,10 +269,6 @@ def test_legacy_project_without_voice_cast_is_not_gated(tmp_path, monkeypatch):
     monkeypatch.setattr(ProjectRepository, "WORKSPACE_ROOT", str(data_dir / "projects"))
     monkeypatch.setattr(ProjectRepository, "LEGACY_ROOT", str(data_dir / "legacy"))
     monkeypatch.setattr(ProjectRepository, "_INITIALIZED", True)
-    from lib import project_manager as pm
-
-    monkeypatch.setattr(pm, "WORKSPACE_ROOT", str(data_dir / "projects"))
-    monkeypatch.setattr(pm, "LEGACY_ROOT", str(data_dir / "legacy"))
     ProjectService.create_project_from_data("legacy", {
         "meta": {"title": "旧项目"},
         "voices": {"旁白": {}},
@@ -543,10 +531,6 @@ def test_artifact_lookup_legacy_bare(tmp_path, monkeypatch):
     monkeypatch.setattr(ProjectRepository, "WORKSPACE_ROOT", str(data_dir / "projects"))
     monkeypatch.setattr(ProjectRepository, "LEGACY_ROOT", str(data_dir / "legacy"))
     monkeypatch.setattr(ProjectRepository, "_INITIALIZED", True)
-    from lib import project_manager as pm
-
-    monkeypatch.setattr(pm, "WORKSPACE_ROOT", str(data_dir / "projects"))
-    monkeypatch.setattr(pm, "LEGACY_ROOT", str(data_dir / "legacy"))
     ProjectService.create_project_from_data("legacy", {
         "meta": {"title": "旧"},
         "voices": {"旁白": {}},

@@ -3,7 +3,7 @@ from lib import project_paths  # noqa: E402
 
 验证（设计 §6 O5 / §12.3）：
 - prog.build_preview_rows(project) 行数=剧本段数、列=章节/段落/角色/文本；
-- pm.get/set_synthesis_selections 读写一致、缺文件返回 {}；
+- ProjectRepository.get/set_synthesis_selections 读写一致、缺文件返回 {}；
 - prog.build_segment_states(project, selected_chapters) 未选章段标 skipped；
 - queue.synthesize_project(..., selected_chapters=[选中章]) 用 FakeEngine 桩：
   未选章段 meta.segments_status 标 skipped、选章段被合成（eng.calls==选中段数）。
@@ -36,10 +36,10 @@ _fake_torch = types.SimpleNamespace(
 )
 sys.modules.setdefault("torch", _fake_torch)
 
-import lib.project_manager as pm  # noqa: E402
 from lib import progress as prog  # noqa: E402
 import lib.queue as synth_queue  # noqa: E402
 import lib.tts_engine as tts_engine  # noqa: E402
+from repositories.project_repo import ProjectRepository  # noqa: E402
 
 
 SCRIPT = {
@@ -77,11 +77,13 @@ class _FakeEngine:
 @pytest.fixture
 def project(tmp_path, monkeypatch):
     """用临时目录作 WORKSPACE_ROOT，建一个 3 段 1 角色项目并绑定参考音频。"""
-    monkeypatch.setattr(pm, "WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(ProjectRepository, "WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(ProjectRepository, "LEGACY_ROOT", str(tmp_path / "legacy"))
+    monkeypatch.setattr(ProjectRepository, "_INITIALIZED", True)
     sp = tmp_path / "s.json"
     sp.write_text(json.dumps(SCRIPT, ensure_ascii=False), encoding="utf-8")
-    pm.create_project("o5", str(sp))
-    d = pm.get_project_dir("o5")
+    ProjectRepository.create_project("o5", str(sp))
+    d = ProjectRepository.get_project_dir("o5")
     vo = os.path.join(project_paths.project_dir(d, "voices", create=True), "ref.wav")
     _dummy_wav(vo)
     bp = project_paths.project_file(d, "voice_bindings")
@@ -111,16 +113,16 @@ def test_build_preview_rows_matches_script(project):
 
 
 def test_get_set_synthesis_selections_roundtrip(project):
-    pm.set_synthesis_selections(project, {"chapters": ["1", "2"]})
-    got = pm.get_synthesis_selections(project)
+    ProjectRepository.set_synthesis_selections(project, {"chapters": ["1", "2"]})
+    got = ProjectRepository.get_synthesis_selections(project)
     assert got == {"chapters": ["1", "2"]}, f"读写应一致，实际 {got}"
 
 
 def test_get_synthesis_selections_missing_file_returns_empty(project):
     # 从未设置过 selections 的项目 -> 缺文件返回 {}
-    assert pm.get_synthesis_selections(project) == {}
+    assert ProjectRepository.get_synthesis_selections(project) == {}
     # 从未创建的项目名 -> 同样返回 {}
-    assert pm.get_synthesis_selections("never_created") == {}
+    assert ProjectRepository.get_synthesis_selections("never_created") == {}
 
 
 def test_build_segment_states_marks_skipped(project):
@@ -137,7 +139,7 @@ def test_synthesize_project_skips_unselected(project, monkeypatch):
     """关键：全 pending 项目，勾选第1章 -> 第1章被合成、第2章标 skipped 且不合成。"""
     eng = _FakeEngine()
     monkeypatch.setattr(tts_engine, "_tts", eng)
-    d = pm.get_project_dir(project)
+    d = ProjectRepository.get_project_dir(project)
     vo = os.path.join(project_paths.project_dir(d, "voices", create=True), "ref.wav")
 
     list(synth_queue.synthesize_project(
@@ -146,7 +148,7 @@ def test_synthesize_project_skips_unselected(project, monkeypatch):
     # 选中章（第1章，2 段）被合成 -> 2 次
     assert eng.calls == 2, f"应只合成选中章的 2 段，实际 eng.calls={eng.calls}"
     # 选章段标 done
-    meta, _, _ = pm.open_project(project)
+    meta, _, _ = ProjectRepository.load_project(project)
     assert meta.segments_status["1-001"] == "done"
     assert meta.segments_status["1-002"] == "done"
     # 未选章（第2章，1 段）标 skipped、未被合成
@@ -162,11 +164,11 @@ def test_synthesize_project_does_not_downgrade_done_segment(project, monkeypatch
     """
     eng1 = _FakeEngine()
     monkeypatch.setattr(tts_engine, "_tts", eng1)
-    d = pm.get_project_dir(project)
+    d = ProjectRepository.get_project_dir(project)
     vo = os.path.join(project_paths.project_dir(d, "voices", create=True), "ref.wav")
     # 第1轮：全量合成（selected_chapters 默认 None=全选）
     list(synth_queue.synthesize_project(project, {"旁白": vo}, cb_seg_state=None))
-    meta, _, _ = pm.open_project(project)
+    meta, _, _ = ProjectRepository.load_project(project)
     assert meta.segments_status["2-001"] == "done", "前置：第2章段应已合成 done"
 
     # 第2轮：仅勾选第1章；第2章（含已 done 的 2-001）为未选
@@ -174,7 +176,7 @@ def test_synthesize_project_does_not_downgrade_done_segment(project, monkeypatch
     monkeypatch.setattr(tts_engine, "_tts", eng2)
     list(synth_queue.synthesize_project(
         project, {"旁白": vo}, cb_seg_state=None, selected_chapters=["1"]))
-    meta, _, _ = pm.open_project(project)
+    meta, _, _ = ProjectRepository.load_project(project)
     assert meta.segments_status["2-001"] == "done", \
         f"已 done(含wav) 的未选段不应被降级为 skipped，实际 {meta.segments_status['2-001']}"
     # 第1章段上一轮已 done(有wav) -> 不在 remaining -> 不会被重新合成

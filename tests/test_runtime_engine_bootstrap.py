@@ -20,7 +20,6 @@ import time
 
 import pytest
 
-from lib import project_manager as pm
 from lib import tts_engine
 from repositories.project_repo import ProjectRepository
 from repositories.task_repo import TaskRepository
@@ -56,11 +55,6 @@ def engine_project(tmp_path, monkeypatch):
     ProjectRepository.WORKSPACE_ROOT = os.path.join(data_dir, "projects")
     ProjectRepository.LEGACY_ROOT = os.path.join(data_dir, "legacy")
     ProjectRepository._INITIALIZED = True
-    # Keep the legacy compat wrapper in sync: the runtime loop reaches
-    # ``lib.project_manager`` through ``build_segment_states``, and the
-    # wrapper mirrors its module-level roots into ProjectRepository.
-    monkeypatch.setattr(pm, "WORKSPACE_ROOT", ProjectRepository.WORKSPACE_ROOT)
-    monkeypatch.setattr(pm, "LEGACY_ROOT", ProjectRepository.LEGACY_ROOT)
     ProjectService.create_project_from_data("book", SCRIPT)
     project_dir = ProjectRepository.get_project_dir("book")
     voice_path = os.path.join(project_paths.project_dir(project_dir, "project_voices", create=True), "narrator.wav")

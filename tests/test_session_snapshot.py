@@ -15,9 +15,9 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-import lib.project_manager as pm  # noqa: E402
 from lib.snapshot import ProjectSnapshot  # noqa: E402
 from lib.types import ProjectMeta  # noqa: E402
+from repositories.project_repo import ProjectRepository  # noqa: E402
 from services.session import SessionState  # noqa: E402
 
 
@@ -44,7 +44,9 @@ def test_set_and_ensure_snapshot_clean(tmp_path):
 
 
 def test_ensure_snapshot_rebuilds_when_dirty(tmp_path, monkeypatch):
-    monkeypatch.setattr(pm, "WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(ProjectRepository, "WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(ProjectRepository, "LEGACY_ROOT", str(tmp_path / "legacy"))
+    monkeypatch.setattr(ProjectRepository, "_INITIALIZED", True)
     script_path = tmp_path / "structured_script.json"
     script_path.write_text(json.dumps({
         "meta": {"title": "t"},
@@ -52,14 +54,14 @@ def test_ensure_snapshot_rebuilds_when_dirty(tmp_path, monkeypatch):
         "chapters": [{"id": 1, "title": "一",
                       "segments": [{"id": "1-001", "role": "旁白", "text": "hi"}]}],
     }, ensure_ascii=False), encoding="utf-8")
-    pm.create_project("rebook", str(script_path))
+    ProjectRepository.create_project("rebook", str(script_path))
 
     ss = SessionState()
     ss.set_project("rebook", None, {})
-    snap = pm.load_snapshot("rebook")
+    snap = ProjectRepository.load_snapshot("rebook")
     ss.set_snapshot(snap)
     # 让 project.json 变新 → 脏
-    p = project_paths.project_file(pm.get_project_dir("rebook"), "project_meta")
+    p = project_paths.project_file(ProjectRepository.get_project_dir("rebook"), "project_meta")
     t = snap.loaded_at + 10
     os.utime(p, (t, t))
     got = ss.ensure_snapshot()

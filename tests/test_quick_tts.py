@@ -22,7 +22,6 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lib import tts_profile  # noqa: E402
-from lib import project_manager as pm  # noqa: E402
 from repositories.project_repo import ProjectRepository  # noqa: E402
 from repositories.task_repo import QUICK_TTS_CONTEXT, TaskRecord, TaskRepository  # noqa: E402
 from services import runtime_tts  # noqa: E402
@@ -49,8 +48,6 @@ def quick_env(tmp_path, monkeypatch):
     ProjectRepository.WORKSPACE_ROOT = os.path.join(data_dir, "projects")
     ProjectRepository.LEGACY_ROOT = os.path.join(data_dir, "legacy")
     ProjectRepository._INITIALIZED = True
-    monkeypatch.setattr(pm, "WORKSPACE_ROOT", ProjectRepository.WORKSPACE_ROOT)
-    monkeypatch.setattr(pm, "LEGACY_ROOT", ProjectRepository.LEGACY_ROOT)
     ProjectRepository.create_project_from_data("book", SCRIPT)
     TaskRepository.reset_schema_cache()
     return data_dir

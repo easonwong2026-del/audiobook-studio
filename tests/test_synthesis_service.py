@@ -21,8 +21,8 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-import lib.project_manager as pm  # noqa: E402
 import lib.tts_engine as tts_engine  # noqa: E402
+from repositories.project_repo import ProjectRepository  # noqa: E402
 from services.synthesis import SynthesisState, SynthesisService  # noqa: E402
 
 
@@ -57,11 +57,13 @@ SCRIPT = {
 
 @pytest.fixture
 def project(tmp_path, monkeypatch):
-    monkeypatch.setattr(pm, "WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(ProjectRepository, "WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(ProjectRepository, "LEGACY_ROOT", str(tmp_path / "legacy"))
+    monkeypatch.setattr(ProjectRepository, "_INITIALIZED", True)
     sp = tmp_path / "s.json"
     sp.write_text(json.dumps(SCRIPT, ensure_ascii=False), encoding="utf-8")
-    pm.create_project("syn", str(sp))
-    d = pm.get_project_dir("syn")
+    ProjectRepository.create_project("syn", str(sp))
+    d = ProjectRepository.get_project_dir("syn")
     vo = os.path.join(project_paths.project_dir(d, "project_voices", create=True), "ref.wav")
     _dummy(vo)
     bp = project_paths.project_file(d, "voice_bindings")
@@ -86,7 +88,7 @@ def test_synthesis_runs_to_completion(project, monkeypatch):
     SynthesisService.reset_executor()  # 测试隔离：新线程池
 
     state = SynthesisState(task_id="t1", project=project)
-    SynthesisService.start(state, project, _bindings(pm.get_project_dir(project)))
+    SynthesisService.start(state, project, _bindings(ProjectRepository.get_project_dir(project)))
 
     deadline = time.time() + 15
     while state.status not in ("done", "cancelled", "error") and time.time() < deadline:
@@ -103,7 +105,7 @@ def test_synthesis_cancel_at_segment_boundary(project, monkeypatch):
     SynthesisService.reset_executor()  # 测试隔离：新线程池
 
     state = SynthesisState(task_id="t2", project=project)
-    SynthesisService.start(state, project, _bindings(pm.get_project_dir(project)))
+    SynthesisService.start(state, project, _bindings(ProjectRepository.get_project_dir(project)))
 
     # 轮询直到至少完成 1 段（不提前取消），随后置 cancel
     deadline = time.time() + 15

@@ -1390,3 +1390,145 @@ The independent R3A PR must report targeted project-manager/repository/service,
 synthesis/progress/snapshot, Production, Runtime selected, Create/Open, Catalog,
 Export isolation, Merge, Assembly, full pytest, Windows selected workflow,
 compileall, Ruff `--select F`, and `git diff --check`. No IA-2B work is included.
+
+## Round IA-2B / R3B — `project_manager` facade retirement audit
+
+### Baseline and scope
+
+R3B starts from merged PR #66, `720adb8643f6b390d5dcdc47ef7cdb0e5a6b9501`.
+The branch is `refactor/project-manager-retirement-r3b`. This round is limited to
+the `lib/project_manager.py` compatibility boundary. It does not retire `p_sel`,
+Project Page compatibility, Project View compatibility, or change Catalog,
+SessionState selected/opened semantics, storage/legacy fallback, Create/Open UX,
+Runtime/TTS/Production/QA/Repair/Export/Merge/Assembly/Voice Cast/MCP, config, or
+dependencies.
+
+### Complete caller audit
+
+The repository audit used `rg` and qualified-name searches, Python AST inspection,
+imports/re-exports, `getattr`/`setattr`, `import_module`, string callback keys,
+monkeypatch sites, tests, scripts, MCP, docs, tools, startup, migration, and
+recovery paths. No production import or dynamic caller of the facade remains other
+than the explicit root synchronization in `ProjectService.set_data_dir()`.
+
+Before R3B, after the R3A production migration:
+
+```text
+app.py / services / lib readers -> ProjectService or ProjectRepository
+ProjectService.set_data_dir   -> ConfigRepository + ProjectRepository
+                                 + pm root synchronization
+tests / legacy callers        -> lib.project_manager -> ProjectRepository
+```
+
+After R3B:
+
+```text
+production disk ownership     -> ProjectService / ProjectRepository
+ProjectService.set_data_dir   -> ConfigRepository + ProjectRepository
+                                 + explicit pm root compatibility sync
+compatibility tests           -> pm public CRUD facade + mutable roots
+external/unknown legacy API   -> retained pm public CRUD facade
+```
+
+`ProjectRepository` does not read `lib.project_manager` globals. The only reverse
+direction is the deliberate `_repository()` synchronization performed when a
+caller explicitly invokes the pm facade. R3B regression coverage proves that a
+canonical Repository/Service call keeps its own roots when pm globals differ.
+
+### Final classification of every audited symbol
+
+Only the requested R3B categories are used below.
+
+| Symbol | Final classification | Evidence and handling |
+|---|---|---|
+| `WORKSPACE_ROOT` | `LEGACY_COMPAT` | Module-level mutable legacy root; synchronized by `ProjectService.set_data_dir()` and consumed only when a caller enters the pm facade. |
+| `LEGACY_ROOT` | `LEGACY_COMPAT` | Same compatibility contract; Repository still owns workspace-first/legacy-fallback resolution. |
+| `_repository` | `COMPAT_INTERNAL` | Internal facade implementation that synchronizes the two mutable roots before delegating to `ProjectRepository`; it is not a public API. |
+| `_resolve_dir` | `DEAD` | No production or external evidence in the audit; deleted. Canonical resolver remains `ProjectRepository._resolve_dir`. |
+| `scan_projects` | `LEGACY_COMPAT_RETAINED` | Retained CRUD-looking wrapper for compatibility tests and unknown legacy integrations. No production caller or verifiable external consumer was found; production scanning uses `ProjectService`/`ProjectRepository`. |
+| `create_project` | `LEGACY_COMPAT_RETAINED` | Retained creation wrapper for compatibility risk only; production creation uses `ProjectCreationService`/`ProjectRepository`. |
+| `open_project` | `LEGACY_COMPAT_RETAINED` | Retained load wrapper for compatibility risk only; production open uses `ProjectService`/`ProjectRepository`. |
+| `load_snapshot` | `LEGACY_COMPAT_RETAINED` | Retained snapshot wrapper for compatibility risk only; production snapshot ownership is `ProjectRepository`. |
+| `delete_project` | `LEGACY_COMPAT_RETAINED` | Retained CRUD-looking wrapper for compatibility risk only; guarded production deletion remains in `ProjectService`. |
+| `get_project_dir` | `LEGACY_COMPAT_RETAINED` | Retained path-resolution wrapper for compatibility risk only; production services use `ProjectRepository`. |
+| `update_segment_status` | `LEGACY_COMPAT_RETAINED` | Retained status mutation wrapper for compatibility risk only; production mutation paths use Service/Repository APIs. |
+| `get_remaining` | `LEGACY_COMPAT_RETAINED` | Retained recovery wrapper for compatibility risk only; canonical recovery logic remains in `ProjectRepository`. |
+| `_meta_path` | `DEAD` | No pm wrapper caller; deleted. `ProjectRepository._meta_path` remains canonical and tested. |
+| `_load_meta` | `DEAD` | No pm wrapper caller; deleted. Repository metadata loading is unchanged. |
+| `_repair_meta` | `DEAD` | No pm wrapper caller; deleted. Repository repair semantics are unchanged. |
+| `_save_meta` | `DEAD` | No pm wrapper caller; deleted. Repository atomic metadata writes are unchanged. |
+| `get_synthesis_overrides` | `DEAD` | All production and test-only callers migrated to `ProjectService`/`ProjectRepository`; deleted from pm. |
+| `set_synthesis_overrides` | `DEAD` | Same; persistence format and atomic-write owner unchanged. |
+| `get_synthesis_selections` | `DEAD` | All production and test-only callers migrated to `ProjectService`/`ProjectRepository`; deleted from pm. |
+| `set_synthesis_selections` | `DEAD` | Same; synthesis scope semantics unchanged. |
+| `_project_status` | `DEAD` | Style/catalog test migrated to `ProjectRepository._project_status`; deleted from pm. |
+
+No retained pm symbol is classified `PRODUCTION` or `TEST_ONLY_LEGACY`: production
+callers were migrated and test-only callers were migrated. The repository contains
+no verifiable real external consumer. Retaining the public-looking CRUD facade is a
+conservative response to unknown legacy-integration risk, not evidence that an
+external consumer has been proven. The retained facade is intentionally not deleted
+mechanically.
+
+### Test-only migration and compatibility test disposition
+
+Historical fixtures that only created projects, resolved directories, loaded
+snapshots, updated progress, or read synthesis selections were moved to the
+canonical owner. This includes:
+
+- `tests/test_dataframe_style.py`, `tests/test_o12_cancel_during_pause.py`,
+  `tests/test_o12_pause_resume.py`, `tests/test_o5_preview.py`,
+  `tests/test_progress.py`, `tests/test_project_service.py`,
+  `tests/test_project_snapshot.py`, `tests/test_queue_b7.py`,
+  `tests/test_session_snapshot.py`, `tests/test_snapshot_caching.py`,
+  `tests/test_synthesis_service.py`, and
+  `tests/workflows/test_synthesis_lifecycle.py`;
+- root-only fixture imports were removed from the engine, runtime, production,
+  startup, MCP, supplement, utility, and self-healing tests, including
+  `test_engine_recycle_idempotency.py`, `test_engine_self_healing.py`,
+  `test_followup_dual_engine_fixes.py`, `test_hotpath_optimizations.py`,
+  `test_mcp_server.py`, `test_partial_production_scope.py`,
+  `test_production_jobs.py`, `test_production_runtime.py`, `test_quick_tts.py`,
+  `test_runtime_engine_bootstrap.py`, `test_runtime_shutdown.py`,
+  `test_runtime_start_fail_fast.py`, `test_startup_phases.py`,
+  `test_supplement_dual_engine_regression.py`,
+  `test_supplement_progress_terminal.py`, and
+  `test_utility_engine_selection.py`;
+- the four duplicate synthesis-preference tests in `tests/test_project_manager.py`
+  were removed after their invariants were confirmed in Repository/Service tests.
+
+The following are retained as `TESTING_COMPAT_ITSELF`, not historical fixtures:
+
+- `tests/test_project_manager.py` covers the public CRUD/status/recovery facade;
+- `tests/test_project_manager_compat_r3a.py` covers mutable roots, legacy fallback,
+  and the R3A production-reader boundary;
+- `tests/workflows/test_data_dir_switch.py` explicitly verifies the old facade's
+  root-switch behavior.
+
+R3B adds `tests/test_project_manager_retirement_r3b.py`, which protects the exact
+facade surface, the production import graph, independent pm/repository roots, and
+the `ProjectService.set_data_dir()` synchronization contract.
+
+### Final wrapper/root state
+
+Deleted from `lib/project_manager.py`: `_resolve_dir`, `_meta_path`, `_load_meta`,
+`_repair_meta`, `_save_meta`, `_project_status`, and all four synthesis preference
+wrappers. Retained: the two mutable roots, `_repository()`, and the eight public
+CRUD/status/recovery wrappers (`scan_projects`, `create_project`, `open_project`,
+`load_snapshot`, `delete_project`, `get_project_dir`, `update_segment_status`, and
+`get_remaining`).
+
+`ProjectService.set_data_dir()` still updates `ProjectRepository.WORKSPACE_ROOT` /
+`LEGACY_ROOT` and then mirrors those values into pm. This is compatibility root
+synchronization only; it does not make pm the storage authority and does not
+reintroduce a project selector or a second root state.
+
+### R3B validation record
+
+Local validation passed: full pytest `1330 passed, 26 skipped`; targeted
+project-manager/repository/service, storage/migration, snapshot/progress/synthesis,
+Create/Open, Catalog/Session, Production, Runtime selected, Export project-switch
+isolation, Merge, Assembly, and MCP `335 passed`; Windows selected workflow `329
+passed`; compileall, Ruff `--select F` on changed Python, and `git diff --check`
+also passed. Final CI run `32723417477` completed with Ubuntu and Windows success. No
+IA-2B work beyond this facade boundary is included.

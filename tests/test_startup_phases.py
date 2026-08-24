@@ -21,7 +21,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from lib import project_manager as pm
 from lib import procutil
 from lib.procutil import no_window_kwargs, run_no_window
 from lib.startup import enrich
@@ -57,8 +56,6 @@ def production_project(tmp_path, monkeypatch):
     ProjectRepository.WORKSPACE_ROOT = str(tmp_path / "projects")
     ProjectRepository.LEGACY_ROOT = str(tmp_path / "legacy")
     ProjectRepository._INITIALIZED = True
-    monkeypatch.setattr(pm, "WORKSPACE_ROOT", ProjectRepository.WORKSPACE_ROOT)
-    monkeypatch.setattr(pm, "LEGACY_ROOT", ProjectRepository.LEGACY_ROOT)
     monkeypatch.setattr(
         TaskRepository,
         "get_task_dir",
