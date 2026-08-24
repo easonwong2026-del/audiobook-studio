@@ -521,37 +521,6 @@ button[aria-label*="Play"] {{ border-radius:999px!important; background:{ACCENT}
 .selected-inspector .gr-row {{ gap:8px!important; flex-wrap:wrap!important; }}
 .selected-inspector .gr-row > * {{ min-width:0!important; }}
 .selected-inspector .gr-dropdown,.selected-inspector .gr-textbox {{ min-width:0!important; }}
-.workbench-status {{ margin-bottom:4px!important; }}
-.workbench-hero {{ min-height:148px; display:flex; justify-content:space-between; align-items:center; gap:24px; padding:24px 26px; border-radius:16px; color:#ffffff; background:linear-gradient(125deg,#24392c 0%,#355642 100%); overflow:hidden; }}
-.workbench-hero .eyebrow {{ color:{ACCENT}; font-size:11px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }}
-.workbench-hero h2 {{ color:#ffffff!important; font-size:30px!important; line-height:1.12!important; margin:7px 0 8px!important; letter-spacing:-.035em!important; }}
-.workbench-hero p {{ color:#c4cdc5!important; margin:0!important; max-width:620px; font-size:14px!important; }}
-.hero-progress {{ flex:0 0 auto; width:88px; height:88px; border:5px solid {ACCENT}; border-radius:50%; display:flex; flex-direction:column; justify-content:center; align-items:center; background:rgba(255,255,255,.07); }}
-.hero-progress span {{ color:#ffffff; font-size:20px; font-weight:800; letter-spacing:-.04em; }}
-.hero-progress small {{ color:#c4cdc5; font-size:10px; text-align:center; line-height:1.1; width:60px; }}
-.hero-icon {{ font-size:42px; }}
-.empty-state .hero-icon {{ border-radius:18px; background:rgba(212,245,106,.12); padding:18px; }}
-.workbench-main-row {{ gap:14px; margin-top:14px!important; align-items:stretch!important; flex-wrap:wrap!important; }}
-.workbench-main-row > * {{ min-width:280px!important; }}
-.dashboard-metrics {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin-bottom:12px; }}
-.metric-card,.workbench-card {{ border:1px solid {BORDER}; background:{CARD}; border-radius:14px; padding:16px 18px; box-shadow:0 3px 10px rgba(33,54,40,.04); }}
-.metric-card span,.card-eyebrow {{ display:block; color:{TEXT_MUTED}; font-size:11px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; }}
-.metric-card strong {{ display:block; color:{TEXT_PRIMARY}; font-size:27px; line-height:1; margin:8px 0 4px; letter-spacing:-.04em; }}
-.metric-card strong i {{ color:#9aa39d; font-size:16px; font-style:normal; margin:0 3px; }}
-.metric-card small,.workbench-card p {{ color:{TEXT_MUTED}; font-size:12px; line-height:1.45; margin:4px 0 0; }}
-.metric-track {{ height:6px; overflow:hidden; border-radius:999px; background:#edf1ed; margin-top:14px; }}
-.metric-track b {{ display:block; height:100%; border-radius:inherit; background:#1f8a5b; }}
-.metric-track.voices b {{ background:#c2e65b; }}
-.next-step-card {{ border-color:{ACCENT_SOFT}; background:#f9fdeF; }}
-.next-step-card strong,.task-card strong,.workbench-issues strong {{ display:block; color:#172218; font-size:16px; margin-top:8px; }}
-.task-card {{ height:100%; min-height:0; background:{PANEL}; }}
-.workbench-issues {{ height:100%; min-height:0; }}
-.workbench-issues ul {{ list-style:none; padding:0; margin:12px 0 0; }}
-.workbench-issues li {{ display:flex; align-items:center; gap:9px; color:#354036; font-size:13px; padding:7px 0; border-bottom:1px solid #edf0ed; }}
-.workbench-issues li:last-child {{ border-bottom:0; }}
-.issue-dot {{ width:7px; height:7px; border-radius:50%; flex:0 0 auto; background:#e3aa2f; }}
-.issue-dot.error {{ background:#C81E2E; }}.issue-dot.info {{ background:#5c859d; }}.issue-dot.warning {{ background:#D68A1E; }}
-.workbench-issues.is-clear {{ background:#f4fbf6; border-color:#d7eadc; }}
 .inline-empty {{ color:#717b73; padding:12px 0; font-size:14px; }}
 
 /* ===== 阶段页 ===== */
@@ -633,9 +602,6 @@ button[aria-label*="Play"] {{ border-radius:999px!important; background:{ACCENT}
 /* ===== 生产内部导航 (Pencil 三级 tab) ===== */
 #grp-production-nav {{ margin-top:0!important; padding:8px 0 4px!important; background:transparent!important; border:none!important; box-shadow:none!important; }}
 #grp-production-nav .production-tabs {{ margin:0!important; }}
-.quick-actions {{ gap:8px!important; }}
-.quick-actions .gr-button {{ margin-top:0!important; }}
-
 @media (max-width: 900px) {{
   .gradio-container {{ padding:12px!important; }}
   .sidebar {{ min-width:100%!important; margin:0 0 12px!important;
@@ -644,8 +610,6 @@ button[aria-label*="Play"] {{ border-radius:999px!important; background:{ACCENT}
   .app-shell-row {{ flex-wrap:wrap!important; }}
   .app-shell-row > .sidebar {{ flex:1 1 100%!important; width:100%!important; max-width:100%!important; }}
   .app-shell-row > .main-area {{ flex:1 1 100%!important; width:100%!important; }}
-  .dashboard-metrics {{ grid-template-columns:1fr; }}
-  .workbench-hero {{ padding:22px; }}.hero-progress {{ display:none; }}
   .main-area {{ width:100%!important; padding:8px 12px 20px!important; }}
   .voice-workspace {{ flex-wrap:wrap!important; }}
   .voice-binding-layout {{ flex-wrap:wrap!important; }}
@@ -653,7 +617,7 @@ button[aria-label*="Play"] {{ border-radius:999px!important; background:{ACCENT}
   .voice-config-footer > * {{ flex:1 1 100%!important; min-width:0!important; }}
   .voice-config-footer .voice-bind-action {{ flex:1 1 100%!important; width:100%!important; }}
   .voice-binding-steps {{ grid-template-columns:1fr!important; }}
-  .workbench-main-row > *, .workbench-split-row > *, .stage-row > *, .voice-step-card {{ min-width:100%!important; }}
+  .workbench-split-row > *, .stage-row > *, .voice-step-card {{ min-width:100%!important; }}
   .workbench-toolbar > * {{ min-width:100%!important; }}
 }}
 @media (max-width: 1180px) and (min-width: 901px) {{

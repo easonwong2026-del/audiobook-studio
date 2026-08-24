@@ -26,6 +26,11 @@ APP_PATH = os.path.join(PROJECT_ROOT, "app.py")
 with open(APP_PATH, encoding="utf-8") as file:
     APP_SRC = file.read()
 APP_TREE = ast.parse(APP_SRC)
+CATALOG_WIRING_PATH = os.path.join(
+    PROJECT_ROOT, "ui", "wiring", "project_catalog_wiring.py"
+)
+with open(CATALOG_WIRING_PATH, encoding="utf-8") as file:
+    CATALOG_WIRING_SRC = file.read()
 
 
 def _assigned_names(tree):
@@ -113,11 +118,13 @@ def test_bookshelf_select_no_longer_opens_project():
         current = parents.get(current)
 
 
-def test_open_project_still_wired_from_project_page_and_quick_action():
-    """打开项目仍可从项目页 p_open 与概览快捷 ov_open 触发。"""
+def test_open_project_still_wired_from_project_page_and_workbench_inspector():
+    """打开项目仍从项目页兼容入口和 Workbench Inspector 进入统一打开链。"""
     assert "p_open.click(open_project," in APP_SRC
-    assert "ov_open.click(" in APP_SRC
-    assert ".then(open_project, [p_sel, ss]" in APP_SRC
+    assert "ov_open.click(" not in APP_SRC
+    assert "bookshelf_open" in APP_SRC
+    assert "open_project_outputs" in APP_SRC
+    assert 'page["bookshelf_open"].click(' in CATALOG_WIRING_SRC
 
 
 def test_project_page_old_aliases_kept_as_none():

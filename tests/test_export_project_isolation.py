@@ -293,6 +293,5 @@ def test_open_chain_wires_all_seven_export_outputs_and_nav_reconciles():
     ]
 
     nav_export = APP_SOURCE[APP_SOURCE.index("nav_export.click("):]
-    ov_export = APP_SOURCE[APP_SOURCE.index("ov_export.click("):]
     assert "export_ui.reconcile_export_state" in nav_export
-    assert "export_ui.reconcile_export_state" in ov_export
+    assert "ov_export.click(" not in APP_SOURCE

@@ -372,12 +372,11 @@ def test_theme_keeps_gradio_550_components_readable_in_dark_preference():
 
 def test_dashboard_and_page_titles_do_not_repeat_navigation():
     overview = _text("ui/pages/overview_page.py")
-    dashboard = _text("ui/components/dashboard.py")
     voice = _text("ui/pages/voice_page.py")
     assert 'gr.Markdown("### 工作台")' not in overview
-    assert "empty_dashboard_html()" in overview
-    assert "有声书生产工作台" not in dashboard
-    assert "选择项目后开始制作" in dashboard
+    assert 'gr.Markdown("## 项目工作台")' in overview
+    assert "empty_dashboard_html" not in overview
+    assert not (ROOT / "ui/components/dashboard.py").exists()
     assert 'gr.Markdown("### 角色与声音")' in voice
     assert 'label="搜索角色"' in voice
     assert 'v_role = gr.State' in voice
