@@ -49,7 +49,7 @@ ICON_COLORS: dict[str, str] = {
     "⏭": APPLE_TERTIARY_GREY,   # skipped 跳过
 }
 
-# O4 书架：键为 lib.project_manager._project_status 实际产出的完整状态字符串（含 emoji 前缀）。
+# O4 书架：键为 ProjectRepository._project_status 实际产出的完整状态字符串（含 emoji 前缀）。
 STATUS_WORD_COLORS: dict[str, str] = {
     "✅完成": APPLE_GREEN,        # 完成 → 绿
     "🟢进行中": APPLE_BLUE,      # 进行中 → 蓝

@@ -24,7 +24,7 @@ class SessionState:
 
     Attributes:
         project: 当前项目名（``None`` 表示尚未打开项目）。
-        script: 结构化剧本（``lib.project_manager.open_project`` 返回的 raw dict）。
+        script: 结构化剧本（``ProjectService.open_project`` 返回的 raw dict）。
         bindings: 角色 -> 参考音频绝对路径 的绑定表。
         synthesis: 当前合成任务态（``SynthesisState``）；未开始合成时为 ``None``。
     """

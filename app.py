@@ -29,7 +29,6 @@ from lib import (
 )
 from lib import dataframe_style as df_style
 from lib import progress as synth_progress
-from lib import project_manager as _pm
 from services import (
     ACTIVE_PRODUCTION_STATES,
     ProductionJobError,
@@ -128,7 +127,7 @@ def open_project(name, ss):
             gr.update(choices=[]), "", "打开项目后显示角色绑定状态。",
         )
     try:
-        # 业务委托 ProjectService.open_project_as_snapshot（包 pm.load_snapshot）
+        # 业务委托 ProjectService.open_project_as_snapshot（底层为 ProjectRepository）
         snap = ProjectService.open_project_as_snapshot(name)
         ss.set_project(name, snap.script, snap.bindings)
         ss.set_snapshot(snap)
@@ -892,7 +891,11 @@ def _format_scope_plan(plan: dict | None, scope_mode="all") -> str:
 def render_scope_controls(ss):
     """Restore scope controls, including legacy chapter-only selections."""
     options, chapter_ids = _chapter_options(ss)
-    saved = _pm.get_synthesis_selections(ss.project) if ss and ss.project else {}
+    saved = (
+        ProjectService.get_synthesis_selections(ss.project)
+        if ss and ss.project
+        else {}
+    )
     saved_chapters = _string_list(saved.get("chapters")) if isinstance(saved, dict) else []
     saved_segments = _string_list(
         saved.get("segment_ids") if isinstance(saved, dict) else []
@@ -1041,14 +1044,14 @@ def do_synthesis(ss, num_beams=2, progress=gr.Progress(),
         "speech_rate": float(speech_rate),
     }
     try:
-        _pm.set_synthesis_overrides(proj, overrides)
+        ProjectService.set_synthesis_overrides(proj, overrides)
     except Exception as exc:
         logger.warning("保存合成覆盖参数失败: %s", exc)
     chapter_ids = _string_list(selected_chapters)
     segment_ids = _string_list(selected_segment_ids)
     scope = _scope_from_ui(scope_mode, chapter_ids, segment_ids)
     try:
-        _pm.set_synthesis_selections(
+        ProjectService.set_synthesis_selections(
             proj,
             {
                 "mode": str(scope_mode or "all"),
@@ -3133,7 +3136,7 @@ def render_preview(ss):
         for index, ch in enumerate(chapters)
     }
     # 回填勾选：读 synthesis_selections.json
-    sel = _pm.get_synthesis_selections(ss.project)
+    sel = ProjectService.get_synthesis_selections(ss.project)
     saved = sel.get("chapters")
     if saved is not None:
         chosen = [c for c in saved if c in chapter_options]

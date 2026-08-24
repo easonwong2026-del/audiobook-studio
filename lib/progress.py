@@ -8,8 +8,8 @@ O3 结构化队列进度列表 + O12 段落级暂停/恢复共用的「内存段
 - ``to_queue_rows(states)``：转为 ``gr.Dataframe`` 行（list[list]）。
 
 数据源纪律（设计 §9.4）：``state.segment_states`` 只由本模块写入，
-**绝不反向写 ``meta.segments_status``**（落盘仍归 ``pm.update_segment_status``）。
-本模块仅依赖 ``lib.project_manager`` / ``lib.script_loader``，无任何 gradio 依赖，
+**绝不反向写 ``meta.segments_status``**（落盘仍归 ``ProjectRepository`` / service API）。
+本模块直接读取 ``ProjectRepository``，无任何 gradio 依赖，
 可被 ``tests/test_progress.py`` 直接单测。
 """
 from __future__ import annotations
@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import Optional
 
 from . import chapter_identity
-from . import project_manager as pm
+from repositories.project_repo import ProjectRepository
 
 # ── 段状态枚举（集中声明，O3/O12 共用） ──
 # pending 待合成 / running 合成中 / done 已完成 / error 失败
@@ -93,7 +93,7 @@ def build_segment_states(
         段态字典列表，每项含 ``seg_id`` / ``chapter`` / ``role`` / ``text`` /
         ``status`` / ``progress``。
     """
-    meta, script_data, _ = pm.open_project(project)
+    meta, script_data, _ = ProjectRepository.load_project(project)
     selected_set = None
     if selected_chapters:
         selected_set = {str(c) for c in selected_chapters}
@@ -320,5 +320,5 @@ def build_preview_rows(project: str) -> list[list]:
     Returns:
         二维行列表；空项目返回空列表。
     """
-    _, script_data, _ = pm.open_project(project)
+    _, script_data, _ = ProjectRepository.load_project(project)
     return build_preview_rows_from_script(script_data)
