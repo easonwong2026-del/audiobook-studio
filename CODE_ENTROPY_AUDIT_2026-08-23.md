@@ -2228,8 +2228,8 @@ Ruff --select F (changed Python): passed
 git diff --check: passed
 ```
 
-Windows selected workflow 与 PR CI 在 implementation PR 建立后记录；本地没有声称真实
-Windows UI 已执行。
+PR #71 CI run `32745184155`：Ubuntu 与 Windows selected workflow 均 success。本地没有
+声称真实 Windows UI 已执行。
 
 ### R4C acceptance decision
 
