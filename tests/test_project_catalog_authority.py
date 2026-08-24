@@ -18,9 +18,6 @@ WIRING_TREE = ast.parse(
         encoding="utf-8"
     )
 )
-PROJECT_VIEW_SRC = (ROOT / "ui" / "project_view_handlers.py").read_text(
-    encoding="utf-8"
-)
 
 
 def _page_click_callbacks() -> dict[str, str]:
@@ -136,6 +133,5 @@ def test_app_has_no_duplicate_project_management_handlers():
         "permanently_delete_archived_project",
         "refresh_bookshelf",
     })
-    assert "select_project_from_bookshelf" in definitions
+    assert "select_project_from_bookshelf" not in definitions
     assert "render_chapter_tree" not in definitions
-    assert "def render_chapter_tree(" in PROJECT_VIEW_SRC

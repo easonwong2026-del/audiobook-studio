@@ -35,7 +35,7 @@ def hierarchy_outputs(page: dict) -> list:
 
     The first four outputs keep the Phase B order.  The four appended outputs
     expose project kind, chapter title, chapter order, and the title/order
-    update action without changing the legacy 25-output bookshelf prefix.
+    update action without changing the 24-output bookshelf prefix.
     """
     return [
         page["bookshelf_parent_book"],
@@ -50,12 +50,11 @@ def hierarchy_outputs(page: dict) -> list:
 
 
 def bookshelf_management_outputs(
-    page: dict, project_sel, *, include_hierarchy: bool = False
+    page: dict, *, include_hierarchy: bool = False
 ) -> list:
-    """Return the 25-output bookshelf contract, optionally plus hierarchy."""
+    """Return the 24-output bookshelf contract, optionally plus hierarchy."""
     outputs = [
         page["ov_bookshelf"],
-        project_sel,
         page["bookshelf_trash_table"],
         page["bookshelf_trash_sel"],
         page["bookshelf_trash_status"],
@@ -69,7 +68,7 @@ def bookshelf_management_outputs(
 
 
 def bookshelf_selection_context_outputs(page: dict) -> list:
-    """Return the p_sel-free output contract for bookshelf selection events."""
+    """Return the output contract for bookshelf selection events."""
     return [
         *(page[key] for key in catalog_handlers.BOOKSHELF_ACTION_KEYS),
         page["bookshelf_archive_confirm"],
@@ -84,8 +83,8 @@ def bookshelf_selection_context_outputs(page: dict) -> list:
     ]
 
 
-def selection_ui_outputs(page: dict, _project_sel=None) -> list:
-    """Compatibility alias for the p_sel-free bookshelf context outputs."""
+def selection_ui_outputs(page: dict) -> list:
+    """Return the bookshelf selection-context output contract."""
     return bookshelf_selection_context_outputs(page)
 
 
@@ -96,10 +95,7 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
         page: 概览页组件字典（``create_overview_page()`` 的返回）。
         deps: 依赖字典，含：
             - ``session``: ``gr.State(SessionState())``；
-            - ``project_sel``: 项目页 ``p_sel`` Dropdown（刷新 choices 用，
-              兼容保留；书架 select 同步由 app.py 内联接线完成）；
-            - ``catalog_outputs``: legacy five-output catalog components;
-            - ``management_outputs``: state-aware 25-output bookshelf refresh;
+            - ``management_outputs``: state-aware 24-output bookshelf refresh;
             - ``callbacks``: app.py 注入的回调，可选键：
               ``open_project`` / ``open_project_outputs`` / ``open_chain_rest`` /
               ``post_archive_reconcile`` / ``goto_project`` / ``groups``；
@@ -107,7 +103,7 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
     """
     session = deps["session"]
     management_outputs = deps.get("management_outputs") or bookshelf_management_outputs(
-        page, deps["project_sel"], include_hierarchy=True
+        page, include_hierarchy=True
     )
     management_refresh = deps.get(
         "management_refresh",
@@ -171,7 +167,7 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
             chain = cb["open_chain_rest"](chain)
         chain = chain.then(
             management_refresh,
-            [page["bookshelf_search"], deps["project_sel"], session],
+            [page["bookshelf_search"], session],
             management_outputs,
         )
         chain = refresh_merge_after(chain)
@@ -182,7 +178,7 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
     # ── 手动刷新：query 保持，selection 仅在不可见/不存在时清除 ──
     refresh_chain = page["bookshelf_refresh"].click(
         management_refresh,
-        [page["bookshelf_search"], deps["project_sel"], session],
+        [page["bookshelf_search"], session],
         management_outputs,
     )
     refresh_merge_after(refresh_chain)
@@ -264,7 +260,7 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
         [page["bookshelf_msg"],],
     ).then(
         management_refresh,
-        [page["bookshelf_search"], deps["project_sel"], session],
+        [page["bookshelf_search"], session],
         management_outputs,
     )
     bind_chain = refresh_merge_after(bind_chain)
@@ -279,7 +275,7 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
         [page["bookshelf_msg"],],
     ).then(
         management_refresh,
-        [page["bookshelf_search"], deps["project_sel"], session],
+        [page["bookshelf_search"], session],
         management_outputs,
     )
     update_chain = refresh_merge_after(update_chain)
@@ -289,7 +285,7 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
         [page["bookshelf_msg"],],
     ).then(
         management_refresh,
-        [page["bookshelf_search"], deps["project_sel"], session],
+        [page["bookshelf_search"], session],
         management_outputs,
     )
     unbind_chain = refresh_merge_after(unbind_chain)
@@ -315,10 +311,10 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
     )
 
     # Only a changed success revision reaches this event.  Reconcile catalog
-    # and p_sel before any workflow callback can consume the old project value.
+    # Reconcile Catalog/selection state before any workflow callback runs.
     archive_success_chain = page["bookshelf_archive_event"].change(
         management_refresh,
-        [page["bookshelf_search"], deps["project_sel"], session],
+        [page["bookshelf_search"], session],
         management_outputs,
     )
     if "post_archive_reconcile" in cb:
@@ -332,7 +328,7 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
         [page["bookshelf_msg"]],
     ).then(
         management_refresh,
-        [page["bookshelf_search"], deps["project_sel"], session],
+        [page["bookshelf_search"], session],
         management_outputs,
     )
     restore_chain = refresh_merge_after(restore_chain)
@@ -353,7 +349,7 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
         [page["bookshelf_msg"]],
     ).then(
         management_refresh,
-        [page["bookshelf_search"], deps["project_sel"], session],
+        [page["bookshelf_search"], session],
         management_outputs,
     )
     trash_restore_chain = refresh_merge_after(trash_restore_chain)
@@ -363,7 +359,7 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
         [page["bookshelf_msg"]],
     ).then(
         management_refresh,
-        [page["bookshelf_search"], deps["project_sel"], session],
+        [page["bookshelf_search"], session],
         management_outputs,
     ).then(
         lambda: _update_checkbox_false(),

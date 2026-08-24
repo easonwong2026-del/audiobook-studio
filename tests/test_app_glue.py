@@ -1,7 +1,8 @@
 """静态验证：app.py 修复（无法 import，因为顶层 import gradio 需 GPU/UI 环境）
 
 通过 AST 解析 + 字符串断言验证：
-  - B5: create_project 的 return 均为 4 元组；p_create.click 的 outputs 仅 4 个且 p_sel 只出现一次
+  - IA-2B: Project Page selector compatibility wrapper is retired;
+    JSON creation emits only its result and hydrates from SessionState
   - B4: do_export(fmt, bitrate, output_dir) 签名存在；e_go.click(do_export, [e_fmt, e_br, e_save_dir], ...) 含 e_br
   - B10: save_to_lib 的 return 为 4 元组且 outputs 含 e_voice
   - D4: preview_bound_voice 函数被定义，且 v_preview_btn.click(preview_bound_voice, ...) 接线
@@ -109,17 +110,9 @@ def _mapping_key(node, mapping_name):
     return node.slice.value
 
 
-def test_create_project_returns_4tuple():
-    fn = find_func("create_project")
-    assert fn is not None, "未找到 create_project 函数"
-    returns = [n for n in ast.walk(fn)
-               if isinstance(n, ast.Return) and isinstance(n.value, ast.Tuple)]
-    assert returns, "create_project 没有返回元组"
-    for r in returns:
-        n = len(r.value.elts)
-        print(f"[B5] create_project return 元素数 = {n}")
-        assert n == 4, f"create_project 的 return 应为 4 元组，实际 {n} 个"
-    print(f"[B5] create_project 共 {len(returns)} 处 return，均为 4 元组 ✔")
+def test_project_page_compatibility_wrapper_is_retired():
+    assert find_func("create_project") is None
+    assert "ProjectCatalogService" not in SRC
 
 
 def test_json_create_click_wiring():
@@ -134,29 +127,29 @@ def test_json_create_click_wiring():
     outputs = node.args[2]
     assert isinstance(outputs, ast.List)
     ids = _arg_ids(outputs)
-    assert len(ids) == 2, f"outputs 应为 2 个，实际 {len(ids)}"
-    assert ids.count("p_sel") == 1, "p_sel 在 outputs 中应只出现一次"
+    assert ids == ["cp_json_result", "cp_json_success"]
     assert find_click("cp_json_check") is not None
 
 
-def test_json_create_reuses_open_project_and_full_voice_refresh_chain():
-    """创建成功后必须走既有 open_project + 全量刷新链，避免角色页半空。"""
+def test_json_create_hydrates_session_and_keeps_full_voice_refresh_chain():
+    """创建成功后从 SessionState hydrate live Voice outputs。"""
     assert "voice_create_chain = _open_chain_rest(voice_create_chain)" in SRC
-    open_calls = [
+    hydrate_calls = [
         node for node in ast.walk(TREE)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "then"
+        and node.func.attr in {"then", "success"}
         and node.args
         and isinstance(node.args[0], ast.Name)
-        and node.args[0].id == "open_project"
+        and node.args[0].id == "hydrate_opened_project"
         and len(node.args) >= 3
         and isinstance(node.args[2], ast.List)
     ]
-    assert open_calls, "未找到带 outputs 的 open_project 接线"
-    assert any(len(node.args[2].elts) == 7 for node in open_calls), (
-        "创建后的 open_project 必须返回完整 7 项页面状态"
-    )
+    assert hydrate_calls, "未找到 SessionState hydrate 接线"
+    assert any(len(node.args[2].elts) == 6 for node in hydrate_calls)
+    assert "create_ui.require_creation_success" in SRC
+    assert ".success(\n        hydrate_opened_project" in SRC
+    assert ".success(\n        lambda: _goto(\"voices\")" in SRC
     assert "voice_ui.refresh_voice_filters" in SRC
     assert "voice_ui.refresh_voice_lib" in SRC
     assert "voice_ui.refresh_role_list" in SRC
@@ -244,7 +237,7 @@ def test_json_import_service_is_wired_without_source_analysis():
 
 
 def test_json_create_chain_tail_refreshes_catalog():
-    """PR C：创建项目成功链尾统一刷新目录类组件（书架 / p_sel / 回收站）。"""
+    """创建项目成功链尾统一刷新目录类组件（书架 / 回收站）。"""
     assert "catalog_ui.refresh_bookshelf_management_view" in SRC
     assert "voice_create_chain.then(\n        catalog_ui.refresh_bookshelf_management_view" in SRC
-    assert "bookshelf_search" in SRC
+    assert "[bookshelf_search, ss]" in SRC

@@ -240,32 +240,29 @@ def test_h_search_state_preserved_across_navigation(state_workspace):
     assert len(bookshelf["data"]) == 1
 
 
-# ── I. archive → p_sel/catalog 同步 ──
+# ── I. archive → Catalog/selected/opened 同步 ──
 
 
-def test_i_archive_syncs_p_sel(state_workspace):
+def test_i_archive_syncs_catalog_without_opened_mirror(state_workspace):
     ss = SessionState()
-    _select(ss, "alpha")  # bookshelf selection must not populate p_sel
+    _select(ss, "alpha")
     _msg, _c, _s, _i = handlers.archive_selected("alpha", "alpha", ss)
-    # Stateless catalog refresh still sanitizes its explicit selector value.
-    bookshelf, p_sel_update, _trash, _tc, _ts = handlers.refresh_project_catalog("", "alpha")
-    assert "alpha" not in p_sel_update.get("choices", [])
-    assert p_sel_update.get("value") is None
-    assert [row[0] for row in bookshelf["data"]] == ["beta"]
+    result = handlers.refresh_bookshelf_management_view("", ss)
+    assert [row[0] for row in result[0]["data"]] == ["beta"]
+    assert result[4] == ""
+    assert ss.project is None
 
 
-# ── J. restore → p_sel/catalog 同步 ──
+# ── J. restore → Catalog 同步 ──
 
 
-def test_j_restore_syncs_p_sel(state_workspace):
+def test_j_restore_syncs_catalog(state_workspace):
     handlers.archive_selected("alpha", "alpha", None)
     archived = ProjectStorageService.list_archived()
     assert len(archived) == 1
     handlers.restore_archived_global(archived[0]["archive_id"])
-    # 统一刷新：p_sel 恢复 A（choices 含 A）
-    bookshelf, p_sel_update, _trash, _tc, _ts = handlers.refresh_project_catalog("", "")
-    assert "alpha" in p_sel_update.get("choices", [])
-    assert {row[0] for row in bookshelf["data"]} == {"alpha", "beta"}
+    result = handlers.refresh_bookshelf_management_view("", SessionState())
+    assert {row[0] for row in result[0]["data"]} == {"alpha", "beta"}
 
 
 # ── K. live active production archive 被阻止 → selected/opened 不变 ──

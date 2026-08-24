@@ -43,6 +43,8 @@ def create_create_project_page() -> dict:
                 interactive=False,
             )
         cp_json_result = gr.Markdown("")
+        # Per-operation result gate only; it is not a project selector or mirror.
+        cp_json_success = gr.State(False)
 
     return {
         "group": grp,
@@ -54,4 +56,5 @@ def create_create_project_page() -> dict:
         "cp_json_check": cp_json_check,
         "cp_json_create": cp_json_create,
         "cp_json_result": cp_json_result,
+        "cp_json_success": cp_json_success,
     }

@@ -40,5 +40,5 @@ def test_open_chain_wires_all_pages():
     assert "_dashboard_snapshot" not in SRC, "旧 dashboard snapshot 不应继续注册"
     assert "catalog_ui.refresh_bookshelf_management_view_with_hierarchy" in SRC, \
         "工作台应由 Catalog authority 刷新"
-    assert ".then(catalog_ui.reconcile_project_selector, [ss], [p_sel])" in SRC, \
-        "打开链应直接接入 Project Catalog selector authority"
+    assert "project_view_ui" not in SRC
+    assert "reconcile_project_selector" not in SRC

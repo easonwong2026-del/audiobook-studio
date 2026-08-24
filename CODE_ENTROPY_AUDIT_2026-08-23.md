@@ -1167,3 +1167,121 @@ legacy-sink 集）；扩展 IA / Catalog / Session / Project Page boundary 集�
 PR #63 合并前最终事实：Full pytest 1335 passed / 26 skipped、targeted IA / Catalog
 65 passed、Windows selected workflow 329 passed、CI run 32645813009 Ubuntu + Windows
 success。
+
+---
+
+# Round IA-2B — Project Page / selected-opened contract retirement
+
+日期：2026-08-24
+
+Merged baseline：PR #64 已按仓库既有 squash 策略合并；新的
+`origin/main` baseline 为 `31c76b63ffc03d110607b8c63065adb80c7f4ba5`。
+本轮分支：`refactor/project-page-contract-r2b`。
+
+## Latest caller-audit conclusion
+
+本轮重新完成了全仓 `rg`、production AST、imports/reexports、`getattr` /
+`__getattribute__`、string callback keys、`setattr` / monkeypatch、tests、scripts、
+`mcp_server` 与 docs audit。未发现脚本、MCP、动态反射或 re-export caller 继续消费
+`p_sel`、Project Page 或 Project View。`ui/wiring/voice_wiring.py` 仍只读取
+`callbacks`、`session`、`production_voice`；本轮保留这三个 live keys。
+
+## Before / after caller graph
+
+Before：
+
+    create_from_json -> [cp_json_result, p_sel]
+    p_refresh -> reconcile_project_selector -> [p_sel]
+    p_open -> open_project([p_sel, ss]) -> [p_summary, live Voice outputs]
+    _open_chain_rest -> reconcile_project_selector -> Project View tree/storage
+    Catalog refresh -> [bookshelf, p_sel, trash, selection context]
+    settings / app.load -> [bookshelf_search, p_sel, ss]
+
+After：
+
+    create_from_json -> [cp_json_result, cp_json_success]
+                     -> require_creation_success
+                     -> success only:
+                          hydrate_opened_project([ss]) -> six live Voice outputs
+                          -> Voices
+                          -> _open_chain_rest
+    bookshelf_open -> open_selected_project([selected_project, ss])
+                   -> open_project -> _open_chain_rest
+    _open_chain_rest / _post_archive_reconcile
+        -> live export / status / Voice Cast / Review / Repair / queue / synthesis
+        -> voice library / production check / export readiness / Catalog
+    Catalog refresh -> [bookshelf, trash, selected, selection context, hierarchy]
+                     -> [search_query, SessionState]
+
+`SessionState.project` remains the only opened-project truth and
+`SessionState.selected_project` remains the only Workbench selection truth. No hidden
+Dropdown, Textbox, or project-identity compatibility mirror replaces `p_sel`.
+`cp_json_success` is only the boolean result of the current Create operation; it is not
+project identity, an opened-project mirror, or a future `p_sel` substitute.
+
+## Final classification
+
+| candidate / contract | classification | final fact |
+|---|---|---|
+| `p_sel` | DEAD | no production definition, import, output, callback input, or dynamic caller remains |
+| `grp_project` | DEAD | hidden Project Page Group removed from app topology |
+| `p_refresh`, `p_open`, `p_open_msg`, `p_summary`, `p_storage`, `p_chapter_tree` | DEAD | hidden Project Page components and callbacks removed |
+| `create_project_page` | DEAD | page builder removed; `create_create_project_page` is the live JSON create page |
+| `project_view_handlers` / `project_view_ui` | DEAD | hidden chapter-tree/storage sink removed after production caller audit |
+| selector helpers (`build_project_selector_update`, `reconcile_project_selector`, `refresh_project_catalog`) | DEAD | no remaining live selector contract; management refresh owns Catalog output |
+| `create_project` old app wrapper | DEAD | dead four-output compatibility wrapper removed |
+| `hide_project_from_list` / `restore_project_to_list` | DEAD | no production caller; selector-dependent dead wrappers removed |
+| `select_project_from_bookshelf` | DEAD | no production caller; live selection is `catalog_ui.select_bookshelf_row` |
+| `open_project` | LIVE | opened-session loader retained; output contract is six live Voice outputs |
+| `hydrate_opened_project` | LIVE | thin create-chain adapter delegates to the existing opened-project loader |
+| `bookshelf_open` | LIVE | Workbench Inspector is the only visible project-open path |
+| `ov_bookshelf` / Catalog management | LIVE | selected/opened isolation, search, hierarchy, archive/restore remain live |
+| `grp_create_project` / `create_create_project_page` | LIVE | Workbench New Project entry remains functional |
+| `p_sel` in historical docs/tests | DEFERRED | retained only as historical wording or negative structural assertions; not runtime state |
+
+## Deletion and retention evidence
+
+Deleted production surface:
+
+- hidden Project Page builder and Project View handler module;
+- all `p_*` Project Page component construction, outputs, and event wiring;
+- selector-dependent Catalog helper APIs and `project_sel` dependency;
+- `p_summary` from the `open_project` contract;
+- hidden `nav_project` / `nav_create_project` buttons and handlers;
+- dead app-level project creation/list-visibility/legacy bookshelf wrappers.
+
+Retained deliberately:
+
+- `SessionState.project`, `SessionState.selected_project`, `p_open`-free live page
+  semantics, and selected != opened invariant;
+- `ProjectService`, `ProjectCreationService`, Catalog relation status/filter semantics,
+  hierarchy/search/archive guards, Runtime/TTS/Production/QA/Repair/Export/Merge/
+  Assembly/Storage/Voice Cast/MCP/dependencies;
+- `create_create_project_page()` and the visible Workbench New Project action;
+- `open_project(name, ss)` and all existing downstream refresh order, with the hidden
+  summary output removed because it had no live consumer.
+
+Catalog management output contract is now 24 outputs, or 32 with the eight hierarchy
+controls. All management refresh callbacks consume `[bookshelf_search, ss]`; the main
+refresh scans the complete Catalog once, filters visible rows from that snapshot, and
+uses the same snapshot for Book child counts. The regression case with three Chapters
+and one matching search row verifies Parent + matched Chapter visibility, “关联 3 个
+章节项目”, selected/opened preservation, and one scan.
+
+Inspector presentation now renders `RELATION_ORPHAN` as
+“⚠ 未归属章节 · {relation_message}” and `RELATION_INVALID` as
+“⚠ 关系无效 · {relation_message}”; Catalog relation status and business logic are
+unchanged.
+
+## Follow-up validation record
+
+- Follow-up head: `97fe339f6c905326fa79af20fb9c4e5358d1792e`;
+- Full pytest: **1325 passed, 26 skipped**;
+- Windows selected workflow: **329 passed**;
+- CI run `32695647298`: Ubuntu success; Windows Python 3.10 selected workflow success;
+- compileall: pass;
+- Ruff `--select F` on changed Python files: pass;
+- `git diff --check`: pass.
+
+No IA-2C or new UI feature work was started. Project Page / `p_sel` retirement is
+complete; future work must not reintroduce a hidden opened-project mirror.

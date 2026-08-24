@@ -96,21 +96,8 @@ def test_open_chain_rest_untouched():
     # 仍覆盖打开项目后的工作流关键刷新
     for marker in (
         "refresh_top_status", "preview_chapters", "refresh_queue_list",
-        "project_view_ui.render_chapter_tree", "render_preview", "voice_ui.refresh_voice_lib",
+        "render_preview", "voice_ui.refresh_voice_lib",
         "refresh_production_check", "refresh_export_default_dir",
         "catalog_ui.refresh_bookshelf_management_view_with_hierarchy",
-        "catalog_ui.reconcile_project_selector",
     ):
         assert marker in src, f"_open_chain_rest 应保留 {marker} 刷新"
-
-
-def test_refresh_project_catalog_pure_contract():
-    """refresh_project_catalog 为固定 5 元组契约（纯函数复核）。"""
-    import inspect
-
-    from ui import project_catalog_handlers as handlers
-
-    sig = inspect.signature(handlers.refresh_project_catalog)
-    assert list(sig.parameters) == ["search_query", "p_sel_value"]
-    assert sig.parameters["search_query"].default == ""
-    assert sig.parameters["p_sel_value"].default == ""

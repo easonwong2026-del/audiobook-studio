@@ -89,7 +89,7 @@ def test_selection_controls_enable_actions_and_clear_all_transients(
 ):
     ss = SessionState(project="beta")
     ss.set_selected("alpha")
-    updates = handlers.reconcile_bookshelf_selection(ss, "alpha")
+    updates = handlers.reconcile_bookshelf_selection(ss)
     assert len(updates) == 18
     for update in updates[0:9]:
         assert update.get("interactive") is True
@@ -102,33 +102,28 @@ def test_selection_controls_enable_actions_and_clear_all_transients(
     assert updates[15].get("visible") is False
     assert updates[16].get("visible") is False
     assert updates[17].get("value") == ""
-    assert handlers.reconcile_project_selector(ss).get("value") == "beta"
-
     ss.clear_selected()
-    cleared = handlers.reconcile_bookshelf_selection(ss, "alpha")
+    cleared = handlers.reconcile_bookshelf_selection(ss)
     assert len(cleared) == 18
     for update in cleared[0:9]:
         assert update.get("interactive") is False
-    assert handlers.reconcile_project_selector(ss).get("value") == "beta"
 
 
-def test_opened_project_wins_p_sel_while_bookshelf_selection_stays_independent(
+def test_opened_project_and_bookshelf_selection_stay_independent(
     bookshelf_workspace,
 ):
     ss = SessionState(project="beta", script={"meta": {"title": "贝塔"}})
     ss.set_selected("alpha")
 
-    updates = handlers.reconcile_bookshelf_selection(ss, "alpha")
+    updates = handlers.reconcile_bookshelf_selection(ss)
     assert ss.project == "beta"
     assert ss.selected_project == "alpha"
     assert updates[0].get("interactive") is True
-    assert handlers.reconcile_project_selector(ss).get("value") == "beta"
-
-    refreshed = handlers.refresh_bookshelf_management_view("", "alpha", ss)
-    assert refreshed[1].get("value") == "beta"  # project-page workflow control
-    assert refreshed[5] == "alpha"  # bookshelf mirror State value
-    assert "alpha" in refreshed[6].get("value", "")
-    assert "beta" in refreshed[6].get("value", "")
+    refreshed = handlers.refresh_bookshelf_management_view("", ss)
+    assert refreshed[4] == "alpha"  # canonical selected_project mirror
+    assert "alpha" in refreshed[5].get("value", "")
+    assert "beta" in refreshed[5].get("value", "")
+    assert ss.project == "beta"
 
 
 def test_selected_card_explicitly_distinguishes_opened_project(bookshelf_workspace):
@@ -147,14 +142,12 @@ def test_selected_card_explicitly_distinguishes_opened_project(bookshelf_workspa
 def test_refresh_preserves_valid_selection_and_filters(bookshelf_workspace):
     ss = SessionState()
     ss.set_selected("alpha")
-    result = handlers.refresh_bookshelf_management_view("阿尔法", "alpha", ss)
-    assert len(result) == 25
+    result = handlers.refresh_bookshelf_management_view("阿尔法", ss)
+    assert len(result) == 24
     assert [row[0] for row in result[0]["data"]] == ["alpha"]
-    assert result[1].get("choices") == ["alpha", "beta"]
-    assert result[1].get("value") is None
-    assert result[5] == "alpha"
-    assert "阿尔法" in result[6].get("value", "")
-    assert result[7].get("interactive") is True
+    assert result[4] == "alpha"
+    assert "阿尔法" in result[5].get("value", "")
+    assert result[6].get("interactive") is True
     assert ss.selected_project == "alpha"
 
 
@@ -167,11 +160,11 @@ def test_valid_refresh_keeps_selection_and_archive_confirmation(
     assert confirmation == "alpha"
     revision = ss.selection_revision
 
-    result = handlers.refresh_bookshelf_management_view("阿尔法", "alpha", ss)
+    result = handlers.refresh_bookshelf_management_view("阿尔法", ss)
     assert ss.selected_project == "alpha"
     assert ss.selection_revision == revision
-    assert result[5] == "alpha"
-    assert result[16].get("value") is None  # passive refresh preserves State
+    assert result[4] == "alpha"
+    assert result[15].get("value") is None  # passive refresh preserves State
     assert ss._archive_confirmation_revision == revision
 
 
@@ -185,9 +178,9 @@ def test_state_aware_refresh_uses_one_catalog_snapshot(bookshelf_workspace, monk
         return original_scan()
 
     monkeypatch.setattr(ProjectCatalogService, "scan", staticmethod(_scan_once))
-    result = handlers.refresh_bookshelf_management_view("阿尔法", "alpha", SessionState())
+    result = handlers.refresh_bookshelf_management_view("阿尔法", SessionState())
 
-    assert len(result) == 25
+    assert len(result) == 24
     assert calls == 1
 
 
@@ -210,37 +203,36 @@ def test_selection_revision_changes_only_for_real_context_changes():
     assert ss.selection_revision > after_back
 
 
-def test_search_filter_clears_p_sel_mirror_and_actions(bookshelf_workspace):
+def test_search_filter_clears_selected_state_and_actions(bookshelf_workspace):
     ss = SessionState()
     ss.set_selected("alpha")
     handlers.apply_project_search("贝塔", ss)
-    updates = handlers.reconcile_bookshelf_selection(ss, "alpha")
+    updates = handlers.reconcile_bookshelf_selection(ss)
     assert ss.selected_project is None
     assert updates[0].get("interactive") is False
     for update in updates[0:9]:
         assert update.get("interactive") is False
-    assert handlers.reconcile_project_selector(ss).get("value") is None
 
 
 def test_refresh_removes_missing_selection_and_disables_actions(bookshelf_workspace):
     ss = SessionState()
     ss.set_selected("alpha")
     handlers.archive_selected("alpha", "alpha", ss)
-    result = handlers.refresh_bookshelf_management_view("", "alpha", ss)
+    result = handlers.refresh_bookshelf_management_view("", ss)
     assert ss.selected_project is None
-    assert result[5] == ""
-    assert "选择" in result[6].get("value", "")
-    for update in result[7:16]:
+    assert result[4] == ""
+    assert "选择" in result[5].get("value", "")
+    for update in result[6:15]:
         assert update.get("interactive") is False
+    assert result[15] == ""
     assert result[16] == ""
-    assert result[17] == ""
+    assert result[17].get("visible") is False
     assert result[18].get("visible") is False
-    assert result[19].get("visible") is False
-    assert result[20] == ""
+    assert result[19] == ""
+    assert result[20].get("visible") is False
     assert result[21].get("visible") is False
     assert result[22].get("visible") is False
-    assert result[23].get("visible") is False
-    assert result[24].get("value") == ""
+    assert result[23].get("value") == ""
 
 
 def test_archive_confirmation_is_invalidated_by_a_to_b_to_a(bookshelf_workspace):
@@ -281,7 +273,7 @@ def test_cleanup_transient_reset_after_selection_context_change(bookshelf_worksp
     # The repository may have no candidate files in this fixture; use the
     # shared reconciliation contract to assert the reset semantics directly.
     ss.set_selected("beta")
-    updates = handlers.reconcile_bookshelf_selection(ss, "beta")
+    updates = handlers.reconcile_bookshelf_selection(ss)
     assert updates[0].get("interactive") is True
     assert updates[10] == ""
     assert updates[11].get("visible") is False
@@ -334,7 +326,7 @@ def test_storage_handlers_and_wiring_have_four_outputs(monkeypatch):
     try:
         assert len(storage_upgrade_outputs(page)) == 4
         assert len(cleanup_outputs(page)) == 4
-        assert len(bookshelf_management_outputs(page, gr.Dropdown())) == 25
+        assert len(bookshelf_management_outputs(page)) == 24
     finally:
         block.__exit__(None, None, None)
 

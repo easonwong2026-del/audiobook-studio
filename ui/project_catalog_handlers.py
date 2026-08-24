@@ -7,8 +7,7 @@ Service 层（``ProjectStorageService`` / ``ProjectBackupService`` /
 核心不变式：
 - 书架点选只写 ``ss.selected_project``，**绝不动** ``ss.project``、不加载剧本；
 - 各管理动作 handler 收显式 ``project_name`` 参数，不再从 ``ss.project`` 读取；
-- ``refresh_project_catalog`` 保持目录类组件的固定 5 元组低层契约；
-  ``refresh_bookshelf_management_view`` 是包含 selection reconciliation 的唯一 UI 出口。
+- ``refresh_bookshelf_management_view`` 是包含 selection reconciliation 的唯一 UI 出口。
 """
 from __future__ import annotations
 
@@ -38,8 +37,7 @@ _BOOKSHELF_HINT = (
 
 # ``SessionState.selected_project`` is the canonical bookshelf-management
 # selection source. ``bookshelf_selected_proj`` is only the Gradio mirror used
-# by management-action inputs. ``p_sel`` belongs to the project-page workflow
-# and must not be mutated by an ordinary bookshelf row-selection event.
+# by management-action inputs and is never an opened-project mirror.
 BOOKSHELF_ACTION_KEYS = (
     "bookshelf_open",
     "bookshelf_open_dir",
@@ -58,30 +56,6 @@ def _update(**kwargs: Any) -> Any:
     return gr.update(**kwargs)
 
 
-def build_project_selector_update(
-    summaries=None, p_sel_value: str = "", ss=None
-) -> dict:
-    """Build a legal ``p_sel`` Dropdown update from one catalog snapshot.
-
-    ``p_sel`` is the project-page workflow control, not a bookshelf-selection
-    mirror. Its value must always be either absent/``None`` or a member of the
-    choices emitted in the same update. When a session is available, only the
-    opened workflow project is eligible; ``selected_project`` is deliberately
-    not a fallback. The legacy ``p_sel_value`` is used only for stateless
-    callers that explicitly own the selector value.
-    """
-    if summaries is None:
-        summaries = ProjectCatalogService.scan()
-    choices = [item.project_name for item in summaries]
-    if ss is not None:
-        opened = str(getattr(ss, "project", "") or "")
-        candidates = (opened,)
-    else:
-        candidates = (str(p_sel_value or ""),)
-    value = next((candidate for candidate in candidates if candidate in choices), None)
-    return _update(choices=choices, value=value)
-
-
 def bind_open_project(callback) -> None:
     """供 app.py 注入 ``open_project``（书架「打开项目」唯一打开入口）。"""
     global _OPEN_PROJECT_CALLBACK
@@ -89,9 +63,8 @@ def bind_open_project(callback) -> None:
 
 
 def _empty_open_outputs() -> tuple:
-    """打开项目空态返回（与 app.open_project 空项目分支同契约，7 元组）。"""
+    """打开项目空态返回（与 app.open_project 空项目分支同契约，6 元组）。"""
     return (
-        "📖 等待打开项目",
         _update(choices=[], value=None),
         None,
         "### 当前角色配置\n请从左侧角色列表选择角色。",
@@ -320,9 +293,8 @@ def select_bookshelf_row(rows, ss, evt: gr.SelectData) -> tuple[str, str]:
     Returns:
         ``(选中项目名 State 值, 选中信息 Markdown)`` 二元组。
 
-    ``p_sel`` is deliberately not an output here. It is reconciled exactly
-    once by the following catalog-aware callback, after
-    ``ss.selected_project`` has been mutated.
+    The opened project is deliberately not an output here. Selection and
+    opened workflow state remain independent in ``SessionState``.
     """
     selected = getattr(evt, "selected", None) if evt is not None else None
     row_value = getattr(evt, "row_value", None) if evt is not None else None
@@ -354,8 +326,7 @@ def select_bookshelf_row(rows, ss, evt: gr.SelectData) -> tuple[str, str]:
         else:
             result = "", _BOOKSHELF_HINT
         logger.debug(
-            "bookshelf deselect preserved selection=%r; p_sel deferred to "
-            "catalog-aware reconciliation",
+            "bookshelf deselect preserved selection=%r",
             current,
         )
         return result
@@ -393,8 +364,7 @@ def select_bookshelf_row(rows, ss, evt: gr.SelectData) -> tuple[str, str]:
         return "", _BOOKSHELF_HINT
     ss.set_selected(name)
     logger.debug(
-        "bookshelf select applied selected_after=%r opened=%r; p_sel deferred "
-        "to catalog-aware reconciliation",
+        "bookshelf select applied selected_after=%r opened=%r",
         ss.selected_project,
         ss.project,
     )
@@ -423,7 +393,7 @@ def _selection_controls_updates(
 
     This is the dedicated bookshelf-selection context contract. It contains
     management action states, destructive transient states, and the bookshelf
-    message only; it intentionally has no ``p_sel`` output. Every
+    message only. Every
     selection-context change uses this helper, so no individual button can
     retain an old token or confirmation state.
     """
@@ -451,8 +421,8 @@ def _selection_controls_updates(
 def selection_ui_output_keys() -> tuple[str, ...]:
     """Return the bookshelf-selection context output keys.
 
-    ``p_sel`` is intentionally absent: it is reconciled by the separate
-    project-page workflow selector owner.
+    The opened workflow project is intentionally absent: it is owned by
+    ``SessionState.project``.
     """
     return (
         *BOOKSHELF_ACTION_KEYS,
@@ -469,7 +439,7 @@ def selection_ui_output_keys() -> tuple[str, ...]:
 
 
 def reconcile_bookshelf_selection_context(ss) -> tuple:
-    """Reconcile bookshelf-management state without touching ``p_sel``."""
+    """Reconcile bookshelf-management state from selected session state."""
     summaries = ProjectCatalogService.scan()
     updates = _selection_controls_updates(
         ss,
@@ -486,21 +456,9 @@ def reconcile_bookshelf_selection_context(ss) -> tuple:
     return updates
 
 
-def reconcile_bookshelf_selection(ss, *_legacy_args) -> tuple:
-    """Compatibility name for the p_sel-free bookshelf context reconciler.
-
-    Older callers may still pass the former ``p_sel_value`` argument. It is
-    ignored so those callers cannot accidentally re-couple bookshelf events
-    to the project-page selector.
-    """
+def reconcile_bookshelf_selection(ss) -> tuple:
+    """Compatibility name for the bookshelf context reconciler."""
     return reconcile_bookshelf_selection_context(ss)
-
-
-def reconcile_project_selector(ss, summaries=None) -> dict:
-    """Reconcile the project-page selector from opened workflow state only."""
-    if summaries is None:
-        summaries = ProjectCatalogService.scan()
-    return build_project_selector_update(summaries, ss=ss)
 
 
 def _hierarchy_control_updates(ss, summaries=None) -> tuple:
@@ -1216,54 +1174,21 @@ def permanently_delete_archived_global(archive_id: str, confirmed: bool) -> str:
         return f"❌ 永久删除失败：{exc}"
 
 
-# ── 统一刷新出口 ──
-
-
-def refresh_project_catalog(search_query: str = "", p_sel_value: str = "") -> tuple:
-    """目录类组件全量刷新唯一出口。
-
-    Args:
-        search_query: 当前书架搜索词（保持过滤状态，不因刷新突然变回全部）。
-        p_sel_value: 当前项目下拉选中值；若已不在新 catalog 中（如被归档）
-            则同步清空，避免「下拉还指着已归档项目」的幽灵状态。
-
-    Returns:
-        固定 5 元组契约：
-        ``(书架行 gr.update, p_sel choices gr.update[同一 catalog 生成],
-            回收站表 rows, 回收站下拉 gr.update, 回收站状态文本)``
-    """
-    summaries = ProjectCatalogService.scan()
-    bookshelf = render_bookshelf_rows(
-        search_query,
-        ProjectCatalogService.filter_projects(summaries, search_query),
-        catalog_summaries=summaries,
-    )
-    rows, trash_choices, status = render_archived_projects()
-    return (
-        bookshelf,
-        build_project_selector_update(summaries, p_sel_value),
-        rows,
-        trash_choices,
-        status,
-    )
-
-
 def _refresh_bookshelf_management_state(
-    search_query: str = "", p_sel_value: str = "", ss=None
+    search_query: str = "", ss=None
 ) -> tuple[tuple, list]:
     """Refresh the catalog and reconcile the complete bookshelf management UI.
 
-    ``refresh_project_catalog`` intentionally remains the stable five-output
-    catalog primitive.  This state-aware wrapper is the only UI reconciliation
-    path: it preserves ``ss.catalog_query``, validates the canonical
-    ``ss.selected_project`` against the freshly scanned/filter catalog, updates
-    the mirror/card/action states, and preserves a live archive confirmation
-    unless the selection context is stale.
+    This state-aware wrapper is the only UI reconciliation path: it preserves
+    ``ss.catalog_query``, validates the canonical ``ss.selected_project``
+    against the freshly scanned/filter catalog, updates the mirror/card/action
+    states, and preserves a live archive confirmation unless the selection
+    context is stale.
 
-    Returns 25 outputs in this order:
+    Returns 24 outputs in this order:
 
-    ``catalog(5), bookshelf_selected_proj, bookshelf_selected,`` followed by
-    the p_sel-free outputs named by ``selection_ui_output_keys()``.
+    ``catalog(4), bookshelf_selected_proj, bookshelf_selected,`` followed by
+    the selection-context outputs named by ``selection_ui_output_keys()``.
     """
     query = str(search_query or "")
     if ss is not None and (
@@ -1295,11 +1220,6 @@ def _refresh_bookshelf_management_state(
         # or production/session reference behind after reconciliation.
         ss.clear_opened()
         opened = ""
-    p_sel_update = (
-        reconcile_project_selector(ss, summaries)
-        if ss is not None
-        else build_project_selector_update(summaries, p_sel_value)
-    )
     rows, trash_choices, status = render_archived_projects()
 
     selected_summary = next(
@@ -1318,7 +1238,6 @@ def _refresh_bookshelf_management_state(
     )
     result = (
         bookshelf,
-        p_sel_update,
         rows,
         trash_choices,
         status,
@@ -1330,28 +1249,24 @@ def _refresh_bookshelf_management_state(
 
 
 def refresh_bookshelf_management_view(
-    search_query: str = "", p_sel_value: str = "", ss=None
+    search_query: str = "", ss=None
 ) -> tuple:
-    """Return the stable 25-output Bookshelf Management contract."""
-    result, _summaries = _refresh_bookshelf_management_state(
-        search_query, p_sel_value, ss
-    )
+    """Return the stable 24-output Bookshelf Management contract."""
+    result, _summaries = _refresh_bookshelf_management_state(search_query, ss)
     return result
 
 
 def refresh_bookshelf_management_view_with_hierarchy(
-    search_query: str = "", p_sel_value: str = "", ss=None
+    search_query: str = "", ss=None
 ) -> tuple:
     """Refresh Bookshelf Management plus Phase B/B.5 relationship controls.
 
     The hierarchy controls are derived from the same Catalog snapshot as the
-    25 legacy outputs; no second scan is introduced on the main refresh path.
-    The resulting contract is 33 outputs: the stable 25-output bookshelf
+    24 bookshelf outputs; no second scan is introduced on the main refresh path.
+    The resulting contract is 32 outputs: the stable 24-output bookshelf
     prefix followed by eight dedicated hierarchy outputs.
     """
-    result, summaries = _refresh_bookshelf_management_state(
-        search_query, p_sel_value, ss
-    )
+    result, summaries = _refresh_bookshelf_management_state(search_query, ss)
     return (*result, *_hierarchy_control_updates(ss, summaries))
 
 
@@ -1375,7 +1290,6 @@ __all__ = [
     "archive_selected",
     "archive_selected_with_event",
     "bind_open_project",
-    "build_project_selector_update",
     "bind_selected_chapter",
     "cancel_selected_cleanup",
     "cancel_selected_storage_upgrade",
@@ -1390,10 +1304,8 @@ __all__ = [
     "permanently_delete_archived_global",
     "reconcile_bookshelf_selection",
     "reconcile_bookshelf_selection_context",
-    "reconcile_project_selector",
     "refresh_archived_projects_global",
     "refresh_bookshelf_management_view",
-    "refresh_project_catalog",
     "render_bookshelf_rows",
     "repair_selected_integrity",
     "restore_archived_global",

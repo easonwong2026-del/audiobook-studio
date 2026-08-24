@@ -73,12 +73,6 @@ def _select(ss: SessionState, name: str):
     )
 
 
-def _assert_dropdown_update_is_valid(update: dict, previous_choices=()) -> None:
-    choices = update.get("choices", list(previous_choices))
-    value = update.get("value")
-    assert value is None or value in choices, (choices, value)
-
-
 def test_t1_selection_from_empty_dropdown_does_not_emit_invalid_value(
     archive_workspace,
 ):
@@ -92,23 +86,21 @@ def test_t1_selection_from_empty_dropdown_does_not_emit_invalid_value(
 def test_t2_selected_a_opened_none_has_legal_value_and_choices(archive_workspace):
     ss = SessionState()
     _select(ss, "alpha")
-    updates = handlers.reconcile_bookshelf_selection(ss, "alpha")
+    updates = handlers.reconcile_bookshelf_selection(ss)
 
     assert len(updates) == 18
-    selector = handlers.reconcile_project_selector(ss)
-    _assert_dropdown_update_is_valid(selector, previous_choices=[])
-    assert selector.get("value") is None
+    assert ss.selected_project == "alpha"
+    assert ss.project is None
 
 
 def test_t3_selected_a_opened_b_keeps_b_in_legal_choices(archive_workspace):
     ss = SessionState(project="beta")
     _select(ss, "alpha")
-    updates = handlers.reconcile_bookshelf_selection(ss, "alpha")
+    updates = handlers.reconcile_bookshelf_selection(ss)
 
     assert len(updates) == 18
-    selector = handlers.reconcile_project_selector(ss)
-    _assert_dropdown_update_is_valid(selector, previous_choices=[])
-    assert selector.get("value") == "beta"
+    assert ss.selected_project == "alpha"
+    assert ss.project == "beta"
 
 
 def test_t4_first_archive_click_is_confirmation_only(archive_workspace):
@@ -162,20 +154,19 @@ def test_t6_archive_wiring_uses_success_only_reconciliation():
     assert 'page["bookshelf_archive_event"].change(' in archive_block
 
 
-def test_t7_archive_selected_a_opened_b_keeps_b_legal_in_p_sel(archive_workspace):
+def test_t7_archive_selected_a_preserves_opened_b(archive_workspace):
     ss = SessionState(project="beta", script={"meta": {"title": "贝塔"}})
     ss.set_selected("alpha")
 
     message, *_ = handlers.archive_selected("alpha", "alpha", ss)
-    result = handlers.refresh_bookshelf_management_view("", "alpha", ss)
+    result = handlers.refresh_bookshelf_management_view("", ss)
 
     assert "已移入回收站" in message
     assert ss.selected_project is None
     assert ss.project == "beta"
-    p_sel_update = result[1]
-    assert p_sel_update.get("choices") == ["beta"]
-    assert p_sel_update.get("value") == "beta"
-    _assert_dropdown_update_is_valid(p_sel_update)
+    assert result[0]["data"]
+    assert result[4] == ""
+    assert ss.project == "beta"
 
 
 def test_t8_archive_selected_and_opened_a_clears_value_safely(archive_workspace):
@@ -183,13 +174,12 @@ def test_t8_archive_selected_and_opened_a_clears_value_safely(archive_workspace)
     ss.set_selected("alpha")
 
     handlers.archive_selected("alpha", "alpha", ss)
-    result = handlers.refresh_bookshelf_management_view("", "alpha", ss)
+    result = handlers.refresh_bookshelf_management_view("", ss)
 
     assert ss.selected_project is None
     assert ss.project is None
-    assert result[1].get("choices") == ["beta"]
-    assert result[1].get("value") is None
-    _assert_dropdown_update_is_valid(result[1])
+    assert [row[0] for row in result[0]["data"]] == ["beta"]
+    assert result[4] == ""
 
 
 def test_t9_archive_last_project_emits_empty_choices_and_none_value(archive_workspace):
@@ -197,26 +187,20 @@ def test_t9_archive_last_project_emits_empty_choices_and_none_value(archive_work
     handlers.archive_selected("alpha", "alpha", ss)
     handlers.archive_selected("beta", "beta", ss)
 
-    result = handlers.refresh_bookshelf_management_view("", "beta", ss)
-    p_sel_update = result[1]
+    result = handlers.refresh_bookshelf_management_view("", ss)
 
-    assert p_sel_update.get("choices") == []
-    assert p_sel_update.get("value") is None
-    _assert_dropdown_update_is_valid(p_sel_update)
+    assert result[0]["data"] == []
+    assert result[4] == ""
 
 
-def test_t10_restore_repopulates_legal_p_sel_choices(archive_workspace):
+def test_t10_restore_repopulates_catalog(archive_workspace):
     handlers.archive_selected("alpha", "alpha", None)
     archived = ProjectStorageService.list_archived()
     assert len(archived) == 1
 
     handlers.restore_archived_global(archived[0]["archive_id"])
-    result = handlers.refresh_project_catalog("", "alpha")
-    p_sel_update = result[1]
-
-    assert "alpha" in p_sel_update.get("choices", [])
-    assert p_sel_update.get("value") == "alpha"
-    _assert_dropdown_update_is_valid(p_sel_update)
+    result = handlers.refresh_bookshelf_management_view("", SessionState())
+    assert {row[0] for row in result[0]["data"]} == {"alpha", "beta"}
 
 
 def test_t11_a_to_b_to_a_confirmation_remains_stale_protected(archive_workspace):
@@ -235,35 +219,23 @@ def test_t11_a_to_b_to_a_confirmation_remains_stale_protected(archive_workspace)
     assert (archive_workspace / "projects" / "alpha").is_dir()
 
 
-def test_t12_empty_catalog_selector_contract_is_explicit():
-    update = handlers.build_project_selector_update([])
-
-    assert update.get("choices") == []
-    assert update.get("value") is None
-    _assert_dropdown_update_is_valid(update)
+def test_t12_catalog_has_no_selector_helper_contract():
+    assert not hasattr(handlers, "build_project_selector_update")
+    assert not hasattr(handlers, "reconcile_project_selector")
 
 
-def test_t13_manual_project_refresh_sanitizes_stale_value(monkeypatch):
-    summary = type("Summary", (), {"project_name": "beta"})()
-    monkeypatch.setattr(
-        handlers.ProjectCatalogService,
-        "scan",
-        staticmethod(lambda: [summary]),
-    )
+def test_t13_refresh_signature_owns_only_search_and_session():
+    import inspect
 
-    update = handlers.reconcile_project_selector(SessionState(project="alpha"))
-
-    assert update.get("choices") == ["beta"]
-    assert update.get("value") is None
-    _assert_dropdown_update_is_valid(update)
+    assert list(inspect.signature(
+        handlers.refresh_bookshelf_management_view
+    ).parameters) == ["search_query", "ss"]
 
 
-def test_t14_refresh_p_sel_emits_choices_with_legal_value(monkeypatch):
-    summary = type("Summary", (), {"project_name": "beta"})()
-    monkeypatch.setattr(handlers.ProjectCatalogService, "scan", lambda: [summary])
+def test_t14_management_output_contract_has_no_opened_selector():
+    import inspect
+    from ui.wiring.project_catalog_wiring import bookshelf_management_outputs
 
-    update = handlers.reconcile_project_selector(SessionState(project="beta"))
-
-    assert update.get("choices") == ["beta"]
-    assert update.get("value") == "beta"
-    _assert_dropdown_update_is_valid(update)
+    assert "project_sel" not in inspect.signature(
+        bookshelf_management_outputs
+    ).parameters
