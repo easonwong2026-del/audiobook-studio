@@ -1523,8 +1523,10 @@ reintroduce a project selector or a second root state.
 
 ### R3B validation record
 
-The final PR report records targeted project-manager/repository/service, storage and
-migration, snapshot/progress/synthesis, Create/Open, Catalog/Session, Production,
-Runtime selected, Export project-switch isolation, Merge, Assembly, MCP, full
-pytest, Windows selected workflow, compileall, Ruff `--select F`, and
-`git diff --check`. No IA-2B work beyond this facade boundary is included.
+Local validation passed: full pytest `1330 passed, 26 skipped`; targeted
+project-manager/repository/service, storage/migration, snapshot/progress/synthesis,
+Create/Open, Catalog/Session, Production, Runtime selected, Export project-switch
+isolation, Merge, Assembly, and MCP `335 passed`; Windows selected workflow `329
+passed`; compileall, Ruff `--select F` on changed Python, and `git diff --check`
+also passed. CI run `32722861080` completed with Ubuntu and Windows success. No
+IA-2B work beyond this facade boundary is included.
