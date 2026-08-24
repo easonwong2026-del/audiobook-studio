@@ -91,10 +91,6 @@ def vc_project(tmp_path, monkeypatch):
     monkeypatch.setattr(ProjectRepository, "WORKSPACE_ROOT", str(data_dir / "projects"))
     monkeypatch.setattr(ProjectRepository, "LEGACY_ROOT", str(data_dir / "legacy"))
     monkeypatch.setattr(ProjectRepository, "_INITIALIZED", True)
-    from lib import project_manager as pm
-
-    monkeypatch.setattr(pm, "WORKSPACE_ROOT", str(data_dir / "projects"))
-    monkeypatch.setattr(pm, "LEGACY_ROOT", str(data_dir / "legacy"))
     monkeypatch.setattr(
         TaskRepository,
         "get_task_dir",

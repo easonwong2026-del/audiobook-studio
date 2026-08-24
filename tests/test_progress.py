@@ -1,7 +1,7 @@
 """O3 纯逻辑单测：lib.progress 三个纯函数（无 gradio / 无 torch / 无 GPU）。
 
 验证（设计 §10.3）：
-1) build_segment_states(project) 返回全段列表、状态与 pm.open_project 的
+1) build_segment_states(project) 返回全段列表、状态与 ProjectRepository.load_project 的
    meta.segments_status 对齐（pending→pending、done→done、failed→error、未出现段不遗漏）；
 2) update_segment_state(states, seg_id, status, progress=...) 更新既有段或追加；
 3) to_queue_rows(states) 行数=段数、列数=6、图标映射正确
@@ -19,8 +19,8 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-import lib.project_manager as pm  # noqa: E402
 from lib import progress as prog  # noqa: E402
+from repositories.project_repo import ProjectRepository  # noqa: E402
 
 
 SCRIPT = {
@@ -48,10 +48,12 @@ SCRIPT = {
 @pytest.fixture
 def project(tmp_path, monkeypatch):
     """用临时目录作 WORKSPACE_ROOT，建一个 2 章 3 段 2 角色项目。"""
-    monkeypatch.setattr(pm, "WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(ProjectRepository, "WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(ProjectRepository, "LEGACY_ROOT", str(tmp_path / "legacy"))
+    monkeypatch.setattr(ProjectRepository, "_INITIALIZED", True)
     sp = tmp_path / "s.json"
     sp.write_text(json.dumps(SCRIPT, ensure_ascii=False), encoding="utf-8")
-    pm.create_project("prog", str(sp))
+    ProjectRepository.create_project("prog", str(sp))
     return "prog"
 
 
@@ -67,8 +69,8 @@ def test_build_segment_states_returns_all_segments(project):
 
 
 def test_build_segment_states_aligns_with_meta(project):
-    pm.update_segment_status(project, "1-001", "done")
-    pm.update_segment_status(project, "1-002", "failed")
+    ProjectRepository.update_segment_status(project, "1-001", "done")
+    ProjectRepository.update_segment_status(project, "1-002", "failed")
     # 2-001 未触碰 -> 应保持 pending
     states = {s["seg_id"]: s for s in prog.build_segment_states(project)}
     assert states["1-001"]["status"] == "done"
@@ -81,7 +83,7 @@ def test_build_segment_states_aligns_with_meta(project):
 
 def test_build_segment_states_explicit_pending_maps_to_pending(project):
     # 显式置 pending 也应为 pending（不能误判为 default 分支）
-    pm.update_segment_status(project, "1-001", "pending")
+    ProjectRepository.update_segment_status(project, "1-001", "pending")
     states = {s["seg_id"]: s for s in prog.build_segment_states(project)}
     assert states["1-001"]["status"] == "pending"
 
@@ -110,7 +112,7 @@ def test_update_segment_state_updates_existing(project):
 
 def test_update_segment_state_appends_when_missing():
     states: list = []
-    st = prog.update_segment_state(states, "9-999", prog.SEGMENT_STATUS_DONE, 1.0)
+    prog.update_segment_state(states, "9-999", prog.SEGMENT_STATUS_DONE, 1.0)
     assert len(states) == 1
     assert states[0]["seg_id"] == "9-999"
     assert states[0]["status"] == "done"

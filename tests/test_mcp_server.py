@@ -7,7 +7,6 @@ import os
 
 import pytest
 
-from lib import project_manager as pm
 from mcp_server.server import _TOOLS, handle_request
 from mcp_server.tools.projects import (
     get_project,
@@ -46,8 +45,6 @@ def isolated_projects(tmp_path, monkeypatch):
     ProjectRepository.WORKSPACE_ROOT = str(tmp_path / "data" / "projects")
     ProjectRepository.LEGACY_ROOT = str(tmp_path / "data" / "legacy")
     ProjectRepository._INITIALIZED = True
-    monkeypatch.setattr(pm, "WORKSPACE_ROOT", ProjectRepository.WORKSPACE_ROOT)
-    monkeypatch.setattr(pm, "LEGACY_ROOT", ProjectRepository.LEGACY_ROOT)
     yield tmp_path
     (
         ProjectRepository.WORKSPACE_ROOT,

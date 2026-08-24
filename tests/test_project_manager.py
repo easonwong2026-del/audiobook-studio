@@ -124,38 +124,3 @@ def test_validate_script_detects_unknown_role(tmp_path):
     good.write_text(json.dumps(SCRIPT_VALID, ensure_ascii=False), encoding="utf-8")
     script2 = sl.load_script(str(good))
     assert sl.validate_script(script2) == [], "合法剧本应无错误"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 2.3 O2 / 2.4：synthesis_overrides.json 持久化（全局合成覆盖读写）
-# ─────────────────────────────────────────────────────────────────────────────
-
-def test_set_get_synthesis_overrides_roundtrip(project):
-    """写入后读出一致（覆盖参数字典原样还原）。"""
-    ov = {"emotion": "happy", "override": True, "emo_alpha": 0.8, "speech_rate": 1.2}
-    pm.set_synthesis_overrides(project, ov)
-    assert pm.get_synthesis_overrides(project) == ov
-
-
-def test_get_synthesis_overrides_missing_returns_empty(project):
-    """覆盖文件不存在时返回 {}（不抛异常）。"""
-    assert pm.get_synthesis_overrides(project) == {}
-
-
-def test_get_synthesis_overrides_corrupt_file_returns_empty(project):
-    """覆盖文件损坏（非法 JSON）时安全回退为 {}。"""
-    ov_path = project_paths.project_file(pm.get_project_dir(project), "synthesis_overrides")
-    with open(ov_path, "w", encoding="utf-8") as f:
-        f.write("{not valid json")
-    assert pm.get_synthesis_overrides(project) == {}
-
-
-def test_set_synthesis_overrides_non_destructive(project):
-    """set 仅写独立覆盖文件，不改动 structured_script.json 源剧本。"""
-    script_path = project_paths.project_file(pm.get_project_dir(project), "structured_script")
-    before = open(script_path, encoding="utf-8").read()
-    pm.set_synthesis_overrides(project, {"emotion": "sad"})
-    after = open(script_path, encoding="utf-8").read()
-    assert before == after, "set_synthesis_overrides 不应改动 structured_script.json"
-    ov_path = project_paths.project_file(pm.get_project_dir(project), "synthesis_overrides")
-    assert os.path.isfile(ov_path), "覆盖应写入独立的 synthesis_overrides.json"

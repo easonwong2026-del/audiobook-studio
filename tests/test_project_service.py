@@ -1,5 +1,5 @@
 from lib import project_paths
-"""ProjectService 单测（纯 Python，假 ffmpeg / 假引擎无关，仅用 lib.project_manager）。
+"""ProjectService 单测（纯 Python，假 ffmpeg / 假引擎无关）。
 
 沿用 ``test_queue_b7.py`` 的范式：用 ``tmp_path`` 作 ``WORKSPACE_ROOT``，验证
 项目的创建 / 扫描 / 打开 / 剧本校验 / 角色绑定 / 存入音色库。无需 GPU / UI。
@@ -18,7 +18,6 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from services.project import ProjectService  # noqa: E402
-import lib.project_manager as pm  # noqa: E402
 from repositories.project_repo import ProjectRepository  # noqa: E402
 
 
@@ -39,8 +38,8 @@ SCRIPT = {
 @pytest.fixture
 def project(tmp_path, monkeypatch):
     """临时 WORKSPACE_ROOT 下建一个 1 段 1 角色项目。"""
-    monkeypatch.setattr(pm, "WORKSPACE_ROOT", str(tmp_path))
     monkeypatch.setattr(ProjectRepository, "WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(ProjectRepository, "LEGACY_ROOT", str(tmp_path / "legacy"))
     monkeypatch.setattr(ProjectRepository, "_INITIALIZED", True)
     sp = tmp_path / "s.json"
     sp.write_text(json.dumps(SCRIPT, ensure_ascii=False), encoding="utf-8")
@@ -79,7 +78,7 @@ def test_validate_script_file_ok(project, tmp_path):
 
 
 def test_bind_voice_mutates_json_and_returns_path(project):
-    d = pm.get_project_dir("t1")
+    d = ProjectRepository.get_project_dir("t1")
     vo = os.path.join(project_paths.project_dir(d, "project_voices", create=True), "ref.wav")
     _dummy(vo)
     dest = ProjectService.bind_voice("t1", "旁白", vo)

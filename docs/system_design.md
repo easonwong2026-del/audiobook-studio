@@ -4,7 +4,7 @@
 
 ### 1. Implementation Approach
 
-**核心挑战**：lib/project_manager.py 500+ 行混合了「原始 JSON 读/写 + 业务查询 + 数据格式转换」，且写入操作未全部使用原子写。app.py 和多个 service 直接调用 pm.* 的磁盘函数，耦合紧密。
+**核心挑战（历史背景）**：lib/project_manager.py 500+ 行混合了「原始 JSON 读/写 + 业务查询 + 数据格式转换」，且写入操作未全部使用原子写。此前 app.py 和多个 service 直接调用 pm.* 的磁盘函数，耦合紧密；当前生产路径已迁移到 Repository/Service。
 
 **分层策略**：引入 `repositories/` 层作为唯一的持久化边界，采用 **Repository Pattern**：
 
@@ -16,7 +16,7 @@ app.py → services/*.py → repositories/*.py (NEW) → 磁盘 JSON
 
 - `repositories/` 只依赖标准库 + `lib/types.py` + `lib/snapshot.py`（快照引用），**不反向依赖** `services/` 或 `app.py`
 - 新增 repo，不改已有测试红线（除非明确标注）
-- 旧 `lib/project_manager.py` 保留不动（向后兼容），但阶段四结束后其直接磁盘调用归零
+- 旧 `lib/project_manager.py` 保留为窄兼容 facade；其生产直接磁盘调用归零，公共 CRUD wrapper 与 mutable roots 继续服务 legacy callers，根同步不等于磁盘 authority
 
 **API 设计风格**：
 - Repository 方法均用 `@staticmethod` 或模块级函数（无实例状态，与既有的 `ProjectService` 风格一致）
@@ -49,8 +49,8 @@ repositories/
   tests/test_task_repo.py
 ```
 
-**不修改**（保留旧文件供参考，但调用方迁移后不再使用）：
-- `lib/project_manager.py`（保留，但不再被任何代码直接调用）
+**不修改**（生产调用方已迁移；兼容调用仍受测试覆盖）：
+- `lib/project_manager.py`（保留窄 facade；`ProjectService.set_data_dir()` 仅同步其 mutable roots）
 - `lib/voice_lib.py`（业务查询不变，不受影响）
 - `lib/progress.py`（业务查询不变，不受影响）
 - `lib/snapshot.py`（不受影响，被 ProjectRepository 引用）
@@ -228,7 +228,7 @@ class ProjectRepository:
         """原子写 synthesis_selections.json。"""
 ```
 
-**与 `lib/project_manager.py` 的关系**：`ProjectRepository` 是 `pm` 的"重构版"，函数签名几乎一一对应。旧 `pm` 保留，但 `ProjectService` 改为调用 `ProjectRepository`。
+**与 `lib/project_manager.py` 的关系**：`ProjectRepository` 是唯一磁盘 authority；旧 `pm` 只是把少量公共 CRUD 调用转发到 Repository 的兼容 facade。R3B 已删除 pm 的 private metadata/status wrappers 与 synthesis preference wrappers；`ProjectService` 和 UI 统一调用 Repository/Service。
 
 #### 3.3 BindingRepository (`repositories/binding_repo.py`)
 
@@ -560,7 +560,7 @@ def atomic_write(path: str, data: dict) -> None:
    - 音频先写唯一 `.part.wav`，校验后原子发布到项目 cache
    
 3. **验证 `app.py`**：
-   - 确认所有 handler 的 `pm.*` 直接调用已经通过 `ProjectService` 间接走 `ProjectRepository`
+   - 确认所有 handler 不再直接调用 `pm.*` 磁盘函数，统一通过 `ProjectService` / `ProjectRepository`
    - 确认 `config.*` 调用仍然工作（lib/config.py 向后兼容）
    - 确认红线 AST 测试不破裂
    
@@ -574,8 +574,8 @@ def atomic_write(path: str, data: dict) -> None:
 - **原子写规范**：所有 JSON 写入必须使用 `tmp_path + ".tmp"` 作为临时文件 → 写入 → `f.flush()` → `os.fsync(f.fileno())` → `os.replace(tmp_path, path)`。`os.replace` 在**同一文件系统**内是原子操作。所有配置文件（config.json, project.json, voice_bindings.json, task JSON）都在 data_dir 内，天然同盘。
 - **Repository 不反向依赖 Services**：`repositories/` 只能依赖标准库 + `lib/types.py` + `lib/snapshot.py`。不得 import `services/` 或 `app.py`。
 - **WORKSPACE_ROOT monkeypatch**：`ProjectRepository.WORKSPACE_ROOT` 是模块级变量，测试通过 `monkeypatch.setattr(ProjectRepository, "WORKSPACE_ROOT", str(tmp_path))` 覆盖。
-- **向后兼容原则**：`lib/config.py` 和 `lib/project_manager.py` 保留不动（函数签名不变），但新增代码不走它们直接调磁盘。
-- **`ProjectService.set_data_dir()` 特殊处理**：当前它会设置 `pm.WORKSPACE_ROOT`，T03 后改为设置 `ProjectRepository.WORKSPACE_ROOT`。同时考虑是否也需要更新 `lib/config` 的 `WORKSPACE_ROOT`？不需要——旧 pm 已不被调用，留空即可。
+- **向后兼容原则**：`lib/config.py` 和 `lib/project_manager.py` 保留其已承诺的兼容 surface，但新增代码不通过 pm 直接调磁盘；R3B 已删除无 caller 的 pm private wrappers。
+- **`ProjectService.set_data_dir()` 特殊处理**：它设置 `ProjectRepository.WORKSPACE_ROOT` / `LEGACY_ROOT`，并同步 pm facade 的同名 mutable roots，保证旧 integrations 在 facade 调用中继续解析同一目录。
 - **异常向上传递**：Repository 层抛出明确异常（`FileNotFoundError`, `json.JSONDecodeError`, `RepoError`），Service 层负责捕获并转换为 UI 层可展示的消息。不允许 `except Exception: pass`。
 
 ### 9. Task Dependency Graph
@@ -614,14 +614,14 @@ graph TD
 | `pm.list_projects()` | `ProjectService.list_projects()` | `lib/project_manager.py` | `ProjectRepository.list_projects()` |
 | `pm.bind_voice` 内的`voice_bindings.json`写 | `ProjectService.bind_voice()` | 直接 json.dump | `ProjectRepository.save_bindings()` |
 | `config.set_data_dir()` | `ProjectService.set_data_dir()` | `lib/config.py`→json.dump | `ConfigRepository.set_data_dir()`（lib/config 包装） |
-| `pm.get_synthesis_overrides()` | app.py `do_synthesis` 内 | `lib/project_manager.py` | `ProjectRepository.get_synthesis_overrides()` |
-| `pm.set_synthesis_overrides()` | app.py `do_synthesis` 内 | `lib/project_manager.py`→json.dump | `ProjectRepository.set_synthesis_overrides()`（原子写） |
-| `pm.get_synthesis_selections()` | app.py `render_preview` 内 | `lib/project_manager.py` | `ProjectRepository.get_synthesis_selections()` |
-| `pm.set_synthesis_selections()` | app.py `do_synthesis` 内 | `lib/project_manager.py`→json.dump | `ProjectRepository.set_synthesis_selections()`（原子写） |
+| `ProjectService.get_synthesis_overrides()` | app.py `do_synthesis` 内 | `ProjectService` | `ProjectRepository.get_synthesis_overrides()` |
+| `ProjectService.set_synthesis_overrides()` | app.py `do_synthesis` 内 | `ProjectService` | `ProjectRepository.set_synthesis_overrides()`（原子写） |
+| `ProjectService.get_synthesis_selections()` | app.py `render_preview` 内 | `ProjectService` | `ProjectRepository.get_synthesis_selections()` |
+| `ProjectService.set_synthesis_selections()` | app.py `do_synthesis` 内 | `ProjectService` | `ProjectRepository.set_synthesis_selections()`（原子写） |
 | `build_role_choices()` | `ui/components/voice_binding.py::format_role_choices` | `ui/components/voice_binding.py`（纯展示函数） | UI-owned category/value choices |
 | `build_bound_role_choices()` | `ui/components/voice_binding.py::format_bound_role_choices`、`app.py::refresh_supplement_roles` | `ui/components/voice_binding.py`（纯展示函数） | UI-owned bound-role choices |
 | `Project View.render_chapter_tree()` | historical Round 2A boundary | IA-2B retired the hidden Project View; Workbench Catalog hierarchy is authoritative | → `ProjectCatalogService` hierarchy rows |
-| `pm.WORKSPACE_ROOT` | `ProjectService.set_data_dir()` | 模块级变量 | `ProjectRepository.WORKSPACE_ROOT` |
+| `pm.WORKSPACE_ROOT` / `pm.LEGACY_ROOT` | `ProjectService.set_data_dir()` | 兼容 facade mutable roots | 与 `ProjectRepository` 同步；Repository 仍是 authority |
 
 ### "改移" vs "保持" vs "双写"
 
@@ -655,6 +655,6 @@ graph TD
 |---|------|------|----------|
 | R1 | **原子写跨盘失败**：`os.replace(tmp, path)` 在 tmp 和 path 不在同一文件系统时报 `OSError` | 配置/项目数据损坏 | 所有 tmp 文件在同一目录（`path + ".tmp"`），天然同盘。确认 config.json 与 program dir 同盘；project.json 与 project dir 同盘。 |
 | R2 | **config.py 被多处直接调用**（app.py:key-up, launcher.py, lib/ 内各模块） | 切换中间态时 config 行为不一致 | `lib/config.py` 保持所有公有函数签名不变，内部实现改为委托 `ConfigRepository`。不存在"两套"——始终是 `lib/config.py` 调 `ConfigRepository`。 |
-| R3 | **阶段三快照加载入口依赖 services/project.py**，T03 改了打开逻辑 | 快照加载与项目打开不同步 | `ProjectRepository.load_snapshot()` 内部调 `load_project()` + `ProjectSnapshot.build()`，与阶段三的 `pm.load_snapshot` 逻辑等价。`services/session.py` 的 `ensure_snapshot` / `reload_if_stale` 不需要改（快照类无变化）。 |
+| R3 | **阶段三快照加载入口依赖 services/project.py**，T03 改了打开逻辑 | 快照加载与项目打开不同步 | `ProjectRepository.load_snapshot()` 内部调 `load_project()` + `ProjectSnapshot.build()`，与阶段三的 `pm.load_snapshot` 逻辑等价；pm public wrapper 仍只作兼容转发。`services/session.py` 的 `ensure_snapshot` / `reload_if_stale` 不需要改（快照类无变化）。 |
 | R4 | **Project View 章节树的 I/O 与 HTML ownership** | IA-2B retired the hidden Project Page / Project View compatibility sink; Workbench Catalog hierarchy rows use the complete Catalog snapshot | Keep `ProjectService.open_project()` for live opened-session hydration; do not reintroduce a hidden selector or Project View refresh callback. |
 | R5 | **测试隔离**：conftest.py 设置了 `AUDIOBOOK_STUDIO_DATA_DIR` 环境变量，但 `config_repo.py` 如何知道 CONFIG_PATH？ | ConfigRepository 写到了程序目录的 config.json 而非临时目录 | `ConfigRepository.CONFIG_PATH` 保持与 `lib/config.py` 一致（`os.path.join(PROGRAM_DIR, "config.json")`）。测试通过 `monkeypatch.setattr(ConfigRepository, "CONFIG_PATH", str(tmp_path / "config.json"))` 隔离。 |

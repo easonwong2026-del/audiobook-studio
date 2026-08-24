@@ -22,7 +22,6 @@ from datetime import datetime, timezone
 
 import pytest
 
-from lib import project_manager as pm
 from repositories.project_repo import ProjectRepository
 from repositories.task_repo import TaskRecord
 from services.production_runtime import ProductionRuntimeClient
@@ -46,8 +45,6 @@ def runtime_project(tmp_path, monkeypatch):
     ProjectRepository.WORKSPACE_ROOT = os.path.join(data_dir, "projects")
     ProjectRepository.LEGACY_ROOT = os.path.join(data_dir, "legacy")
     ProjectRepository._INITIALIZED = True
-    monkeypatch.setattr(pm, "WORKSPACE_ROOT", ProjectRepository.WORKSPACE_ROOT)
-    monkeypatch.setattr(pm, "LEGACY_ROOT", ProjectRepository.LEGACY_ROOT)
     ProjectRepository.create_project_from_data("book", SCRIPT)
     return data_dir
 
@@ -218,8 +215,6 @@ def test_do_supplement_synth_clears_loading_progress(tmp_path, monkeypatch):
     ProjectRepository.WORKSPACE_ROOT = os.path.join(data_dir, "projects")
     ProjectRepository.LEGACY_ROOT = os.path.join(data_dir, "legacy")
     ProjectRepository._INITIALIZED = True
-    monkeypatch.setattr(pm, "WORKSPACE_ROOT", ProjectRepository.WORKSPACE_ROOT)
-    monkeypatch.setattr(pm, "LEGACY_ROOT", ProjectRepository.LEGACY_ROOT)
     ProjectRepository.create_project_from_data("book", SCRIPT)
 
     monkeypatch.setattr(app.SupplementService, "synthesize_lines", _fake_synthesize_lines)
@@ -257,8 +252,6 @@ def test_do_supplement_synth_zero_success_uses_neutral_wording(tmp_path, monkeyp
     ProjectRepository.WORKSPACE_ROOT = os.path.join(data_dir, "projects")
     ProjectRepository.LEGACY_ROOT = os.path.join(data_dir, "legacy")
     ProjectRepository._INITIALIZED = True
-    monkeypatch.setattr(pm, "WORKSPACE_ROOT", ProjectRepository.WORKSPACE_ROOT)
-    monkeypatch.setattr(pm, "LEGACY_ROOT", ProjectRepository.LEGACY_ROOT)
     ProjectRepository.create_project_from_data("book", SCRIPT)
 
     def _fail_all(*args, **kwargs):
@@ -296,8 +289,6 @@ def test_do_supplement_synth_error_clears_loading_progress(tmp_path, monkeypatch
     ProjectRepository.WORKSPACE_ROOT = os.path.join(data_dir, "projects")
     ProjectRepository.LEGACY_ROOT = os.path.join(data_dir, "legacy")
     ProjectRepository._INITIALIZED = True
-    monkeypatch.setattr(pm, "WORKSPACE_ROOT", ProjectRepository.WORKSPACE_ROOT)
-    monkeypatch.setattr(pm, "LEGACY_ROOT", ProjectRepository.LEGACY_ROOT)
     ProjectRepository.create_project_from_data("book", SCRIPT)
 
     def _boom(*_args, **_kwargs):

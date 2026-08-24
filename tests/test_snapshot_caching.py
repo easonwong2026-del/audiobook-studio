@@ -2,11 +2,11 @@
 
 验证：
 - 调用一次打开项目 handler（``app.open_project(name, ss)``）后，``ss.project_snapshot``
-  非 None，且只真正读盘一次（``load_snapshot`` → ``lib.project_manager.open_project``）；
-- 之后连续多次调用刷新函数，``lib.project_manager.open_project`` 的**磁盘读盘调用次数**
+  非 None，且只真正读盘一次（``load_snapshot`` → ``ProjectRepository.load_project``）；
+- 之后连续多次调用刷新函数，``ProjectRepository.load_project`` 的**磁盘读盘调用次数**
   不因刷新次数增长——即刷新走 ``ss.project_snapshot``，不重复读盘。
 
-计数方法：用 monkeypatch 把 ``lib.project_manager.open_project`` 包成计数 wrapper。
+计数方法：用 monkeypatch 把 ``ProjectRepository.load_project`` 包成计数 wrapper。
 ``ProjectSnapshot.reload_if_stale``、``services.project.ProjectService.open_project``、
 ``lib.progress.build_preview_rows`` 等所有读盘点最终都走这个模块属性，因此计数覆盖全链路。
 
@@ -23,7 +23,6 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-import lib.project_manager as pm  # noqa: E402
 from services.session import SessionState  # noqa: E402
 from repositories.project_repo import ProjectRepository  # noqa: E402
 
@@ -52,13 +51,13 @@ SCRIPT = {
 @pytest.fixture
 def project(tmp_path, monkeypatch):
     """造最小项目，并把 WORKSPACE_ROOT 指到临时目录。"""
-    monkeypatch.setattr(pm, "WORKSPACE_ROOT", str(tmp_path))
     monkeypatch.setattr(ProjectRepository, "WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(ProjectRepository, "LEGACY_ROOT", str(tmp_path / "legacy"))
     monkeypatch.setattr(ProjectRepository, "_INITIALIZED", True)
     script_path = tmp_path / "structured_script.json"
     script_path.write_text(json.dumps(SCRIPT, ensure_ascii=False), encoding="utf-8")
     name = "cachebook"
-    pm.create_project(name, str(script_path))
+    ProjectRepository.create_project(name, str(script_path))
     return name
 
 
@@ -77,7 +76,7 @@ def _counting_open(monkeypatch):
 
 def _freeze_mtime_older_than_snapshot(name, snap):
     """测试期间把三个关键文件 mtime 设到快照加载时刻之前，避免 reload_if_stale 误回读。"""
-    proj_dir = pm.get_project_dir(name)
+    proj_dir = ProjectRepository.get_project_dir(name)
     for fn in ("project.json", "structured_script.json", "voice_bindings.json"):
         p = os.path.join(proj_dir, fn)
         if os.path.isfile(p):
@@ -124,7 +123,7 @@ def test_render_preview_reads_snapshot_not_disk(project, monkeypatch):
     """render_preview 多次刷新不应重复读盘（走 ss.project_snapshot）。
 
     若失败：render_preview → synth_progress.build_preview_rows(ss.project)
-    → pm.open_project 仍在重复读盘，违反计划 §7.4「页面普通刷新读会话快照」。
+    → ProjectRepository.load_project 仍在重复读盘，违反计划 §7.4「页面普通刷新读会话快照」。
     """
     state = _counting_open(monkeypatch)
     import app
@@ -139,5 +138,5 @@ def test_render_preview_reads_snapshot_not_disk(project, monkeypatch):
     assert state["n"] == 1, (
         f"render_preview 不应重复读盘：刷新后 open_project 调用 {state['n']} 次，"
         f"期望仅打开时的 1 次（走 ss.project_snapshot）。\n"
-        f"诊断：render_preview → build_preview_rows(ss.project) → pm.open_project 仍在读盘。"
+        f"诊断：render_preview → build_preview_rows(ss.project) → ProjectRepository.load_project 仍在读盘。"
     )

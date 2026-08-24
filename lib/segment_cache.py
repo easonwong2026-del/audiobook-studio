@@ -264,7 +264,7 @@ def effective_params(seg, overrides: dict) -> tuple:
         seg: 段落对象，至少含 ``emotion``，可选 ``emo_alpha`` / ``speech_rate`` /
             ``pinyin_hints``（通常来自 ``script_loader`` 解析的 ``ScriptSegment``，
             也兼容普通命名空间 / dict-like 对象）。
-        overrides: 全局覆盖 dict（可由 ``project_manager.get_synthesis_overrides``
+        overrides: 全局覆盖 dict（可由 ``ProjectService.get_synthesis_overrides``
             读取），键：
             - ``emotion``: str 或 None（None=按剧本每段自身值）。
             - ``override``: bool，是否用全局 ``emo_alpha`` / ``speech_rate`` 覆盖。

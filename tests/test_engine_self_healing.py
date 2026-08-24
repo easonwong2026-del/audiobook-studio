@@ -19,7 +19,6 @@ import wave
 
 import pytest
 
-from lib import project_manager as pm
 from lib import queue as queue_module
 from lib import tts_engine
 from lib.failures import (
@@ -79,8 +78,6 @@ def healing_project(tmp_path, monkeypatch):
     ProjectRepository.WORKSPACE_ROOT = os.path.join(data_dir, "projects")
     ProjectRepository.LEGACY_ROOT = os.path.join(data_dir, "legacy")
     ProjectRepository._INITIALIZED = True
-    monkeypatch.setattr(pm, "WORKSPACE_ROOT", ProjectRepository.WORKSPACE_ROOT)
-    monkeypatch.setattr(pm, "LEGACY_ROOT", ProjectRepository.LEGACY_ROOT)
     ProjectService.create_project_from_data("book", _script())
     project_dir = ProjectRepository.get_project_dir("book")
     voice_path = os.path.join(project_paths.project_dir(project_dir, "project_voices", create=True), "narrator.wav")

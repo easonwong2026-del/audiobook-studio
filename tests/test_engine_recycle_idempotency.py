@@ -36,7 +36,6 @@ from pathlib import Path
 
 import pytest
 
-from lib import project_manager as pm
 from lib.tts_profile import resolve_profile
 from repositories.project_repo import ProjectRepository
 from repositories.task_repo import TaskRecord, TaskRepository
@@ -61,8 +60,6 @@ def runtime_project(tmp_path, monkeypatch):
     ProjectRepository.WORKSPACE_ROOT = os.path.join(data_dir, "projects")
     ProjectRepository.LEGACY_ROOT = os.path.join(data_dir, "legacy")
     ProjectRepository._INITIALIZED = True
-    monkeypatch.setattr(pm, "WORKSPACE_ROOT", ProjectRepository.WORKSPACE_ROOT)
-    monkeypatch.setattr(pm, "LEGACY_ROOT", ProjectRepository.LEGACY_ROOT)
     ProjectRepository.create_project_from_data("book", SCRIPT)
     return data_dir
 

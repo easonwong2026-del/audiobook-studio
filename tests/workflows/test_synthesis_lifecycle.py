@@ -21,8 +21,8 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-import lib.project_manager as pm  # noqa: E402
 import lib.segment_cache as segment_cache  # noqa: E402
+from repositories.project_repo import ProjectRepository  # noqa: E402
 
 
 # ── 假音频生成 ────────────────────────────────────────────────────────────────
@@ -64,17 +64,18 @@ SCRIPT = {
 def synth_project(tmp_path, monkeypatch):
     """创建 2 章 4 段项目，环境变量已重定向到 tmp_path。"""
     monkeypatch.setenv("AUDIOBOOK_STUDIO_DATA_DIR", str(tmp_path))
-    monkeypatch.setattr(pm, "WORKSPACE_ROOT", str(tmp_path / "projects"))
-    monkeypatch.setattr(pm, "LEGACY_ROOT", str(tmp_path / "legacy"))
+    monkeypatch.setattr(ProjectRepository, "WORKSPACE_ROOT", str(tmp_path / "projects"))
+    monkeypatch.setattr(ProjectRepository, "LEGACY_ROOT", str(tmp_path / "legacy"))
+    monkeypatch.setattr(ProjectRepository, "_INITIALIZED", True)
 
     script_path = tmp_path / "script.json"
     with open(script_path, "w", encoding="utf-8") as f:
         json.dump(SCRIPT, f, ensure_ascii=False, indent=2)
 
-    pm.create_project("synth_book", str(script_path))
+    ProjectRepository.create_project("synth_book", str(script_path))
 
     # 创建一个参考音频并写入 bindings
-    proj_dir = pm.get_project_dir("synth_book")
+    proj_dir = ProjectRepository.get_project_dir("synth_book")
     voices_dir = project_paths.project_dir(proj_dir, "voices", create=True)
     ref_wav = os.path.join(voices_dir, "ref_旁白.wav")
     _make_fake_wav(ref_wav)
@@ -96,7 +97,7 @@ def synth_project(tmp_path, monkeypatch):
 
 def _fake_synthesize(project: str, seg_id: str, duration: float = 0.3):
     """模拟合成一段：写 WAV + 更新 project.json 状态为 done。"""
-    proj_dir = pm.get_project_dir(project)
+    proj_dir = ProjectRepository.get_project_dir(project)
     seg_dir = project_paths.project_dir(proj_dir, "segments", create=True)
 
     # 用参数感知的缓存键名写 WAV（与真实合成路径一致）
@@ -105,7 +106,7 @@ def _fake_synthesize(project: str, seg_id: str, duration: float = 0.3):
     _make_fake_wav(wav_path, duration=duration)
 
     # 更新状态
-    pm.update_segment_status(project, seg_id, "done")
+    ProjectRepository.update_segment_status(project, seg_id, "done")
     return wav_path
 
 
@@ -123,7 +124,7 @@ class TestSynthesisLifecycle:
             _fake_synthesize(synth_project, seg_id)
 
         # ��证 meta
-        meta, script, bindings = pm.open_project(synth_project)
+        meta, script, bindings = ProjectRepository.load_project(synth_project)
         assert meta.completed_count == 4
         assert meta.pending_count == 0
         assert meta.failed_count == 0
@@ -132,7 +133,7 @@ class TestSynthesisLifecycle:
             assert meta.segments_status[seg_id] == "done"
 
         # 验证 WAV 文件存在
-        proj_dir = pm.get_project_dir(synth_project)
+        proj_dir = ProjectRepository.get_project_dir(synth_project)
         seg_dir = project_paths.project_dir(proj_dir, "segments", create=True)
         for seg_id in seg_ids:
             cache_key = segment_cache.segment_cache_key(seg_id, "neutral", 1.0, 1.0, None)
@@ -147,7 +148,7 @@ class TestSynthesisLifecycle:
         for seg_id in ["s1", "s2", "s3", "s4"]:
             _fake_synthesize(synth_project, seg_id, duration=0.3)
 
-        proj_dir = pm.get_project_dir(synth_project)
+        proj_dir = ProjectRepository.get_project_dir(synth_project)
         seg_dir = project_paths.project_dir(proj_dir, "segments", create=True)
         cache_key = segment_cache.segment_cache_key("s1", "neutral", 1.0, 1.0, None)
         wav_path = os.path.join(seg_dir, f"{cache_key}.wav")
@@ -167,7 +168,7 @@ class TestSynthesisLifecycle:
         assert new_size != old_size, "重新合成后 WAV 文件大小应变化"
 
         # 验证 meta 依然正确（全部 done）
-        meta, _, _ = pm.open_project(synth_project)
+        meta, _, _ = ProjectRepository.load_project(synth_project)
         assert meta.completed_count == 4
         assert meta.segments_status["s1"] == "done"
 
@@ -176,5 +177,5 @@ class TestSynthesisLifecycle:
         for seg_id in ["s1", "s2", "s3", "s4"]:
             _fake_synthesize(synth_project, seg_id)
 
-        remaining = pm.get_remaining(synth_project)
+        remaining = ProjectRepository.get_remaining(synth_project)
         assert remaining == [], f"全部合成后应有空剩余，实际: {remaining}"

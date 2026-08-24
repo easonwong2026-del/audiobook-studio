@@ -23,9 +23,9 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-import lib.project_manager as pm  # noqa: E402
 import lib.tts_engine as tts_engine  # noqa: E402
 from services.synthesis import SynthesisState, SynthesisService  # noqa: E402
+from repositories.project_repo import ProjectRepository  # noqa: E402
 
 
 SCRIPT = {
@@ -45,11 +45,13 @@ SCRIPT = {
 
 @pytest.fixture
 def project(tmp_path, monkeypatch):
-    monkeypatch.setattr(pm, "WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(ProjectRepository, "WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(ProjectRepository, "LEGACY_ROOT", str(tmp_path / "legacy"))
+    monkeypatch.setattr(ProjectRepository, "_INITIALIZED", True)
     sp = tmp_path / "s.json"
     sp.write_text(json.dumps(SCRIPT, ensure_ascii=False), encoding="utf-8")
-    pm.create_project("cd", str(sp))
-    d = pm.get_project_dir("cd")
+    ProjectRepository.create_project("cd", str(sp))
+    d = ProjectRepository.get_project_dir("cd")
     vo = os.path.join(project_paths.project_dir(d, "project_voices", create=True), "ref.wav")
     _dummy(vo)
     bp = project_paths.project_file(d, "voice_bindings")
@@ -79,7 +81,7 @@ def test_cancel_during_pause(project, monkeypatch):
     monkeypatch.setattr(tts_engine, "synthesize_segment", _fake_segment_slow)
     SynthesisService.reset_executor()
     state = SynthesisState(task_id="t1", project=project)
-    SynthesisService.start(state, project, _bindings(pm.get_project_dir(project)))
+    SynthesisService.start(state, project, _bindings(ProjectRepository.get_project_dir(project)))
 
     # 轮询直到至少完成 1 段且仍在运行
     deadline = time.time() + 15
