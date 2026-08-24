@@ -1532,3 +1532,175 @@ isolation, Merge, Assembly, and MCP `335 passed`; Windows selected workflow `329
 passed`; compileall, Ruff `--select F` on changed Python, and `git diff --check`
 also passed. Final CI run `32723417477` completed with Ubuntu and Windows success. No
 IA-2B work beyond this facade boundary is included.
+
+## Post-R3B — 全仓 Code Entropy Audit（2026-08-24）
+
+### Baseline、事实修正与范围
+
+本节追加在 R3B 历史记录之后，不改写前面的阶段结论。
+
+- PR #67 的最终 head 是 `c5193eaef027ec25eaec0aaa8618e277f6c2e75f`。
+- PR #67 已按既有 squash 策略合并；merge commit / 当前 `origin/main` 是
+  `a75c3e7725e0218cc4fd4467ac5dee2a085892ce`。
+- 最终 CI 是 `32726842355`，Ubuntu 与 Windows 均成功。此前 audit 文案中的
+  中间 run（包括 `32722861080` / `32723417477`）不是最终事实；本节只引用
+  `32726842355`。
+- 本轮分支：`audit/code-entropy-post-r3b`。
+- 本轮只做审计和文档追加，不删除生产代码，不创建 R4A PR，不开始 R3C，
+  不移动或删除 `lib/project_manager.py`，也不触碰 p_sel / Project Page /
+  Project View 的正式退休。
+
+审计对象覆盖 `app.py`、`ui/`、`services/`、`repositories/`、`lib/`、
+`mcp_server/`、`scripts/`、启动与 launcher、打包/迁移/恢复路径、tests、
+docs 与 re-export。仓库当前库存为：`app.py` 1 个、`ui/` 31 个、
+`services/` 35 个、`repositories/` 11 个、`lib/` 27 个、
+`mcp_server/` 13 个、`scripts/` 6 个、tests 140 个 Python 文件。
+
+### 审计方法与证据边界
+
+本轮使用以下交叉证据，不以单次 grep 命中数直接判定 dead：
+
+- `rg` / qualified-name 搜索：定义、调用、import/from-import、`__all__`、
+  re-export、字符串 callback key、Gradio `.click/.change/.submit/.select/.load`
+  注册、MCP `_TOOLS` / `_HANDLERS`、scripts/subprocess、docs 和迁移/恢复说明。
+- Python AST：函数/类定义、`Name` 与 `Attribute` 引用、Call 节点、import、
+  callback 作为参数传递、字符串常量、`getattr/setattr/globals/locals`、
+  `importlib` / `__import__`。
+- 动态入口：显式检查 `ui/wiring/*` 的 callback dictionary、
+  `ui.project_catalog_handlers._OPEN_PROJECT_CALLBACK`、MCP handler map、
+  runtime callback / progress callback 和测试 monkeypatch。
+- 平台路径：Windows 选中 workflow、`ProjectRepository` 的 workspace-first /
+  legacy fallback、TaskRepository legacy JSON fallback、无黑框启动与
+  `subprocess` 路径一起纳入 blast-radius 判断。
+
+本仓库无法证明不存在未提交到仓库的真实外部 import；因此“无外部 caller”
+只表示没有在 production、tests、scripts、MCP、docs、re-export、动态入口中
+找到可验证 consumer。对于看起来像公共 API 的兼容壳，未知 legacy integration
+风险不等于已经证明存在外部使用。
+
+### 生产负向审计结果
+
+在 production Python（排除 tests/docs/历史审计文本）中未发现下列已退休的
+Workbench sink、dashboard caller 或 p_sel 入口：
+
+```text
+p_sel
+ov_status       ov_progress     ov_task        ov_issues
+ov_open         ov_voices       ov_synth       ov_export
+refresh_overview
+_dashboard_snapshot
+grp-workbench-legacy-sink
+ui/components/dashboard.py
+```
+
+这些名字当前只在长期 architecture regression tests 的负向断言、历史文档或
+测试说明中出现。`ui/pages/overview_page.py` 中的 `assembly_dashboard` 是
+Whole-book Assembly 的 live output，不是已删除的 Workbench dashboard sink，
+不能误删或误归类。
+
+生产代码中与 `project_manager` 相关的唯一引用仍是
+`services/project.py::ProjectService.set_data_dir()` 对
+`ProjectRepository.WORKSPACE_ROOT/LEGACY_ROOT` 和兼容模块 roots 的显式同步；
+没有重新引入 production CRUD caller。
+
+### Ownership map
+
+| 领域 | canonical owner | 第二层 caller / adapter | 状态与 entropy 判断 |
+|---|---|---|---|
+| Project lifecycle | `ProjectCreationService` + `ProjectService` + `ProjectRepository` | Create UI、Workbench `bookshelf_open`、MCP project/script adapters | 生产路径已经收口；`lib/project_manager.py` 只是保留的 `LEGACY_COMPAT` facade。 |
+| Catalog / hierarchy | `ProjectCatalogService` | `ui/project_catalog_handlers.py`、Catalog wiring、Whole-book Assembly | Catalog 负责关系状态、搜索和 hierarchy；主刷新使用一次 `scan()` snapshot，再 `filter_projects()` 与 `hierarchy_from_summaries()`，不可把 visible subset 当结构统计。 |
+| Session / snapshot | `SessionState` 的 `project` / `selected_project`；`ProjectSnapshot` 是 opened asset cache | `app._snap`、Create/Open、Voice、Production、Review、Export | opened / selected 真相源清晰，但 `script` / `bindings` 同时存在于 SessionState 与 Snapshot，是本轮最高风险的重复载荷。 |
+| Voice assets / Voice Cast | `VoiceAssetService`、`VoiceCastResolver`、Voice repositories | `ui/wiring/voice_wiring.py`、app legacy-manual fallback、MCP voice adapters、Repair | 新 Voice Cast 与旧 manual project 双轨是有意兼容，不是可由 grep 删除的死代码。隐藏 `v_preview_*` 仍有注册事件和测试覆盖。 |
+| Production / Runtime / TTS | `ProductionJobService`、`ProductionRuntime` / `ProductionRuntimeClient`、`TaskRepository` | app observers、UI、MCP production adapters；`SynthesisService` direct/legacy adapter | durable task/runtime 是 owner；`SynthesisService.persist_task` 与 legacy JSON 是兼容 transport，不能在本轮清理。 |
+| QA / Repair | `QualityService` + `QualityRepository`；`RepairService` | Review UI、Repair observer、MCP quality adapters | revision、repair history 和 technical QA 由 service/repository 持有；UI 只渲染/发起。 |
+| Export / Delivery | `ExportService` + `services.delivery` + `QualityRepository` history | `ui/export_handlers.py`、runtime export worker、MCP export adapters、Workflow | Export A/B project isolation、delivery hash、manifest 和 ownership fence 都是 live contract；任何 alias 清理需另行验证。 |
+| Merge / Assembly | Chapter Merge Planner/Executor；Whole-book Assembly Service/Operations | merge/assembly UI handlers、Catalog hierarchy | 两套 planner/executor 是不同业务边界；Assembly 读取 Catalog，但不拥有 Catalog。冻结。 |
+| Settings / data-dir | `ConfigRepository` + `lib.config`；data-dir mutation 在 `ProjectService.set_data_dir` | Settings UI、environment resolver、pm root sync | raw config/profile/env 多源是 dual-engine 兼容层；data-dir 切换还负责 Session reset 和 Catalog/Assembly refresh。冻结。 |
+| MCP | `mcp_server/server.py` 的显式 `_TOOLS` / `_HANDLERS` | `mcp_server/tools/*.py` thin adapters → services | 无 UI callback、无 p_sel、无 pm facade caller；adapter 只是 JSON-RPC contract transport。 |
+| Startup / recovery | `launcher.py`、`lib.environment`、`lib.startup`、`ApplicationLifecycleService`、`ProductionRuntimeClient` | scripts diagnostics、runtime logs、TaskRepository startup fields | 启动阶段、runtime recovery、Windows no-window 行为均为 live reliability surface。 |
+| Storage / migration / backup | `ProjectRepository`、`ProjectStorageRepository`、`ProjectStorageService`、`project_paths`、`ProjectBackupService` | Catalog management UI、acceptance/benchmark scripts、recovery paths | v1/v2/v3 resolver、legacy relative paths、backup/rollback、unknown-file preservation 都是合法兼容与恢复职责。 |
+
+### 候选矩阵
+
+下表给出本轮发现的可讨论 candidate。Windows 表示删除/收口后必须覆盖的
+Windows 相关风险，不表示当前已存在 Windows bug。
+
+| 优先级 / 分类 | symbol / module | caller graph 与冗余原因 | 删除风险、测试与 Windows 影响 | 建议 |
+|---|---|---|---|---|
+| P0_BLOCKER | SessionState.script / SessionState.bindings 与 ProjectSnapshot.script / bindings | app.open_project、Create handler 同时 set_project(...) + set_snapshot(...)；Voice bind 先 mutate ss.bindings，再重建 snapshot；页面有的读 ss.script，有的读 _snap(ss).script。 | 高：晚到 callback、snapshot reload、跨页面 refresh 可能暴露两份不同载荷。test_session_snapshot.py、Create/Open、Catalog state、snapshot caching、Windows selected workflow 覆盖当前契约，但没有证明长期 canonicalization 已完成。 | 先保留。下一次涉及它必须先定义“snapshot 是 cache 还是唯一 payload”，并增加 divergence test；不能借此改变 SessionState.project / selected_project。 |
+| HIGH_VALUE_CLEANUP | app.py::do_supplement_synth、app.py::do_quick_tts_synth | 当前 utility UI 只接 do_utility_tts_synth；两个旧函数只是 pass-through。do_supplement_synth 仍被 tests/test_supplement.py、tests/test_supplement_progress_terminal.py 和历史设计文档直接引用；do_quick_tts_synth 在仓库内没有直接 caller。 | 中：顶层函数可能被未提交的外部脚本 import；补录 progress/terminal contract 不能丢。现有 supplement/utility tests 与 Windows workflow 可覆盖，项目/声音来源隔离也必须保留。 | 唯一建议的 R4A 候选：只审计并退休这两个 utility compatibility pass-through；不动 shared entrypoint、export、preview、Session 或 TTS service。 |
+| MEDIUM_VALUE_CLEANUP | ProjectCatalogService.scan/search_projects/get_summary 与 UI 的 explicit scan → filter | search_projects() = filter_projects(scan(), query)；get_summary() 重新 scan()；render_bookshelf_rows 无 snapshot 时走 convenience API，而主 Workbench refresh 已传递完整 snapshot。重复主要是 in-memory normalization / convenience surface，不是额外磁盘 scan。 | 高：改变 filter_projects 或 hierarchy normalization 会影响 search parent isolation、Book child count、orphan/invalid、Assembly。test_project_catalog*、hierarchy、Catalog state、Windows archive/search 覆盖。 | 记录为 Catalog API consolidation，先不改语义；未来应以显式 Catalog snapshot contract 为前提，不得机械删除 search_projects。 |
+| MEDIUM_VALUE_CLEANUP / DEFERRED | services/delivery.py::build_delivery_input_snapshot / build_delivery_input_hash | 两个 descriptive alias 只是绑定到 compute_*；当前 production caller 使用 compute_*，别名只由 __all__ 暴露，没有 repo 内 direct caller。 | 中高：外部 import 风险未知；Export/Workflow freshness hash、manifest 与 A/B project switch 都依赖 canonical computation。test_delivery_freshness.py、Export phase4、project isolation 与 Windows selected workflow 相关。 | 继续保留并冻结到 Export audit；不要在 R4A 触碰。 |
+| DEAD / LOW_VALUE_RESIDUE | app.py::migrate_project_copy | AST、qualified rg、Gradio event registration、MCP、scripts、tests、docs 均只有定义；没有 .click / .then / callback dictionary 引用。它只转调仍被测试直接覆盖的 ProjectStorageService.migrate_to_projects_root。 | 删除 blast radius 低，Windows 只涉及未接线的提示 handler；但它可能代表被撤掉的用户入口，不能把 service 误删。 | 可作为独立微清理，排在 utility R4A 之后；本轮不删除。 |
+| LOW_VALUE_RESIDUE / LEGIT_ADAPTER | VoiceAssetService.list_voice_assets/get_voice_asset、模块级同名 wrappers | MCP adapter 实际调用 list_assets/get_asset；app、Repair、Voice Cast 也使用 asset_id_for_path/get_record/resolve_path。别名没有仓库内 direct production caller，但通过 __all__ 保留外部发现面。 | 低至中：无 Windows workflow 语义变化，未知 external import 风险仍存在。Voice asset boundary、Voice Cast、partial production tests 覆盖 canonical API。 | 暂归 LEGIT_ADAPTER；需先定义 public service API 才能删除。 |
+| LOW_VALUE_RESIDUE / LEGIT_ADAPTER | ui/project_catalog_handlers.reconcile_bookshelf_selection、各 UI module 的 _update | wiring 使用 reconcile_bookshelf_selection_context；旧短名仍被 direct tests 使用。_update 在 Catalog/Create/Merge/Assembly 各自只包装 gr.update，不是业务 owner。 | 低：输出 tuple 长度、Gradio update semantics 和 Windows event payload 容易被机械重构破坏；相关 bookshelf/merge/assembly tests 已覆盖。 | 不合并成“大 UI utility”作为顺手清理；保留兼容短名，未来按页面 contract 分批评估。 |
+| LEGIT_COMPAT | lib/project_manager.py roots / _repository / 八个 public-looking wrappers | production 只有 ProjectService.set_data_dir 的 root sync；旧 tests、legacy callers、未知 integrations 仍可经 facade 进入 ProjectRepository。 | 高：workspace-first / legacy fallback、mutable root monkeypatch、Windows 路径和旧脚本都可能受影响。R3A/R3B project-manager tests 与 full CI 已覆盖，但没有 external consumer 证据。 | R3C 冻结：不删 facade、不删文件、不移动、不删除 root sync；保留是未知 legacy 风险的保守决策，不是已证明 external usage。 |
+| LEGIT_COMPAT | ProjectRepository / project_paths 的 v1/v2 aliases、relative resolver、TaskRepository._migrate_legacy_json / _legacy_load | 旧项目打开、旧相对路径、项目无 DB 时的 recovery/load path、storage migration、acceptance scripts 和 tests 共同消费。 | 高，尤其 Windows legacy layout、junction/普通目录 fallback、任务恢复和备份 rollback；storage migration / project repo / task repo / Windows selected tests 覆盖。 | DO_NOT_TOUCH，除非有独立迁移/恢复 round 与 fixture matrix。 |
+| LEGIT_COMPAT | app legacy-manual Voice Cast、services.delivery / QualityService legacy audio fallback、SynthesisService.persist_task | 没有 Character Roster / Voice Cast 的旧项目仍由 app/status、delivery fingerprint、quality revision 和 direct synthesis callers 识别。 | 高：删除会使旧项目不可读或改变 production readiness；Voice Cast、delivery freshness、quality、supplement/production tests 与 Windows workflow 相关。 | 保留。不能把“当前新 UI 不产生”当成 dead。 |
+| DEFERRED | Settings 多源 config / TTS aliases：ui/settings_handlers、ConfigRepository、lib.config、lib.environment | UI 同时读取 raw JSON、profile、env、resolved model dirs，并写 profile + raw keys；这是 dual-engine / rollback compatibility。 | 高：Runtime/TTS engine selection、recycle、startup/prewarm、Windows process behavior；大量 TTS/runtime tests 与 selected CI 覆盖。 | 本轮冻结 Runtime/TTS/Settings semantics；不在 R4A 处理。 |
+| TEST_ONLY | tests 中对 WORKSPACE_ROOT / LEGACY_ROOT、Gradio page dict aliases、旧 handler names 的 monkeypatch/direct calls | 这些是 fixture isolation、contract tests 或 compatibility self-tests，不是 production caller。 | 不应以 test-only grep 命中恢复生产代码；删除测试会降低 boundary proof，Windows tests 也使用相同 root isolation pattern。 | 保留测试证据；若未来删除兼容 API，先迁移对应 contract tests，再删 API。 |
+| DEAD | ov_* hidden Workbench sinks、refresh_overview、_dashboard_snapshot、grp-workbench-legacy-sink、ui/components/dashboard.py | production AST/rg/wiring/MCP/scripts 中无 caller；长期 test_project_page_contract_r2b.py 负向断言负责防回归。 | 已删除；本轮不重复删除。唯一风险是误把 live assembly_dashboard 归入旧 dashboard。 | 永久负向 invariant 保持；分类为 DEAD，不重新引入。 |
+
+### 重点五项与排序
+
+1. P0_BLOCKER：SessionState 与 ProjectSnapshot 的重复 mutable payload。它不是
+   立即删除目标，而是之后所有 Session/页面清理的前置架构决策。
+2. HIGH_VALUE_CLEANUP：do_supplement_synth / do_quick_tts_synth 两个
+   utility pass-through。当前 visible utility UI 已有统一 owner，清理能减少
+   顶层 handler contract；外部 import 风险必须先经过同样的完整 caller audit。
+3. MEDIUM_VALUE_CLEANUP：Catalog convenience API 与 snapshot-aware main path
+   的边界。可减少重复 normalization，但任何修改都可能触碰 search、hierarchy
+   和 selected/opened isolation。
+4. MEDIUM_VALUE_CLEANUP / DEFERRED：Delivery hash 的 descriptive aliases。
+   熵值很低但 Export freshness / delivery semantics 风险很高，因此不应优先。
+5. DEAD / LOW_VALUE_RESIDUE：未接线的 migrate_project_copy。删除很安全，
+   但业务收益低，排在 utility contract 清理之后。
+
+### 唯一推荐的下一轮：R4A Utility Compatibility Entry-point Retirement
+
+这是建议，不是本轮实现。R4A 的精确范围只能是：
+
+- app.py::do_supplement_synth；
+- app.py::do_quick_tts_synth；
+- 这些函数的 direct tests / historical design references 的迁移或删除；
+- 证明 do_utility_tts_synth 是唯一 visible utility synth entrypoint。
+
+R4A 明确不包括：migrate_project_copy、ProjectCatalogService API、
+lib/project_manager.py、p_sel、Project Page/View、SessionState 字段、
+do_supplement_export / do_quick_tts_export、Export/Delivery、Voice Cast、
+Production/Runtime/TTS、QA/Repair、Storage/MCP 或 navigation topology。
+
+#### R4A acceptance matrix（仅规划）
+
+| 检查 | 必须证明 |
+|---|---|
+| Static caller audit | production、tests、scripts、MCP、docs、__all__、dynamic getattr / string callback 中不再需要两个旧 synth entrypoint；visible wiring 仍只接 do_utility_tts_synth。 |
+| Project-role behavior | 统一入口仍返回原有补录 WAV / terminal progress / task metadata；旧 do_supplement_synth 的成功、0 成功、异常 progress tests 迁移后全部通过。 |
+| Library-voice behavior | Quick TTS 的声音库校验、engine selection、preview/export 与原结果保持一致；不得把 library voice 误接入 opened project。 |
+| Session isolation | SessionState.project、selected_project、utility result project marker、Export project-switch isolation 不改变；不新增 mirror。 |
+| UI / navigation | visible nav、Voice Cast、Production/QA、Delivery、Workbench Create/Open chain 完全不变；不触碰隐藏 sink 回归断言。 |
+| Windows | Windows selected workflow、utility/Gradio callback tests、no-window behavior 通过；不改变 runtime process 或 TTS engine policy。 |
+| Repository gates | targeted utility/supplement tests、Catalog/Session/Open、Voice、Production、Export isolation、Merge、Assembly、full pytest、Windows selected workflow、compileall、Ruff --select F、git diff --check。 |
+
+若实施前发现正式 public API 或未提交的 packaging entrypoint 依赖这两个函数，
+则 R4A 不应删除它们，应把它们改列为 LEGIT_COMPAT；本轮没有取得这样的
+外部证据，也没有授权扩大审计以外的动作。
+
+### 本轮冻结与交付结论
+
+以下结论保持不变：
+
+- SessionState.project 是 opened truth，selected_project 是 selected truth；
+  search 不改变 opened，open 只通过 Workbench Inspector bookshelf_open。
+- Create success gate、Book child count 完整 Catalog snapshot、orphan/invalid
+  presentation、archive revision、hierarchy、Voice Cast、Production/Runtime、
+  QA/Repair、Export A/B isolation、Merge、Assembly、storage legacy fallback 与
+  MCP contract 均冻结。
+- p_sel、Project Page/View、project_manager facade/root sync、Catalog
+  filter_projects 语义和所有生产兼容读取路径均未触碰。
+- 没有执行 R4A；没有修改生产 Python；本轮只追加本节审计文档。
+
+本轮文档追加后的验证只需 git diff --check 与工作树检查；生产行为验证复用
+PR #67 最终 CI 32726842355（Ubuntu + Windows success）及 R3B 已记录的 full
+pytest 1330 passed, 26 skipped / Windows selected workflow 329 passed。审计
+分支应保持 clean，并作为 R4A 之前的独立证据基线。
