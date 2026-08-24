@@ -1364,8 +1364,8 @@ authority.
 | `_project_status` | TEST_COMPAT | Catalog/repository owns production derivation; existing style test uses the compatibility name. |
 | `get_synthesis_selections` | TEST_COMPAT | UI now routes through `ProjectService`; wrapper remains for existing tests/legacy callers. |
 | `set_synthesis_selections` | TEST_COMPAT | UI now routes through `ProjectService`; repository remains the persistence owner. |
-| `WORKSPACE_ROOT` | LIVE_PRODUCTION | `ProjectService.set_data_dir()` keeps the mutable compatibility root synchronized. |
-| `LEGACY_ROOT` | LIVE_PRODUCTION | Same explicit root synchronization; repository resolver still supports legacy projects. |
+| `WORKSPACE_ROOT` | LEGACY_COMPAT_SYNC | `ProjectService.set_data_dir()` keeps the mutable facade root synchronized; `ProjectRepository` remains disk authority. |
+| `LEGACY_ROOT` | LEGACY_COMPAT_SYNC | Same explicit facade synchronization; the repository resolver still owns legacy-project fallback. |
 
 No symbol was deleted in this round. The evidence-supported reduction is the
 production caller surface: every disk read/write caller now bypasses the facade,
