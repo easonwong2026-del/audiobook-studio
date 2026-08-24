@@ -3614,7 +3614,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     shared_components = create_status_bar()
     top_status = shared_components["top_status"]
 
-    with gr.Row():
+    with gr.Row(elem_classes=["app-shell-row"]):
         # 侧边栏导航按钮（从 ui/navigation 抽离）
         nav = create_nav_buttons()
         # 解包导航按钮（保持变量名兼容接线代码）
@@ -3641,6 +3641,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             ov_voices = ov_page["ov_voices"]
             ov_synth = ov_page["ov_synth"]
             ov_export = ov_page["ov_export"]
+            workbench_new_project = ov_page["workbench_new_project"]
             bookshelf_search = ov_page["bookshelf_search"]
             bookshelf_refresh = ov_page["bookshelf_refresh"]
             bookshelf_selected_proj = ov_page["bookshelf_selected_proj"]
@@ -4014,6 +4015,12 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         [ss],
         assembly_outputs,
     )
+    # Workbench owns the visible New Project entry.  It reuses the existing
+    # create/open chain; successful creation still routes to Voices through
+    # the existing _GROUPS topology.
+    workbench_new_project.click(
+        lambda: _goto("create_project"), None, _GROUPS,
+    )
     nav_project.click(
         lambda: _goto("project"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-project')?.classList.add('active'); }")
@@ -4313,7 +4320,6 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
                 ],
                 "open_chain_rest": _open_chain_rest,
                 "post_archive_reconcile": _post_archive_reconcile,
-                "goto_project": lambda: _goto("project"),
             },
         },
     )

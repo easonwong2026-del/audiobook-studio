@@ -946,3 +946,86 @@ serial rerun passed with baseline warning count and no candidate-only regression
   Utility business logic、MCP contract 和依赖均未修改。
 - Final worktree：clean；分支已推送并跟踪
   `origin/refactor/export-ui-boundary-r3f`。
+
+---
+
+# Workbench IA-1 follow-up — Round IA-2 caller audit correction
+
+日期：2026-08-23
+
+Reference：PR #63 head `e97b84c1104171801bbb31a1cc3bcb6af12ea8ca`。
+本节只同步 IA-1 完成后的 caller audit 结论；不执行 Round IA-2 删除。
+
+## Corrected Voice wiring conclusion
+
+`ui/wiring/voice_wiring.py::wire_voice_page` 当前只读取以下 context keys：
+
+- `context["callbacks"]`
+- `context["session"]`
+- `context["production_voice"]`
+
+虽然 `app.py` 仍向 `wire_voice_page` 注入 `"project": p_sel`，但该 key 没有被
+`wire_voice_page` 读取，属于 dead compatibility injection。它是 Round IA-2 的优先
+删除候选；本轮不删除。
+
+这不等于 `p_sel` 在全局已经 dead：打开链的 selector reconcile、Project View 的
+chapter tree / storage mirror、旧 `p_refresh` / `p_open`、创建链和目录刷新仍有真实
+兼容消费。当前只能把 Voice wiring 中的 injection 标记为 dead，不能据此删除整个
+`p_sel` contract。
+
+```text
+current:
+app.py::wire_voice_page context
+  ├─ callbacks       -> ui/wiring/voice_wiring.py (live)
+  ├─ session         -> ui/wiring/voice_wiring.py (live)
+  ├─ production_voice -> ui/wiring/voice_wiring.py (live)
+  └─ project: p_sel  -> not read (dead compatibility injection)
+
+Round IA-2 candidate:
+app.py wire_voice_page context["project"] = p_sel
+  -> remove only after a dedicated wiring/caller regression check
+```
+
+## Hidden Workbench legacy sink candidates
+
+The following components are intentionally hidden by IA-1 but remain in the Gradio
+component graph and/or refresh wiring. They are Round IA-2 audit candidates only:
+
+| hidden sink | current residual wiring | IA-2 action | evidence / guard |
+|---|---|---|---|
+| `ov_status` | `refresh_overview` / `_open_chain_rest` / `_post_archive_reconcile` still emit the legacy dashboard status output | audit and remove the old dashboard refresh output contract | hidden `grp-workbench-legacy-sink`; opened-project refresh tests |
+| `ov_progress` | same legacy dashboard refresh tuple | audit and remove with dashboard tuple | same as above |
+| `ov_task` | same legacy dashboard refresh tuple | audit and remove with dashboard tuple | same as above |
+| `ov_issues` | same legacy dashboard refresh tuple | audit and remove with dashboard tuple | same as above |
+| `ov_open` | hidden quick-action event still routes through the old Project Page open path | audit and retire after visible Inspector open coverage is complete | hidden component; existing open-chain compatibility tests |
+| `ov_voices` | hidden quick-action event still routes to Voices | audit and retire after visible navigation/caller coverage | hidden component; existing voice refresh tests |
+| `ov_synth` | hidden quick-action event still routes to production | audit and retire after visible navigation/caller coverage | hidden component; production refresh contracts |
+| `ov_export` | hidden quick-action event still routes to Delivery | audit and retire after visible navigation/caller coverage | hidden component; Export reconciliation tests |
+
+No hidden sink, old dashboard refresh callback, or quick-action event is deleted in
+this follow-up. The IA-2 caller graph is therefore:
+
+```text
+Workbench visible UI
+  -> selected/opened Catalog + Inspector contracts
+
+hidden legacy sink
+  ├─ ov_status / ov_progress / ov_task / ov_issues
+  │    -> legacy dashboard refresh outputs
+  └─ ov_open / ov_voices / ov_synth / ov_export
+       -> hidden compatibility quick-action chains
+```
+
+## IA-2 deletion order candidate
+
+1. Remove the dead `wire_voice_page` `"project": p_sel` injection with a focused
+   wiring test.
+2. Prove all visible Workbench open/voice/production/delivery paths before removing
+   hidden quick-action events.
+3. Remove the legacy dashboard refresh outputs only after all `refresh_overview`,
+   open-chain, archive-reconcile, creation-chain and navigation callers are audited.
+4. Re-audit `p_sel` separately; its remaining Project View and open-chain consumers are
+   not covered by the dead Voice wiring injection finding.
+
+This section records candidates only. IA-2 implementation is explicitly out of scope
+for the IA-1 follow-up.

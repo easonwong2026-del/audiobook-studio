@@ -1,8 +1,9 @@
-"""普通用户友好的项目管理页。
+"""隐藏的 Project Page compatibility sink。
 
 技术维护能力已迁移到书架（概览页项目书架）：打开目录 / 创建备份 / 清理缓存 /
 诊断修复 / 移入回收站 / 从备份恢复 / 回收站，均在书架对「选中项目」执行。
-本页只保留当前生产工作流内容：选择项目、打开项目、项目信息、存储摘要、书稿结构。
+Workbench 现在承载用户可见的选择 / 打开 / Inspector；本页只保留当前生产
+工作流刷新链需要的隐藏选择器、摘要、存储和书稿结构组件，供 Round 2 退休。
 """
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ from services.project_catalog import ProjectCatalogService
 
 
 def create_project_page() -> dict:
-    """创建项目管理页面（不含新建项目入口）。"""
+    """创建隐藏的 Project Page compatibility sink（不含新建项目入口）。"""
     with gr.Group(visible=False, elem_id="grp-project") as grp_project:
         with gr.Group(elem_classes=["stage-card"]):
             gr.Markdown("#### 选择项目")
