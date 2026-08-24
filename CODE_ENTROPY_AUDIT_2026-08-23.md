@@ -1704,3 +1704,44 @@ Production/Runtime/TTS、QA/Repair、Storage/MCP 或 navigation topology。
 PR #67 最终 CI 32726842355（Ubuntu + Windows success）及 R3B 已记录的 full
 pytest 1330 passed, 26 skipped / Windows selected workflow 329 passed。审计
 分支应保持 clean，并作为 R4A 之前的独立证据基线。
+
+## R4A Closure — Utility Compatibility Entry-point Recheck（2026-08-24）
+
+本节只记录 R4A 调查的停止结论，不实现 R4A，也不改变前文历史结论。
+
+### Baseline
+
+- PR #68 merge / `origin/main` baseline：`e08024650306ea00d6de44b7dfa441ae63ffc34a`。
+- R4A 调查分支：`refactor/utility-entrypoint-retirement-r4a`。
+- visible utility synthesis wiring 仍唯一指向 `app.py::do_utility_tts_synth`。
+- targeted supplement / utility / Quick TTS baseline：`58 passed, 1 skipped`。
+
+### Caller recheck
+
+重新执行了 `rg`、AST（definition / Name / Attribute / Call / import）、动态字符串、
+`getattr` / `setattr` / `globals` / `locals`、callback dictionary、Gradio event、
+MCP、scripts / subprocess、tests / monkeypatch、re-export / `__all__` 审计：
+
+| Symbol | 重新确认的 caller evidence | 分类 |
+|---|---|---|
+| `do_utility_tts_synth` | `app.py` 定义；`utility_synth.click(...)` 生产 wiring；已有统一 utility tests | `LIVE_PRODUCTION / CANONICAL` |
+| `do_supplement_synth` | 仅 `tests/test_supplement.py`、`tests/test_supplement_progress_terminal.py` 与历史设计文档；无生产、MCP、scripts 或动态 caller | `LEGACY_COMPAT_ADAPTER` |
+| `do_quick_tts_synth` | 仅自身定义；无仓库内 production、tests、scripts、MCP、docs live example 或动态 caller | `LEGACY_COMPAT_DEFERRED` |
+
+### Contract gate
+
+两个旧入口均不能按 pure pass-through 直接退休：
+
+- `do_supplement_synth` 保留旧的补录参数合同（含 `sup_mode`、JSON role/lines），
+  直接转发到 `_synthesize_project_utility`，并返回旧二元组；canonical utility
+  project branch 固定映射为 paste mode，并返回四元组。
+- `do_quick_tts_synth` 为 canonical library mode 注入固定默认参数，并将 canonical
+  四元组压缩为旧二元组。
+
+因此触发 R4A 明确停止条件：
+
+**R4A = `CLOSED_NO_CHANGE / NOT_PURE_PASS_THROUGH`。**
+
+本结论意味着：本轮不迁移测试、不删除两个函数、不改变
+`do_utility_tts_synth`、Quick TTS、Supplement、Session 或 TTS service。R4A 不创建
+implementation PR；如未来要继续，必须先重新定义这两个旧合同的兼容边界。
