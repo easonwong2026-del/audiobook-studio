@@ -110,13 +110,21 @@ def _audio_pipeline():
 
 def _snap(ss):
     """读取（必要时重建）当前项目快照：优先用会话态快照，缺失时按项目名重建。"""
-    s = ss.ensure_snapshot()
+    if not ss:
+        return None
+    ensure_snapshot = getattr(ss, "ensure_snapshot", None)
+    if not callable(ensure_snapshot):
+        return None
+    s = ensure_snapshot()
     if s is not None:
         return s
-    if ss and ss.project:
-        rebuilt = ProjectService.open_project_as_snapshot(ss.project)
-        ss.set_snapshot(rebuilt)
-        return rebuilt
+    project = getattr(ss, "project", None)
+    if project:
+        rebuilt = ProjectService.open_project_as_snapshot(project)
+        apply_snapshot = getattr(ss, "apply_project_snapshot", None)
+        if not callable(apply_snapshot):
+            return None
+        return apply_snapshot(rebuilt, project=project)
     return None
 
 def open_project(name, ss):
@@ -129,8 +137,7 @@ def open_project(name, ss):
     try:
         # 业务委托 ProjectService.open_project_as_snapshot（底层为 ProjectRepository）
         snap = ProjectService.open_project_as_snapshot(name)
-        ss.set_project(name, snap.script, snap.bindings)
-        ss.set_snapshot(snap)
+        ss.apply_project_snapshot(snap, project=name)
 
         seg_dir = project_paths.project_dir(ProjectService.get_project_dir(name), "segments")
         existing = scan_existing_raw(snap, seg_dir)
@@ -146,7 +153,7 @@ def open_project(name, ss):
             if task_logs:
                 log_init = "\n".join(task_logs[-15:])
 
-        role_choices = build_role_management_choices(snap.script, ss.bindings)
+        role_choices = build_role_management_choices(snap.script, snap.bindings)
 
         return (
                 gr.update(choices=role_choices, value=None),
@@ -668,17 +675,14 @@ def bind_voice(role, audio_file, from_lib, ss):
     else:
         # 业务委托 ProjectService.bind_voice（拷贝 + 写 voice_bindings.json），返回 dest
         dest = ProjectService.bind_voice(ss.project, role, src, category=cat)
-    # 原地 mutate 会话态绑定表（R1：多标签隔离，不靠返回值回传）
-    ss.bindings[role] = dest
-    # 写盘后重建快照并刷新会话态绑定表 / 分类映射
+    # 写盘后重建快照，并通过唯一 boundary 刷新 Session compatibility mirror。
     snap = ProjectService.open_project_as_snapshot(ss.project)
-    ss.set_snapshot(snap)
-    ss.bindings = snap.bindings
+    ss.apply_project_snapshot(snap, project=ss.project)
     voice = snap.script.get("voices", {}).get(role, {})
     return (
         f"{format_role_label(role, voice)} 已绑定",
         gr.update(
-            choices=build_role_management_choices(snap.script, ss.bindings),
+            choices=build_role_management_choices(snap.script, snap.bindings),
             value=role,
         ),
         gr.update(),
@@ -695,8 +699,11 @@ def preview_bound_voice(role, audio_file, from_lib, ss):
     """
     if not role or not ss:
         return None
+    snapshot = _snap(ss)
+    if snapshot is None:
+        return None
     audio = _lib_path(from_lib) if from_lib else audio_file
-    audio = audio or ss.bindings.get(role)
+    audio = audio or snapshot.bindings.get(role)
     if not audio or not os.path.isfile(audio):
         return None
     try:
@@ -2442,10 +2449,14 @@ def refresh_supplement_roles(ss):
     ``ui.components.voice_binding.build_bound_role_choices(script, bindings)``；刷新时机为
     进入“生产与质检”阶段时懒刷新；刷新时机与打开项目链路解耦（阶段三重构后已无 22 元组契约）。
     """
-    if not ss or not ss.project or not ss.script:
+    if not ss or not getattr(ss, "project", None):
         return gr.update(interactive=False, choices=[], value=None,
                          info="请先打开项目并绑定角色音色")
-    choices = format_bound_role_choices(ss.script, ss.bindings)
+    snapshot = _snap(ss)
+    if not snapshot or not snapshot.script:
+        return gr.update(interactive=False, choices=[], value=None,
+                         info="请先打开项目并绑定角色音色")
+    choices = format_bound_role_choices(snapshot.script, snapshot.bindings)
     if not choices:
         return gr.update(interactive=False, choices=[], value=None,
                          info="请先打开项目并绑定角色音色")
@@ -2488,7 +2499,12 @@ def do_supplement_parse_json(sup_json, ss):
         ``(sup_role 更新, sup_json_role state, sup_json_lines state, 状态 markdown)``。
         失败时不改变 state（保持原角色 / 文本），仅给出诊断 markdown。
     """
-    if not ss or not ss.project or not ss.script:
+    if not ss or not getattr(ss, "project", None):
+        return (gr.update(interactive=False, choices=[], value=None,
+                          info="请先打开项目并绑定角色音色"),
+                "", [], "❌ 请先打开项目")
+    snapshot = _snap(ss)
+    if not snapshot or not snapshot.script:
         return (gr.update(interactive=False, choices=[], value=None,
                           info="请先打开项目并绑定角色音色"),
                 "", [], "❌ 请先打开项目")
@@ -2506,7 +2522,7 @@ def do_supplement_parse_json(sup_json, ss):
     except Exception as e:
         return (gr.update(), "", [], f"❌ 读取小 JSON 失败：{e}")
     try:
-        role, lines = SupplementService.parse_input_json(raw, ss.script)
+        role, lines = SupplementService.parse_input_json(raw, snapshot.script)
     except ValueError as e:
         return (gr.update(), "", [], "❌ 小 JSON 解析失败：\n" + str(e))
     except Exception as e:
@@ -2582,7 +2598,10 @@ def _synthesize_project_utility(sup_role, sup_mode, sup_text, sup_json_role, sup
     Returns:
         ``(sup_wavs state, 状态 markdown)``；状态 markdown 含逐句 ✅ / ❌ 句N 反馈。
     """
-    if not ss or not ss.project or not ss.script:
+    if not ss or not getattr(ss, "project", None):
+        return [], "❌ 请先打开项目并绑定角色音色"
+    snapshot = _snap(ss)
+    if not snapshot or not snapshot.script:
         return [], "❌ 请先打开项目并绑定角色音色"
     # 决定角色与文本
     if sup_mode == "json":
@@ -2596,9 +2615,9 @@ def _synthesize_project_utility(sup_role, sup_mode, sup_text, sup_json_role, sup
     if not lines:
         return [], "❌ 没有可合成的文本（请粘贴内容，或先解析小 JSON）"
 
-    # 音色真相源：参考音频唯一来自 ss.bindings[role]；P1 换音色仅本次覆盖、不回写 ss.bindings。
+    # 音色真相源：参考音频来自当前 Snapshot；P1 换音色仅本次覆盖、不回写 durable bindings。
     override_voice = _lib_path(sup_voice) if sup_voice else None
-    speaker = override_voice or ss.bindings.get(role)
+    speaker = override_voice or snapshot.bindings.get(role)
     if not speaker:
         return [], f"❌ 角色「{role}」未绑定音色，且未选择替换音色"
 
@@ -2845,7 +2864,10 @@ def do_supplement_export(sup_format, sup_bitrate, sup_export_name, sup_wavs, sup
         ``(_safe_path, msg)``；``_safe_path`` 经 ``file_component_paths``
         确保落在 Gradio allowed_paths 内，再交给 ``gr.File`` 下载。
     """
-    if not ss or not ss.project:
+    if not ss or not getattr(ss, "project", None):
+        return None, "请先打开项目"
+    snapshot = _snap(ss)
+    if not snapshot:
         return None, "请先打开项目"
     wavs = [w for w in (sup_wavs or []) if w and os.path.isfile(w)]
     if not wavs:
@@ -2857,7 +2879,7 @@ def do_supplement_export(sup_format, sup_bitrate, sup_export_name, sup_wavs, sup
     from services.export_naming import build_export_path, unique_path
 
     out_path = unique_path(build_export_path(out_dir, name, sup_format, fallback=f"supplement_{_safe_name(role)}"))
-    meta = ss.script.get("meta", {}) if isinstance(ss.script, dict) else {}
+    meta = snapshot.script.get("meta", {}) if isinstance(snapshot.script, dict) else {}
     title = f"{meta.get('title', 'audiobook')} - {role} 补录" if meta else None
     artist = meta.get("author") if meta else None
     try:

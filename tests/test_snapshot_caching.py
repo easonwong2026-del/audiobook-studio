@@ -92,6 +92,11 @@ def test_open_project_establishes_snapshot(project, monkeypatch):
     app.open_project(project, ss)
 
     assert ss.project_snapshot is not None, "打开项目后 ss.project_snapshot 应为非 None"
+    assert ss.project == project
+    assert ss.script == ss.project_snapshot.script
+    assert ss.bindings == ss.project_snapshot.bindings
+    assert ss.script is not ss.project_snapshot.script
+    assert ss.bindings is not ss.project_snapshot.bindings
     assert state["n"] == 1, (
         f"打开项目应仅读盘一次（load_snapshot → open_project），实际 {state['n']} 次"
     )

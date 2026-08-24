@@ -2067,3 +2067,173 @@ legacy Session readers 的事实，不把任何一层误标为第二个 durable 
 - 最终决策：**`CONFIRMED_BUG`**；但只记录为 R4C candidate，本轮不修。
 - R4B 交付：本节审计文档与 audit commit；没有 implementation acceptance，也没有
   扩大到 p_sel / Project Page / Session redesign。
+
+## Round R4C — Session/Snapshot Consistency Bugfix（2026-08-25）
+
+本节记录 R4B 已确认 divergence 的最小 bugfix。它不是字段退休、Session redesign 或
+普通 entropy cleanup；R4B 历史审计事实保持不变。
+
+### Baseline、branch 与 scope
+
+- R4B doc-only PR #70 已 squash merge，CI run `32741221931` 的 Ubuntu 与 Windows
+  selected workflow 均成功。
+- R4C baseline / merge 后 `origin/main`：`ffa497c7a36fb03b7ff752579f3f32e7dfb3fcb0`。
+- implementation branch：`fix/session-snapshot-consistency-r4c`。
+- 真实字段仍是 `ProjectSnapshot.name` 与 `SessionState.project_snapshot`；没有新增
+  `project_name` 或 `snapshot` alias。
+- 没有删除 `SessionState.script` / `SessionState.bindings`，没有修改 storage format、
+  selected/opened semantics、p_sel、Project Page、Catalog、Production、Runtime/TTS、
+  QA/Repair、Export、Merge、Assembly、MCP contract 或 Voice Cast storage。
+
+### Root Cause / Before
+
+R4B reproducer 的路径是：
+
+```text
+durable Repository update
+  -> ProjectSnapshot.is_stale()
+  -> SessionState.ensure_snapshot()
+  -> ProjectSnapshot.reload_if_stale()
+  -> self.project_snapshot = fresh
+```
+
+旧实现只替换 Snapshot，不更新 `SessionState.script` / `SessionState.bindings`，所以同一个
+opened project 可以同时出现：
+
+```text
+Snapshot script = B       Session script = A
+Snapshot binding = new.wav Session binding = None
+```
+
+旧 Open / Create / Voice path 还把 `set_project(...)`、`set_snapshot(...)` 与
+`ss.bindings[role] = ...` 分开执行，初始 Open 时 Session payload 与 Snapshot payload
+甚至共享 mutable dict identity。
+
+### Implementation / After invariant
+
+新增 `SessionState.apply_project_snapshot(snapshot, project=...)` 作为唯一 opened
+Snapshot apply boundary：
+
+1. 在任何 Session mutation 前校验 `snapshot.name == opened project`；
+2. 一次 transition 更新 `project`、`project_snapshot`、`script`、`bindings`；
+3. Session script / bindings 使用 `copy.deepcopy`，内容与 Snapshot 一致但不共享 mutable
+   identity；
+4. `set_project` 保留为 legacy compatibility setter，并先 invalidate 旧 Snapshot；
+5. `set_snapshot` 明确为 low-level cache handle，不再被当作 payload synchronization。
+
+成功 hydrate / reload 后的 invariant：
+
+```text
+ss.project == snapshot.name
+ss.project_snapshot is snapshot
+ss.script == snapshot.script
+ss.bindings == snapshot.bindings
+ss.script is not snapshot.script
+ss.bindings is not snapshot.bindings
+```
+
+`ensure_snapshot()` 现在会：
+
+- clean Snapshot 直接返回；
+- stale reload 成功时通过 `apply_project_snapshot` 同步 mirrors；
+- Snapshot name 与 opened project 不一致时丢弃 cache，不返回错误项目 payload；
+- 当前 repository project directory 与 Snapshot directory 不一致时丢弃 cache，防止
+  old-root / new-root 混合；
+- 外部删除导致 `ProjectNotFoundError` 时清理完整 opened context，不保留 orphan payload；
+- 其他 reload failure 至少丢弃 invalid cache，不继续返回旧 Snapshot。
+
+`app._snap()` 与 `ui.voice_handlers._snapshot()` 的 fallback rebuild 均改为同一 apply
+boundary。`invalidate_snapshot()` 保持 cache-only contract；但所有生产内部
+script/bindings readers 都先经过当前 Snapshot resolver，`clear_opened()` 才负责清空
+opened identity、mirrors、Snapshot 与 synthesis。
+
+### Reader migration / ownership result
+
+以下 legacy readers 已改为读取 current Snapshot view：
+
+- `app.open_project` role choices 与 `bind_voice` result presentation；
+- `preview_bound_voice`；
+- `refresh_supplement_roles`、`do_supplement_parse_json`；
+- `_synthesize_project_utility`、`do_supplement_export`；
+- `ui.voice_handlers` fallback rebuild。
+
+生产 `app.py` / `ui/**` / `services/**` 中不再存在直接 `ss.script` 或 `ss.bindings`
+reader；剩余 `state.script` / `state.bindings` 属于独立 Chapter Merge planner state，
+不是 `SessionState`。Session fields 仍保留作为 compatibility mirrors，尚未进入字段
+退休 round。
+
+Durable / cache / mirror ownership 没有改变：
+
+```text
+ProjectRepository / project files  = durable truth
+ProjectSnapshot                    = opened cache / modern read view
+SessionState.project               = opened identity
+SessionState.selected_project      = selected identity
+SessionState.script / bindings     = synchronized compatibility mirrors
+```
+
+### Voice binding / external update
+
+UI Voice binding 现在是：
+
+```text
+ProjectService / VoiceCast durable write
+  -> open_project_as_snapshot
+  -> apply_project_snapshot
+  -> UI reads fresh Snapshot
+```
+
+删除了 `ss.bindings[role] = dest` 的 implicit alias synchronization。外部 durable binding
+update 的 R4B reproducer 已转为 permanent regression：stale reload 后 Repository、
+Snapshot、Session mirror 三方内容一致，且没有 dict alias。
+
+### Identity、data-dir、archive/delete
+
+- `Session.project = B` + `Snapshot.name = A`：resolver 不返回 A；丢弃错误 cache，
+  当前 project 可由 `_snap()` 按 B rebuild。
+- 正常 A → B apply transition：B 的 project、Snapshot、script、bindings 全部替换，A
+  payload 不残留。
+- Settings 既有 `set_data_dir() -> reset_for_data_root()` contract 未改；额外保护了
+  direct root mutation，避免旧 project_dir 与新 Repository root 组成 mixed Snapshot。
+- archive selected ≠ opened 的隔离未改；archive / external delete 当前 opened project
+  后 stale resolver 不再返回旧 Snapshot，删除场景清理 opened payload。
+
+### Late callback conclusion
+
+本轮没有在现有普通 Gradio open chain 中复现第二个 late-output bug，也没有引入全局
+generation framework。Export 与 Review / Repair 既有局部 fence 保持不变；generic
+opened callback generation 继续记录为 `DEFERRED_STRUCTURAL_RISK`，不扩大 R4C scope。
+
+### Permanent tests and verification
+
+新增 / 更新的长期 regression 覆盖：
+
+- stale script / bindings reload 同步 Session mirror；
+- Session / Snapshot script、bindings no-alias；
+- external durable Voice binding update；
+- Snapshot identity mismatch；
+- A → B transition；
+- data-dir mixed-root 防护；
+- external delete / orphan payload cleanup；
+- invalidate cache-only semantics；
+- UI Voice binding Repository / Snapshot / Session 三方一致；
+- Create failure 保持旧 project / Snapshot / mirrors，Create success 完整 hydrate。
+
+本地最终验证：
+
+```text
+Full pytest: 1338 passed, 26 skipped
+compileall: passed
+Ruff --select F (changed Python): passed
+git diff --check: passed
+```
+
+PR #71 CI run `32745184155`：Ubuntu 与 Windows selected workflow 均 success。本地没有
+声称真实 Windows UI 已执行。
+
+### R4C acceptance decision
+
+R4C 已把 R4B 的 `CONFIRMED_DIVERGENCE` 收口为 explicit synchronization invariant，
+没有把 compatibility mirror 误升格为 durable owner，也没有删除字段。完成 CI / PR
+验收后本轮停止；下一轮仍不得自动开始 Session field retirement、Catalog
+consolidation、Delivery alias cleanup 或 `migrate_project_copy` cleanup。

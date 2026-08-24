@@ -3,9 +3,10 @@
 把项目的 CRUD / 校验 / 绑定等纯业务逻辑从 ``app.py`` 抽离到这里，使 UI 层只负责
 编排与展示。所有方法均为 ``staticmethod``，无实例状态，便于单测。
 
-注意：角色绑定（``bind_voice``）会**原地修改**传入会话的 ``bindings`` 字典
-（见 ``app.bind_voice`` 调用 ``ss.bindings[role] = dest``），而非通过返回值回传——
-这与 R1「多标签各自持有独立 ``SessionState``、原地 mutate」的约定一致。
+注意：角色绑定（``bind_voice``）只负责 durable write 并返回目标音频路径；
+``app.bind_voice`` 在写盘后通过 Session Snapshot apply boundary 刷新 compatibility
+mirror，而不是依赖原地 mutate 或返回值自动传播。这与 R1「多标签各自持有独立
+``SessionState``」的隔离约定一致。
 ``save_to_lib`` ���把音频存入 ``voice_library`` 目录，不改变角色绑定表。
 
 阶段四重构：所有磁盘操作从 ``lib.project_manager (pm)`` 改为

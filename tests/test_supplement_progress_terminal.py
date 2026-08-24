@@ -17,7 +17,6 @@ from __future__ import annotations
 from lib import project_paths
 
 import os
-from types import SimpleNamespace
 from datetime import datetime, timezone
 
 import pytest
@@ -26,6 +25,7 @@ from repositories.project_repo import ProjectRepository
 from repositories.task_repo import TaskRecord
 from services.production_runtime import ProductionRuntimeClient
 from services.runtime_tts import RuntimeTTSError, RuntimeTTSService
+from services.session import SessionState
 
 SCRIPT = {
     "meta": {"title": "Progress"},
@@ -207,6 +207,19 @@ class FakeProgress:
         self.calls.append((frac, desc))
 
 
+def _opened_session_with_binding(speaker: str) -> SessionState:
+    project_dir = ProjectRepository.get_project_dir("book")
+    ProjectRepository.save_bindings(
+        project_dir,
+        {"bindings": {"旁白": speaker}, "role_categories": {}},
+    )
+    session = SessionState()
+    session.apply_project_snapshot(
+        ProjectRepository.load_snapshot("book"), project="book"
+    )
+    return session
+
+
 def test_do_supplement_synth_clears_loading_progress(tmp_path, monkeypatch):
     import app
 
@@ -219,11 +232,7 @@ def test_do_supplement_synth_clears_loading_progress(tmp_path, monkeypatch):
 
     monkeypatch.setattr(app.SupplementService, "synthesize_lines", _fake_synthesize_lines)
     progress = FakeProgress()
-    session = SimpleNamespace(
-        project="book",
-        script=SCRIPT,
-        bindings={"旁白": os.path.join(str(tmp_path), "speaker.wav")},
-    )
+    session = _opened_session_with_binding(os.path.join(str(tmp_path), "speaker.wav"))
     wavs, md = app.do_supplement_synth(
         "旁白", "paste", "你好。世界。", "", [],
         "(按默认)", 1.0, 1.0, 2, True, None, session,
@@ -259,11 +268,7 @@ def test_do_supplement_synth_zero_success_uses_neutral_wording(tmp_path, monkeyp
 
     monkeypatch.setattr(app.SupplementService, "synthesize_lines", _fail_all)
     progress = FakeProgress()
-    session = SimpleNamespace(
-        project="book",
-        script=SCRIPT,
-        bindings={"旁白": os.path.join(str(tmp_path), "speaker.wav")},
-    )
+    session = _opened_session_with_binding(os.path.join(str(tmp_path), "speaker.wav"))
     wavs, md = app.do_supplement_synth(
         "旁白", "paste", "你好。世界。", "", [],
         "(按默认)", 1.0, 1.0, 2, True, None, session,
@@ -296,11 +301,7 @@ def test_do_supplement_synth_error_clears_loading_progress(tmp_path, monkeypatch
 
     monkeypatch.setattr(app.SupplementService, "synthesize_lines", _boom)
     progress = FakeProgress()
-    session = SimpleNamespace(
-        project="book",
-        script=SCRIPT,
-        bindings={"旁白": os.path.join(str(tmp_path), "speaker.wav")},
-    )
+    session = _opened_session_with_binding(os.path.join(str(tmp_path), "speaker.wav"))
     wavs, md = app.do_supplement_synth(
         "旁白", "paste", "你好。世界。", "", [],
         "(按默认)", 1.0, 1.0, 2, True, None, session,

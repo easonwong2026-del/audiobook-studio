@@ -9,10 +9,13 @@
 """
 from __future__ import annotations
 
+import copy
+import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
 from lib.snapshot import ProjectSnapshot
+from repositories.exceptions import ProjectNotFoundError
 
 if TYPE_CHECKING:  # pragma: no cover - 仅类型检查期导入，避免与 synthesis 循环导入
     from services.synthesis import SynthesisState
@@ -24,8 +27,8 @@ class SessionState:
 
     Attributes:
         project: 当前项目名（``None`` 表示尚未打开项目）。
-        script: 结构化剧本（``ProjectService.open_project`` 返回的 raw dict）。
-        bindings: 角色 -> 参考音频绝对路径 的绑定表。
+        script: 当前 Snapshot payload 的深拷贝，仅供 legacy compatibility readers 使用。
+        bindings: 当前 Snapshot bindings 的深拷贝，仅供 legacy compatibility readers 使用。
         synthesis: 当前合成任务态（``SynthesisState``）；未开始合成时为 ``None``。
     """
 
@@ -48,7 +51,12 @@ class SessionState:
     _archive_confirmation_revision: Optional[int] = None
 
     def set_project(self, name: str, script: Any, bindings: dict[str, str]) -> None:
-        """写入当前项目，原地更新字段（不新建对象，保持 ``gr.State`` 引用稳定）。
+        """写入兼容 mirror，原地更新字段（不新建 ``SessionState`` 对象）。
+
+        这是 legacy compatibility setter，不是 opened Snapshot hydrate boundary。
+        直接写入 payload 时先使旧 Snapshot 失效，避免调用者留下「新 mirror + 旧
+        Snapshot」的混合状态；Open / Create / reload 应使用
+        :meth:`apply_project_snapshot`。
 
         Args:
             name: 项目名。
@@ -56,8 +64,9 @@ class SessionState:
             bindings: 角色绑定表（dict）。
         """
         self.project = name
-        self.script = script
-        self.bindings = bindings
+        self.script = copy.deepcopy(script) if script is not None else None
+        self.bindings = copy.deepcopy(bindings)
+        self.project_snapshot = None
 
     def set_selected(self, name: Optional[str]) -> None:
         """写入书架选中项目（不打开项目、不加载剧本）。"""
@@ -112,17 +121,110 @@ class SessionState:
         self.catalog_query = str(query or "")
 
     def set_snapshot(self, snapshot: Optional[ProjectSnapshot]) -> None:
-        """写入当前项目快照（``ProjectSnapshot``），原地更新字段。"""
+        """写入 / 清除 cache handle；不会同步 Session compatibility mirrors。
+
+        Open / Create / stale reload 必须使用 ``apply_project_snapshot``；保留这个
+        low-level setter 是为了让 ``invalidate_snapshot`` 与旧测试 / integration
+        double 保持兼容。
+        """
         self.project_snapshot = snapshot
+
+    def apply_project_snapshot(
+        self,
+        snapshot: ProjectSnapshot,
+        *,
+        project: Optional[str] = None,
+    ) -> ProjectSnapshot:
+        """Atomically apply one opened Snapshot and refresh compatibility mirrors.
+
+        ``ProjectSnapshot`` remains the current cache / modern read view.  Session
+        ``script`` and ``bindings`` are deliberately deep-copied compatibility
+        mirrors; their content follows the Snapshot but their mutable identities do
+        not.  Validation happens before mutating any Session field so a mismatched
+        Snapshot cannot partially replace an existing opened project.
+        """
+        snapshot_name = str(getattr(snapshot, "name", "") or "").strip()
+        opened_name = str(project if project is not None else snapshot_name).strip()
+        if not snapshot_name or opened_name != snapshot_name:
+            raise ValueError(
+                "Snapshot identity does not match the opened project: "
+                f"opened={opened_name!r}, snapshot={snapshot_name!r}"
+            )
+        mirrored_bindings = copy.deepcopy(snapshot.bindings)
+        if not isinstance(mirrored_bindings, dict):
+            raise TypeError("ProjectSnapshot.bindings must be a dict")
+
+        # Validate and copy before changing identity/cache fields.  This keeps the
+        # transition all-or-nothing for the normal in-process callback path.
+        mirrored_script = copy.deepcopy(snapshot.script)
+        self.project = opened_name
+        self.project_snapshot = snapshot
+        self.script = mirrored_script
+        self.bindings = mirrored_bindings
+        return snapshot
+
+    @staticmethod
+    def _same_project_dir(left: Any, right: Any) -> bool:
+        if not left or not right:
+            return False
+        left_path = os.path.normcase(os.path.realpath(os.path.abspath(str(left))))
+        right_path = os.path.normcase(os.path.realpath(os.path.abspath(str(right))))
+        return left_path == right_path
+
+    def _snapshot_matches_opened(self, snapshot: ProjectSnapshot) -> bool:
+        """Reject a cache from another project or another configured data root."""
+        if not self.project:
+            # A low-level SessionState test / integration may hold a standalone
+            # snapshot before an opened identity exists.  Production readers still
+            # require ``project`` and therefore cannot consume it as opened state.
+            return True
+        if str(getattr(snapshot, "name", "") or "") != str(self.project):
+            return False
+        try:
+            from repositories.project_repo import ProjectRepository
+
+            current_dir = ProjectRepository.get_project_dir(str(self.project))
+        except (OSError, RuntimeError, ValueError):
+            return False
+        return self._same_project_dir(current_dir, snapshot.project_dir)
 
     def ensure_snapshot(self) -> Optional[ProjectSnapshot]:
         """确保返回一个（必要时按脏检测重载的）最新快照；无快照时返回 None。"""
         if self.project_snapshot is None:
             return None
-        fresh = self.project_snapshot.reload_if_stale()
+        current = self.project_snapshot
+        if not self._snapshot_matches_opened(current):
+            # Do not serve an A Snapshot for opened B, or retain a cache tied to a
+            # previous data root.  ``app._snap`` / the Voice resolver can rebuild
+            # the current opened project through the same apply boundary.
+            self.project_snapshot = None
+            return None
+        try:
+            fresh = current.reload_if_stale()
+        except ProjectNotFoundError:
+            # An externally deleted / archived opened project has no valid
+            # payload left to preserve; clear the complete opened context.
+            self.clear_opened()
+            return None
+        except (OSError, RuntimeError, ValueError):
+            # A deleted / unavailable project must not continue serving its old
+            # payload.  Keep the opened identity for the caller's safe rebuild or
+            # error path, but drop the invalid cache.
+            self.project_snapshot = None
+            return None
+        if fresh is current:
+            return current
+        if self.project:
+            try:
+                return self.apply_project_snapshot(fresh, project=self.project)
+            except (TypeError, ValueError):
+                self.project_snapshot = None
+                return None
+        # Standalone low-level users without an opened identity may still refresh
+        # their cache, but cannot claim a Session mirror transition.
         self.project_snapshot = fresh
         return fresh
 
     def invalidate_snapshot(self) -> None:
-        """使当前快照失效（如写盘后状态已变，下次读取触发重载）。"""
+        """只使 cache 失效；下次内部读取必须通过 Snapshot resolver rehydrate。"""
         self.project_snapshot = None
