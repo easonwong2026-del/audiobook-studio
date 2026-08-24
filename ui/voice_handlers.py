@@ -19,13 +19,17 @@ from ui.components.voice_binding import build_role_management_choices
 
 def _snapshot(ss):
     """Read the current session snapshot without importing ``app``."""
-    snapshot = ss.ensure_snapshot()
+    ensure_snapshot = getattr(ss, "ensure_snapshot", None)
+    if not callable(ensure_snapshot):
+        return None
+    snapshot = ensure_snapshot()
     if snapshot is not None:
         return snapshot
-    if ss and ss.project:
-        rebuilt = ProjectService.open_project_as_snapshot(ss.project)
-        ss.set_snapshot(rebuilt)
-        return rebuilt
+    project = getattr(ss, "project", None)
+    apply_snapshot = getattr(ss, "apply_project_snapshot", None)
+    if project and callable(apply_snapshot):
+        rebuilt = ProjectService.open_project_as_snapshot(project)
+        return apply_snapshot(rebuilt, project=project)
     return None
 
 

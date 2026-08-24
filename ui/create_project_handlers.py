@@ -192,8 +192,7 @@ def create_from_json(project_name, json_file, ss=None) -> tuple[str, bool]:
             from services import ProjectService
 
             snapshot = ProjectService.open_project_as_snapshot(result.project_name)
-            ss.set_project(result.project_name, snapshot.script, snapshot.bindings)
-            ss.set_snapshot(snapshot)
+            ss.apply_project_snapshot(snapshot, project=result.project_name)
         message = (
             "### ✅ 项目创建成功\n\n"
             f"- **项目名称**：`{html.escape(result.project_name)}`\n"

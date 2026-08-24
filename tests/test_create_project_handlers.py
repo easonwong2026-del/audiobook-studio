@@ -80,7 +80,15 @@ def test_create_from_json_failure_paths_return_false_without_mutating_opened_ses
     ]
 
     for name, json_file, error in cases:
-        ss = SessionState(project="B", script={"project": "B"}, bindings={"old": "voice"})
+        old_snapshot = SimpleNamespace(
+            name="B", script={"project": "B"}, bindings={"old": "voice"}
+        )
+        ss = SessionState(
+            project="B",
+            script={"project": "B"},
+            bindings={"old": "voice"},
+            project_snapshot=old_snapshot,
+        )
         service_calls = []
 
         def fail_service(_name, _source, error=error):
@@ -100,6 +108,7 @@ def test_create_from_json_failure_paths_return_false_without_mutating_opened_ses
         assert isinstance(result[0], str)
         assert result[1] is False
         assert ss.project == "B"
+        assert ss.project_snapshot is old_snapshot
         assert ss.script == {"project": "B"}
         assert ss.bindings == {"old": "voice"}
         assert bool(service_calls) is bool(name and Path(json_file).exists())
@@ -108,7 +117,9 @@ def test_create_from_json_failure_paths_return_false_without_mutating_opened_ses
 def test_create_from_json_success_updates_session_and_returns_true(monkeypatch, tmp_path):
     source = tmp_path / "script.json"
     source.write_text("{}", encoding="utf-8")
-    snapshot = SimpleNamespace(script={"project": "C"}, bindings={"旁白": "voice-c"})
+    snapshot = SimpleNamespace(
+        name="C", script={"project": "C"}, bindings={"旁白": "voice-c"}
+    )
     monkeypatch.setattr(
         create_handlers.ProjectCreationService,
         "create_from_structured_script",
@@ -117,7 +128,15 @@ def test_create_from_json_success_updates_session_and_returns_true(monkeypatch, 
     from services import ProjectService
 
     monkeypatch.setattr(ProjectService, "open_project_as_snapshot", lambda _name: snapshot)
-    ss = SessionState(project="B", script={"project": "B"}, bindings={"old": "voice"})
+    old_snapshot = SimpleNamespace(
+        name="B", script={"project": "B"}, bindings={"old": "voice"}
+    )
+    ss = SessionState(
+        project="B",
+        script={"project": "B"},
+        bindings={"old": "voice"},
+        project_snapshot=old_snapshot,
+    )
 
     result = create_handlers.create_from_json("C", str(source), ss)
 
@@ -128,12 +147,22 @@ def test_create_from_json_success_updates_session_and_returns_true(monkeypatch, 
     assert ss.project_snapshot is snapshot
     assert ss.script == snapshot.script
     assert ss.bindings == snapshot.bindings
+    assert ss.script is not snapshot.script
+    assert ss.bindings is not snapshot.bindings
 
 
 def test_creation_success_gate_blocks_failure_chain_and_allows_success(monkeypatch, tmp_path):
     source = tmp_path / "script.json"
     source.write_text("{}", encoding="utf-8")
-    ss = SessionState(project="B", script={"project": "B"}, bindings={"old": "voice"})
+    old_snapshot = SimpleNamespace(
+        name="B", script={"project": "B"}, bindings={"old": "voice"}
+    )
+    ss = SessionState(
+        project="B",
+        script={"project": "B"},
+        bindings={"old": "voice"},
+        project_snapshot=old_snapshot,
+    )
     hydrate_calls = []
     goto_calls = []
 
@@ -145,12 +174,15 @@ def test_creation_success_gate_blocks_failure_chain_and_allows_success(monkeypat
     _, creation_success = create_handlers.create_from_json("C", str(source), ss)
     assert creation_success is False
     assert ss.project == "B"
+    assert ss.project_snapshot is old_snapshot
     with pytest.raises(gr.Error):
         create_handlers.require_creation_success(creation_success)
     assert hydrate_calls == []
     assert goto_calls == []
 
-    snapshot = SimpleNamespace(script={"project": "C"}, bindings={"旁白": "voice-c"})
+    snapshot = SimpleNamespace(
+        name="C", script={"project": "C"}, bindings={"旁白": "voice-c"}
+    )
     monkeypatch.setattr(
         create_handlers.ProjectCreationService,
         "create_from_structured_script",
@@ -163,7 +195,10 @@ def test_creation_success_gate_blocks_failure_chain_and_allows_success(monkeypat
     assert creation_success is True
     assert ss.project == "C"
     assert ss.project_snapshot is snapshot
+    assert ss.project_snapshot is not old_snapshot
     assert create_handlers.require_creation_success(creation_success) is None
+    assert ss.script is not snapshot.script
+    assert ss.bindings is not snapshot.bindings
     hydrate_calls.append(ss.project)
     goto_calls.append("voices")
     assert hydrate_calls == ["C"]
