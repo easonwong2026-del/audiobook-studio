@@ -1745,3 +1745,325 @@ MCP、scripts / subprocess、tests / monkeypatch、re-export / `__all__` 审计�
 本结论意味着：本轮不迁移测试、不删除两个函数、不改变
 `do_utility_tts_synth`、Quick TTS、Supplement、Session 或 TTS service。R4A 不创建
 implementation PR；如未来要继续，必须先重新定义这两个旧合同的兼容边界。
+
+## Round R4B — SessionState / ProjectSnapshot Ownership Audit（2026-08-24）
+
+本节是 R4B 的完整 ownership / caller audit。它只追加审计事实与下一轮建议，
+没有修改生产 Python、没有删除字段、没有改变 callback / UI contract，也没有执行
+R4C。
+
+### Baseline 与审计边界
+
+- latest `origin/main` baseline：`be75f0d52508f913df22ff35143f53ec20ef34e5`。
+- 分支：`audit/session-snapshot-ownership-r4b`。
+- 分支建立前，R4A 的停止结果已经在上一节单独以 doc-only PR 收口：
+  `CLOSED_NO_CHANGE / NOT_PURE_PASS_THROUGH`。
+- 冻结 `SessionState.project` = opened、`selected_project` = selected；不引入
+  `p_sel`、hidden mirror、第二个 selector 或新的 Snapshot 字段。
+- 本轮只检查 ownership、读写路径、身份关系、stale reload、late callback、持久化
+  边界与测试缺口；没有把审计建议实施为代码。
+
+### 审计方法与覆盖面
+
+对 production、tests、scripts、MCP、docs 以及 import / re-export surface 执行了
+`rg` 与 AST audit，覆盖 `Name`、`Attribute`、`Assign`、`AnnAssign`、`AugAssign`、
+`Call`、`Return`，并复核：
+
+- `SessionState.project`、`selected_project`、`script`、`bindings`、
+  `project_snapshot` 的所有显式 writer / reader；
+- `ProjectSnapshot` 的 `name`、`meta`、`script`、`bindings`、`build`、
+  `reload_if_stale`、stale detection 与 project directory identity；
+- `set_project`、`set_snapshot`、`ensure_snapshot`、`invalidate_snapshot`、
+  `clear_opened`、`reset_for_data_root`、`open_project`、Create hydrate、Voice
+  binding、repair / stale reload、Production、Review / QA、Export、archive / delete、
+  data-dir、Merge、Assembly；
+- `getattr` / `setattr` / `globals` / `locals` / `vars` / `__dict__` / `importlib`、
+  string callback keys、Gradio event inputs / outputs、callback dictionaries、MCP
+  handlers、tests / monkeypatch / fixtures / fakes、scripts / recovery / migration /
+  startup。
+
+结论是：没有发现绕过上述显式路径、以动态字段名重新写入 Session payload 或
+ProjectSnapshot payload 的隐藏 writer。`services/__init__.py` 对类型的 re-export
+不构成 field access。需要特别纠正命名：当前 `ProjectSnapshot` 没有
+`project_name` 字段，实际身份字段是 `name`；`ProjectMeta.project_name` 是持久化
+metadata 中的项目名。
+
+### Durable truth 与内存层角色
+
+持久化真相在 `ProjectRepository` 及其项目文件，不在 `SessionState` 或
+`ProjectSnapshot`：
+
+- `structured_script.json` / canonical script 的 durable owner 是
+  `ProjectRepository` 及创建、合并、存储相关 service；
+- `voice_bindings.json` 的 durable owner 是 `ProjectRepository`，Voice Cast / UI / MCP
+  通过 service 或 resolver 写回；
+- `project.json` 与 status journal 提供 `ProjectMeta` 的持久化来源；
+- `SessionState` 是每个 Gradio session 的运行时容器；
+- `ProjectSnapshot` 是按 opened project 建立的内存 cache / read view，不是第二个磁盘
+  真相源。
+
+当前 Open / Create 的初始路径是：
+
+```text
+ProjectRepository.load_snapshot(name)
+        -> ProjectSnapshot.build(...)
+        -> SessionState.set_project(name, snapshot.script, snapshot.bindings)
+        -> SessionState.set_snapshot(snapshot)
+```
+
+因此在刚打开或刚创建成功的正常同步路径上，`SessionState.script` 与
+`ProjectSnapshot.script`、`SessionState.bindings` 与 `ProjectSnapshot.bindings` 内容相同，
+并且当前实现还共享同一份对象引用。这是 `DUPLICATED_BUT_SYNCHRONIZED` 的初始状态，
+不是独立 ownership。
+
+`selected_project` 只由 bookshelf selection 写入；选中不会打开项目、不会加载 script、
+不会写 `project` 或 payload。archive / catalog reconciliation 在 opened 项目被删除、
+归档或从当前 catalog 消失时清理 opened payload；selected ≠ opened 时会保留当前
+opened 项目。
+
+### Ownership matrix
+
+| State | Candidate owner | Writers | Readers | Mutable? | Rebuild / source | Current role / classification |
+|---|---|---|---|---|---|---|
+| `SessionState.project` | Session opened identity | `set_project`、`clear_opened`、Open / Create | 全部需要当前 opened project 的 callbacks、Export / Production / Voice / Catalog | 是 | 显式 Open / Create name；不是从 selected 推导 | `CANONICAL`（opened truth，冻结） |
+| `SessionState.selected_project` | Workbench Catalog selection | `set_selected`、archive / catalog handlers | archive、Merge、Assembly confirmation、bookshelf UI | 是 | 当前 bookshelf selection | `CANONICAL`（selected truth，冻结） |
+| `SessionState.snapshot` | 不存在此字段；实际字段是 `project_snapshot` | 无 | 无 | 不适用 | 见 `SessionState.project_snapshot` | `NOT_PRESENT`；不新增 alias |
+| `SessionState.script` | `ProjectRepository` durable data；Session 仅保留兼容副本 | `set_project`；没有 production script item writer | supplement / utility / legacy production readers、部分 app callbacks | 是；raw dict | Open / Create 时来自 Snapshot；stale reload 不回写 | `COMPAT_MIRROR`；初始为 `DUPLICATED_BUT_SYNCHRONIZED`，stale reload 后进入 `CONFIRMED_DIVERGENCE` |
+| `SessionState.bindings` | `ProjectRepository` durable `voice_bindings.json`；Session 仅保留兼容副本 | `set_project`、`bind_voice` 中的 in-place role write、clear；随后部分路径整体替换 | legacy supplement / utility readers、binding presentation、绑定兼容路径 | 是；有直接 in-place mutation | Open / Create 或 bind 后从 Snapshot；`ensure_snapshot` 不回写 | `COMPAT_MIRROR`；初始为 `DUPLICATED_BUT_SYNCHRONIZED`，stale reload 后进入 `CONFIRMED_DIVERGENCE`；另有 alias `STRUCTURAL_RISK` |
+| `SessionState.project_snapshot` | Session 内的 opened snapshot handle | `set_snapshot`、`ensure_snapshot`、fallback rebuild、`invalidate_snapshot` | `_snap`、Voice page、现代 Production / QA / Review / status / preview readers | 是；引用可替换 | `ProjectRepository.load_snapshot` 或 `reload_if_stale` | `CACHE`；缺少 name/project identity fence，存在 `STRUCTURAL_RISK` |
+| `ProjectSnapshot.project_name` | 不存在此字段 | 无 | 无 | 不适用 | 实际字段 `name`；持久化 metadata 为 `ProjectMeta.project_name` | `NOT_PRESENT`；不新增 duplicate identity field |
+| `ProjectSnapshot.name`（不是 `project_name`） | Snapshot identity copied from Open name；durable name 仍来自 Repository | `build` / `reload_if_stale` 创建新对象 | `_snap`、现代 UI / service readers | dataclass 可变，但没有 direct production writer | Open name + `ProjectRepository.load_project(name)` | `CACHE` identity；应与 `SessionState.project` 校验但当前未校验 |
+| `ProjectSnapshot.meta` | `project.json` / status journal | `build` / reload；没有 Session mirror | modern status、catalog-adjacent production / QA readers | dataclass 可变；无 direct snapshot writer | `ProjectRepository._load_meta` | `CACHE / DERIVED` |
+| `ProjectSnapshot.script` | `structured_script.json` | `build` / reload；没有 direct snapshot item writer | modern Voice / Production / Review / QA / preview readers | dict 可变；当前与初始 Session script alias | `ProjectRepository.load_project` | `CACHE`；与 Session mirror 的 stale divergence 是 `CONFIRMED_BUG` |
+| `ProjectSnapshot.bindings` | `voice_bindings.json` | `build` / reload；UI / resolver 先写 durable，再重建 | modern Voice / Voice Cast / Production readers | dict 可变；当前与初始 Session bindings alias | `ProjectRepository.load_project` | `CACHE`；与 Session mirror 的 stale divergence 是 `CONFIRMED_BUG`，alias 为 `STRUCTURAL_RISK` |
+
+这里的 `COMPAT_MIRROR` 不是建议增加的新 mirror，而是记录当前仍被 legacy
+supplement / utility 代码读取的既有字段。`ProjectSnapshot.script` / `bindings` 的
+`CACHE` 分类也不等于它们拥有 durable truth；它们是现代 opened workflow 的当前读视图。
+
+### Mutation-site classification
+
+| Path | Script operation | Bindings operation | Classification / observation |
+|---|---|---|---|
+| Open / Create hydrate | `ProjectRepository.load_snapshot` → Snapshot `script` → `set_project` assignment | 同一 Snapshot `bindings` → `set_project` assignment | `RELOAD_FROM_REPOSITORY` + `REPLACE_WHOLE_OBJECT`；初始两边同步且共享引用 |
+| `SessionState.set_project` | 替换 `self.script` 引用 | 替换 `self.bindings` 引用 | `REPLACE_WHOLE_OBJECT`；不建立 Snapshot identity contract |
+| `SessionState.set_snapshot` | 不触碰 Session script | 不触碰 Session bindings | Snapshot handle `REPLACE_WHOLE_OBJECT`；不是 payload sync |
+| `SessionState.ensure_snapshot` / `_snap` / Voice fallback | stale 时 Repository reload 只重建 Snapshot script | stale 时 Repository reload 只重建 Snapshot bindings | `RELOAD_FROM_REPOSITORY`；只更新一边，已触发 `CONFIRMED_DIVERGENCE` |
+| `bind_voice` | 不修改 Session script | durable write 后 `ss.bindings[role] = dest`，再整体替换为 fresh Snapshot bindings | `PERSIST_TO_REPOSITORY` + `IN_PLACE_MUTATION` + `RELOAD_FROM_REPOSITORY` + `REPLACE_WHOLE_OBJECT`；中间 alias 有风险 |
+| Voice Cast / MCP resolver | 不直接改 Session script | 直接持久化完整 bindings document，无 Session writer | `PERSIST_TO_REPOSITORY`；下一次 stale reload 才进入 Snapshot |
+| Production / Voice / Review / QA / Export readers | 不修改 | 不修改 | `READ_ONLY`（现代路径多读 Snapshot；legacy utility/supplement 读 Session mirror） |
+| `clear_opened` / data-root reset | 置 `None` | 替换为空 dict | `REPLACE_WHOLE_OBJECT` + `RESET`；可见 data-dir UI 路径受保护 |
+
+因此不能把两套字段描述成“所有 writer 都严格双写”：至少
+`ensure_snapshot()` 是合法且现存的只更新 Snapshot 的路径，外部 durable binding writer
+也不会直接更新当前 Session。
+
+### Stale reload 与真实 divergence reproducer
+
+`SessionState.ensure_snapshot()` 当前只执行：
+
+```text
+fresh = self.project_snapshot.reload_if_stale()
+self.project_snapshot = fresh
+return fresh
+```
+
+它不会同步 `SessionState.project`、`SessionState.script` 或
+`SessionState.bindings`，也不会验证 `fresh.name == self.project`。app `_snap()` 与
+`ui.voice_handlers._snapshot()` 的 fallback rebuild 同样只 `set_snapshot`，不回写
+Session payload。
+
+已用临时目录做真实 reproducer（没有留下仓库文件）：
+
+1. 打开同一个项目，建立 `SessionState` 与 Snapshot 的初始 alias；
+2. 从 Repository 外部更新 `structured_script` 标题为 `B`，并更新 durable binding 为
+   `new.wav`，使关键文件 mtime 晚于 `loaded_at`；
+3. 调用 `ss.ensure_snapshot()`；
+4. 观察 Session mirror 与 fresh Snapshot。
+
+结果：
+
+```text
+OPEN_IDENTITY True True
+STALE_RELOADED True
+SESSION_SCRIPT_TITLE A
+SNAPSHOT_SCRIPT_TITLE B
+SESSION_BINDING None
+SNAPSHOT_BINDING new.wav
+POST_RELOAD_IDENTITY False False
+DIVERGENCE True True
+```
+
+这不是普通 Open A → Open B 顺序下的猜测，而是实际 stale reload 后同时出现的
+script / bindings 内容分歧。因此本轮对两个 Session payload 字段标记
+`CONFIRMED_DIVERGENCE`，最终决策为 `CONFIRMED_BUG`。当前测试没有把这个 reproducer
+固化成新测试，因为本轮明确是 audit-only；缺口与 R4C 范围在下文单独列出。
+
+### 关键调用链与风险
+
+#### 1. Voice binding / 外部 durable update（已确认）
+
+`VoiceCastResolver`、MCP voice-cast handler 与 UI 都可以先写
+`voice_bindings.json`。现代 Voice / Production 读 Snapshot；legacy supplement / utility
+仍读 `SessionState.bindings`。当外部写盘触发 stale reload 时，`ensure_snapshot()` 只替换
+Snapshot，旧 Session binding 继续被兼容 reader 使用，形成同一个 opened project 的两种
+运行视图。UI `bind_voice` 的正常路径会在写盘后主动重建 Snapshot 并整体替换
+`ss.bindings`，但这不能修复外部 writer、stale reload 或异常中断窗口。
+
+此外，Open 初始 alias 使 `ss.bindings[role] = dest` 也可能先改到旧 Snapshot 的同一
+dict，再执行 durable write / reload；这是共享可变对象带来的额外 `STRUCTURAL_RISK`。
+
+#### 2. Open A → Open B 与 generic late callback（结构性风险）
+
+正常同步 Open 会先 `set_project` 再 `set_snapshot`，现有 selected/opened 测试覆盖了
+常规 A / B 隔离。但 `selection_revision` 只保护 selected / archive confirmation，
+不是 opened payload generation；通用 `_open_chain_rest` 也没有像 Export task 或
+Review / Repair fence 那样绑定 project / generation。当前没有通用断言保证
+`Snapshot.name == SessionState.project`，`_snap()` 在 mismatch 时仍会返回 Snapshot。
+
+因此 late A callback 或并发 Open A/B 可能把 A 的普通 UI 输出带入 B 的 opened workflow，
+或者在 `set_project` 与 `set_snapshot` 两步之间观察到混合状态。Export 有明确的
+project/task fence，Review / Repair 有 generation/project/repair/task fence；这些局部
+保护不能推导为全局 Session/Snapshot fence。该风险尚未在普通单线程生产路径中复现，
+分类为 `STRUCTURAL_RISK`，不是第二个 `CONFIRMED_BUG`。
+
+#### 3. data-dir / archive-delete 与 stale identity（UI 有保护，边界仍有风险）
+
+Settings UI 只有在 `ProjectService.set_data_dir()` 成功后才调用
+`ss.reset_for_data_root()`，该 reset 清空 selected、opened、script、bindings、
+Snapshot、synthesis，同时按 contract 保留 catalog query；因此当前可见 data-dir
+workflow 的同名项目隔离是受保护的。
+
+但 `ProjectService.set_data_dir()` 本身不持有 SessionState；若未来脚本、MCP 或其他
+调用者直接切 root 而不经过 UI reset，旧 Snapshot 会保留旧 `project_dir`，而
+`reload_if_stale()` 通过当前 Repository root 读取数据，Session mirror 也不会同步。
+外部 archive / delete 同样可能令 stale detection 后的 reload 抛出 not-found，而不会
+自动把 Session 清空。现有 archive handler / catalog reconcile 对可见路径做了清理，
+但没有覆盖所有外部 mutation。
+
+三条风险链的最终分类如下：
+
+| Mutation chain | 结果 | 分类 |
+|---|---|---|
+| 外部 / MCP Voice Cast 写 durable bindings → mtime stale → `ensure_snapshot` 只换 Snapshot → legacy reader 继续读旧 `ss.bindings` | 已实际得到 Snapshot 新值、Session 旧值 | `CONFIRMED_DIVERGENCE / CONFIRMED_BUG` |
+| Open A → generic `_open_chain_rest` late callback / 并发 Open B → 普通输出缺少 opened generation fence | 常规同步路径无复现；局部 Export / Review fence 不覆盖 generic chain | `STRUCTURAL_RISK` |
+| 直接 data-dir / archive-delete mutation →旧 Session/Snapshot 未 reset → stale reload 使用新 root 或抛 not-found | UI 路径有 reset；非 UI caller 没有 Session fence | `STRUCTURAL_RISK` |
+
+### Domain caller audit 结论
+
+- **Open / Create**：两者都从一次 Snapshot 建立 Session payload；成功路径初始同步，
+  但 `set_project` / `set_snapshot` 不是原子 transition，也没有 Snapshot identity check。
+  Create failure contract 已有明确 success gate：失败返回统一 `(message, False)`、不改旧
+  opened project，后续 hydrate / goto Voices 不执行；R4B 没有触碰这条边界。若在两次
+  setter 之间发生异常或并发观察，当前实现仍可能短暂出现新 `project` 配旧 Snapshot，
+  这是需要 R4C invariant 覆盖的 transition risk。
+- **Voice Binding**：durable write 由 Repository / Voice Cast service 负责；现代 readers
+  偏向 Snapshot，legacy readers 仍使用 Session mirror；UI 正常绑定后会主动 reload，
+  finalize / repair 主要 invalidate Snapshot，不同步 Session payload。
+- **Production / Review / QA / Repair**：现代路径多数从 Snapshot 或 durable task state
+  读取；Review / Repair 有自己的 stale-output fence；repair terminal path invalidate
+  Snapshot，但不构成 payload synchronization。
+- **Export**：Export task 的 project / task tracking 与 callback-current guard 能保护
+  A/B project-switch isolation；这是局部安全边界，不是 Session/Snapshot 全局 owner。
+- **Archive / delete**：通过 Catalog handler 归档当前 opened 项目时清空 opened；归档
+  selected ≠ opened 时保留 opened。外部删除没有同等 Session invalidation contract。
+- **Merge / Assembly**：Chapter Merge 在 source/target 等于 opened 时拒绝后台改盘；
+  Whole Book Assembly 在目标 Book 已 opened 时产生 blocking conflict，confirmation 也
+  绑定 selected/opened scope。它们保护 durable mutation，但不修复一般 late callback。
+- **MCP / scripts / startup / recovery**：没有发现直接持有 `SessionState` 或
+  `ProjectSnapshot` payload 的 caller；MCP voice-cast 以 project name 走 durable service，
+  这正是外部 durable update 能触发本 session stale divergence 的来源之一。
+- **Dynamic / hidden callers**：未发现相关 `getattr` / `setattr` / string callback key /
+  monkeypatch / importlib 路径重新写入 script 或 bindings；`services.__all__` 只暴露
+  类型，不改变 ownership。
+
+### Existing revision / fence inventory
+
+当前已有的版本或 fence 不是统一的 Snapshot revision：
+
+- `SessionState.selection_revision` 只服务 selected / archive confirmation；不代表
+  opened payload generation；
+- Export 使用 project + task tracking，能拒绝跨项目的旧 export UI callback；
+- Review / Repair 使用 generation + project + repair_id + task_id fence；
+- Whole Book Assembly / Chapter Merge 将 selected / opened / data-root 纳入 plan 或
+  confirmation，并在 opened target / source 时阻止后台改盘；
+- `ProjectSnapshot` 没有 revision / generation / content hash；`ensure_snapshot` 只依赖
+  关键文件 mtime 与 project directory existence；
+- 没有发现统一的 opened-project generation 可以保护普通 `_open_chain_rest`。
+
+因此不能把已有 `selection_revision`、Export task id 或 Review / Repair fence 误当作
+Session/Snapshot 的全局 payload consistency mechanism。
+
+### Test coverage 与缺口
+
+本轮只运行审计相关的现有回归集，没有新增测试或修改测试 contract：
+
+```text
+134 passed, 22 warnings
+```
+
+覆盖 Session / Snapshot、snapshot caching、Project creation、Catalog / data-dir、
+Export isolation、Production、Voice Cast、Chapter Merge、Whole Book Assembly 与
+Assembly operations。现有 `test_session_snapshot.py` 能证明 stale Snapshot 被替换，但
+dirty case 没有用已填充的 Session script / bindings 检查 payload sync；因此不能阻止
+本轮已复现的 divergence。还缺少：
+
+- external durable script / binding update 后 Session 与 Snapshot 的 identity / payload
+  invariant test；
+- Voice Cast / MCP 写盘后同一 session 的 stale reload test；
+- Open A → late generic callback → Open B 的 opened generation / output fence test；
+- direct data-dir、external delete / restore 与当前 session 的 invalidation test；
+- `ProjectSnapshot.build()` 当前 bindings alias 与 Session in-place mutation 的 isolation
+  test。
+
+### Recommended durable owner 与 R4C 精确边界
+
+推荐 ownership 保持三层清晰分工：
+
+1. `ProjectRepository` 文件继续是 script、bindings、meta 的唯一 durable authority；
+2. `SessionState.project` / `selected_project` 继续分别是 opened / selected identity，
+   本轮冻结不动；
+3. `ProjectSnapshot` 作为当前 opened project 的 cache / modern read view；
+   `SessionState.script` / `bindings` 仅作为现有 legacy reader 的临时兼容 mirror，不能
+   再被当成独立真相源。
+
+#### Ownership candidates（只评估，不实施）
+
+| Option | Pros | Risks / migration cost | Affected callers / tests / Windows / compatibility | Decision |
+|---|---|---|---|---|
+| A. Session 只保留 identity + Snapshot owns opened payload | 最终只有一个 opened payload read view；概念最简单 | 需要迁移或删除所有 Session script / bindings readers；Create / Voice / supplement / utility 兼容面大，可能触碰既有 Gradio / Windows callback 行为 | `refresh_supplement_roles`、`do_supplement_parse_json`、utility、export、`bind_voice` 与大量 tests；需完整 Open / Voice / Production / Windows 回归；旧 integration 若直接读字段会破坏兼容 | 不作为 R4C 首选，属于更后续的字段退休方案 |
+| B. Session owns payload，Snapshot 只做 immutable derived cache | legacy readers 迁移成本较低；可把 Session 作为 UI payload owner | durable reload 后必须先更新 Session 再重建 Snapshot；现代 Voice / Production / QA / preview 仍需迁移读源；当前 Snapshot 是 mutable dataclass，冻结与 copy 会扩大 blast radius | 影响 `_snap`、Voice handlers、现代 production readers、Open / Create / stale reload；需新增 immutable / reload / A→B / data-dir tests；兼容性较好但 cache rebuild 复杂 | 不推荐；会把 UI Session 提升为 payload owner，弱化 Repository → cache 的自然方向 |
+| C. Repository durable truth + Snapshot cache + 显式受 invariant 保护的 Session compatibility mirror | 保留既有字段和 caller contract；可先修真实 stale divergence；selected / opened 与 Windows UI blast radius 最小 | mirror 仍存在，必须消除 alias、明确同步 / 失效规则，并逐一审计 legacy readers；属于中等 implementation cost | 影响 Session transition、`ensure_snapshot`、Open / Create、Voice write、legacy readers；需 stale / external Voice Cast / late callback / data-dir / delete tests；最能保持现有 compatibility contract | **推荐**，作为 R4C 唯一建议方向 |
+
+推荐 Option C 的理由是：它同时承认 durable repository、现代 Snapshot read view 与现有
+legacy Session readers 的事实，不把任何一层误标为第二个 durable truth，也不借本轮
+真实 divergence 直接扩大到字段删除或 navigation / project contract 重构。
+
+若继续，R4C 只能是以下精确范围的 implementation round：
+
+- 定义并实现一个明确的 Session ↔ Snapshot payload invariant：同一 opened project 必须
+  检查 identity，stale reload / fallback rebuild / Open / Create / Voice write / clear /
+  data-root reset 后不得留下旧 script 或 bindings；同时消除 Snapshot 与 Session 的
+  隐式可变 dict alias；
+- 为 stale script、stale bindings、external Voice Cast update、Open A → B late output、
+  data-dir / delete invalidation 增加长期 regression tests；
+- 对 `refresh_supplement_roles`、`do_supplement_parse_json`、utility readers、
+  `do_supplement_export` 与 `bind_voice` 逐一选择“读取显式 Snapshot view”或“读取受
+  invariant 保护的 compatibility mirror”，并完成完整 caller audit；
+- 不改变 selected / opened semantics，不删除 `p_sel`、Project Page、任何 Session
+  字段，不触碰 Catalog、navigation、Production、QA、Repair、Export、Merge、Assembly、
+  Runtime、Storage、Voice Cast、MCP contract。
+
+本段只是 R4C 的边界说明；**本轮没有执行 R4C，也没有提交任何 production fix**。
+
+### R4B final decision
+
+- SessionState script / bindings：初始 Open / Create 时是
+  `DUPLICATED_BUT_SYNCHRONIZED` 的既有兼容 mirror；stale reload 后已确认
+  `CONFIRMED_DIVERGENCE`。
+- ProjectSnapshot script / bindings：`CACHE`，由 Repository 重建；不是 durable owner。
+- Durable owner：`ProjectRepository` 项目文件及其 service / resolver 写路径。
+- Divergence：**是，已通过真实 reproducer 确认**。
+- 最终决策：**`CONFIRMED_BUG`**；但只记录为 R4C candidate，本轮不修。
+- R4B 交付：本节审计文档与 audit commit；没有 implementation acceptance，也没有
+  扩大到 p_sel / Project Page / Session redesign。
