@@ -1199,8 +1199,12 @@ Before：
 
 After：
 
-    create_from_json -> [cp_json_result]
-                     -> hydrate_opened_project([ss]) -> six live Voice outputs
+    create_from_json -> [cp_json_result, cp_json_success]
+                     -> require_creation_success
+                     -> success only:
+                          hydrate_opened_project([ss]) -> six live Voice outputs
+                          -> Voices
+                          -> _open_chain_rest
     bookshelf_open -> open_selected_project([selected_project, ss])
                    -> open_project -> _open_chain_rest
     _open_chain_rest / _post_archive_reconcile
@@ -1211,7 +1215,9 @@ After：
 
 `SessionState.project` remains the only opened-project truth and
 `SessionState.selected_project` remains the only Workbench selection truth. No hidden
-Dropdown, Textbox, `gr.State`, or compatibility mirror replaces `p_sel`.
+Dropdown, Textbox, or project-identity compatibility mirror replaces `p_sel`.
+`cp_json_success` is only the boolean result of the current Create operation; it is not
+project identity, an opened-project mirror, or a future `p_sel` substitute.
 
 ## Final classification
 
@@ -1267,10 +1273,12 @@ Inspector presentation now renders `RELATION_ORPHAN` as
 “⚠ 关系无效 · {relation_message}”; Catalog relation status and business logic are
 unchanged.
 
-## Validation record
+## Follow-up validation record
 
-- Full pytest: **1319 passed, 26 skipped**;
-- IA / Catalog / Project Page contract targeted tests: pass;
+- Follow-up head: `97fe339f6c905326fa79af20fb9c4e5358d1792e`;
+- Full pytest: **1325 passed, 26 skipped**;
+- Windows selected workflow: **329 passed**;
+- CI run `32695647298`: Ubuntu success; Windows Python 3.10 selected workflow success;
 - compileall: pass;
 - Ruff `--select F` on changed Python files: pass;
 - `git diff --check`: pass.
