@@ -1285,3 +1285,108 @@ unchanged.
 
 No IA-2C or new UI feature work was started. Project Page / `p_sel` retirement is
 complete; future work must not reintroduce a hidden opened-project mirror.
+
+---
+
+## Round IA-2B / R3A — `project_manager` compatibility boundary
+
+### Baseline and scope
+
+R3A starts from the merged IA-2B baseline `e141696b4d87cee6d1d1537c9f4fbe465a18f813`
+(PR #65, squash merge). This round only audits and narrows the production ownership
+of `lib/project_manager.py`. It does not retire `p_sel`, delete Project Page
+compatibility, or change Runtime/TTS/Production/QA/Repair/Export/Merge/Assembly,
+Catalog, Workbench/Create UX, Voice Cast, MCP, dependencies, or storage semantics.
+
+### Audit method and result
+
+The complete repository audit covered:
+
+- `rg` and qualified-name searches across production code, tests, scripts, MCP,
+  docs, and re-exports;
+- Python AST call/import inspection for every listed symbol;
+- dynamic `getattr` / `setattr`, string callback keys, `import_module`, and
+  monkeypatch references;
+- root mutation and legacy-root resolution paths.
+
+No hidden production caller was found outside the four migrated read/persistence
+paths and the explicit root synchronization in `ProjectService.set_data_dir()`.
+There are no `project_manager` imports or calls in `mcp_server` or scripts.
+
+Before R3A:
+
+```text
+app.py                    -> lib.project_manager synthesis preference wrappers
+services/synthesis.py     -> pm.open_project
+lib/progress.py           -> pm.open_project (2 readers)
+lib/snapshot.py           -> pm.open_project (stale reload reader)
+ProjectService.set_data_dir -> pm.WORKSPACE_ROOT / pm.LEGACY_ROOT sync
+lib/project_manager.py   -> ProjectRepository for every disk operation
+```
+
+After R3A:
+
+```text
+app.py                    -> ProjectService -> ProjectRepository
+services/synthesis.py     -> ProjectRepository.load_project
+lib/progress.py           -> ProjectRepository.load_project
+lib/snapshot.py           -> ProjectRepository.load_project (lazy import)
+ProjectService.set_data_dir -> ConfigRepository + ProjectRepository
+                              + retained pm root compatibility sync
+tests / legacy callers    -> lib.project_manager -> ProjectRepository
+```
+
+The canonical ownership rule is now explicit: UI uses `ProjectService`, lower-level
+readers use `ProjectRepository` directly where a service layer would introduce a
+cycle, and the old module remains a compatibility facade rather than a production
+authority.
+
+### Final symbol classification
+
+| Symbol | Classification | Evidence / final handling |
+|---|---|---|
+| `_repository` | LEGACY_COMPAT | Only compatibility wrappers use it; it synchronizes mutable legacy roots into the repository. |
+| `_resolve_dir` | LEGACY_COMPAT | No production caller; retained as a private legacy resolver wrapper. |
+| `scan_projects` | TEST_COMPAT | Repository-owned production path; existing tests/legacy imports remain supported. |
+| `create_project` | TEST_COMPAT | Repository/creation-service production path; wrapper retained for tests/legacy imports. |
+| `open_project` | TEST_COMPAT | All production readers migrated; wrapper retained for tests/legacy imports. |
+| `load_snapshot` | TEST_COMPAT | `ProjectService.open_project_as_snapshot()` owns production use; wrapper retained. |
+| `delete_project` | TEST_COMPAT | `ProjectService.delete_project()` owns guarded production use; wrapper retained. |
+| `get_project_dir` | TEST_COMPAT | Production services use `ProjectRepository`; wrapper retained. |
+| `update_segment_status` | TEST_COMPAT | Production mutation paths use service/repository APIs; wrapper retained. |
+| `get_remaining` | TEST_COMPAT | No production caller; wrapper retained for legacy/test recovery callers. |
+| `_meta_path` | LEGACY_COMPAT | No repository caller; private wrapper retained for compatibility safety. |
+| `_load_meta` | LEGACY_COMPAT | No repository caller; private wrapper retained for compatibility safety. |
+| `_repair_meta` | LEGACY_COMPAT | No repository caller; private wrapper retained for compatibility safety. |
+| `_save_meta` | LEGACY_COMPAT | No repository caller; private wrapper retained for compatibility safety. |
+| `get_synthesis_overrides` | TEST_COMPAT | UI now routes through `ProjectService`; wrapper remains for existing tests/legacy callers. |
+| `set_synthesis_overrides` | TEST_COMPAT | UI now routes through `ProjectService`; repository remains the persistence owner. |
+| `_project_status` | TEST_COMPAT | Catalog/repository owns production derivation; existing style test uses the compatibility name. |
+| `get_synthesis_selections` | TEST_COMPAT | UI now routes through `ProjectService`; wrapper remains for existing tests/legacy callers. |
+| `set_synthesis_selections` | TEST_COMPAT | UI now routes through `ProjectService`; repository remains the persistence owner. |
+| `WORKSPACE_ROOT` | LEGACY_COMPAT_SYNC | `ProjectService.set_data_dir()` keeps the mutable facade root synchronized; `ProjectRepository` remains disk authority. |
+| `LEGACY_ROOT` | LEGACY_COMPAT_SYNC | Same explicit facade synchronization; the repository resolver still owns legacy-project fallback. |
+
+No symbol was deleted in this round. The evidence-supported reduction is the
+production caller surface: every disk read/write caller now bypasses the facade,
+while the wrappers and mutable roots remain covered as a deliberate compatibility
+shell. No `DEAD` classification is used for a retained wrapper because the purpose
+of this round is to preserve the externally observable compatibility boundary until
+a separately authorized retirement round proves it can be removed.
+
+### Root and legacy compatibility proof
+
+`WORKSPACE_ROOT` and `LEGACY_ROOT` remain module-level mutable variables. Existing
+monkeypatch and integration assignments continue to flow through `_repository()`;
+`ProjectService.set_data_dir()` synchronizes both the canonical repository and the
+compatibility module. `ProjectRepository._resolve_dir()` still prefers a workspace
+project and falls back to the legacy root. R3A regression tests exercise a mutable
+workspace root, a legacy-only project, `ProjectService.open_project()`, progress
+readers, and stale snapshot reload against the legacy project.
+
+### R3A validation target
+
+The independent R3A PR must report targeted project-manager/repository/service,
+synthesis/progress/snapshot, Production, Runtime selected, Create/Open, Catalog,
+Export isolation, Merge, Assembly, full pytest, Windows selected workflow,
+compileall, Ruff `--select F`, and `git diff --check`. No IA-2B work is included.

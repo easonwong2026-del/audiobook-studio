@@ -6,8 +6,8 @@
 
 模块依赖关系（闭环，无环）：
     session.SessionState  --(前向引用)-->  synthesis.SynthesisState
-    synthesis.SynthesisService  --驱动-->  lib.queue / lib.project_manager
-    project.ProjectService      --包装-->  lib.project_manager / lib.script_loader
+    synthesis.SynthesisService  --驱动-->  lib.queue / ProjectRepository
+    project.ProjectService      --包装-->  ProjectRepository / lib.script_loader
     export.ExportService        --调用-->  lib.audio_pipeline（透传 ExportError）
 """
 from __future__ import annotations

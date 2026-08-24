@@ -1,7 +1,7 @@
 """项目快照：打开项目后的内存一致视图（避免页面间重复读盘 + 脏检测）。
 
-仅依赖 ``lib.types``（ProjectMeta）与 ``lib.project_manager``（延迟 import 以避免
-循环依赖），不依赖 gradio / services 层，因此可被单元测试直接 import。
+仅依赖 ``lib.types``（ProjectMeta）与 ``ProjectRepository``（在重载方法内延迟
+import 以避免循环依赖），不依赖 gradio / services 层，因此可被单元测试直接 import。
 
 设计要点：
 - ``script`` / ``meta`` 来自磁盘读出的原始 dict / dataclass；
@@ -71,6 +71,7 @@ class ProjectSnapshot:
         """若磁盘已变更则重新加载并返回新快照，否则返回自身（不重复读盘）。"""
         if not self.is_stale():
             return self
-        from lib import project_manager as pm
-        meta, script, bd = pm.open_project(self.name)
+        from repositories.project_repo import ProjectRepository
+
+        meta, script, bd = ProjectRepository.load_project(self.name)
         return ProjectSnapshot.build(self.name, meta, script, bd, self.project_dir)

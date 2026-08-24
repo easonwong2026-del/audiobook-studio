@@ -160,7 +160,7 @@ def has_segment_wav(
 ) -> bool:
     """某段是否已存在对应 wav（参数感知文件 / 旧版裸文件 / 任意参数变体均可）。
 
-    用于 ``project_manager`` 状态机判断「标记 done 的段是否真的有音频文件」，
+    用于 ``ProjectRepository`` 状态机判断「标记 done 的段是否真的有音频文件」，
     因状态表层只存 ``seg_id``、不存参数，故同时匹配：
     1) 给定参数的缓存键文件；
     2) 旧版裸 ``{seg_id}.wav``；

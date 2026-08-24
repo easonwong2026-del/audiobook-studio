@@ -1,4 +1,4 @@
-"""项目服务：包 ``lib.project_manager`` + ``lib.script_loader``（禁止 import gradio）。
+"""项目服务：项目业务编排 + ``ProjectRepository``（禁止 import gradio）。
 
 把项目的 CRUD / 校验 / 绑定等纯业务逻辑从 ``app.py`` 抽离到这里，使 UI 层只负责
 编排与展示。所有方法均为 ``staticmethod``，无实例状态，便于单测。
@@ -9,7 +9,7 @@
 ``save_to_lib`` ���把音频存入 ``voice_library`` 目录，不改变角色绑定表。
 
 阶段四重构：所有磁盘操作从 ``lib.project_manager (pm)`` 改为
-``repositories.ProjectRepository`` / ``ConfigRepository``。
+``repositories.ProjectRepository`` / ``ConfigRepository``；pm 仅作为旧调用方兼容壳。
 """
 from __future__ import annotations
 
@@ -120,6 +120,26 @@ class ProjectService:
     def open_project_as_snapshot(name: str):
         """打开项目并返回 ``ProjectSnapshot``（含自动拆出的 bindings / role_categories）。"""
         return ProjectRepository.load_snapshot(name)
+
+    @staticmethod
+    def get_synthesis_overrides(name: str) -> dict:
+        """读取项目级合成覆盖参数。"""
+        return ProjectRepository.get_synthesis_overrides(name)
+
+    @staticmethod
+    def set_synthesis_overrides(name: str, overrides: dict) -> None:
+        """保存项目级合成覆盖参数。"""
+        ProjectRepository.set_synthesis_overrides(name, overrides)
+
+    @staticmethod
+    def get_synthesis_selections(name: str) -> dict:
+        """读取项目级合成范围选择。"""
+        return ProjectRepository.get_synthesis_selections(name)
+
+    @staticmethod
+    def set_synthesis_selections(name: str, selections: dict) -> None:
+        """保存项目级合成范围选择。"""
+        ProjectRepository.set_synthesis_selections(name, selections)
 
     @staticmethod
     def create_project_from_data(name: str, script: dict) -> Any:

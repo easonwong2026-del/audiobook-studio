@@ -21,7 +21,6 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, ClassVar, Optional
 
 from lib import progress as _progress
-from lib import project_manager as pm
 from lib import project_paths, segment_cache
 from lib import queue as synth_queue
 from repositories.project_repo import ProjectRepository
@@ -363,7 +362,7 @@ class SynthesisService:
             # 预读总数与已完成数（用于进度条分母 / 断点续跑初值），仅读一次。
             # P2 提速：进度不再于每个 yield 重新打开 project.json 计算，改为本地累加。
             try:
-                meta, script_data, _ = pm.open_project(project)
+                meta, script_data, _ = ProjectRepository.load_project(project)
                 chapters = script_data.get("chapters", []) if isinstance(script_data, dict) else []
                 selected_chapter_set = (
                     {str(item) for item in selected_chapters}
