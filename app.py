@@ -3495,6 +3495,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             cp_json_check = cr_page["cp_json_check"]
             cp_json_create = cr_page["cp_json_create"]
             cp_json_result = cr_page["cp_json_result"]
+            cp_json_success = cr_page["cp_json_success"]
 
             # ───────── 音色资产 ─────────
             vce_page = create_voice_page()
@@ -3921,14 +3922,18 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     voice_create_chain = cp_json_create.click(
         create_ui.create_from_json,
         [cp_json_name, cp_json_file, ss],
-        [cp_json_result],
+        [cp_json_result, cp_json_success],
         concurrency_limit=1,
         concurrency_id="project-creation",
     ).then(
+        create_ui.require_creation_success,
+        [cp_json_success],
+        [],
+    ).success(
         hydrate_opened_project,
         [ss],
         [v_table, v_role, v_role_title, v_lib, s_log, v_status],
-    ).then(
+    ).success(
         lambda: _goto("voices"), None, _GROUPS,
     )
     voice_create_chain = _open_chain_rest(voice_create_chain)

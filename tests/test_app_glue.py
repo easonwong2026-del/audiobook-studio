@@ -127,7 +127,7 @@ def test_json_create_click_wiring():
     outputs = node.args[2]
     assert isinstance(outputs, ast.List)
     ids = _arg_ids(outputs)
-    assert ids == ["cp_json_result"]
+    assert ids == ["cp_json_result", "cp_json_success"]
     assert find_click("cp_json_check") is not None
 
 
@@ -138,7 +138,7 @@ def test_json_create_hydrates_session_and_keeps_full_voice_refresh_chain():
         node for node in ast.walk(TREE)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "then"
+        and node.func.attr in {"then", "success"}
         and node.args
         and isinstance(node.args[0], ast.Name)
         and node.args[0].id == "hydrate_opened_project"
@@ -147,6 +147,9 @@ def test_json_create_hydrates_session_and_keeps_full_voice_refresh_chain():
     ]
     assert hydrate_calls, "未找到 SessionState hydrate 接线"
     assert any(len(node.args[2].elts) == 6 for node in hydrate_calls)
+    assert "create_ui.require_creation_success" in SRC
+    assert ".success(\n        hydrate_opened_project" in SRC
+    assert ".success(\n        lambda: _goto(\"voices\")" in SRC
     assert "voice_ui.refresh_voice_filters" in SRC
     assert "voice_ui.refresh_voice_lib" in SRC
     assert "voice_ui.refresh_role_list" in SRC

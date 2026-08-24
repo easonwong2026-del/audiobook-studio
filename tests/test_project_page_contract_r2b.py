@@ -22,9 +22,18 @@ NAV_SOURCE = (ROOT / "ui" / "navigation.py").read_text(encoding="utf-8")
 CATALOG_WIRING_SOURCE = (
     ROOT / "ui" / "wiring" / "project_catalog_wiring.py"
 ).read_text(encoding="utf-8")
+VOICE_WIRING_SOURCE = (ROOT / "ui" / "wiring" / "voice_wiring.py").read_text(
+    encoding="utf-8"
+)
 PAGES_INIT_SOURCE = (ROOT / "ui" / "pages" / "__init__.py").read_text(
     encoding="utf-8"
 )
+PRODUCTION_SOURCE = "\n".join(
+    path.read_text(encoding="utf-8")
+    for root in (ROOT / "ui", ROOT / "services", ROOT / "lib")
+    for path in root.rglob("*.py")
+)
+PRODUCTION_SOURCE += "\n" + APP_SOURCE
 
 
 def _summary(status: str, message: str):
@@ -146,7 +155,7 @@ def test_open_and_create_wiring_use_live_session_contract():
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "then"
+            and node.func.attr in {"then", "success"}
             and node.args
             and isinstance(node.args[0], ast.Name)
             and node.args[0].id == "hydrate_opened_project"
@@ -211,3 +220,29 @@ def test_inspector_distinguishes_orphan_and_invalid_relation_copy():
     assert "⚠ 关系无效 · 所属整书身份冲突" in invalid
     assert "⚠ 关系无效 · 缺少所属整书" not in orphan
     assert "⚠ 未归属章节 · 所属整书身份冲突" not in invalid
+
+
+def test_ia2a_legacy_workbench_sinks_remain_permanently_retired():
+    assert not (ROOT / "ui" / "components" / "dashboard.py").exists()
+    for marker in (
+        "ov_status",
+        "ov_progress",
+        "ov_task",
+        "ov_issues",
+        "ov_open",
+        "ov_voices",
+        "ov_synth",
+        "ov_export",
+        "refresh_overview",
+        "_dashboard_snapshot",
+        "grp-workbench-legacy-sink",
+    ):
+        assert marker not in PRODUCTION_SOURCE
+
+
+def test_voice_wiring_does_not_receive_project_compatibility_injection():
+    assert '"project": p_sel' not in APP_SOURCE
+    assert "p_sel" not in VOICE_WIRING_SOURCE
+    assert 'context["project"]' not in VOICE_WIRING_SOURCE
+    assert 'context["session"]' in VOICE_WIRING_SOURCE
+    assert 'context["production_voice"]' in VOICE_WIRING_SOURCE

@@ -178,14 +178,14 @@ def format_creation_warnings(warnings: list[str], limit: int = 10) -> str:
     return "\n".join(lines)
 
 
-def create_from_json(project_name, json_file, ss=None) -> str:
-    """Create one V3 project and write the opened-project session state."""
+def create_from_json(project_name, json_file, ss=None) -> tuple[str, bool]:
+    """Create one V3 project and report ``(message, creation_success)``."""
     source = _file_value_path(json_file)
     name = str(project_name or "").strip()
     if not name:
-        return "### ⚠ 请输入项目名称", _update()
+        return "### ⚠ 请输入项目名称", False
     if not source or not os.path.isfile(source):
-        return "### ⚠ 请上传 structured_script.json", _update()
+        return "### ⚠ 请上传 structured_script.json", False
     try:
         result = ProjectCreationService.create_from_structured_script(name, source)
         if ss is not None:
@@ -204,12 +204,20 @@ def create_from_json(project_name, json_file, ss=None) -> str:
             "\n**下一步**：前往「角色与声音」完成声音绑定。"
             + format_creation_warnings(result.warnings)
         )
-        return message
+        return message, True
     except ValueError as exc:
-        return f"### ❌ 创建失败\n{html.escape(str(exc))}", _update()
+        return f"### ❌ 创建失败\n{html.escape(str(exc))}", False
     except Exception as exc:  # pragma: no cover - final UI safety net
         logger.exception("JSON 项目创建失败")
-        return f"### ❌ 创建异常\n{html.escape(str(exc)[:800])}", _update()
+        return f"### ❌ 创建异常\n{html.escape(str(exc)[:800])}", False
+
+
+def require_creation_success(creation_success: bool) -> None:
+    """Stop the dependent success chain when creation did not succeed."""
+    if not creation_success:
+        import gradio as gr
+
+        raise gr.Error("项目创建未成功；请留在当前页面修正错误后重试。")
 
 
 __all__ = [
@@ -219,4 +227,5 @@ __all__ = [
     "format_json_preview",
     "inspect_json",
     "inspect_project_name",
+    "require_creation_success",
 ]
