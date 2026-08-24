@@ -48,7 +48,6 @@ from services import (
     VoiceAssetService,
     VoiceCastError,
     VoiceCastResolver,
-    WorkflowService,
     get_application_lifecycle,
 )
 from services.review_audio import ReviewAudioService
@@ -65,12 +64,10 @@ from ui import whole_book_assembly_handlers as assembly_ui
 from ui.components import (
     build_role_management_choices,
     create_production_navigation,
-    empty_dashboard_html,
     format_role_config_title,
     format_bound_role_choices,
     format_role_label,
     format_role_management_summary,
-    project_dashboard_html,
 )
 from ui.navigation import _GROUPS, _goto, create_nav_buttons
 from ui.pages import (
@@ -3335,107 +3332,6 @@ def refresh_production_check(ss):
         return f"#### 生产检查\n⚠ 状态读取失败：{exc}"
 
 
-def _dashboard_snapshot(ss):
-    """将现有项目快照整理为工作台展示数据。
-
-    这里只读取 ``SessionState`` / ``ProjectSnapshot`` 并决定下一步 UI 文案，不改变
-    项目、队列或任何持久化状态；业务操作仍由既有 Service 和 handler 负责。
-    """
-    if not ss or not ss.project:
-        return empty_dashboard_html()
-
-    try:
-        snap = _snap(ss)
-        if snap is None:
-            return empty_dashboard_html()
-        script, meta = snap.script, snap.meta
-        title = script.get("meta", {}).get("title", ss.project)
-        chapters = script.get("chapters", [])
-        total_chapters = len(chapters)
-        total_segments = getattr(meta, "total_segments", 0)
-        completed_segments = getattr(meta, "completed_count", 0)
-        statuses = getattr(meta, "segments_status", {}) or {}
-        completed_chapters = sum(
-            1 for chapter in chapters
-            if chapter.get("segments")
-            and all(statuses.get(segment.get("id")) == "done" for segment in chapter["segments"])
-        )
-        roles = script.get("voices", {}) or {}
-        role_total = len(roles)
-        roles_bound = sum(1 for role in roles if ss.bindings.get(role))
-
-        workflow = WorkflowService.get_state(ss.project)
-        stage = str(workflow.get("stage") or "prepared")
-        stage_labels = {
-            "prepared": "项目已准备",
-            "cast_pending": "等待角色声音",
-            "ready_for_production": "可以开始生产",
-            "producing": "生产进行中",
-            "quality_check": "进入质量检查",
-            "needs_fix": "需要修复",
-            "quality_passed": "质量已通过",
-            "exporting": "正在导出",
-            "delivered": "已经交付",
-        }
-        actions = workflow.get("next_actions") or []
-        next_action = actions[0] if actions else {}
-        next_step = stage_labels.get(stage, stage)
-        next_detail = str(
-            next_action.get("reason") or "按工作流状态继续下一步。"
-        )
-        issues: list[tuple[str, str]] = [
-            (
-                "error" if blocker.get("code") in {
-                    "SYNTHESIS_FAILED", "QUALITY_FIX_REQUIRED"
-                } else "warning",
-                str(blocker.get("message") or blocker.get("code") or ""),
-            )
-            for blocker in workflow.get("blockers", [])
-        ]
-        active_task = workflow.get("summary", {}).get("active_production_task")
-        quality = workflow.get("summary", {}).get("quality", {})
-        task_label = (
-            f"生产任务 · {active_task}"
-            if active_task else f"工作流 · {stage_labels.get(stage, stage)}"
-        )
-        task_detail = (
-            f"合成 {completed_segments}/{total_segments} 段；"
-            f"QA 通过 {quality.get('passed', 0)}，"
-            f"待试听确认 {quality.get('needs_review', 0)}，"
-            f"需修复 {quality.get('needs_fix', 0)}。"
-        )
-
-        return project_dashboard_html(
-            title=title,
-            project_name=ss.project,
-            chapters_done=completed_chapters,
-            chapters_total=total_chapters,
-            segments_done=completed_segments,
-            segments_total=total_segments,
-            roles_bound=roles_bound,
-            roles_total=role_total,
-            task_label=task_label,
-            task_detail=task_detail,
-            next_step=next_step,
-            next_detail=next_detail,
-            issues=issues,
-        )
-    except Exception as exc:
-        logger.warning("刷新工作台状态失败: %s", exc)
-        return empty_dashboard_html()
-
-
-def refresh_overview(ss):
-    """刷新工作台的项目状态、生产摘要、待办和项目书架。
-
-    书架输出走 **catalog 数据源 + ``ss.catalog_query`` 过滤**（单一状态来源），
-    绝不使用 legacy ``refresh_bookshelf`` 覆盖——否则导航离开/返回时会把
-    搜索结果刷成全部项目（幽灵状态回归）。
-    """
-    query = (ss.catalog_query if ss is not None else "") or ""
-    return (*_dashboard_snapshot(ss), catalog_ui.render_bookshelf_rows(query))
-
-
 def _review_outputs():
     """Return the complete review-page callback contract in one stable order."""
     return [
@@ -3456,7 +3352,7 @@ def _open_chain_rest(event):
 
     顺序与原 22 元组全量刷新契约一致，覆盖：顶栏 / 章节表 / 章节试听
     选项 / 队列列表 / 章节树 / 合成预览 / 音色库 / 分类下拉 / 生产检查 /
-    默认导出目录 / 概览 / 项目下拉。
+    默认导出目录 / Catalog / 项目下拉。
     """
     e = event
     e = e.then(
@@ -3519,10 +3415,6 @@ def _open_chain_rest(event):
         export_ui.refresh_export_readiness,
         [e_fmt, e_qa_policy, ss],
         [e_readiness],
-    )
-    e = e.then(
-        refresh_overview, [ss],
-        [ov_status, ov_progress, ov_task, ov_issues, ov_bookshelf],
     )
     e = e.then(
         catalog_ui.refresh_bookshelf_management_view_with_hierarchy,
@@ -3597,10 +3489,6 @@ def _post_archive_reconcile(event):
         [e_fmt, e_qa_policy, ss],
         [e_readiness],
     )
-    e = e.then(
-        refresh_overview, [ss],
-        [ov_status, ov_progress, ov_task, ov_issues, ov_bookshelf],
-    )
     return e
 
 
@@ -3632,15 +3520,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             # ───────── 概览 ─────────
             ov_page = create_overview_page()
             grp_overview = ov_page["group"]
-            ov_status = ov_page["ov_status"]
-            ov_progress = ov_page["ov_progress"]
-            ov_task = ov_page["ov_task"]
-            ov_issues = ov_page["ov_issues"]
             ov_bookshelf = ov_page["ov_bookshelf"]
-            ov_open = ov_page["ov_open"]
-            ov_voices = ov_page["ov_voices"]
-            ov_synth = ov_page["ov_synth"]
-            ov_export = ov_page["ov_export"]
             workbench_new_project = ov_page["workbench_new_project"]
             bookshelf_search = ov_page["bookshelf_search"]
             bookshelf_refresh = ov_page["bookshelf_refresh"]
@@ -3999,8 +3879,6 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     overview_nav_chain = nav_overview.click(
         lambda: _goto("overview"), None, _GROUPS,
         js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-overview')?.classList.add('active'); }").then(
-        refresh_overview, [ss], [ov_status, ov_progress, ov_task, ov_issues, ov_bookshelf])
-    overview_nav_chain.then(
         catalog_ui.refresh_bookshelf_management_view_with_hierarchy,
         [bookshelf_search, p_sel, ss],
         catalog_management_outputs,
@@ -4121,59 +3999,6 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         assembly_outputs,
     )
 
-    # ── 概览页快捷操作：「打开项目」切页 → open_project 首步 → 打开链刷新 ──
-    chain = ov_open.click(
-        lambda: _goto("project"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-project')?.classList.add('active'); }"    ).then(open_project, [p_sel, ss], [p_summary, v_table, v_role, v_role_title, v_lib, s_log, v_status])
-    _open_chain_rest(chain)
-    ov_voices.click(
-        lambda: _goto("voices"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-voices')?.classList.add('active'); }").then(
-        voice_ui.refresh_role_list,
-        [v_role_search, v_role, ss], [v_table]).then(
-        voice_ui.refresh_voice_filters,
-        [], [v_bind_category, v_lib_category, v_save_category]).then(
-        voice_ui.refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category]).then(
-        refresh_voice_cast_ui, [ss], [v_status, v_cast_finalize]
-    )
-    ov_synth.click(
-        lambda: _goto("synth"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-synth')?.classList.add('active'); }").then(
-        lambda: gr.update(value="synth"), None, [production_stage]).then(
-        refresh_production_voice_choices, [], [e_voice, utility_override_voice]).then(
-        refresh_production_check, [ss], [production_check]).then(
-        preview_chapters, [ss], _review_outputs()).then(
-        preview_chapter_options, [ss], [e_chapter_sel]).then(
-        refresh_quality_workspace,
-        [e_quality_filter, e_chapter_sel, ss],
-        [e_quality_summary, e_seg_preview_sel, e_seg_regen_sel, e_segment_quality]).then(
-        recover_review_repair,
-        [ss],
-        [e_review_repair_id, e_review_repair_task_id, e_review_repair_project, review_repair_timer]).then(
-        refresh_queue_list, [ss], [s_queue_list]).then(
-        refresh_production_task, [ss], [s_task_status]).then(
-        refresh_supplement_roles, [ss], [utility_role]).then(
-        refresh_utility_export_hint, [utility_mode, ss], [utility_save_loc]).then(
-        lambda: gr.update(choices=_lib_voices(), value=None), None, [utility_voice]).then(
-        refresh_quick_tts_engine_info, None, [utility_engine])
-    ov_export.click(
-        lambda: _goto("export"), None, _GROUPS,
-        js="(x) => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); document.getElementById('nav-export')?.classList.add('active'); }").then(
-        export_ui.refresh_export_default_dir, [ss], [e_save_dir_hint]).then(
-        export_ui.refresh_export_readiness, [e_fmt, e_qa_policy, ss], [e_readiness]).then(
-        export_ui.reconcile_export_state,
-        [e_export_task_id, e_export_output_dir, ss],
-        [
-            e_out,
-            e_path,
-            e_export_task_id,
-            e_export_output_dir,
-            e_open,
-            e_export_timer,
-            e_go,
-        ],
-    )
-
     # ═══════════ events（业务接线，沿用 v2） ═══════════
 
     # ═══════════ 新建项目页面 ═══════════
@@ -4264,7 +4089,6 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     wire_voice_page(
         vce_page,
         {
-            "project": p_sel,
             "session": ss,
             "production_voice": e_voice,
             "callbacks": {

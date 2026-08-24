@@ -4,7 +4,6 @@
 """
 
 from .brand_logo import BRAND_MARK_PATH, BRAND_MARK_SIZE, create_brand_logo
-from .dashboard import empty_dashboard_html, project_dashboard_html
 from .production_nav import create_production_navigation
 from .voice_binding import (
     build_role_management_choices,
@@ -20,8 +19,6 @@ __all__ = [
     "BRAND_MARK_PATH",
     "BRAND_MARK_SIZE",
     "create_brand_logo",
-    "empty_dashboard_html",
-    "project_dashboard_html",
     "create_production_navigation",
     "build_role_management_choices",
     "build_role_management_rows",

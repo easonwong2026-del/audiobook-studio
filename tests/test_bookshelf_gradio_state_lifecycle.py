@@ -253,7 +253,7 @@ def test_real_gradio_bookshelf_click_a_then_b_never_updates_p_sel(
 def test_bookshelf_selection_has_one_catalog_aware_p_sel_owner():
     source = APP_PATH.read_text(encoding="utf-8")
     start = source.index("bookshelf_select_chain = ov_bookshelf.select(")
-    end = source.index("# ── 概览页快捷操作", start)
+    end = source.index("# ═══════════ events", start)
     selection_block = source[start:end]
 
     assert "p_sel" not in selection_block

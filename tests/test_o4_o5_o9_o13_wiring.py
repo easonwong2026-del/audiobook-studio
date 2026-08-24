@@ -5,7 +5,7 @@ handler（create_project / do_export / preview_bound_voice /
 do_export_subtitles / refresh_top_status / refresh_queue_list / pause_synthesis /
 resume_synthesis）接线未变、do_synthesis 首参仍为 ss。
 
-V3.1 重构后 p_open.click / ov_open.click / ov_bookshelf.select 三条入口统一走
+V3.1 重构后 p_open.click / bookshelf_open / ov_bookshelf.select 三条入口统一走
 打开项目统一链路（open_project 首步 + _open_chain_rest），不再每个 handler 单独 .then 链。测试适配新架构。
 """
 import sys
@@ -20,6 +20,11 @@ APP_PATH = os.path.join(PROJECT_ROOT, "app.py")
 with open(APP_PATH, encoding="utf-8") as f:
     SRC = f.read()
 TREE = ast.parse(SRC)
+CATALOG_WIRING_PATH = os.path.join(
+    PROJECT_ROOT, "ui", "wiring", "project_catalog_wiring.py"
+)
+with open(CATALOG_WIRING_PATH, encoding="utf-8") as f:
+    CATALOG_WIRING_SRC = f.read()
 EXPORT_HANDLERS_PATH = os.path.join(PROJECT_ROOT, "ui", "export_handlers.py")
 with open(EXPORT_HANDLERS_PATH, encoding="utf-8") as f:
     EXPORT_HANDLERS_SRC = f.read()
@@ -123,7 +128,7 @@ def test_o4_bookshelf_components_defined():
 
 
 def test_o4_p_open_click_appends_bookshelf_then():
-    # V3.1：p_open.click / ov_open.click / ov_bookshelf.select 三条入口统一走
+    # V3.1：p_open.click / bookshelf_open / ov_bookshelf.select 三条入口统一走
     # 打开项目统一链路（方案 A），目录刷新由 Project Catalog 接管，
     # Project View handler 仍服务项目页章节树。
     # 校验刷新链覆盖 ov_bookshelf / p_chapter_tree。
@@ -226,10 +231,10 @@ def test_redline_core_handlers_still_defined():
 
 
 def test_redline_p_open_chain_preserves_top_status_preview_queue():
-    # 阶段三：open_project 作为 .then 链首步，其后经 _open_chain_rest 接好各刷新。
-    # 校验打开链以 .then 形式触发这些刷新 handler。
-    assert ".then(open_project," in SRC, \
-        "打开链未以 .then(open_project, ...) 作为首步"
+    # 阶段三：Workbench Inspector 的 bookshelf_open 作为打开首步，
+    # 其后经 _open_chain_rest 接好各刷新。
+    assert 'page["bookshelf_open"].click(' in CATALOG_WIRING_SRC, \
+        "Workbench Inspector 未以 bookshelf_open 作为打开首步"
     assert ".then(refresh_top_status, [ss], [top_status])" in SRC, \
         "打开链未以 .then(refresh_top_status, [ss], [top_status]) 刷新顶栏"
     assert ".then(preview_chapters, [ss]" in SRC, \

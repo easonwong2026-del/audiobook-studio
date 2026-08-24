@@ -949,12 +949,14 @@ serial rerun passed with baseline warning count and no candidate-only regression
 
 ---
 
-# Workbench IA-1 follow-up — Round IA-2 caller audit correction
+# Workbench IA-1 follow-up — Round IA-2 caller audit correction (pre-IA-2A baseline)
 
 日期：2026-08-23
 
 Reference：PR #63 head `e97b84c1104171801bbb31a1cc3bcb6af12ea8ca`。
-本节只同步 IA-1 完成后的 caller audit 结论；不执行 Round IA-2 删除。
+本节记录 IA-2A 实施前的 caller audit 结论；其 candidate 状态已由文末
+Round IA-2A final classification superseded。本节保留作为历史基线，不代表当前
+生产代码仍保留这些 sink。
 
 ## Corrected Voice wiring conclusion
 
@@ -1029,3 +1031,139 @@ hidden legacy sink
 
 This section records candidates only. IA-2 implementation is explicitly out of scope
 for the IA-1 follow-up.
+
+---
+
+# Round IA-2A — Workbench Legacy Sink Retirement
+
+日期：2026-08-24
+
+Merged baseline：PR #63 已按仓库既有 squash 策略合并；merge commit / new origin/main
+为 4393909c985243e4f65fb0a18771e7690d75d540。IA-2A 分支从该 origin/main 建立：
+refactor/workbench-legacy-sink-r2a。
+
+本轮只退休 IA-1 遗留的、无用户可见入口的 Workbench dashboard / quick-action sink。
+p_sel、Project Page compatibility contract、Runtime/TTS/Production/QA/Repair/Export、
+Merge、Assembly、Storage、Voice Cast、MCP 与 dependencies 均未触碰。
+
+## Final caller-audit conclusion
+
+完整审计覆盖：
+
+- 全仓 rg（production、tests、scripts、MCP、docs）；
+- production Python AST（排除 .git、.venv-test、__pycache__）；
+- imports / reexports；
+- getattr、__getattribute__、string callback keys、monkeypatch / setattr；
+- tests 与动态 caller 入口。
+
+审计结论：候选 dashboard / quick-action 名称在生产代码中只曾由 app.py、
+ui/pages/overview_page.py、ui/components/dashboard.py 及 ui/components/__init__.py
+承载；没有 services、repositories、scripts 或 mcp_server 的 caller。完成清理后，
+生产 AST 与 rg 不再发现这些 legacy sink；剩余命中仅是测试断言和本审计文档中的
+历史 / 当前审计记录。ui/components/__init__.py 已不再 re-export dashboard helper。
+没有发现 getattr、__getattribute__、string callback key 或 monkeypatch 对这些
+sink 的隐藏消费。
+
+## Before / after caller graph
+
+Before：
+
+    Workbench / open / archive / overview navigation
+      ├─ refresh_overview
+      │    └─ _dashboard_snapshot -> ov_status / ov_progress / ov_task / ov_issues
+      └─ hidden ov_open / ov_voices / ov_synth / ov_export quick-action chains
+
+After：
+
+    Workbench visible Catalog + Inspector
+      ├─ bookshelf_open -> open_selected_project -> _open_chain_rest
+      │    ├─ downstream refresh contract
+      │    └─ Catalog management refresh
+      └─ visible nav_voices / nav_synth / nav_export -> existing page refresh chains
+
+    overview navigation / archive reconcile
+      └─ live Catalog and workflow outputs only
+
+不存在 dashboard tuple refresh，也不存在 hidden quick-action event wiring。
+
+## Final classification
+
+| candidate | classification | final fact |
+|---|---|---|
+| ov_status | DEAD | hidden dashboard output 与 refresh_overview 一并删除 |
+| ov_progress | DEAD | hidden dashboard output 与 refresh_overview 一并删除 |
+| ov_task | DEAD | hidden dashboard output 与 refresh_overview 一并删除 |
+| ov_issues | DEAD | hidden dashboard output 与 refresh_overview 一并删除 |
+| ov_open | DEAD | hidden open quick action 删除；由 Workbench bookshelf_open 覆盖 |
+| ov_voices | DEAD | hidden voice quick action 删除；由 visible nav_voices 覆盖 |
+| ov_synth | DEAD | hidden production quick action 删除；由 visible nav_synth 覆盖 |
+| ov_export | DEAD | hidden delivery quick action 删除；由 visible nav_export 覆盖 |
+| refresh_overview | DEAD | 不再刷新不可见 dashboard tuple；Catalog 由 authority 直接刷新 |
+| _dashboard_snapshot | DEAD | 唯一旧 dashboard producer 随 refresh_overview 删除 |
+| ui/components/dashboard.py | DEAD | 全仓 production caller / re-export 清零后删除 |
+| empty_dashboard_html / project_dashboard_html | DEAD | helper 与 component re-export 删除 |
+| wire_voice_page project injection | DEAD | 只删除 dead project: p_sel injection；Voice wiring live keys 不变 |
+| ov_bookshelf | LIVE | Workbench visible Catalog/Dataframe 与 selection wiring |
+| bookshelf_open | LIVE | Workbench Inspector 唯一可见打开入口 |
+| nav_voices | LIVE | visible 角色与声音入口及既有 refresh chain |
+| nav_synth | LIVE | visible 生产与质检入口及既有 refresh chain |
+| nav_export | LIVE | visible 交付入口及 export reconciliation |
+| catalog_ui.refresh_bookshelf_management_view_with_hierarchy | LIVE | Catalog authority；打开、返回、archive 等链路继续使用 |
+| grp_project / p_sel / p_open / p_refresh / p_summary / p_storage / p_chapter_tree | DEFERRED | IA-2B 冻结兼容 contract，未删除 |
+| create_project_page / project_view_ui Project Page contract | DEFERRED | IA-2B scope，未改动 |
+
+## Deletion list
+
+- app.py dashboard imports、_dashboard_snapshot、refresh_overview 及其不可见输出接线；
+- app.py ov_open / ov_voices / ov_synth / ov_export hidden event registrations；
+- app.py wire_voice_page context 中 dead project: p_sel injection；
+- overview_page.py hidden legacy group 与八个 sink return keys；
+- ui/components/dashboard.py 及 components package re-exports；
+- theme.py 中仅服务旧 dashboard / quick-action 的 dead CSS selectors；
+- 受影响的旧 structural tests，并新增 IA-2A caller / replacement regression tests。
+
+## Retention and visible-path proof
+
+- visible navigation 仍为 工作台 / 角色与声音 / 生产与质检 / 交付 / 设置；
+- Workbench 新建项目按钮与既有 create/open chain 保留；
+- bookshelf select 仍只更新 selected_project；opened project 仍由 Inspector 显式打开，
+  selected != opened invariant 未改变；
+- bookshelf_open 仍进入 open_selected_project，再复用 _open_chain_rest；
+  Export reconciliation、top status、Voice Cast、Review / QA、Repair observer、
+  production queue/task、synthesis scope/preview、voice library、production check、
+  export readiness、Catalog、Merge、Assembly 的既有 downstream callbacks 均保留；
+- visible nav_voices、nav_synth、nav_export 保留原有 page refresh wiring；
+- search / hierarchy / archive / restore 与 Export project-switch isolation 仍走
+  Catalog / Session authority；没有引入第二个 Catalog scan 或改变 filter semantics。
+
+## Round IA-2B latest caller audit
+
+本轮没有开始 IA-2B。最新边界结论如下：
+
+- p_sel 仍被 Project Page 的 p_open / p_refresh / summary / chapter tree / storage
+  contract 使用；open chain 会先 reconcile selector，再把 p_sel 交给 Project View；
+- p_sel 仍作为 project_catalog_wiring 的 compatibility dependency，用于 selector
+  与管理输出；创建链、设置页 Catalog refresh 与现有项目页事件仍保留；
+- grp_project、create_project_page、project_view_ui 及 compatibility keys 均保留；
+- Voice wiring 不读取 context project，也不消费 p_sel；本轮只删 dead injection，
+  没有把该结论扩大为 p_sel 全局退休；
+- 因而 Project Page / p_sel 正式退休仍属于 IA-2B，未在 IA-2A 实施。
+
+## Validation record
+
+IA-2A targeted structural / Voice / Catalog / open / Export checks：57 passed（初始
+legacy-sink 集）；扩展 IA / Catalog / Session / Project Page boundary 集为
+116 passed；Voice / Production / Export project-switch / Merge / Assembly 集为
+161 passed, 1 skipped。
+
+最终串行验证：
+
+- Full pytest：1340 passed, 26 skipped；
+- Windows selected workflow command：329 passed；
+- compileall：pass；
+- Ruff --select F：pass；
+- git diff --check：pass。
+
+PR #63 合并前最终事实：Full pytest 1335 passed / 26 skipped、targeted IA / Catalog
+65 passed、Windows selected workflow 329 passed、CI run 32645813009 Ubuntu + Windows
+success。

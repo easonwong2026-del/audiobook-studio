@@ -2,21 +2,16 @@
 
 The Workbench is the only visible project-context entry point.  Its left side
 is the existing flat Catalog/Dataframe presentation and its right side is an
-inspector for ``SessionState.selected_project``.  The old dashboard blocks and
-Project Page controls remain available only through hidden compatibility
-components so the current refresh contracts can be retired in a later round.
+inspector for ``SessionState.selected_project``.  Project Page controls remain
+available through their compatibility contract; the old dashboard and quick
+action sinks are retired.
 """
 from __future__ import annotations
 
 import gradio as gr
 
-from ui.components.dashboard import empty_dashboard_html
-
-
 def create_overview_page() -> dict:
     """Create the Workbench shell and its selected-project inspector."""
-    initial_status, initial_progress, initial_task, initial_issues = empty_dashboard_html()
-
     with gr.Group(visible=True, elem_id="grp-overview") as grp_overview:
         with gr.Row(elem_classes=["workbench-toolbar"]):
             with gr.Column(scale=3, elem_classes=["workbench-heading"]):
@@ -281,30 +276,9 @@ def create_overview_page() -> dict:
         bookshelf_archive_confirm = gr.State("")
         bookshelf_archive_event = gr.State(0)
 
-        # Hidden legacy dashboard/quick-action components.  Refresh chains
-        # still write them until the old dashboard contract is retired in the
-        # next round; none of these blocks is visible to users.
-        with gr.Group(visible=False, elem_id="grp-workbench-legacy-sink"):
-            ov_status = gr.HTML(value=initial_status, elem_classes=["workbench-status"])
-            ov_progress = gr.HTML(value=initial_progress)
-            ov_task = gr.HTML(value=initial_task)
-            ov_issues = gr.HTML(value=initial_issues)
-            ov_open = gr.Button("打开 / 切换项目", visible=False)
-            ov_voices = gr.Button("配置角色声音", visible=False)
-            ov_synth = gr.Button("进入生产与质检", visible=False)
-            ov_export = gr.Button("交付成品", visible=False)
-
     return {
         "group": grp_overview,
-        "ov_status": ov_status,
-        "ov_progress": ov_progress,
-        "ov_task": ov_task,
-        "ov_issues": ov_issues,
         "ov_bookshelf": ov_bookshelf,
-        "ov_open": ov_open,
-        "ov_voices": ov_voices,
-        "ov_synth": ov_synth,
-        "ov_export": ov_export,
         "workbench_new_project": workbench_new_project,
         "bookshelf_search": bookshelf_search,
         "bookshelf_refresh": bookshelf_refresh,
