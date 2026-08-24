@@ -1441,18 +1441,18 @@ Only the requested R3B categories are used below.
 
 | Symbol | Final classification | Evidence and handling |
 |---|---|---|
-| `WORKSPACE_ROOT` | `PUBLIC_COMPAT` | Module-level mutable legacy root; synchronized by `ProjectService.set_data_dir()` and consumed only when a caller enters the pm facade. |
-| `LEGACY_ROOT` | `PUBLIC_COMPAT` | Same compatibility contract; Repository still owns workspace-first/legacy-fallback resolution. |
-| `_repository` | `PUBLIC_COMPAT` | Narrow facade implementation that synchronizes the two mutable roots before delegating to `ProjectRepository`. |
+| `WORKSPACE_ROOT` | `LEGACY_COMPAT` | Module-level mutable legacy root; synchronized by `ProjectService.set_data_dir()` and consumed only when a caller enters the pm facade. |
+| `LEGACY_ROOT` | `LEGACY_COMPAT` | Same compatibility contract; Repository still owns workspace-first/legacy-fallback resolution. |
+| `_repository` | `COMPAT_INTERNAL` | Internal facade implementation that synchronizes the two mutable roots before delegating to `ProjectRepository`; it is not a public API. |
 | `_resolve_dir` | `DEAD` | No production or external evidence in the audit; deleted. Canonical resolver remains `ProjectRepository._resolve_dir`. |
-| `scan_projects` | `PUBLIC_COMPAT` | Retained public CRUD wrapper for legacy callers and explicit compatibility tests. Production scanning uses `ProjectService`/`ProjectRepository`. |
-| `create_project` | `PUBLIC_COMPAT` | Retained public creation wrapper; production creation uses `ProjectCreationService`/`ProjectRepository`. |
-| `open_project` | `PUBLIC_COMPAT` | Retained public load wrapper; production open uses `ProjectService`/`ProjectRepository`. |
-| `load_snapshot` | `PUBLIC_COMPAT` | Retained public snapshot wrapper; production snapshot ownership is `ProjectRepository`. |
-| `delete_project` | `PUBLIC_COMPAT` | Retained as an externally observable CRUD compatibility surface; guarded production deletion remains in `ProjectService`. |
-| `get_project_dir` | `PUBLIC_COMPAT` | Retained path-resolution wrapper; production services use `ProjectRepository`. |
-| `update_segment_status` | `PUBLIC_COMPAT` | Retained status mutation wrapper; production mutation paths use Service/Repository APIs. |
-| `get_remaining` | `PUBLIC_COMPAT` | Retained recovery wrapper; canonical recovery logic remains in `ProjectRepository`. |
+| `scan_projects` | `LEGACY_COMPAT_RETAINED` | Retained CRUD-looking wrapper for compatibility tests and unknown legacy integrations. No production caller or verifiable external consumer was found; production scanning uses `ProjectService`/`ProjectRepository`. |
+| `create_project` | `LEGACY_COMPAT_RETAINED` | Retained creation wrapper for compatibility risk only; production creation uses `ProjectCreationService`/`ProjectRepository`. |
+| `open_project` | `LEGACY_COMPAT_RETAINED` | Retained load wrapper for compatibility risk only; production open uses `ProjectService`/`ProjectRepository`. |
+| `load_snapshot` | `LEGACY_COMPAT_RETAINED` | Retained snapshot wrapper for compatibility risk only; production snapshot ownership is `ProjectRepository`. |
+| `delete_project` | `LEGACY_COMPAT_RETAINED` | Retained CRUD-looking wrapper for compatibility risk only; guarded production deletion remains in `ProjectService`. |
+| `get_project_dir` | `LEGACY_COMPAT_RETAINED` | Retained path-resolution wrapper for compatibility risk only; production services use `ProjectRepository`. |
+| `update_segment_status` | `LEGACY_COMPAT_RETAINED` | Retained status mutation wrapper for compatibility risk only; production mutation paths use Service/Repository APIs. |
+| `get_remaining` | `LEGACY_COMPAT_RETAINED` | Retained recovery wrapper for compatibility risk only; canonical recovery logic remains in `ProjectRepository`. |
 | `_meta_path` | `DEAD` | No pm wrapper caller; deleted. `ProjectRepository._meta_path` remains canonical and tested. |
 | `_load_meta` | `DEAD` | No pm wrapper caller; deleted. Repository metadata loading is unchanged. |
 | `_repair_meta` | `DEAD` | No pm wrapper caller; deleted. Repository repair semantics are unchanged. |
@@ -1463,10 +1463,12 @@ Only the requested R3B categories are used below.
 | `set_synthesis_selections` | `DEAD` | Same; synthesis scope semantics unchanged. |
 | `_project_status` | `DEAD` | Style/catalog test migrated to `ProjectRepository._project_status`; deleted from pm. |
 
-No symbol is classified `PRODUCTION`, `TEST_ONLY_LEGACY`, or `DEFERRED` in the
-final pm surface: production callers were migrated, test-only callers were
-migrated, and the retained CRUD/root names have an explicit public compatibility
-reason. The retained facade is intentionally not deleted mechanically.
+No retained pm symbol is classified `PRODUCTION` or `TEST_ONLY_LEGACY`: production
+callers were migrated and test-only callers were migrated. The repository contains
+no verifiable real external consumer. Retaining the public-looking CRUD facade is a
+conservative response to unknown legacy-integration risk, not evidence that an
+external consumer has been proven. The retained facade is intentionally not deleted
+mechanically.
 
 ### Test-only migration and compatibility test disposition
 
@@ -1528,5 +1530,5 @@ project-manager/repository/service, storage/migration, snapshot/progress/synthes
 Create/Open, Catalog/Session, Production, Runtime selected, Export project-switch
 isolation, Merge, Assembly, and MCP `335 passed`; Windows selected workflow `329
 passed`; compileall, Ruff `--select F` on changed Python, and `git diff --check`
-also passed. CI run `32722861080` completed with Ubuntu and Windows success. No
+also passed. Final CI run `32723417477` completed with Ubuntu and Windows success. No
 IA-2B work beyond this facade boundary is included.
