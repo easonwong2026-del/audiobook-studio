@@ -159,14 +159,16 @@ def test_qa_search_filter_preserved_across_archive_restore(qa_workspace, tmp_pat
 
     # 归档后按同一 query 刷新 → 0
     handlers.archive_selected("alpha", "alpha", None)
-    bookshelf, _p_sel, trash_rows, _tc, _ts = handlers.refresh_project_catalog("阿尔法")
+    refreshed = handlers.refresh_bookshelf_management_view("阿尔法", SessionState())
+    bookshelf, trash_rows = refreshed[0], refreshed[1]
     assert [row[0] for row in bookshelf["data"]] == []
     assert len(trash_rows) == 1
 
     # 恢复后按同一 query 刷新 → 1
     archived = ProjectStorageService.list_archived()
     handlers.restore_archived_global(archived[0]["archive_id"])
-    bookshelf2, _p_sel2, trash_rows2, _tc2, _ts2 = handlers.refresh_project_catalog("阿尔法")
+    refreshed2 = handlers.refresh_bookshelf_management_view("阿尔法", SessionState())
+    bookshelf2, trash_rows2 = refreshed2[0], refreshed2[1]
     assert [row[0] for row in bookshelf2["data"]] == ["alpha"]
     assert trash_rows2 == []
 
@@ -192,8 +194,8 @@ def test_qa_restore_backup_global_message(qa_workspace, tmp_path):
 
 
 def test_qa_open_selected_project_safe_without_callback(qa_workspace):
-    """未注入 open_project 回调时返回空态 7 元组，不崩溃。"""
+    """未注入 open_project 回调时返回空态 6 元组，不崩溃。"""
     handlers.bind_open_project(None)
     result = handlers.open_selected_project("alpha", SessionState())
-    assert len(result) == 7
-    assert "等待打开项目" in result[0]
+    assert len(result) == 6
+    assert result[0].get("choices") == []

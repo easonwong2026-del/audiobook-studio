@@ -69,7 +69,7 @@ def test_services_imported_and_used():
 
 def test_handlers_take_ss():
     """核心 handler 均接 ss（do_export 用 *args 吸收 ss）。"""
-    for h in ["create_project", "do_synthesis", "preview_bound_voice",
+    for h in ["do_synthesis", "preview_bound_voice",
               "bind_voice", "open_project", "regenerate_segment", "preview_chapters",
               "play_segment", "cancel"]:
         fn = find_func(h)
@@ -135,7 +135,7 @@ def test_main_groups_follow_navigation_order():
         if isinstance(element, ast.Name)
     ]
     assert names == [
-        "grp_overview", "grp_create_project", "grp_project", "grp_voices",
+        "grp_overview", "grp_create_project", "grp_voices",
         "grp_production_nav", "grp_synth", "grp_review", "grp_export",
         "grp_supplement", "grp_settings",
     ]

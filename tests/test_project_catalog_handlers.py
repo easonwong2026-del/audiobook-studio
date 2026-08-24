@@ -5,7 +5,7 @@
 - select 只改 selected 不动 project（核心隔离不变式）；
 - 动作 handler 收显式 project_name（不读 ss.project）；
 - archive 两步确认契约（第一次只提示，第二次才归档）；
-- refresh_project_catalog 固定 5 元组契约；
+- state-aware bookshelf refresh 使用 SessionState 的 selected/opened 隔离；
 - 打开项目回调注入（open_selected_project 委托注入的 open_project）。
 """
 from __future__ import annotations
@@ -95,7 +95,6 @@ def test_select_bookshelf_row_only_sets_selected(handler_workspace):
     assert ss.project == "opened_proj"
     assert ss.script == {"meta": {}}
     assert "阿尔法" in info
-    # p_sel is owned by the following catalog-aware reconciliation callback.
 
 
 @pytest.mark.parametrize("column", range(4))
@@ -267,15 +266,14 @@ def test_archive_opened_project_resets_session(handler_workspace):
     assert "选择" in info.get("value", "")
 
 
-def test_refresh_project_catalog_contract(handler_workspace):
-    """refresh_project_catalog 返回固定 5 元组契约。"""
-    result = handlers.refresh_project_catalog("")
+def test_refresh_management_contract(handler_workspace):
+    """书架管理刷新返回不含 opened-project mirror 的固定契约。"""
+    result = handlers.refresh_bookshelf_management_view("", SessionState())
     assert isinstance(result, tuple)
-    assert len(result) == 5
-    bookshelf, p_sel_update, trash_rows, trash_choices, trash_status = result
+    assert len(result) == 24
+    bookshelf, trash_rows, trash_choices, trash_status = result[:4]
     assert bookshelf["headers"] == ["项目", "结构", "段进度", "状态", "最近修改"]
     assert {row[0] for row in bookshelf["data"]} == {"alpha", "beta"}
-    assert p_sel_update.get("choices") == ["alpha", "beta"]
     assert isinstance(trash_rows, list)
     assert trash_choices.get("choices") == []
     assert "回收站" in trash_status
@@ -286,7 +284,7 @@ def test_open_selected_project_delegates_to_injected_callback(handler_workspace)
 
     def fake_open(name, ss):
         calls.append((name, ss))
-        return (f"opened:{name}",) * 7
+        return (f"opened:{name}",) * 6
 
     handlers.bind_open_project(fake_open)
     try:
@@ -294,11 +292,12 @@ def test_open_selected_project_delegates_to_injected_callback(handler_workspace)
         result = handlers.open_selected_project("alpha", ss)
         assert calls == [("alpha", ss)]
         assert result[0] == "opened:alpha"
-        assert len(result) == 7
+        assert len(result) == 6
         # 空选中 → 不打开
         empty = handlers.open_selected_project("", ss)
         assert calls == [("alpha", ss)]
-        assert "等待打开项目" in empty[0]
+        assert len(empty) == 6
+        assert empty[0].get("choices") == []
     finally:
         handlers.bind_open_project(None)
 

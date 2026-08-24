@@ -259,30 +259,30 @@ def test_relationship_controls_refresh_immediately(hierarchy_workspace):
     ss = SessionState()
     ss.set_selected("chapter")
 
-    initial = handlers.refresh_bookshelf_management_view_with_hierarchy("", "", ss)
-    assert len(initial) == 33
-    assert initial[25].get("choices") == ["book"]
-    assert initial[26].get("interactive") is True
-    assert initial[27].get("interactive") is False
-    assert initial[29].get("value") == "整书"
+    initial = handlers.refresh_bookshelf_management_view_with_hierarchy("", ss)
+    assert len(initial) == 32
+    assert initial[24].get("choices") == ["book"]
+    assert initial[25].get("interactive") is True
+    assert initial[26].get("interactive") is False
+    assert initial[28].get("value") == "整书"
+    assert initial[29].get("interactive") is False
     assert initial[30].get("interactive") is False
     assert initial[31].get("interactive") is False
-    assert initial[32].get("interactive") is False
 
     message = handlers.bind_selected_chapter("chapter", "book", ss)
     assert "设置为" in message
-    bound = handlers.refresh_bookshelf_management_view_with_hierarchy("", "", ss)
-    assert bound[25].get("value") == "book"
-    assert bound[27].get("interactive") is True
-    assert "当前所属整书" in bound[28].get("value", "")
-    assert bound[30].get("value") == "chapter"
+    bound = handlers.refresh_bookshelf_management_view_with_hierarchy("", ss)
+    assert bound[24].get("value") == "book"
+    assert bound[26].get("interactive") is True
+    assert "当前所属整书" in bound[27].get("value", "")
+    assert bound[29].get("value") == "chapter"
 
     message = handlers.unbind_selected_chapter("chapter", ss)
     assert "解除" in message
-    unbound = handlers.refresh_bookshelf_management_view_with_hierarchy("", "", ss)
-    assert unbound[25].get("value") is None
-    assert unbound[27].get("interactive") is False
-    assert unbound[29].get("value") == "整书"
+    unbound = handlers.refresh_bookshelf_management_view_with_hierarchy("", ss)
+    assert unbound[24].get("value") is None
+    assert unbound[26].get("interactive") is False
+    assert unbound[28].get("value") == "整书"
 
 
 def test_selected_opened_contract_survives_hierarchy_rows(hierarchy_workspace):
@@ -297,15 +297,13 @@ def test_selected_opened_contract_survives_hierarchy_rows(hierarchy_workspace):
 
     ss = SessionState(project="book-b", script={"meta": {}}, bindings={})
     ss.set_selected("chapter-a1")
-    handlers.reconcile_bookshelf_selection(ss, "chapter-a1")
+    handlers.reconcile_bookshelf_selection(ss)
     assert ss.selected_project == "chapter-a1"
     assert ss.project == "book-b"
-    assert handlers.reconcile_project_selector(ss).get("value") == "book-b"
 
     ss.set_project("chapter-b2", {"meta": {}}, {})
     ss.set_selected("book-a")
-    handlers.reconcile_bookshelf_selection(ss, "book-a")
-    assert handlers.reconcile_project_selector(ss).get("value") == "chapter-b2"
+    handlers.reconcile_bookshelf_selection(ss)
     assert ss.selected_project == "book-a"
 
 
@@ -346,10 +344,10 @@ def test_hierarchy_search_clears_hidden_selection_but_keeps_opened(hierarchy_wor
     assert ss.project == "book"
 
     ss.set_selected("chapter")
-    refreshed = handlers.refresh_bookshelf_management_view("第一章", "book", ss)
+    refreshed = handlers.refresh_bookshelf_management_view("第一章", ss)
     assert ss.selected_project == "chapter"
     assert ss.project == "book"
-    assert refreshed[5] == "chapter"
+    assert refreshed[4] == "chapter"
 
 
 def test_archive_chapter_preserves_parent_and_restore_relinks(hierarchy_workspace):

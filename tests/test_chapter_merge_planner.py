@@ -410,7 +410,7 @@ def test_u1_u3_u4_u9_dedicated_ui_state_has_no_catalog_arity_growth(
         "merge_plan_result",
         "merge_plan_state",
     } <= page.keys()
-    assert len(bookshelf_management_outputs(page, page["merge_plan_state"], include_hierarchy=True)) == 33
+    assert len(bookshelf_management_outputs(page, include_hierarchy=True)) == 32
 
     empty = refresh_merge_planner_controls(SessionState())
     assert len(empty) == 5

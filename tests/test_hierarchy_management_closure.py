@@ -102,7 +102,47 @@ def _set_relation(
 
 
 def _refresh(ss) -> tuple:
-    return handlers.refresh_bookshelf_management_view_with_hierarchy("", "", ss)
+    return handlers.refresh_bookshelf_management_view_with_hierarchy("", ss)
+
+
+def test_searching_one_chapter_keeps_full_book_child_count(closure_workspace, monkeypatch):
+    """Visible rows filter, while Book structure counts use the full snapshot."""
+    _root, create = closure_workspace
+    create("book")
+    for index in range(1, 4):
+        name = f"chapter-{index}"
+        create(name)
+        ProjectCatalogService.bind_chapter(
+            name,
+            "book",
+            chapter_title=f"命中章节 {index}",
+            chapter_order=index,
+        )
+
+    ss = SessionState(project="book", script={"meta": {}})
+    ss.set_selected("chapter-1")
+    calls = 0
+    original_scan = ProjectCatalogService.scan
+
+    def scan_once():
+        nonlocal calls
+        calls += 1
+        return original_scan()
+
+    monkeypatch.setattr(ProjectCatalogService, "scan", staticmethod(scan_once))
+    result = handlers.refresh_bookshelf_management_view_with_hierarchy(
+        "命中章节 1", ss
+    )
+
+    rows = result[0]["data"]
+    assert len(rows) == 2
+    assert any(row[0] == "book" for row in rows)
+    assert any("命中章节 1" in row[0] for row in rows)
+    book_row = next(row for row in rows if row[0] == "book")
+    assert book_row[1] == "整书 · 关联 3 个章节项目"
+    assert ss.selected_project == "chapter-1"
+    assert ss.project == "book"
+    assert calls == 1
 
 
 def test_title_and_order_are_explicitly_editable(closure_workspace):
@@ -164,7 +204,6 @@ def test_reassign_is_single_operation_and_keeps_physical_dirs_and_session(
     assert chapter.relation_status == RELATION_VALID
     assert ss.project == "book-b"
     assert ss.selected_project == "chapter"
-    assert handlers.reconcile_project_selector(ss).get("value") == "book-b"
     assert {name: (project_root / name).resolve() for name in before_dirs} == before_dirs
 
 
@@ -300,34 +339,34 @@ def test_hierarchy_controls_reflect_none_book_healthy_and_orphan_states(
 
     ss = SessionState()
     none = _refresh(ss)
-    _assert_dropdown_update_legal(none[25])
-    assert none[29].get("value") == "未选择"
-    assert none[26].get("interactive") is False
-    assert none[30].get("interactive") is False
-    assert none[32].get("interactive") is False
+    _assert_dropdown_update_legal(none[24])
+    assert none[28].get("value") == "未选择"
+    assert none[25].get("interactive") is False
+    assert none[29].get("interactive") is False
+    assert none[31].get("interactive") is False
 
     ss.set_selected("book")
     book = _refresh(ss)
-    _assert_dropdown_update_legal(book[25])
-    assert book[29].get("value") == "整书"
+    _assert_dropdown_update_legal(book[24])
+    assert book[28].get("value") == "整书"
+    assert book[29].get("interactive") is False
     assert book[30].get("interactive") is False
-    assert book[31].get("interactive") is False
-    assert book[27].get("interactive") is False
+    assert book[26].get("interactive") is False
 
     ss.set_selected("chapter")
     healthy = _refresh(ss)
-    _assert_dropdown_update_legal(healthy[25])
-    assert healthy[29].get("value") == "章节"
-    assert healthy[30].get("value") == "第一章"
-    assert healthy[31].get("value") == "2"
-    assert healthy[32].get("interactive") is True
+    _assert_dropdown_update_legal(healthy[24])
+    assert healthy[28].get("value") == "章节"
+    assert healthy[29].get("value") == "第一章"
+    assert healthy[30].get("value") == "2"
+    assert healthy[31].get("interactive") is True
 
     ss.set_selected("orphan")
     orphan = _refresh(ss)
-    _assert_dropdown_update_legal(orphan[25])
-    assert orphan[25].get("choices") == ["book"]
-    assert orphan[30].get("interactive") is True
-    assert "未找到所属整书" in orphan[28].get("value", "")
+    _assert_dropdown_update_legal(orphan[24])
+    assert orphan[24].get("choices") == ["book"]
+    assert orphan[29].get("interactive") is True
+    assert "未找到所属整书" in orphan[27].get("value", "")
 
 
 def test_query_reconciles_selection_after_title_edit_but_keeps_opened(
@@ -343,11 +382,11 @@ def test_query_reconciles_selection_after_title_edit_but_keeps_opened(
 
     assert "更新" in handlers.update_selected_chapter("chapter", "新标题", "1", ss)
     refreshed = handlers.refresh_bookshelf_management_view_with_hierarchy(
-        "旧标题", "book", ss
+        "旧标题", ss
     )
     assert ss.selected_project is None
     assert ss.project == "book"
-    assert refreshed[5] == ""
+    assert refreshed[4] == ""
     assert ss.catalog_query == "旧标题"
 
 
@@ -382,7 +421,7 @@ def test_hierarchy_output_contract_is_additive_and_wired(closure_workspace):
     try:
         page = create_overview_page()
         assert len(hierarchy_outputs(page)) == 8
-        assert len(bookshelf_management_outputs(page, gr.Dropdown())) == 25
-        assert len(bookshelf_management_outputs(page, gr.Dropdown(), include_hierarchy=True)) == 33
+        assert len(bookshelf_management_outputs(page)) == 24
+        assert len(bookshelf_management_outputs(page, include_hierarchy=True)) == 32
     finally:
         block.__exit__(None, None, None)

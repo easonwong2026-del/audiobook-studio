@@ -10,10 +10,8 @@ import pytest
 from gradio.state_holder import SessionState as GradioSessionState
 
 from repositories.project_repo import ProjectRepository
-from services import ProjectService
 from services.session import SessionState
 from ui import project_catalog_handlers as handlers
-from ui.pages import project_page
 from ui.pages.overview_page import create_overview_page
 from ui.wiring.project_catalog_wiring import bookshelf_selection_context_outputs
 
@@ -182,10 +180,10 @@ def test_real_gradio_archive_clicks_confirm_then_archive(lifecycle_workspace):
     assert not (lifecycle_workspace / "projects" / "alpha").is_dir()
 
 
-def test_real_gradio_bookshelf_click_a_then_b_never_updates_p_sel(
+def test_real_gradio_bookshelf_click_a_then_b_updates_only_selected_state(
     lifecycle_workspace,
 ):
-    """The actual Dataframe.select chain has no p_sel output or input."""
+    """The actual Dataframe.select chain has no opened-project output/input."""
     rows = {
         "headers": ["项目", "结构", "段进度", "状态", "最近修改"],
         "data": [
@@ -196,7 +194,6 @@ def test_real_gradio_bookshelf_click_a_then_b_never_updates_p_sel(
     with gr.Blocks() as block:
         page = create_overview_page()
         session = gr.State(SessionState())
-        p_sel = gr.Dropdown(choices=[])
         page["ov_bookshelf"].select(
             handlers.select_bookshelf_row,
             [page["ov_bookshelf"], session],
@@ -225,12 +222,8 @@ def test_real_gradio_bookshelf_click_a_then_b_never_updates_p_sel(
         event_data=event_a,
     )
     assert len(first["data"]) == 2
-    assert p_sel.choices == []
-    assert p_sel.value is None
     reconciled_a = _run(block, 1, [None], state)
     assert len(reconciled_a["data"]) == 18
-    assert p_sel.choices == []
-    assert p_sel.value is None
     assert state[session._id].selected_project == "alpha"
 
     event_b = gr.SelectData(
@@ -245,12 +238,10 @@ def test_real_gradio_bookshelf_click_a_then_b_never_updates_p_sel(
     _run(block, 0, [rows, None], state, event_data=event_b)
     reconciled_b = _run(block, 1, [None], state)
     assert len(reconciled_b["data"]) == 18
-    assert p_sel.choices == []
-    assert p_sel.value is None
     assert state[session._id].selected_project == "beta"
 
 
-def test_bookshelf_selection_has_one_catalog_aware_p_sel_owner():
+def test_bookshelf_selection_has_no_opened_project_mirror():
     source = APP_PATH.read_text(encoding="utf-8")
     start = source.index("bookshelf_select_chain = ov_bookshelf.select(")
     end = source.index("# ═══════════ events", start)
@@ -261,22 +252,7 @@ def test_bookshelf_selection_has_one_catalog_aware_p_sel_owner():
     assert "reconcile_bookshelf_selection_context,\n        [ss]," in selection_block
 
 
-def test_project_page_initial_selector_uses_catalog(monkeypatch):
-    summary = type("Summary", (), {"project_name": "catalog-project"})()
-    monkeypatch.setattr(
-        project_page.ProjectCatalogService,
-        "scan",
-        staticmethod(lambda: [summary]),
-    )
-    monkeypatch.setattr(ProjectService, "scan_projects", lambda: ["legacy"])
-
-    with gr.Blocks():
-        page = project_page.create_project_page()
-
-    assert [value for _label, value in page["p_sel"].choices] == ["catalog-project"]
-
-
-def test_selection_handler_does_not_write_p_sel_before_reconciliation(lifecycle_workspace):
+def test_selection_handler_does_not_write_opened_project_before_reconciliation(lifecycle_workspace):
     ss = SessionState()
     event = type(
         "Event",
@@ -295,18 +271,13 @@ def test_selection_handler_does_not_write_p_sel_before_reconciliation(lifecycle_
     assert len(result) == 2
 
 
-def test_project_selector_uses_opened_workflow_state_only(lifecycle_workspace):
+def test_session_keeps_opened_workflow_state_independent(lifecycle_workspace):
     ss = SessionState()
     ss.set_selected("alpha")
 
-    unopened = handlers.reconcile_project_selector(ss)
-    assert unopened.get("choices") == ["alpha", "beta"]
-    assert unopened.get("value") is None
-
     ss.set_project("beta", {"meta": {}}, {})
-    opened = handlers.reconcile_project_selector(ss)
-    assert opened.get("choices") == ["alpha", "beta"]
-    assert opened.get("value") == "beta"
+    assert ss.project == "beta"
+    assert ss.selected_project == "alpha"
 
 
 def test_selection_transition_writes_raw_archive_state_and_passive_refresh_preserves_it(
@@ -317,9 +288,9 @@ def test_selection_transition_writes_raw_archive_state_and_passive_refresh_prese
     ss.begin_archive_confirmation()
     revision = ss._archive_confirmation_revision
 
-    passive = handlers.refresh_bookshelf_management_view("", "alpha", ss)
+    passive = handlers.refresh_bookshelf_management_view("", ss)
     assert ss._archive_confirmation_revision == revision
-    assert "value" not in passive[16]
+    assert "value" not in passive[15]
 
     ss.set_selected("beta")
     transitioned = handlers.reconcile_bookshelf_selection(ss)

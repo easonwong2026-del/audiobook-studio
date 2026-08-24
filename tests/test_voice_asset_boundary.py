@@ -131,7 +131,8 @@ def test_live_chains_preserve_order_and_selected_opened_isolation():
         categories_index = source.index("voice_ui.refresh_categories")
         assert lib_index < categories_index
         assert "selected_project" not in source
-        assert "project_view_ui.render_chapter_tree" in source
+        assert "project_view_ui" not in source
+        assert "refresh_project_storage" not in source
     assert "voice_ui.refresh_role_list" in APP_SOURCE
     assert "voice_ui.refresh_voice_filters" in APP_SOURCE
     assert "voice_ui.refresh_voice_lib" in APP_SOURCE

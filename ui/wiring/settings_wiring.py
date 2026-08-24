@@ -49,7 +49,7 @@ def wire_settings_page(
         [page["s_data_msg"], page["s_data_dir"]],
     )
     if catalog_refresh is not None:
-        # 切换数据目录成功后统一刷新目录类组件（书架 / p_sel / 回收站）
+        # 切换数据目录成功后统一刷新目录类组件（书架 / 回收站）
         fn, inputs, outputs = catalog_refresh
         data_dir_chain = data_dir_chain.then(fn, inputs, outputs)
     if merge_refresh is not None:

@@ -6,10 +6,8 @@ import logging
 import os
 
 from repositories.project_repo import ProjectRepository, sanitize_project_name
-from services.project_catalog import ProjectCatalogService
 from services.project_creation import ProjectCreationService
 from services.structured_script_import import StructuredScriptImportService
-from ui.project_catalog_handlers import build_project_selector_update
 
 logger = logging.getLogger(__name__)
 
@@ -180,8 +178,8 @@ def format_creation_warnings(warnings: list[str], limit: int = 10) -> str:
     return "\n".join(lines)
 
 
-def create_from_json(project_name, json_file, ss=None) -> tuple[str, dict]:
-    """Create one V3 project from one validated structured JSON file."""
+def create_from_json(project_name, json_file, ss=None) -> str:
+    """Create one V3 project and write the opened-project session state."""
     source = _file_value_path(json_file)
     name = str(project_name or "").strip()
     if not name:
@@ -206,11 +204,7 @@ def create_from_json(project_name, json_file, ss=None) -> tuple[str, dict]:
             "\n**下一步**：前往「角色与声音」完成声音绑定。"
             + format_creation_warnings(result.warnings)
         )
-        return message, build_project_selector_update(
-            ProjectCatalogService.scan(),
-            p_sel_value=result.project_name,
-            ss=ss,
-        )
+        return message
     except ValueError as exc:
         return f"### ❌ 创建失败\n{html.escape(str(exc))}", _update()
     except Exception as exc:  # pragma: no cover - final UI safety net

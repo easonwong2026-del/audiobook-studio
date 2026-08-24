@@ -5,8 +5,7 @@ handler（create_project / do_export / preview_bound_voice /
 do_export_subtitles / refresh_top_status / refresh_queue_list / pause_synthesis /
 resume_synthesis）接线未变、do_synthesis 首参仍为 ss。
 
-V3.1 重构后 p_open.click / bookshelf_open / ov_bookshelf.select 三条入口统一走
-打开项目统一链路（open_project 首步 + _open_chain_rest），不再每个 handler 单独 .then 链。测试适配新架构。
+IA-2B 后 bookshelf_open 是唯一打开入口；选择与打开仍保持隔离。
 """
 import sys
 import os
@@ -33,9 +32,6 @@ VOICE_WIRING_PATH = os.path.join(PROJECT_ROOT, "ui", "wiring", "voice_wiring.py"
 with open(VOICE_WIRING_PATH, encoding="utf-8") as f:
     VOICE_WIRING_SRC = f.read()
 VOICE_WIRING_TREE = ast.parse(VOICE_WIRING_SRC)
-PROJECT_VIEW_PATH = os.path.join(PROJECT_ROOT, "ui", "project_view_handlers.py")
-with open(PROJECT_VIEW_PATH, encoding="utf-8") as f:
-    PROJECT_VIEW_SRC = f.read()
 VOICE_HANDLERS_PATH = os.path.join(PROJECT_ROOT, "ui", "voice_handlers.py")
 with open(VOICE_HANDLERS_PATH, encoding="utf-8") as f:
     VOICE_HANDLERS_SRC = f.read()
@@ -110,36 +106,21 @@ def _mapping_key(node, mapping_name):
     return node.slice.value
 
 
-# ── O4：书架 + 章节树组件与接线 ──
+# ── O4：书架组件与接线 ──
 def test_o4_bookshelf_components_defined():
-    # V3.1：书架组件从 p_bookshelf 改名 ov_bookshelf（概览页书架）
-    for comp in ("ov_bookshelf", "p_chapter_tree"):
+    for comp in ("ov_bookshelf",):
         assert comp in SRC, f"O4 组件未定义: {comp}"
-    for fn in ("select_project_from_bookshelf",):
-        assert find_func(fn) is not None, f"O4 handler 未定义: {fn}"
-    assert "catalog_ui.reconcile_project_selector" in SRC, \
-        "项目页 selector 刷新应直接使用 Project Catalog authority"
-    assert "def render_chapter_tree(" in PROJECT_VIEW_SRC, \
-        "Project View handler 应位于 ui.project_view_handlers"
-    assert "project_view_ui.render_chapter_tree" in SRC, \
-        "项目页打开链应委托 Project View handler"
+    assert "catalog_ui.select_bookshelf_row" in SRC
+    assert "p_chapter_tree" not in SRC
+    assert "project_view_ui" not in SRC
     assert find_func("refresh_bookshelf") is None, \
         "旧书架刷新 handler 不应在 app.py 中复活"
 
 
-def test_o4_p_open_click_appends_bookshelf_then():
-    # V3.1：p_open.click / bookshelf_open / ov_bookshelf.select 三条入口统一走
-    # 打开项目统一链路（方案 A），目录刷新由 Project Catalog 接管，
-    # Project View handler 仍服务项目页章节树。
-    # 校验刷新链覆盖 ov_bookshelf / p_chapter_tree。
-    assert "ov_bookshelf" in SRC, \
-        "ov_bookshelf 组件缺失（书架刷新未在打开链路中覆盖）"
-    assert "p_chapter_tree" in SRC, \
-        "章节树组件 p_chapter_tree 未定义"
-    # 书架行选中回填 p_sel（用新组件名 ov_bookshelf）
-    assert "ov_bookshelf.select(select_project_from_bookshelf" in SRC or \
-           "ov_bookshelf.select(" in SRC, \
-        "ov_bookshelf.select 未接线到 select_project_from_bookshelf"
+def test_o4_bookshelf_select_and_open_are_separate():
+    assert "ov_bookshelf.select(" in SRC
+    assert 'page["bookshelf_open"].click(' in CATALOG_WIRING_SRC
+    assert "p_open.click" not in SRC
 
 
 # ── O5：预览 + 勾选接线 ──
@@ -222,7 +203,7 @@ def test_o13_chapter_sel_change_preview_chapter():
 
 # ── 红线回归：既有关键 handler 仍定义、接线未变 ──
 def test_redline_core_handlers_still_defined():
-    for fn in ("create_project", "preview_bound_voice",
+    for fn in ("preview_bound_voice",
                "refresh_top_status", "refresh_queue_list",
                "pause_synthesis", "resume_synthesis", "open_project"):
         assert find_func(fn) is not None, f"红线 handler 未定义: {fn}"
