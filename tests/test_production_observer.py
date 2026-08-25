@@ -167,7 +167,7 @@ def test_scope_plan_separates_selected_scope_from_whole_book(app_module):
     assert "当前选择无需重复生产" not in rendered
 
 
-def test_scope_plan_only_reports_whole_book_complete_from_whole_plan(app_module):
+def test_scope_plan_reports_current_scope_complete_without_fallback(app_module):
     selected = {
         "ready": True,
         "segments": 3,
@@ -188,11 +188,11 @@ def test_scope_plan_only_reports_whole_book_complete_from_whole_plan(app_module)
 
     rendered = app_module._format_scope_plan(selected, "segments", whole_book)
 
-    assert "✅ 项目已全部生产完成" in rendered
-    assert "✅ 本次选择已全部完成" not in rendered
+    assert "✅ 本次选择已全部完成" in rendered
+    assert "✅ 项目已全部生产完成" not in rendered
 
 
-def test_scope_plans_reuse_service_for_selected_and_whole_book(app_module, monkeypatch):
+def test_scope_plans_only_replan_whole_book_for_all_scope(app_module, monkeypatch):
     calls = []
     selected_plan = {"scope": {"all": False}}
     whole_plan = {"scope": {"all": True}}
@@ -203,16 +203,42 @@ def test_scope_plans_reuse_service_for_selected_and_whole_book(app_module, monke
 
     monkeypatch.setattr(app_module.ProductionJobService, "plan", staticmethod(fake_plan))
 
-    current, whole = app_module._production_scope_plans(
+    current, project_plan = app_module._production_scope_plans(
         "book", {"all": False, "segment_ids": ["11-007"]},
     )
 
     assert current is selected_plan
-    assert whole is whole_plan
+    assert project_plan is None
+    assert calls == [("book", {"all": False, "segment_ids": ["11-007"]})]
+
+    current, project_plan = app_module._production_scope_plans(
+        "book", {"all": True},
+    )
+
+    assert current is whole_plan
+    assert project_plan is whole_plan
     assert calls == [
         ("book", {"all": False, "segment_ids": ["11-007"]}),
         ("book", {"all": True}),
     ]
+
+    selected_plan.update({
+        "ready": True,
+        "segments": 1,
+        "already_completed": 0,
+        "remaining": 1,
+        "to_synthesize": 1,
+        "failed": 0,
+    })
+    rendered = app_module._format_scope_plan(selected_plan, "segments", None)
+    assert "本次选择：1 段" in rendered
+    assert "项目整体：" not in rendered
+    assert app_module._scope_start_update(selected_plan)["interactive"] is True
+
+    selected_plan.update({"already_completed": 1, "remaining": 0, "to_synthesize": 0})
+    assert "✅ 项目已全部生产完成" in app_module._format_scope_plan(
+        selected_plan, "all", selected_plan,
+    )
 
 
 def test_scope_preview_is_only_visible_for_chapter_mode(app_module):
