@@ -419,8 +419,11 @@ def _production_task_markdown(task: dict | None) -> str:
     global_label = _engine_label(
         runtime.get("global_default_engine") or _global_default_engine()
     )
+    status = str(task.get("status") or "")
+    active = status in ACTIVE_PRODUCTION_STATES
+    heading = "当前生产任务" if active else "最近生产任务"
     lines = [
-        "### 当前生产任务",
+        f"### {heading}",
         f"- **任务 ID**：`{task.get('task_id', '')}`",
         f"- **任务来源**：{_production_source_label(str(task.get('source') or ''))}",
         f"- **生产范围**：{scope_text}",
@@ -438,20 +441,20 @@ def _production_task_markdown(task: dict | None) -> str:
         lines.append(f"实际 runtime：**{runtime_label} · {runtime_state}**")
     startup = task.get("startup") if isinstance(task.get("startup"), dict) else {}
     phase = str(startup.get("startup_phase") or "")
-    if phase:
+    if phase == "engine_failed":
+        error_code = str(startup.get("engine_error_code") or "TTS_ENGINE_INIT_FAILED")
+        summary = str(startup.get("engine_error_summary") or "引擎初始化失败")
+        lines.append(
+            f"- ❌ **TTS 引擎初始化失败**（`{error_code}`）：{summary}"
+        )
+    elif active and phase:
         elapsed = startup.get("startup_phase_elapsed_seconds")
         elapsed_text = (
             f"（已持续 {float(elapsed):.0f} 秒）"
             if isinstance(elapsed, (int, float)) and elapsed is not None
             else ""
         )
-        if phase == "engine_failed":
-            error_code = str(startup.get("engine_error_code") or "TTS_ENGINE_INIT_FAILED")
-            summary = str(startup.get("engine_error_summary") or "引擎初始化失败")
-            lines.append(
-                f"- ❌ **TTS 引擎初始化失败**（`{error_code}`）：{summary}"
-            )
-        elif phase in _STARTUP_PHASE_LABELS:
+        if phase in _STARTUP_PHASE_LABELS:
             lines.append(f"- {_STARTUP_PHASE_LABELS[phase]}{elapsed_text}")
         elif phase != "running":
             lines.append(f"- 🚀 启动阶段：`{phase}`{elapsed_text}")
@@ -460,9 +463,12 @@ def _production_task_markdown(task: dict | None) -> str:
                 "- ⏱️ **启动耗时偏长，但运行时仍存活**：IndexTTS2 冷启动通常需要 1-3 分钟，"
                 "请耐心等待（可稍后查看运行时健康状态）。"
             )
+    error_summary = str(task.get("error_summary") or "").strip()
+    if error_summary and status in {"error", "needs_attention"} and phase != "engine_failed":
+        lines.append(f"- ❌ **错误**：{escape(error_summary)}")
     current_chapter = progress.get("current_chapter")
     current_segment = progress.get("current_segment")
-    if current_chapter or current_segment:
+    if active and (current_chapter or current_segment):
         lines.append(
             f"- **当前**：{current_chapter or '—'}"
             + (f" · `{current_segment}`" if current_segment else "")
@@ -934,25 +940,78 @@ def _scope_preview_rows(ss, scope_mode, selected_chapters=None, selected_segment
     )
 
 
-def _format_scope_plan(plan: dict | None, scope_mode="all") -> str:
+def _scope_can_start(plan: dict | None) -> bool:
+    """Use the service plan as the single source for the Start button."""
+    return bool(
+        isinstance(plan, dict)
+        and plan.get("ready")
+        and int(plan.get("to_synthesize", 0) or 0) > 0
+    )
+
+
+def _scope_start_update(plan: dict | None):
+    return gr.update(interactive=_scope_can_start(plan))
+
+
+def _production_scope_plans(project_name: str, scope: dict) -> tuple[dict, dict]:
+    """Return the selected-scope plan and the authoritative whole-book plan."""
+    current = ProductionJobService.plan(project_name, scope)
+    if scope.get("all"):
+        return current, current
+    return current, ProductionJobService.plan(project_name, {"all": True})
+
+
+def _plan_to_synthesize(plan: dict | None) -> int:
+    if not isinstance(plan, dict):
+        return 0
+    return int(plan.get("to_synthesize", plan.get("remaining", 0)) or 0)
+
+
+def _format_scope_plan(
+    plan: dict | None,
+    scope_mode="all",
+    project_plan: dict | None = None,
+) -> str:
     if not plan:
         return "当前没有可用的生产范围计划。"
     if plan.get("project_name") == "" and plan.get("blockers"):
         return "⚠ " + str(plan["blockers"][0].get("message") or "无法读取生产计划")
+    project_plan = project_plan or plan
+    current_remaining = _plan_to_synthesize(plan)
+    project_remaining = _plan_to_synthesize(project_plan)
     voice = plan.get("voice_cast", {}) or {}
     required = int(voice.get("required_role_count", 0) or 0)
     bound = int(voice.get("bound_role_count", 0) or 0)
+    if _scope_can_start(plan):
+        headline = "✅ 当前选择可以开始生产"
+    elif plan.get("ready") and project_remaining == 0:
+        headline = "✅ 项目已全部生产完成"
+    elif plan.get("ready") and current_remaining == 0:
+        headline = "✅ 本次选择已全部完成"
+    else:
+        headline = "⚠ 当前选择暂不可生产"
     lines = [
-        f"### {_scope_mode_label(scope_mode)} · "
-        + ("✅ 当前选择可以开始生产" if plan.get("ready") else "⚠ 当前选择暂不可生产"),
-        f"准备生产：{plan.get('segments', 0)} 段 · {plan.get('chapters', 0)} 章",
-        f"需要角色：{required} · 角色已准备：{bound}/{required}",
+        f"### {_scope_mode_label(scope_mode)} · {headline}",
         (
+            f"本次选择：{plan.get('segments', 0)} 段 · "
             f"已完成：{plan.get('already_completed', 0)} · "
             f"待合成：{plan.get('remaining', 0)} · "
             f"失败待重试：{plan.get('failed', 0)}"
         ),
+        f"需要角色：{required} · 角色已准备：{bound}/{required}",
     ]
+    if isinstance(project_plan, dict):
+        lines.append(
+            f"项目整体：{project_plan.get('segments', 0)} 段 · "
+            f"已完成：{project_plan.get('already_completed', 0)} · "
+            + (
+                f"项目仍有 {project_remaining} 段待生产"
+                if project_remaining > 0
+                else "仍待生产：0"
+            )
+        )
+        if plan.get("ready") and current_remaining == 0 and project_remaining > 0:
+            lines.append("可切换到“整本”或选择“仅未完成”继续生产。")
     blockers = plan.get("blockers", []) or []
     if blockers:
         lines.append("\n**阻塞原因**")
@@ -1004,9 +1063,9 @@ def render_scope_controls(ss):
         item for item in saved_segments
         if item in {record["id"] for record in _segment_records(ss, "__all__")}
     ]
-    plan = ProductionJobService.plan(
-        ss.project if ss and ss.project else "",
-        _scope_from_ui(mode, chapters_value, full_segment_value),
+    scope = _scope_from_ui(mode, chapters_value, full_segment_value)
+    plan, project_plan = _production_scope_plans(
+        ss.project if ss and ss.project else "", scope,
     )
     return (
         gr.update(value=mode),
@@ -1022,17 +1081,19 @@ def render_scope_controls(ss):
             status_col=5,
             status_color_map=df_style.ICON_COLORS,
         ),
-        _format_scope_plan(plan, mode),
+        gr.update(visible=mode == "chapters"),
+        _format_scope_plan(plan, mode, project_plan),
+        _scope_start_update(plan),
     )
 
 
 def refresh_scope_preview(ss, scope_mode, selected_chapters, _chapter_filter, selected_segment_ids):
     """Plan the current UI scope without creating a task or locking roles."""
     if not ss or not ss.project:
-        return [], "请先打开项目。"
+        return [], "请先打开项目。", _scope_start_update(None)
     mode = str(scope_mode or "all")
     scope = _scope_from_ui(mode, selected_chapters, selected_segment_ids)
-    plan = ProductionJobService.plan(ss.project, scope)
+    plan, project_plan = _production_scope_plans(ss.project, scope)
     return (
         df_style.style_dataframe(
             _scope_preview_rows(ss, mode, selected_chapters, selected_segment_ids),
@@ -1040,7 +1101,8 @@ def refresh_scope_preview(ss, scope_mode, selected_chapters, _chapter_filter, se
             status_col=5,
             status_color_map=df_style.ICON_COLORS,
         ),
-        _format_scope_plan(plan, mode),
+        _format_scope_plan(plan, mode, project_plan),
+        _scope_start_update(plan),
     )
 
 
@@ -1049,6 +1111,7 @@ def update_scope_visibility(scope_mode):
     return (
         gr.update(visible=mode == "chapters"),
         gr.update(visible=mode == "segments"),
+        gr.update(visible=mode == "chapters"),
     )
 
 
@@ -3382,6 +3445,7 @@ def _open_chain_rest(event):
             s_segment_selection_state,
             s_preview_df,
             s_scope_readiness,
+            s_start,
         ],
     )
     e = e.then(voice_ui.refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
@@ -3452,6 +3516,7 @@ def _post_archive_reconcile(event):
             s_segment_selection_state,
             s_preview_df,
             s_scope_readiness,
+            s_start,
         ],
     )
     e = e.then(voice_ui.refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
@@ -4101,16 +4166,16 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     s_scope_mode.change(
         update_scope_visibility,
         [s_scope_mode],
-        [s_chapter_scope_group, s_segment_scope_group],
+        [s_chapter_scope_group, s_segment_scope_group, s_preview_df],
     ).then(
         refresh_scope_preview,
         [ss, s_scope_mode, s_chapters_sel, s_segment_chapter_filter, s_segment_selection_state],
-        [s_preview_df, s_scope_readiness],
+        [s_preview_df, s_scope_readiness, s_start],
     )
     s_chapters_sel.change(
         refresh_scope_preview,
         [ss, s_scope_mode, s_chapters_sel, s_segment_chapter_filter, s_segment_selection_state],
-        [s_preview_df, s_scope_readiness],
+        [s_preview_df, s_scope_readiness, s_start],
     )
     s_segment_chapter_filter.change(
         refresh_segment_filter,
@@ -4119,7 +4184,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     ).then(
         refresh_scope_preview,
         [ss, s_scope_mode, s_chapters_sel, s_segment_chapter_filter, s_segment_selection_state],
-        [s_preview_df, s_scope_readiness],
+        [s_preview_df, s_scope_readiness, s_start],
     )
     s_segments_sel.change(
         merge_segment_selection,
@@ -4128,7 +4193,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     ).then(
         refresh_scope_preview,
         [ss, s_scope_mode, s_chapters_sel, s_segment_chapter_filter, s_segment_selection_state],
-        [s_preview_df, s_scope_readiness],
+        [s_preview_df, s_scope_readiness, s_start],
     )
     for button, handler in (
         (s_select_scope_segments, select_scope_segments),
@@ -4143,7 +4208,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         ).then(
             refresh_scope_preview,
             [ss, s_scope_mode, s_chapters_sel, s_segment_chapter_filter, s_segment_selection_state],
-            [s_preview_df, s_scope_readiness],
+            [s_preview_df, s_scope_readiness, s_start],
         )
     s_start.click(do_synthesis, [ss, s_beam, s_emo, s_override, s_alpha, s_rate, s_chapters_sel, s_scope_mode, s_segment_selection_state], outputs=[s_log, s_queue_list]).then(
         refresh_production_task, [ss], [s_task_status]).then(
