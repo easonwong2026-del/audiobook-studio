@@ -26,10 +26,11 @@ def create_synthesis_page() -> dict:
                     with gr.Row():
                         s_start = gr.Button(
                             "开始合成", variant="primary", interactive=False,
+                            min_width=72,
                         )
-                        s_pause = gr.Button("暂停", size="sm")
-                        s_resume = gr.Button("恢复", size="sm")
-                        s_cancel = gr.Button("停止", variant="stop", size="sm")
+                        s_pause = gr.Button("暂停", size="sm", min_width=72)
+                        s_resume = gr.Button("恢复", size="sm", min_width=72)
+                        s_cancel = gr.Button("停止", variant="stop", size="sm", min_width=72)
 
             with gr.Accordion("生产范围", open=False):
                 s_scope_mode = gr.Radio(

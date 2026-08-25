@@ -67,6 +67,61 @@ def test_task_card_distinguishes_active_and_terminal_tasks(app_module):
     )
 
 
+def test_terminal_task_card_does_not_render_stale_active_details(app_module):
+    task = _task("done", finished_at="2026-01-01T00:03:18Z")
+    task["startup"] = {
+        "startup_phase": "runtime_starting",
+        "startup_phase_elapsed_seconds": 291,
+    }
+    task["progress"].update({
+        "current_chapter": "11",
+        "current_segment": "11-007",
+    })
+
+    rendered = app_module._production_task_markdown(task)
+
+    assert "### 最近生产任务" in rendered
+    assert "**总耗时**" in rendered
+    assert "生产中" not in rendered
+    assert "- **当前**" not in rendered
+    assert "已持续" not in rendered
+
+
+def test_active_task_card_keeps_phase_and_current_segment(app_module):
+    task = _task("running")
+    task["startup"] = {
+        "startup_phase": "runtime_starting",
+        "startup_phase_elapsed_seconds": 12,
+    }
+    task["progress"].update({
+        "current_chapter": "11",
+        "current_segment": "11-007",
+    })
+
+    rendered = app_module._production_task_markdown(task)
+
+    assert "### 当前生产任务" in rendered
+    assert "已持续 12 秒" in rendered
+    assert "- **当前**：11 · `11-007`" in rendered
+
+
+def test_terminal_engine_failure_remains_visible_without_active_elapsed(app_module):
+    task = _task("error", finished_at="2026-01-01T00:03:18Z")
+    task["startup"] = {
+        "startup_phase": "engine_failed",
+        "startup_phase_elapsed_seconds": 291,
+        "engine_error_code": "TTS_ENGINE_INIT_FAILED",
+        "engine_error_summary": "引擎不可用",
+    }
+    task["error_summary"] = "TTS_ENGINE_INIT_FAILED: 引擎不可用"
+
+    rendered = app_module._production_task_markdown(task)
+
+    assert "TTS_ENGINE_INIT_FAILED" in rendered
+    assert "引擎不可用" in rendered
+    assert "已持续" not in rendered
+
+
 @pytest.mark.parametrize(
     ("plan", "expected"),
     [
@@ -78,6 +133,85 @@ def test_task_card_distinguishes_active_and_terminal_tasks(app_module):
 def test_scope_start_requires_ready_plan_and_remaining_work(app_module, plan, expected):
     assert app_module._scope_can_start(plan) is expected
     assert app_module._scope_start_update(plan)["interactive"] is expected
+
+
+def test_scope_plan_separates_selected_scope_from_whole_book(app_module):
+    selected = {
+        "ready": True,
+        "segments": 3,
+        "chapters": 1,
+        "already_completed": 3,
+        "remaining": 0,
+        "to_synthesize": 0,
+        "failed": 0,
+        "voice_cast": {"required_role_count": 1, "bound_role_count": 1},
+    }
+    whole_book = {
+        "ready": True,
+        "segments": 32,
+        "chapters": 11,
+        "already_completed": 3,
+        "remaining": 29,
+        "to_synthesize": 29,
+        "failed": 0,
+    }
+
+    rendered = app_module._format_scope_plan(selected, "segments", whole_book)
+
+    assert "✅ 本次选择已全部完成" in rendered
+    assert "本次选择：3 段" in rendered
+    assert "项目整体：32 段" in rendered
+    assert "项目仍有 29 段待生产" in rendered
+    assert "整本”或选择“仅未完成" in rendered
+    assert "当前选择无需重复生产" not in rendered
+
+
+def test_scope_plan_only_reports_whole_book_complete_from_whole_plan(app_module):
+    selected = {
+        "ready": True,
+        "segments": 3,
+        "already_completed": 3,
+        "remaining": 0,
+        "to_synthesize": 0,
+        "failed": 0,
+        "voice_cast": {},
+    }
+    whole_book = {
+        "ready": True,
+        "segments": 32,
+        "already_completed": 32,
+        "remaining": 0,
+        "to_synthesize": 0,
+        "failed": 0,
+    }
+
+    rendered = app_module._format_scope_plan(selected, "segments", whole_book)
+
+    assert "✅ 项目已全部生产完成" in rendered
+    assert "✅ 本次选择已全部完成" not in rendered
+
+
+def test_scope_plans_reuse_service_for_selected_and_whole_book(app_module, monkeypatch):
+    calls = []
+    selected_plan = {"scope": {"all": False}}
+    whole_plan = {"scope": {"all": True}}
+
+    def fake_plan(project_name, scope):
+        calls.append((project_name, scope))
+        return whole_plan if scope.get("all") else selected_plan
+
+    monkeypatch.setattr(app_module.ProductionJobService, "plan", staticmethod(fake_plan))
+
+    current, whole = app_module._production_scope_plans(
+        "book", {"all": False, "segment_ids": ["11-007"]},
+    )
+
+    assert current is selected_plan
+    assert whole is whole_plan
+    assert calls == [
+        ("book", {"all": False, "segment_ids": ["11-007"]}),
+        ("book", {"all": True}),
+    ]
 
 
 def test_scope_preview_is_only_visible_for_chapter_mode(app_module):
