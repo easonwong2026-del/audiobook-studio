@@ -1075,13 +1075,15 @@ def render_scope_controls(ss):
         gr.update(choices=[("全部章节", "__all__"), *options], value=filter_value),
         gr.update(choices=segment_choices, value=segment_value),
         full_segment_value,
-        df_style.style_dataframe(
-            _scope_preview_rows(ss, mode, chapters_value, full_segment_value),
-            synth_progress.SCOPE_PREVIEW_HEADERS,
-            status_col=5,
-            status_color_map=df_style.ICON_COLORS,
+        gr.update(
+            value=df_style.style_dataframe(
+                _scope_preview_rows(ss, mode, chapters_value, full_segment_value),
+                synth_progress.SCOPE_PREVIEW_HEADERS,
+                status_col=5,
+                status_color_map=df_style.ICON_COLORS,
+            ),
+            visible=mode == "chapters",
         ),
-        gr.update(visible=mode == "chapters"),
         _format_scope_plan(plan, mode, project_plan),
         _scope_start_update(plan),
     )

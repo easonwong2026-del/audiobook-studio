@@ -1,6 +1,7 @@
 """Regression tests for the synthesis observer lifecycle and task card."""
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -218,6 +219,89 @@ def test_scope_preview_is_only_visible_for_chapter_mode(app_module):
     assert app_module.update_scope_visibility("all")[2]["visible"] is False
     assert app_module.update_scope_visibility("segments")[2]["visible"] is False
     assert app_module.update_scope_visibility("chapters")[2]["visible"] is True
+
+
+def test_scope_controls_output_contract_matches_wiring(app_module, monkeypatch):
+    monkeypatch.setattr(
+        app_module,
+        "_chapter_options",
+        lambda _ss: ([("第 1 章", "c1")], ["c1"]),
+    )
+    monkeypatch.setattr(
+        app_module.ProjectService,
+        "get_synthesis_selections",
+        staticmethod(lambda _project: {"mode": "chapters", "chapters": ["c1"]}),
+    )
+    monkeypatch.setattr(app_module, "_segment_choices", lambda *_args: ([], []))
+    monkeypatch.setattr(app_module, "_segment_records", lambda *_args: [])
+    monkeypatch.setattr(app_module, "_scope_preview_rows", lambda *_args: [])
+    monkeypatch.setattr(
+        app_module,
+        "_production_scope_plans",
+        lambda *_args: (
+            {
+                "project_name": "book",
+                "ready": True,
+                "segments": 1,
+                "chapters": 1,
+                "already_completed": 0,
+                "remaining": 1,
+                "to_synthesize": 1,
+                "failed": 0,
+                "voice_cast": {},
+                "blockers": [],
+                "warnings": [],
+            },
+        ) * 2,
+    )
+    monkeypatch.setattr(
+        app_module.df_style,
+        "style_dataframe",
+        lambda *_args, **_kwargs: "styled-preview",
+    )
+
+    result = app_module.render_scope_controls(SimpleNamespace(project="book"))
+
+    assert len(result) == 10
+    assert result[-3]["value"] == "styled-preview"
+    assert result[-3]["visible"] is True
+    assert "### 按章节" in result[-2]
+    assert result[-1]["interactive"] is True
+
+    source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+
+    def function(name):
+        return next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == name
+        )
+
+    def return_counts(name):
+        returns = [node for node in ast.walk(function(name)) if isinstance(node, ast.Return)]
+        return [len(node.value.elts) for node in returns]
+
+    def wired_output_counts(name):
+        counts = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or len(node.args) < 3:
+                continue
+            callback = node.args[0]
+            if isinstance(callback, ast.Name) and callback.id == name:
+                outputs = node.args[2]
+                if isinstance(outputs, ast.List):
+                    counts.append(len(outputs.elts))
+        return counts
+
+    assert return_counts("render_scope_controls") == [10]
+    assert return_counts("refresh_scope_preview") == [3, 3]
+    assert return_counts("update_scope_visibility") == [3]
+    assert wired_output_counts("render_scope_controls") == [10, 10]
+    assert wired_output_counts("refresh_scope_preview") == [3, 3, 3, 3, 3]
+    assert wired_output_counts("update_scope_visibility") == [3]
 
 
 def test_latest_task_keeps_terminal_result(app_module, monkeypatch):
