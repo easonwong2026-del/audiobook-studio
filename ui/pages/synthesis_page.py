@@ -24,7 +24,9 @@ def create_synthesis_page() -> dict:
                     gr.Markdown("默认使用剧本标注。已有结果自动断点续跑。")
                 with gr.Column(scale=2):
                     with gr.Row():
-                        s_start = gr.Button("开始合成", variant="primary")
+                        s_start = gr.Button(
+                            "开始合成", variant="primary", interactive=False,
+                        )
                         s_pause = gr.Button("暂停", size="sm")
                         s_resume = gr.Button("恢复", size="sm")
                         s_cancel = gr.Button("停止", variant="stop", size="sm")
@@ -85,6 +87,7 @@ def create_synthesis_page() -> dict:
                     datatype=synth_progress.SCOPE_PREVIEW_DATATYPES,
                     interactive=False,
                     label="当前生产范围预览",
+                    visible=False,
                     wrap=True,
                 )
 
@@ -105,12 +108,12 @@ def create_synthesis_page() -> dict:
                         value=2, interactive=True,
                     )
 
-        gr.Markdown("##### 生产队列")
+        gr.Markdown("##### 任务执行明细")
         s_queue_list = gr.Dataframe(
             headers=synth_progress.QUEUE_HEADERS,
             datatype=synth_progress.QUEUE_DATATYPES,
             interactive=False,
-            label="当前任务状态",
+            label="段落执行状态",
             wrap=True,
         )
         with gr.Row():

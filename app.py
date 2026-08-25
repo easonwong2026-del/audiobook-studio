@@ -419,8 +419,13 @@ def _production_task_markdown(task: dict | None) -> str:
     global_label = _engine_label(
         runtime.get("global_default_engine") or _global_default_engine()
     )
+    heading = (
+        "当前生产任务"
+        if str(task.get("status") or "") in ACTIVE_PRODUCTION_STATES
+        else "最近生产任务"
+    )
     lines = [
-        "### 当前生产任务",
+        f"### {heading}",
         f"- **任务 ID**：`{task.get('task_id', '')}`",
         f"- **任务来源**：{_production_source_label(str(task.get('source') or ''))}",
         f"- **生产范围**：{scope_text}",
@@ -934,6 +939,19 @@ def _scope_preview_rows(ss, scope_mode, selected_chapters=None, selected_segment
     )
 
 
+def _scope_can_start(plan: dict | None) -> bool:
+    """Use the service plan as the single source for the Start button."""
+    return bool(
+        isinstance(plan, dict)
+        and plan.get("ready")
+        and int(plan.get("to_synthesize", 0) or 0) > 0
+    )
+
+
+def _scope_start_update(plan: dict | None):
+    return gr.update(interactive=_scope_can_start(plan))
+
+
 def _format_scope_plan(plan: dict | None, scope_mode="all") -> str:
     if not plan:
         return "当前没有可用的生产范围计划。"
@@ -944,7 +962,15 @@ def _format_scope_plan(plan: dict | None, scope_mode="all") -> str:
     bound = int(voice.get("bound_role_count", 0) or 0)
     lines = [
         f"### {_scope_mode_label(scope_mode)} · "
-        + ("✅ 当前选择可以开始生产" if plan.get("ready") else "⚠ 当前选择暂不可生产"),
+        + (
+            "✅ 当前选择可以开始生产"
+            if _scope_can_start(plan)
+            else (
+                "✅ 当前选择无需重复生产"
+                if plan.get("ready")
+                else "⚠ 当前选择暂不可生产"
+            )
+        ),
         f"准备生产：{plan.get('segments', 0)} 段 · {plan.get('chapters', 0)} 章",
         f"需要角色：{required} · 角色已准备：{bound}/{required}",
         (
@@ -1022,14 +1048,16 @@ def render_scope_controls(ss):
             status_col=5,
             status_color_map=df_style.ICON_COLORS,
         ),
+        gr.update(visible=mode == "chapters"),
         _format_scope_plan(plan, mode),
+        _scope_start_update(plan),
     )
 
 
 def refresh_scope_preview(ss, scope_mode, selected_chapters, _chapter_filter, selected_segment_ids):
     """Plan the current UI scope without creating a task or locking roles."""
     if not ss or not ss.project:
-        return [], "请先打开项目。"
+        return [], "请先打开项目。", _scope_start_update(None)
     mode = str(scope_mode or "all")
     scope = _scope_from_ui(mode, selected_chapters, selected_segment_ids)
     plan = ProductionJobService.plan(ss.project, scope)
@@ -1041,6 +1069,7 @@ def refresh_scope_preview(ss, scope_mode, selected_chapters, _chapter_filter, se
             status_color_map=df_style.ICON_COLORS,
         ),
         _format_scope_plan(plan, mode),
+        _scope_start_update(plan),
     )
 
 
@@ -1049,6 +1078,7 @@ def update_scope_visibility(scope_mode):
     return (
         gr.update(visible=mode == "chapters"),
         gr.update(visible=mode == "segments"),
+        gr.update(visible=mode == "chapters"),
     )
 
 
@@ -3382,6 +3412,7 @@ def _open_chain_rest(event):
             s_segment_selection_state,
             s_preview_df,
             s_scope_readiness,
+            s_start,
         ],
     )
     e = e.then(voice_ui.refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
@@ -3452,6 +3483,7 @@ def _post_archive_reconcile(event):
             s_segment_selection_state,
             s_preview_df,
             s_scope_readiness,
+            s_start,
         ],
     )
     e = e.then(voice_ui.refresh_voice_lib, [v_lib_search, v_lib_category], [v_lib_browser, v_lib_category])
@@ -4101,16 +4133,16 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     s_scope_mode.change(
         update_scope_visibility,
         [s_scope_mode],
-        [s_chapter_scope_group, s_segment_scope_group],
+        [s_chapter_scope_group, s_segment_scope_group, s_preview_df],
     ).then(
         refresh_scope_preview,
         [ss, s_scope_mode, s_chapters_sel, s_segment_chapter_filter, s_segment_selection_state],
-        [s_preview_df, s_scope_readiness],
+        [s_preview_df, s_scope_readiness, s_start],
     )
     s_chapters_sel.change(
         refresh_scope_preview,
         [ss, s_scope_mode, s_chapters_sel, s_segment_chapter_filter, s_segment_selection_state],
-        [s_preview_df, s_scope_readiness],
+        [s_preview_df, s_scope_readiness, s_start],
     )
     s_segment_chapter_filter.change(
         refresh_segment_filter,
@@ -4119,7 +4151,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     ).then(
         refresh_scope_preview,
         [ss, s_scope_mode, s_chapters_sel, s_segment_chapter_filter, s_segment_selection_state],
-        [s_preview_df, s_scope_readiness],
+        [s_preview_df, s_scope_readiness, s_start],
     )
     s_segments_sel.change(
         merge_segment_selection,
@@ -4128,7 +4160,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     ).then(
         refresh_scope_preview,
         [ss, s_scope_mode, s_chapters_sel, s_segment_chapter_filter, s_segment_selection_state],
-        [s_preview_df, s_scope_readiness],
+        [s_preview_df, s_scope_readiness, s_start],
     )
     for button, handler in (
         (s_select_scope_segments, select_scope_segments),
@@ -4143,7 +4175,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         ).then(
             refresh_scope_preview,
             [ss, s_scope_mode, s_chapters_sel, s_segment_chapter_filter, s_segment_selection_state],
-            [s_preview_df, s_scope_readiness],
+            [s_preview_df, s_scope_readiness, s_start],
         )
     s_start.click(do_synthesis, [ss, s_beam, s_emo, s_override, s_alpha, s_rate, s_chapters_sel, s_scope_mode, s_segment_selection_state], outputs=[s_log, s_queue_list]).then(
         refresh_production_task, [ss], [s_task_status]).then(

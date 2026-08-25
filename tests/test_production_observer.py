@@ -60,6 +60,32 @@ def test_invalid_task_timestamps_are_safe(app_module):
     assert "**总耗时**：—" in rendered
 
 
+def test_task_card_distinguishes_active_and_terminal_tasks(app_module):
+    assert "### 当前生产任务" in app_module._production_task_markdown(_task("running"))
+    assert "### 最近生产任务" in app_module._production_task_markdown(
+        _task("done", finished_at="2026-01-01T00:03:18Z")
+    )
+
+
+@pytest.mark.parametrize(
+    ("plan", "expected"),
+    [
+        ({"ready": False, "to_synthesize": 3}, False),
+        ({"ready": True, "to_synthesize": 3}, True),
+        ({"ready": True, "to_synthesize": 0}, False),
+    ],
+)
+def test_scope_start_requires_ready_plan_and_remaining_work(app_module, plan, expected):
+    assert app_module._scope_can_start(plan) is expected
+    assert app_module._scope_start_update(plan)["interactive"] is expected
+
+
+def test_scope_preview_is_only_visible_for_chapter_mode(app_module):
+    assert app_module.update_scope_visibility("all")[2]["visible"] is False
+    assert app_module.update_scope_visibility("segments")[2]["visible"] is False
+    assert app_module.update_scope_visibility("chapters")[2]["visible"] is True
+
+
 def test_latest_task_keeps_terminal_result(app_module, monkeypatch):
     task = _task("done", finished_at="2026-01-01T00:03:18Z")
     monkeypatch.setattr(
