@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import weakref
+from datetime import datetime, timezone
 from html import escape
 from typing import Any
 
@@ -358,6 +359,41 @@ def _engine_label(profile: Any) -> str:
     )
 
 
+def _parse_task_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _format_task_elapsed(task: dict[str, Any]) -> str:
+    created = _parse_task_timestamp(task.get("created_at"))
+    if created is None:
+        return "—"
+    finished = _parse_task_timestamp(task.get("finished_at"))
+    if finished is None:
+        if str(task.get("status") or "") in ACTIVE_PRODUCTION_STATES:
+            finished = datetime.now(timezone.utc)
+        else:
+            return "—"
+    seconds = max(int((finished - created).total_seconds()), 0)
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours} 小时 {minutes} 分 {seconds:02d} 秒"
+    if minutes:
+        return f"{minutes} 分 {seconds} 秒"
+    return f"{seconds} 秒"
+
+
 
 def _production_task_markdown(task: dict | None) -> str:
     """Render a task snapshot without exposing private filesystem paths."""
@@ -390,6 +426,7 @@ def _production_task_markdown(task: dict | None) -> str:
         f"- **生产范围**：{scope_text}",
         f"- **状态**：{_production_status_label(str(task.get('status') or ''))}",
         f"- **进度**：{completed} / {total}（{percent:.1f}%）",
+        f"- **总耗时**：{_format_task_elapsed(task)}",
     ]
     if engine_label:
         lines.append(f"本任务引擎：**{engine_label}**")
@@ -458,16 +495,30 @@ def _production_task_markdown(task: dict | None) -> str:
 def _latest_production_task(project: str) -> dict | None:
     if not project:
         return None
-    active = ProductionJobService.get_active_task(project)
-    if active:
-        return active
     tasks = ProductionJobService.list_tasks(project_name=project)
     return next(
         (
             task for task in tasks
-            if task.get("status") in {"interrupted", "needs_attention"}
+            if str(task.get("status") or "") in ACTIVE_PRODUCTION_STATES
         ),
-        None,
+        tasks[0] if tasks else None,
+    )
+
+
+def _production_task_fingerprint(task: dict | None):
+    if not task:
+        return None
+    progress = task.get("progress", {}) or {}
+    return (
+        str(task.get("project") or ""),
+        str(task.get("task_id") or ""),
+        str(task.get("status") or ""),
+        str(task.get("version") or task.get("updated_at") or ""),
+        str(task.get("finished_at") or ""),
+        progress.get("completed"),
+        progress.get("failed"),
+        progress.get("current_chapter"),
+        progress.get("current_segment"),
     )
 
 
@@ -505,17 +556,43 @@ def refresh_production_engine_status(_ss=None):
 
 
 def refresh_production_task_tick(ss):
-    """Timer tick: refresh the panel and keep the timer alive while active."""
+    """Refresh all production outputs once and stop after the final snapshot."""
     markdown = refresh_production_task(ss)
     task = _latest_production_task(getattr(ss, "project", None)) if ss else None
+    queue = refresh_queue_list(ss)
+    engine = refresh_production_engine_status(ss)
+    log = "\n".join(task.get("log_lines") or []) if task else ""
     active = bool(
         task and str(task.get("status") or "") in ACTIVE_PRODUCTION_STATES
     )
-    return markdown, gr.Timer(active=active)
+    if ss is not None:
+        ss._production_observer_fingerprint = _production_task_fingerprint(task)
+    return markdown, queue, engine, log, gr.Timer(active=active)
+
+
+def watch_external_production_task(ss):
+    """Discover MCP/Agent tasks without repainting unchanged production UI."""
+    if not ss or not getattr(ss, "project", None):
+        return gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip()
+    task = _latest_production_task(ss.project)
+    fingerprint = _production_task_fingerprint(task)
+    if fingerprint == getattr(ss, "_production_observer_fingerprint", None):
+        return gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip()
+    ss._production_observer_fingerprint = fingerprint
+    if task is None:
+        return gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip()
+    active = str(task.get("status") or "") in ACTIVE_PRODUCTION_STATES
+    return (
+        _production_task_markdown(task),
+        refresh_queue_list(ss),
+        refresh_production_engine_status(ss),
+        "\n".join(task.get("log_lines") or []),
+        gr.Timer(active=active),
+    )
 
 
 def activate_production_timer():
-    """Turn on the 1s polling timer after a start/cancel action."""
+    """Turn on the active production observer after a start/cancel action."""
     return gr.Timer(active=True)
 
 def refresh_role_summary(ss):
@@ -1032,16 +1109,14 @@ def do_synthesis(ss, num_beams=2, progress=gr.Progress(),
     """Start production through the shared Web/MCP task kernel."""
     proj = ss.project
     if not proj:
-        yield ("请先在项目管理中打开项目", [])
-        return
+        return ("请先在项目管理中打开项目", [])
     existing = ProductionJobService.get_active_task(proj)
     if existing is not None:
-        yield (
+        return (
             f"项目已有生产任务 `{existing['task_id']}`（{existing['status']}），"
             "请先继续监控或控制该任务。",
             [],
         )
-        return
     # 2.3 O2：解析覆盖并持久化，保证预览 / 导出一致
     emotion_override = None if emotion == "(按剧本默认)" else emotion
     overrides = {
@@ -1088,63 +1163,26 @@ def do_synthesis(ss, num_beams=2, progress=gr.Progress(),
                 task_id=started["task_id"], project=proj, status=started.get("status", "pending")
             )
     except ProductionJobError as exc:
-        yield (f"❌ {exc}", [])
-        return
+        return (f"❌ {exc}", [])
     except Exception as exc:
         logger.exception("网页启动生产失败")
-        yield (f"❌ 启动生产失败: {exc}", [])
-        return
-    # 轮询直到终态，~0.5s 刷新一次日志 + 进度条 + 队列列表
-    while True:
-        snapshot = ProductionJobService.get_task_snapshot(started["task_id"])
-        state = ss.synthesis
-        status = str(snapshot.get("status") or getattr(state, "status", "pending"))
-        if state is not None:
-            state.status = status
-        log_lines = snapshot.get("log_lines") or (
-            state.log_lines[-50:] if state is not None else []
-        )
-        log_text = "\n".join(log_lines)
-        rows = (
-            synth_progress.to_queue_rows(state.segment_states)
-            if state is not None and state.segment_states
-            else synth_progress.to_queue_rows(
-                synth_progress.build_segment_states(
-                    proj,
-                    snapshot.get("scope", {}).get("chapter_ids") or None,
-                    snapshot.get("scope", {}).get("segment_ids") or None,
-                )
+        return (f"❌ 启动生产失败: {exc}", [])
+    snapshot = ProductionJobService.get_task_snapshot(started["task_id"])
+    state = ss.synthesis
+    if state is not None:
+        state.status = str(snapshot.get("status") or getattr(state, "status", "pending"))
+    rows = (
+        synth_progress.to_queue_rows(state.segment_states)
+        if state is not None and state.segment_states
+        else synth_progress.to_queue_rows(
+            synth_progress.build_segment_states(
+                proj,
+                snapshot.get("scope", {}).get("chapter_ids") or None,
+                snapshot.get("scope", {}).get("segment_ids") or None,
             )
         )
-        time.sleep(0.5)
-        try:
-            progress(
-                float(snapshot.get("progress", {}).get("percent", 0.0) or 0.0) / 100,
-                f"{snapshot.get('progress', {}).get('completed', 0)}/{snapshot.get('progress', {}).get('total', 0)}",
-            )
-        except Exception as exc:
-            logger.debug("进度回调异常（进行中）: %s", exc)
-        yield (
-            log_text or _production_task_markdown(snapshot),
-            df_style.style_dataframe(
-                rows,
-                synth_progress.QUEUE_HEADERS,
-                status_col=0,
-                status_color_map=df_style.ICON_COLORS,
-            ),
-        )
-        if status in ("done", "cancelled", "error", "interrupted"):
-            break
-    # 终态再刷一次
-    try:
-        final_progress = snapshot.get("progress", {})
-        progress(
-            float(final_progress.get("percent", 0.0) or 0.0) / 100,
-            f"{final_progress.get('completed', 0)}/{final_progress.get('total', 0)}",
-        )
-    except Exception as exc:
-        logger.debug("进度回调异常（终态）: %s", exc)
-    yield (
+    )
+    return (
         "\n".join(snapshot.get("log_lines") or []) or _production_task_markdown(snapshot),
         df_style.style_dataframe(
             rows,
@@ -1159,6 +1197,8 @@ def cancel(ss):
     if not ss or not ss.project:
         return "当前没有生产任务。"
     task = _latest_production_task(ss.project)
+    if not task or str(task.get("status") or "") not in ACTIVE_PRODUCTION_STATES:
+        return "当前没有生产任务。"
     task_id = task.get("task_id") if task else getattr(ss.synthesis, "task_id", None)
     if not task_id:
         return "当前没有生产任务。"
@@ -1175,7 +1215,7 @@ def pause_synthesis(ss):
     返回 (队列列表, 暂停按钮, 恢复按钮) 的更新三元组。
     """
     task = _latest_production_task(ss.project) if ss and ss.project else None
-    if not task:
+    if not task or str(task.get("status") or "") not in ACTIVE_PRODUCTION_STATES:
         return (gr.update(), gr.update(), gr.update())
     try:
         result = ProductionJobService.pause(task["task_id"])
@@ -3587,15 +3627,13 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             s_open_btn = syn_page["s_open_btn"]
             s_open_msg = syn_page["s_open_msg"]
 
-            # 生产启动阶段 1s 轮询：点击「开始合成」后 1 秒内显示真实 startup phase。
-            # active 由 tick 自动开关（有活动任务即保持轮询，终态后自动停）。
-            s_start_timer = gr.Timer(1.0, active=False)
+            # 生产 observer 只在任务活动期间轮询；终态 tick 会保留最后结果并停表。
+            s_start_timer = gr.Timer(4.0, active=False)
             s_start_timer.tick(
                 refresh_production_task_tick,
                 [ss],
-                [s_task_status, s_start_timer],
+                [s_task_status, s_queue_list, s_engine_status, s_log, s_start_timer],
             )
-            s_start_timer.tick(refresh_production_engine_status, [ss], [s_engine_status])
 
             # ───────── 试听与质检 ─────────
             review_page = create_review_page()
@@ -3734,19 +3772,17 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         grp_settings,
     ]
 
-    # The browser is an observer/controller.  A lightweight timer keeps the
-    # shared durable task state visible after MCP actions without owning the
-    # worker lifecycle.
-    s_task_timer = gr.Timer(1.5)
+    # The browser is an observer/controller.  This low-frequency watcher keeps
+    # MCP/Agent-created tasks discoverable without repainting unchanged UI.
+    s_external_task_watcher = gr.Timer(20.0)
 
     # ═══════════ 侧边栏导航切换 ═══════════
 
-    s_task_timer.tick(
-        refresh_production_task, [ss], [s_task_status]
-    ).then(
-        refresh_queue_list, [ss], [s_queue_list]
+    s_external_task_watcher.tick(
+        watch_external_production_task,
+        [ss],
+        [s_task_status, s_queue_list, s_engine_status, s_log, s_start_timer],
     )
-    s_task_timer.tick(refresh_production_engine_status, [ss], [s_engine_status])
 
     # Export has its own lightweight observer timer.  It only stays active for
     # the task id created by the Export handler and stops on a terminal result.
