@@ -4188,7 +4188,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         [ss, s_scope_mode, s_chapters_sel, s_segment_chapter_filter, s_segment_selection_state],
         [s_preview_df, s_scope_readiness, s_start],
     )
-    s_segments_sel.change(
+    s_segments_sel.input(
         merge_segment_selection,
         [s_segments_sel, s_segment_selection_state, s_segment_chapter_filter, ss],
         [s_segments_sel, s_segment_selection_state],

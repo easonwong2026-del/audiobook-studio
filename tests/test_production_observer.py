@@ -304,6 +304,112 @@ def test_scope_controls_output_contract_matches_wiring(app_module, monkeypatch):
     assert wired_output_counts("update_scope_visibility") == [3]
 
 
+def test_custom_segment_selection_accumulates_and_reaches_scope_plan(app_module, monkeypatch):
+    visible_by_chapter = {
+        "11": ["11-001", "11-002", "11-003"],
+        "12": ["12-001", "12-004"],
+    }
+    monkeypatch.setattr(
+        app_module,
+        "_segment_choices",
+        lambda _ss, chapter: ([], visible_by_chapter[str(chapter)]),
+    )
+    session = SimpleNamespace(project="book")
+
+    visible_update, state = app_module.merge_segment_selection(
+        ["11-002", "11-003"], [], "11", session,
+    )
+    assert visible_update["value"] == ["11-002", "11-003"]
+    assert state == ["11-002", "11-003"]
+
+    _, state = app_module.merge_segment_selection(
+        ["12-004"], state, "12", session,
+    )
+    assert state == ["11-002", "11-003", "12-004"]
+    assert app_module.refresh_segment_filter(session, "11", state)["value"] == [
+        "11-002", "11-003",
+    ]
+
+    plan_calls = []
+
+    def fake_plan(_project, scope):
+        plan_calls.append(scope)
+        selected_count = len(scope.get("segment_ids", []))
+        return {
+            "project_name": "book",
+            "ready": True,
+            "segments": selected_count or 3,
+            "chapters": 1,
+            "already_completed": 0,
+            "remaining": selected_count or 3,
+            "to_synthesize": selected_count or 3,
+            "failed": 0,
+            "voice_cast": {},
+            "blockers": [],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(
+        app_module.ProductionJobService,
+        "plan",
+        staticmethod(fake_plan),
+    )
+    monkeypatch.setattr(app_module, "_scope_preview_rows", lambda *_args: [])
+    monkeypatch.setattr(
+        app_module.df_style,
+        "style_dataframe",
+        lambda *_args, **_kwargs: [],
+    )
+
+    _, readiness, start = app_module.refresh_scope_preview(
+        session, "segments", [], "11", state,
+    )
+
+    assert plan_calls[0]["segment_ids"] == ["11-002", "11-003", "12-004"]
+    assert "本次选择：3 段" in readiness
+    assert start["interactive"] is True
+
+
+def test_segment_action_preserves_other_chapter_selection(app_module, monkeypatch):
+    records = {
+        "11": [
+            {"id": "11-001", "status": "pending"},
+            {"id": "11-002", "status": "done"},
+            {"id": "11-003", "status": "failed"},
+        ],
+    }
+    monkeypatch.setattr(
+        app_module,
+        "_segment_choices",
+        lambda _ss, chapter: ([], [item["id"] for item in records[str(chapter)]]),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "_segment_records",
+        lambda _ss, chapter: records[str(chapter)],
+    )
+    session = SimpleNamespace(project="book")
+
+    _, cleared = app_module.clear_scope_segments(
+        "11", ["12-004", "11-002"], session,
+    )
+    assert cleared == ["12-004"]
+    _, pending = app_module.select_pending_scope_segments("11", cleared, session)
+    assert pending == ["12-004", "11-001", "11-003"]
+    _, failed = app_module.select_failed_scope_segments("11", pending, session)
+    assert failed == ["12-004", "11-003"]
+
+
+def test_custom_segment_checkbox_listens_only_to_user_input(app_module):
+    merge_event = next(
+        item
+        for item in app_module.app.get_config_file()["dependencies"]
+        if item.get("api_name") == "merge_segment_selection"
+    )
+
+    assert merge_event["targets"] == [(app_module.s_segments_sel._id, "input")]
+
+
 def test_latest_task_keeps_terminal_result(app_module, monkeypatch):
     task = _task("done", finished_at="2026-01-01T00:03:18Z")
     monkeypatch.setattr(
