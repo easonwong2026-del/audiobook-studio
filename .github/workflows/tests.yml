@@ -95,42 +95,20 @@ jobs:
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
 
-      - name: Run Windows path, project, runtime, QA and delivery tests
+      - name: Run Windows capability regression tests
+        shell: bash
         env:
           PYTHONUTF8: "1"
-        run: >-
-          python -m pytest -q
-          tests/test_structured_script_import.py
-          tests/test_project_repo.py
-          tests/test_project_service.py
-          tests/test_project_snapshot.py
-          tests/test_binding_repo.py
-          tests/test_session_snapshot.py
-          tests/test_app_glue.py
-          tests/test_app_wiring.py
-          tests/test_ui_layout_regression.py
-          tests/test_workspace_paths.py
-          tests/test_voice_cast_phase2.py
-          tests/test_partial_production_scope.py
-          tests/test_task_repo.py
-          tests/test_hotpath_optimizations.py
-          tests/test_runtime_engine_bootstrap.py
-          tests/test_engine_self_healing.py
-          tests/test_production_jobs.py
-          tests/test_production_runtime.py
-          tests/test_runtime_tts.py
-          tests/test_production_mutation_guard.py
-          tests/test_o12_state_machine.py
-          tests/test_cancellation_state.py
-          tests/test_quality_phase4.py
-          tests/test_delivery_freshness.py
-          tests/test_repair_phase4.py
-          tests/test_workflow_export_phase4.py
-          tests/test_export_duration.py
-          tests/test_audio_pipeline_streaming.py
-          tests/test_export_r2.py
-          tests/test_project_backup.py
-          tests/test_mcp_server.py
-          tests/test_storage_layout_v3.py
-          tests/test_storage_migration_rollback.py
-          tests/workflows/test_project_lifecycle.py
+        run: |
+          python -m pytest -q \
+            tests/test_{windows_*,start_bat_encoding.py,no_hardcoded_paths.py,workspace_paths.py,environment_diagnostics.py,launcher.py,chapter_identity.py} \
+            tests/test_{project_*,catalog_*,bookshelf_*}.py \
+            tests/test_storage_*.py \
+            tests/test_{engine_*,runtime_*,production_*,startup_phases.py,application_lifecycle.py} \
+            tests/test_{o12_cancel_during_pause.py,o12_state_machine.py,cancellation_state.py,synthesis_service.py,partial_production_scope.py} \
+            tests/test_{quality*,batch_qa_terminal_refresh.py,repair*,delivery_freshness.py} \
+            tests/test_{export_*,workflow_export*.py,audio_pipeline*.py,metadata.py} \
+            tests/test_{supplement*,unified_supplement_quick_tts.py} \
+            tests/test_{voice_*,o5_preview.py,o9_voice_lib.py,o13_merge_preview.py,tts_engine*.py,tts_profile_adapter.py,mcp_server.py} \
+            tests/test_{structured_script_import.py,task_repo.py,binding_repo.py,session_snapshot.py,hotpath_optimizations.py} \
+            tests/workflows/test_{*_lifecycle.py,export_mixed_audio.py,data_dir_switch.py}
