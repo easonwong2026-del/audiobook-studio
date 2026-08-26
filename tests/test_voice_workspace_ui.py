@@ -213,16 +213,16 @@ def test_brand_logo_is_a_reusable_unfiltered_component():
     assert "object-fit:contain!important" in theme
 
 
-def test_launcher_icon_assets_are_available_in_png_and_multisize_ico():
+def test_canonical_brand_and_launcher_assets_are_available():
     for relative in (
-        "icon.png",
         "icon.ico",
-        "assets/brand/audiobook-studio-icon-v3.2.1.png",
-        "assets/brand/audiobook-studio-icon-v3.2.1.ico",
+        "assets/brand/audiobook-studio-sidebar-mark-v1.png",
     ):
         assert (ROOT / relative).is_file()
 
-    assert (ROOT / "icon.png").read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert (ROOT / "assets/brand/audiobook-studio-sidebar-mark-v1.png").read_bytes().startswith(
+        b"\x89PNG\r\n\x1a\n"
+    )
     ico = (ROOT / "icon.ico").read_bytes()
     assert ico[:4] == b"\x00\x00\x01\x00"
     assert int.from_bytes(ico[4:6], "little") == 7

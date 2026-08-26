@@ -68,7 +68,7 @@ SCRIPT = {
 def mini_project(tmp_path, monkeypatch):
     """在 tmp_path 下造一个最小 2 章 4 段 2 角色项目，返回 (project_dir, meta, script, bindings)。
 
-    monkeypatch 在最前面设置环境变量，确保 ProjectRepository / project_manager
+    monkeypatch 在最前面设置环境变量，确保 ProjectRepository
     在首次 import 后读取正确的 WORKSPACE_ROOT。
     """
     monkeypatch.setenv("AUDIOBOOK_STUDIO_DATA_DIR", str(tmp_path))
@@ -114,7 +114,7 @@ def mini_project(tmp_path, monkeypatch):
 
 
 def _write_meta(project_dir: str, meta: ProjectMeta):
-    """直接写 project.json（不依赖 project_manager._save_meta）。"""
+    """直接写 project.json（不依赖私有 metadata writer）。"""
     payload = {
         "project_name": meta.project_name,
         "created_at": meta.created_at,

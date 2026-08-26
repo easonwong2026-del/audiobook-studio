@@ -15,7 +15,7 @@ UI JSON 导入
 StructuredScriptImportService
        ├─ lib.script_loader
        ├─ services.script_consistency
-       ├─ ProjectCreationService._assert_slot_available
+       ├─ StructuredScriptImportService._assert_slot_available
        └─ ProjectRepository.create_project（原子创建）
        │
        ├─ ProjectSnapshot / voice_bindings.json
@@ -32,7 +32,6 @@ app.py                         Gradio 页面组合和生产事件编排
 lib/
   types.py                     Script / Chapter / Segment / ProjectMeta
   script_loader.py             V3 JSON 解析、兼容别名和结构校验
-  project_manager.py           既有项目生产兼容包装
   queue.py                     段级合成、断点续跑和按 engine identity 隔离的缓存
   tts_profile.py               双引擎 profile、冻结 identity 与 cache identity
   tts_engine.py                IndexTTS 2 / 2.5 Backend Adapter
@@ -44,7 +43,6 @@ repositories/
   config_repo.py               数据目录配置
 services/
   structured_script_import.py  JSON 检查、预览和创建唯一链路
-  project_creation.py          项目名称和槽位策略
   project.py                   项目、声音绑定和音色库服务
   synthesis.py                 合成任务状态和后台任务
   supplement.py                角色补录

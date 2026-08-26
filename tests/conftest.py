@@ -7,8 +7,7 @@
   lock 路径，inline runtime 无法 claim 任务（task 卡 pending）——2026-08-16
   全量测试 16 failed 的根因之一。
 
-必须在测试模块导入项目存储组件（包括兼容 facade）之前设置，conftest 由 pytest
-在收集前加载，满足该时序。
+必须在测试模块导入项目存储组件之前设置，conftest 由 pytest 在收集前加载，满足该时序。
 """
 import os
 import tempfile

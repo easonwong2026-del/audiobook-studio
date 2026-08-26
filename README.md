@@ -73,7 +73,7 @@ StructuredScriptImportService.inspect()
 
 StructuredScriptImportService.create()
   → 再次 inspect
-  → ProjectCreationService._assert_slot_available()
+  → StructuredScriptImportService._assert_slot_available()
   → ProjectRepository.create_project()
 ```
 

@@ -11,9 +11,6 @@ from services.project_catalog import ProjectCatalogService
 
 
 ROOT = Path(__file__).parents[1]
-COMPATIBILITY_SOURCE = (ROOT / "lib" / "project_manager.py").read_text(
-    encoding="utf-8"
-)
 APP_TREE = ast.parse((ROOT / "app.py").read_text(encoding="utf-8"))
 WIRING_TREE = ast.parse(
     (ROOT / "ui" / "wiring" / "project_catalog_wiring.py").read_text(
@@ -80,7 +77,6 @@ def test_live_bookshelf_scans_only_through_project_catalog(monkeypatch):
     assert calls == ["list_project_summaries"]
     assert not hasattr(ProjectRepository, "list_projects")
     assert not hasattr(ProjectService, "list_projects")
-    assert "def list_projects" not in COMPATIBILITY_SOURCE
 
 
 def test_project_catalog_actions_are_wired_to_catalog_handlers():

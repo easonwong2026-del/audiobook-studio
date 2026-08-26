@@ -7,7 +7,7 @@
 3) to_queue_rows(states) 行数=段数、列数=6、图标映射正确
    （done→✅、running→⏳、error→❌、paused→⏸、pending→⬜、cancelled→⛔）。
 
-用 tmp_path + monkeypatch 建最小项目，复用 test_project_manager 约定（不依赖 gradio/torch）。
+用 tmp_path + monkeypatch 建最小项目，复用 ProjectRepository 约定（不依赖 gradio/torch）。
 """
 import sys
 import os

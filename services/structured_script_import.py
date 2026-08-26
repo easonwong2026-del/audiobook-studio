@@ -8,8 +8,7 @@ The service deliberately has only two operations:
     the network.
 
 ``create(project_name, path)``
-    Inspect again, reserve the project slot through the existing creation
-    guard, and delegate the atomic directory creation to
+    Inspect again, reserve the project slot, and delegate the atomic directory creation to
     :class:`repositories.project_repo.ProjectRepository`.
 """
 from __future__ import annotations
@@ -247,6 +246,30 @@ class StructuredScriptImportService:
         return ProjectRepository.inspect_project_slot(str(project_name).strip())
 
     @staticmethod
+    def _assert_slot_available(project_name: str) -> None:
+        inspection = ProjectRepository.inspect_project_slot(project_name)
+        if inspection.status == "available":
+            return
+        if inspection.status == "valid":
+            raise ValueError(f"项目「{inspection.name}」已存在，请打开已有项目或更换名称")
+        if inspection.status == "legacy":
+            raise ValueError(f"项目「{inspection.name}」存在于旧版项目目录，请勿覆盖")
+        if inspection.status == "incomplete":
+            missing = "、".join(inspection.missing_files) or "未知文件"
+            raise ValueError(
+                f"发现不完整项目目录「{inspection.name}」；缺失：{missing}。"
+                "请先点击“清理残留并重试”"
+            )
+        if inspection.status == "temporary":
+            raise ValueError(
+                f"发现临时项目目录「{inspection.name}」，请先归档残留后重试"
+            )
+        raise ValueError(
+            f"项目目录「{inspection.name}」存在，但项目文件损坏。"
+            "请先移动到回收站后重试"
+        )
+
+    @staticmethod
     def inspect(path: str, project_name: str | None = None) -> StructuredScriptPreview:
         """Inspect a JSON file without creating files in the project workspace."""
         if not path or not os.path.isfile(path):
@@ -320,11 +343,7 @@ class StructuredScriptImportService:
         if preview.errors:
             raise ValueError("JSON 校验失败：\n" + "\n".join(f"- {item}" for item in preview.errors))
 
-        # Keep the existing slot policy as the single guard for valid,
-        # legacy, incomplete, temporary, and corrupted directories.
-        from services.project_creation import ProjectCreationService
-
-        ProjectCreationService._assert_slot_available(safe_name)
+        StructuredScriptImportService._assert_slot_available(safe_name)
         ProjectRepository.create_project(safe_name, path)
         return StructuredScriptCreationResult(
             project_name=safe_name,
@@ -344,9 +363,7 @@ class StructuredScriptImportService:
             messages = [item.get("message", "") for item in report["errors"]]
             raise ValueError("JSON 校验失败：\n" + "\n".join(f"- {item}" for item in messages))
 
-        from services.project_creation import ProjectCreationService
-
-        ProjectCreationService._assert_slot_available(safe_name)
+        StructuredScriptImportService._assert_slot_available(safe_name)
         ProjectRepository.create_project_from_data(safe_name, script)
         summary = report["script_summary"]
         return StructuredScriptCreationResult(

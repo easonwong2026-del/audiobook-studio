@@ -12,9 +12,6 @@ ROOT = Path(__file__).parents[1]
 VOICE_SOURCE = (ROOT / "ui" / "components" / "voice_binding.py").read_text(
     encoding="utf-8"
 )
-PROJECT_MANAGER_SOURCE = (ROOT / "lib" / "project_manager.py").read_text(
-    encoding="utf-8"
-)
 
 
 CASES = [
@@ -134,8 +131,6 @@ def test_voice_choice_helpers_match_baseline_fixture(
 def test_role_choice_presentation_is_ui_owned():
     assert "project_manager" not in VOICE_SOURCE
     assert "_pm" not in VOICE_SOURCE
-    assert "def build_role_choices(" not in PROJECT_MANAGER_SOURCE
-    assert "def build_bound_role_choices(" not in PROJECT_MANAGER_SOURCE
 
 
 def test_role_choice_helpers_are_pure_presentation_only():

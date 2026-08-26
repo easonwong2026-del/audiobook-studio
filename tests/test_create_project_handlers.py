@@ -98,8 +98,8 @@ def test_create_from_json_failure_paths_return_false_without_mutating_opened_ses
             raise error
 
         monkeypatch.setattr(
-            create_handlers.ProjectCreationService,
-            "create_from_structured_script",
+            create_handlers.StructuredScriptImportService,
+            "create",
             fail_service,
         )
         result = create_handlers.create_from_json(name, json_file, ss)
@@ -121,8 +121,8 @@ def test_create_from_json_success_updates_session_and_returns_true(monkeypatch, 
         name="C", script={"project": "C"}, bindings={"旁白": "voice-c"}
     )
     monkeypatch.setattr(
-        create_handlers.ProjectCreationService,
-        "create_from_structured_script",
+        create_handlers.StructuredScriptImportService,
+        "create",
         lambda _name, _source: _creation_result("C"),
     )
     from services import ProjectService
@@ -167,8 +167,8 @@ def test_creation_success_gate_blocks_failure_chain_and_allows_success(monkeypat
     goto_calls = []
 
     monkeypatch.setattr(
-        create_handlers.ProjectCreationService,
-        "create_from_structured_script",
+        create_handlers.StructuredScriptImportService,
+        "create",
         lambda _name, _source: (_ for _ in ()).throw(ValueError("slot occupied")),
     )
     _, creation_success = create_handlers.create_from_json("C", str(source), ss)
@@ -184,8 +184,8 @@ def test_creation_success_gate_blocks_failure_chain_and_allows_success(monkeypat
         name="C", script={"project": "C"}, bindings={"旁白": "voice-c"}
     )
     monkeypatch.setattr(
-        create_handlers.ProjectCreationService,
-        "create_from_structured_script",
+        create_handlers.StructuredScriptImportService,
+        "create",
         lambda _name, _source: _creation_result("C"),
     )
     from services import ProjectService
