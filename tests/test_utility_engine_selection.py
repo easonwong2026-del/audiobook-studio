@@ -13,7 +13,6 @@ it never tracks later settings changes.  Production snapshot logic lives in
 """
 from __future__ import annotations
 
-import inspect
 import json
 import os
 import uuid
@@ -350,17 +349,6 @@ def test_preview_explicit_profile_uses_requested_engine(
     )
     snapshot = _snapshot_of(captured)
     assert snapshot["engine_identity"] == "indextts:2.5"
-
-
-# ── Case 8: Production snapshot logic untouched ───────────────────────────
-def test_production_snapshot_logic_untouched():
-    import services.production_jobs as pj
-
-    source = inspect.getsource(pj)
-    # production keeps its own snapshot resolution and does not depend on the
-    # new utility selection helper
-    assert "_select_utility_engine" not in source
-    assert "resolve_profile" in source
 
 
 # ═══════════════════════════════════════════════════════════════════════════

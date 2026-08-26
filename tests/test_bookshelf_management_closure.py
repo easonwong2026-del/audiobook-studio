@@ -1,7 +1,6 @@
 """Bookshelf management UX/state-safety regression coverage for the close-out PR."""
 from __future__ import annotations
 
-import ast
 import json
 import os
 from pathlib import Path
@@ -407,21 +406,3 @@ def test_cleanup_token_cannot_cross_project(bookshelf_workspace):
 
     assert result["stale"] is True
     assert candidate.exists()
-
-
-def test_ui_ready_catalog_load_is_separate_from_prewarm():
-    app_path = Path(__file__).parents[1] / "app.py"
-    source = app_path.read_text(encoding="utf-8")
-    assert "app.load(\n        catalog_ui.refresh_bookshelf_management_view" in source
-    assert "app.load(_on_ui_ready_prewarm)" in source
-    tree = ast.parse(source)
-    load_callbacks = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
-            continue
-        if node.func.attr != "load" or not node.args:
-            continue
-        callback = node.args[0]
-        load_callbacks.append(ast.unparse(callback))
-    assert "catalog_ui.refresh_bookshelf_management_view" in load_callbacks
-    assert "_on_ui_ready_prewarm" in load_callbacks

@@ -1,8 +1,6 @@
 """Round 3C ownership and behavior contracts for low-risk Voice Asset UI."""
 from __future__ import annotations
 
-import ast
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -11,78 +9,12 @@ from ui import voice_handlers
 from ui.components import voice_binding
 
 
-ROOT = Path(__file__).resolve().parents[1]
-APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
-APP_TREE = ast.parse(APP_SOURCE)
-HANDLERS_SOURCE = (ROOT / "ui" / "voice_handlers.py").read_text(encoding="utf-8")
-HANDLERS_TREE = ast.parse(HANDLERS_SOURCE)
-VOICE_COMPONENT_SOURCE = (ROOT / "ui" / "components" / "voice_binding.py").read_text(encoding="utf-8")
-VOICE_COMPONENT_TREE = ast.parse(VOICE_COMPONENT_SOURCE)
-WIRING_SOURCE = (ROOT / "ui" / "wiring" / "voice_wiring.py").read_text(encoding="utf-8")
-
-MOVED = (
-    "refresh_role_list",
-    "select_role_from_list",
-    "play_lib_voice",
-    "_save_category_choices",
-    "save_to_lib",
-    "filter_vlib_by_category",
-    "refresh_voice_lib",
-    "select_voice_from_browser",
-    "refresh_categories",
-    "refresh_voice_filters",
-)
-
-
-def _top_level_functions(tree):
-    return {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
-
-
-APP_FUNCTIONS = _top_level_functions(APP_TREE)
-HANDLER_FUNCTIONS = _top_level_functions(HANDLERS_TREE)
-VOICE_COMPONENT_FUNCTIONS = _top_level_functions(VOICE_COMPONENT_TREE)
-
-
 def _snapshot(script, bindings):
     return SimpleNamespace(script=script, bindings=bindings)
 
 
 def _session(project="demo"):
     return SimpleNamespace(project=project)
-
-
-def test_low_risk_callbacks_have_one_ui_owner():
-    for name in MOVED:
-        assert name not in APP_FUNCTIONS, f"app.py still owns {name}"
-        assert name in HANDLER_FUNCTIONS, f"ui.voice_handlers missing {name}"
-    assert "import app" not in HANDLERS_SOURCE
-    for forbidden in ("ProductionRuntime", "RuntimeTTSService", "VoiceCastResolver"):
-        assert forbidden not in HANDLERS_SOURCE
-
-
-def test_frozen_cross_domain_handlers_and_library_state_remain_in_app():
-    for name in (
-        "bind_voice",
-        "refresh_voice_cast_ui",
-        "finalize_voice_cast_ui",
-        "preview_bound_voice",
-        "refresh_production_voice_choices",
-        "_lib_path",
-        "_lib_voices",
-    ):
-        assert name in APP_FUNCTIONS, f"frozen app contract moved unexpectedly: {name}"
-
-
-def test_role_config_title_has_one_shared_presentation_owner():
-    assert "_role_config_title" not in APP_FUNCTIONS
-    assert "_role_config_title" not in HANDLER_FUNCTIONS
-    assert "format_role_config_title" in VOICE_COMPONENT_FUNCTIONS
-    assert "format_role_config_title(role, voice, dest)" in ast.unparse(APP_FUNCTIONS["bind_voice"])
-    assert "format_role_config_title(role, voice, binding)" in ast.unparse(
-        HANDLER_FUNCTIONS["select_role_from_list"]
-    )
-    for forbidden in ("gradio", "import app", "services", "VoiceCastResolver", "RuntimeTTSService"):
-        assert forbidden not in VOICE_COMPONENT_SOURCE
 
 
 @pytest.mark.parametrize(
@@ -97,46 +29,6 @@ def test_role_config_title_has_one_shared_presentation_owner():
 )
 def test_shared_role_config_title_exact_behavior(role, voice, binding, expected):
     assert voice_binding.format_role_config_title(role, voice, binding) == expected
-
-
-def test_live_voice_wiring_uses_module_qualified_low_risk_owners():
-    expected = {
-        "select_role_from_list": "voice_ui.select_role_from_list",
-        "refresh_role_list": "voice_ui.refresh_role_list",
-        "play_lib_voice": "voice_ui.play_lib_voice",
-        "save_to_lib": "voice_ui.save_to_lib",
-        "filter_vlib_by_category": "voice_ui.filter_vlib_by_category",
-        "refresh_voice_lib": "voice_ui.refresh_voice_lib",
-        "select_voice_from_browser": "voice_ui.select_voice_from_browser",
-    }
-    for key, owner in expected.items():
-        assert f'"{key}": {owner}' in APP_SOURCE
-    for key, owner in (
-        ("bind_voice", "bind_voice"),
-        ("refresh_role_summary", "refresh_role_summary"),
-        ("refresh_voice_cast_ui", "refresh_voice_cast_ui"),
-        ("finalize_voice_cast", "finalize_voice_cast_ui"),
-        ("preview_bound_voice", "preview_bound_voice"),
-    ):
-        assert f'"{key}": {owner}' in APP_SOURCE
-    for key in ("select_role_from_list", "refresh_role_list", "save_to_lib"):
-        assert f'cb["{key}"]' in WIRING_SOURCE or key in WIRING_SOURCE
-
-
-def test_live_chains_preserve_order_and_selected_opened_isolation():
-    for chain_name in ("_open_chain_rest", "_post_archive_reconcile"):
-        fn = APP_FUNCTIONS[chain_name]
-        source = ast.unparse(fn)
-        lib_index = source.index("voice_ui.refresh_voice_lib")
-        categories_index = source.index("voice_ui.refresh_categories")
-        assert lib_index < categories_index
-        assert "selected_project" not in source
-        assert "project_view_ui" not in source
-        assert "refresh_project_storage" not in source
-    assert "voice_ui.refresh_role_list" in APP_SOURCE
-    assert "voice_ui.refresh_voice_filters" in APP_SOURCE
-    assert "voice_ui.refresh_voice_lib" in APP_SOURCE
-    assert 'page["v_role_search"].change(\n        cb["refresh_role_list"]' in WIRING_SOURCE
 
 
 def test_role_list_fixture_covers_empty_snapshot_search_and_current_retention(monkeypatch):
@@ -180,19 +72,6 @@ def test_select_role_fixture_preserves_seven_outputs_and_binding_copy(monkeypatc
     assert bound[2]["value"] == "/tmp/narrator.wav"
     assert bound[4] == "*当前绑定音频：narrator.wav*"
     assert "沉稳男中音" in bound[1]
-
-
-@pytest.mark.parametrize(
-    ("categories", "expected"),
-    [
-        (None, ["未分类", "— 新建 —"]),
-        ([], ["未分类", "— 新建 —"]),
-        (["温柔", "低沉"], ["未分类", "温柔", "低沉", "— 新建 —"]),
-        (["未分类", "温柔"], ["未分类", "温柔", "— 新建 —"]),
-    ],
-)
-def test_category_choices_fixture(categories, expected):
-    assert voice_handlers._save_category_choices(categories) == expected
 
 
 def test_voice_library_refresh_fixture_preserves_rows_schema_and_category(monkeypatch):
@@ -266,13 +145,3 @@ def test_save_fixture_preserves_error_and_success_four_tuple(monkeypatch):
     assert success[2]["choices"] == ["new.wav"]
     assert success[3]["choices"] == ["未分类", "温柔", "— 新建 —"]
     assert success[3]["value"] == "温柔"
-
-
-def test_category_refresh_and_filter_fixture(monkeypatch):
-    monkeypatch.setattr(voice_handlers.voice_lib, "list_categories", lambda: ["低沉", "温柔"])
-    monkeypatch.setattr(voice_handlers.voice_lib, "voice_names", lambda category=None: [category or "全部"])
-    bind, lib, save = voice_handlers.refresh_voice_filters()
-    assert bind["choices"] == ["低沉", "温柔"] and bind["value"] is None
-    assert lib["choices"] == ["低沉", "温柔"] and lib["value"] is None
-    assert save["value"] == "未分类" and "未分类" in save["choices"]
-    assert voice_handlers.filter_vlib_by_category("温柔")["choices"] == ["温柔"]

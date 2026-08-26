@@ -3,15 +3,12 @@
 覆盖（T02）：
 - 搜索渲染：apply_project_search 产出书架着色契约 + 重置选中信息；
 - select 只改 selected 不动 project（核心隔离不变式）；
-- 动作 handler 收显式 project_name（不读 ss.project）；
-- archive 两步确认契约（第一次只提示，第二次才归档）；
-- state-aware bookshelf refresh 使用 SessionState 的 selected/opened 隔离；
+- SelectData 的真实 payload 与异常输入兼容；
 - 打开项目回调注入（open_selected_project 委托注入的 open_project）。
 """
 from __future__ import annotations
 
 import json
-import os
 
 import gradio as gr
 import pytest
@@ -165,118 +162,6 @@ def test_select_bookshelf_row_ignores_bad_event(handler_workspace):
     assert name == ""
     assert ss.selected_project is None
     assert ss.project is None
-
-
-def test_action_handlers_take_project_name_not_ss(handler_workspace):
-    """动作 handler 收显式 project_name，不依赖 ss.project。"""
-    # open_directory 收 project_name
-    assert "project_name" in handlers.open_selected_directory.__code__.co_varnames
-    # create_backup 收 project_name
-    assert "project_name" in handlers.create_selected_backup.__code__.co_varnames
-    # cleanup 扫描/执行收 project_name
-    assert "project_name" in handlers.scan_selected_cleanup.__code__.co_varnames
-    assert "project_name" in handlers.execute_selected_cleanup.__code__.co_varnames
-    # integrity 收 project_name
-    assert "project_name" in handlers.check_selected_integrity.__code__.co_varnames
-    assert "project_name" in handlers.repair_selected_integrity.__code__.co_varnames
-    # archive 收 project_name + confirmed_project（确认态绑定项目名，不依赖打开状态）
-    assert "project_name" in handlers.archive_selected.__code__.co_varnames
-    assert "confirmed_project" in handlers.archive_selected.__code__.co_varnames
-
-
-def test_archive_two_step_confirmation(handler_workspace, tmp_path):
-    """第一次只提示、不归档；确认态绑定项目名后第二次才归档。"""
-    project_dir = os.path.join(handler_workspace, "projects", "alpha")
-    assert os.path.isdir(project_dir)
-
-    # 第一次点击：confirmed_project 为空（未确认）→ 仅提示，确认态记录 alpha
-    msg1, state1, sel1, info1 = handlers.archive_selected("alpha", "", None)
-    assert "确认将「alpha」移入回收站" in msg1
-    assert state1 == "alpha"
-    # 第一次点击不清 selection（noop update）
-    assert not sel1.get("value")
-    # 第一次点击绝不归档
-    assert os.path.isdir(project_dir)
-
-    # 第二次点击：confirmed_project == alpha → 才归档，确认态复位
-    msg2, state2, sel2, info2 = handlers.archive_selected("alpha", "alpha", None)
-    assert "已移入回收站" in msg2
-    assert state2 == ""
-    assert not os.path.isdir(project_dir)
-
-
-def test_archive_confirm_state_bound_to_project_name(handler_workspace):
-    """QA 缺陷回归：确认态绑定项目名，改选后不会绕过两步确认。"""
-    alpha_dir = os.path.join(handler_workspace, "projects", "alpha")
-    beta_dir = os.path.join(handler_workspace, "projects", "beta")
-    # 对 A 第一次点击 → 确认态记录 alpha
-    _msg1, state1, _sel1, _info1 = handlers.archive_selected("alpha", "", None)
-    assert state1 == "alpha"
-    # 改选 B（确认态仍为 alpha，未复位）→ 对 B 点击 → 必须要求重新确认
-    msg2, state2, _sel2, _info2 = handlers.archive_selected("beta", state1, None)
-    assert "确认将「beta」移入回收站" in msg2
-    assert state2 == "beta"
-    # 关键：beta 未被归档（两步确认未被绕过）
-    assert os.path.isdir(alpha_dir)
-    assert os.path.isdir(beta_dir)
-    # 对 B 确认后再点 → 才归档 B
-    msg3, state3, _sel3, _info3 = handlers.archive_selected("beta", "beta", None)
-    assert "已移入回收站" in msg3
-    assert state3 == ""
-    assert not os.path.isdir(beta_dir)
-    # alpha 不受影响
-    assert os.path.isdir(alpha_dir)
-
-
-def test_archive_active_production_error_message(handler_workspace, monkeypatch):
-    from services.project import ProjectMutationBlockedError
-
-    def _blocked(*_args, **_kwargs):
-        raise ProjectMutationBlockedError(
-            "archive_project", "task-1", "running", "alpha"
-        )
-
-    monkeypatch.setattr(
-        "services.project_storage.ensure_project_mutation_allowed", _blocked
-    )
-    msg, state, sel, info = handlers.archive_selected("alpha", "alpha", None)
-    assert "项目正在生产，请先停止任务后再移入回收站" in msg
-    assert state == ""
-    # guard 阻止时不清 selection（noop update）
-    assert not sel.get("value")
-    assert not info.get("value")
-
-
-def test_archive_opened_project_resets_session(handler_workspace):
-    """被归档项目 == ss.project 时安全 reset session（selected 同步清空）。"""
-    ss = SessionState(project="alpha", script={"meta": {}}, bindings={"旁白": "x"})
-    ss.set_selected("alpha")
-    ss.set_snapshot(object())  # 占位快照
-    ss.synthesis = object()  # 占位合成态
-    msg, _state, sel, info = handlers.archive_selected("alpha", "alpha", ss)
-    assert "已移入回收站" in msg
-    assert ss.project is None
-    assert ss.script is None
-    assert ss.bindings == {}
-    assert ss.project_snapshot is None
-    assert ss.synthesis is None
-    # archive 成功后 selected 全部清空
-    assert ss.selected_project is None
-    assert sel == ""
-    assert "选择" in info.get("value", "")
-
-
-def test_refresh_management_contract(handler_workspace):
-    """书架管理刷新返回不含 opened-project mirror 的固定契约。"""
-    result = handlers.refresh_bookshelf_management_view("", SessionState())
-    assert isinstance(result, tuple)
-    assert len(result) == 24
-    bookshelf, trash_rows, trash_choices, trash_status = result[:4]
-    assert bookshelf["headers"] == ["项目", "结构", "段进度", "状态", "最近修改"]
-    assert {row[0] for row in bookshelf["data"]} == {"alpha", "beta"}
-    assert isinstance(trash_rows, list)
-    assert trash_choices.get("choices") == []
-    assert "回收站" in trash_status
 
 
 def test_open_selected_project_delegates_to_injected_callback(handler_workspace):

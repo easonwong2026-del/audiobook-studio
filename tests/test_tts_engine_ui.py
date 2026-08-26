@@ -7,36 +7,6 @@ from types import SimpleNamespace
 
 from ui import settings_handlers
 
-ROOT = Path(__file__).resolve().parents[1]
-
-
-def test_settings_page_exposes_two_engine_radio_and_independent_model_status():
-    source = (ROOT / "ui/pages/settings_page.py").read_text(encoding="utf-8")
-
-    assert "s_tts_engine = gr.Radio(" in source
-    assert "IndexTTS 2 Legacy（回滚）模型目录" in source
-    assert "IndexTTS 2.5（推荐）模型目录" in source
-    assert '"s_legacy_model_status"' in source
-    assert '"s_indextts25_model_status"' in source
-    assert '"s_tts_runtime_engine"' in source
-    assert '"s_tts_frozen_engine"' in source
-
-
-def test_settings_wiring_calls_clear_apply_handler_and_refreshes_statuses():
-    source = (ROOT / "ui/wiring/settings_wiring.py").read_text(encoding="utf-8")
-
-    assert "settings_handlers.apply_tts_engine" in source
-    assert "settings_handlers.refresh_tts_engine_ui" in source
-    for component in (
-        'page["s_tts_status"]',
-        'page["s_legacy_model_status"]',
-        'page["s_indextts25_model_status"]',
-        'page["s_tts_runtime_engine"]',
-        'page["s_tts_frozen_engine"]',
-    ):
-        assert component in source
-
-
 def test_legacy_single_model_config_defaults_to_rollback_engine(monkeypatch):
     monkeypatch.setattr(
         settings_handlers,

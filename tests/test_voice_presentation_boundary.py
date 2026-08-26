@@ -1,17 +1,9 @@
 """Round 2B behavior and ownership contracts for voice presentation helpers."""
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from ui.components import voice_binding
-
-
-ROOT = Path(__file__).parents[1]
-VOICE_SOURCE = (ROOT / "ui" / "components" / "voice_binding.py").read_text(
-    encoding="utf-8"
-)
 
 
 CASES = [
@@ -126,14 +118,3 @@ def test_voice_choice_helpers_match_baseline_fixture(
     assert voice_binding.build_bound_role_choices(script, bindings) == expected_bound
     assert voice_binding.format_role_choices(script, bindings, role_categories) == expected_formatted
     assert voice_binding.format_bound_role_choices(script, bindings) == expected_formatted_bound
-
-
-def test_role_choice_presentation_is_ui_owned():
-    assert "project_manager" not in VOICE_SOURCE
-    assert "_pm" not in VOICE_SOURCE
-
-
-def test_role_choice_helpers_are_pure_presentation_only():
-    assert "ProjectRepository" not in VOICE_SOURCE
-    assert "ProjectService" not in VOICE_SOURCE
-    assert "voice_bindings.json" not in VOICE_SOURCE

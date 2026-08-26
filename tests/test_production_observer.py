@@ -498,13 +498,3 @@ def test_external_mcp_task_is_discovered_once_without_repaint(app_module, monkey
     assert "已完成" in terminal[0]
     assert "**总耗时**：3 分 18 秒" in terminal[0]
     assert terminal[4].active is False
-
-
-def test_production_observer_has_one_active_timer_and_low_frequency_watcher():
-    source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
-
-    assert "s_task_timer" not in source
-    assert "time.sleep(0.5)" not in source
-    assert "s_start_timer = gr.Timer(4.0, active=False)" in source
-    assert "s_external_task_watcher = gr.Timer(20.0)" in source
-    assert "watch_external_production_task" in source

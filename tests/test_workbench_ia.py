@@ -1,17 +1,12 @@
 """Round IA-1 contracts for the Workbench information architecture."""
 from __future__ import annotations
 
-import ast
-from pathlib import Path
 from types import SimpleNamespace
 
 from lib.types import ProjectSummary
 from services.session import SessionState
 from ui import project_catalog_handlers as handlers
 from ui.navigation import NAV_ITEMS
-
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def _summary(
@@ -111,23 +106,3 @@ def test_row_select_updates_only_selected_and_inspector_names_both_contexts(monk
     assert ss.script == {"sentinel": "opened-book"}
     assert "当前选择：" in info
     assert "当前工作项目" in info
-
-
-def test_workbench_open_is_not_wired_to_project_page_navigation():
-    app_source = (ROOT / "app.py").read_text(encoding="utf-8")
-    tree = ast.parse(app_source)
-    calls = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "wire_project_catalog"
-    ]
-    assert len(calls) == 1
-    assert "goto_project" not in ast.unparse(calls[0])
-    assert 'with gr.Group(visible=True, elem_id="grp-overview")' in (
-        ROOT / "ui/pages/overview_page.py"
-    ).read_text(encoding="utf-8")
-    assert '"workbench_new_project": workbench_new_project' in (
-        ROOT / "ui/pages/overview_page.py"
-    ).read_text(encoding="utf-8")

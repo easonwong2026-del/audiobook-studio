@@ -12,7 +12,6 @@ from services.session import SessionState
 from ui import project_catalog_handlers as handlers
 
 
-APP_PATH = Path(__file__).parents[1] / "app.py"
 WIRING_PATH = (
     Path(__file__).parents[1]
     / "ui"
@@ -217,25 +216,3 @@ def test_t11_a_to_b_to_a_confirmation_remains_stale_protected(archive_workspace)
     assert "确认将" in message
     assert next_confirmation == "alpha"
     assert (archive_workspace / "projects" / "alpha").is_dir()
-
-
-def test_t12_catalog_has_no_selector_helper_contract():
-    assert not hasattr(handlers, "build_project_selector_update")
-    assert not hasattr(handlers, "reconcile_project_selector")
-
-
-def test_t13_refresh_signature_owns_only_search_and_session():
-    import inspect
-
-    assert list(inspect.signature(
-        handlers.refresh_bookshelf_management_view
-    ).parameters) == ["search_query", "ss"]
-
-
-def test_t14_management_output_contract_has_no_opened_selector():
-    import inspect
-    from ui.wiring.project_catalog_wiring import bookshelf_management_outputs
-
-    assert "project_sel" not in inspect.signature(
-        bookshelf_management_outputs
-    ).parameters
