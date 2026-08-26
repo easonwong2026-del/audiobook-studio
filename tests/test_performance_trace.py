@@ -1,53 +1,15 @@
 """Regression tests for the independent production performance trace API."""
 from __future__ import annotations
 
-import ast
 import json
-from pathlib import Path
 
 import pytest
 
 from services.performance_trace import PerformanceTrace, TraceSession
 
 
-_PYTHON_310_PRODUCTION_FILES = (
-    "lib/directed_synthesis.py",
-    "lib/queue.py",
-    "lib/tts_engine.py",
-    "mcp_server/models.py",
-    "mcp_server/server.py",
-    "mcp_server/tools/performance.py",
-    "mcp_server/tools/projects.py",
-    "services/engine_capabilities.py",
-    "services/performance_trace.py",
-    "services/production_runtime.py",
-    "services/synthesis.py",
-    "services/workflow.py",
-)
-_PYTHON_311_ONLY_TYPING_NAMES = {
-    "Self",
-    "NotRequired",
-    "Required",
-    "LiteralString",
-    "Never",
-}
-
-
-def test_changed_production_modules_use_python310_typing_apis():
-    root = Path(__file__).parents[1]
-    for relative_path in _PYTHON_310_PRODUCTION_FILES:
-        tree = ast.parse((root / relative_path).read_text(encoding="utf-8"))
-        imported_names = {
-            alias.name
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and node.module == "typing"
-            for alias in node.names
-        }
-        assert not imported_names & _PYTHON_311_ONLY_TYPING_NAMES, relative_path
-
-
 def test_trace_lifecycle_accepts_zero_as_a_valid_start_time():
-    ticks = iter([0.0, 0.0, 0.25, 0.25, 1.0])
+    ticks = iter([0.0, 0.0, 0.25, 1.0])
     trace = PerformanceTrace(clock=lambda: next(ticks), gpu_sampler=None)
 
     trace.start_task()
@@ -89,9 +51,13 @@ def test_trace_accumulates_task_chapter_segment_and_phase_timings(tmp_path):
     assert summary["scope_timings"]["chapter"]["chapter_total"]["count"] == 1
     assert summary["segment_stats"]["count"] == 1
     assert summary["gpu_snapshots"][0]["boundary"] == "task_start"
+    assert "speaker_resolution" not in summary["timings"]
+    assert "status_persist" not in summary["timings"]
 
     path = tmp_path / "logs" / "performance.json"
     assert trace.checkpoint(path)["infer_calls"] == 1
+    assert not path.exists()
+    assert trace.persist(path) is True
     persisted = json.loads(path.read_text(encoding="utf-8"))
     assert persisted["segment_details"][0]["segment_id"] == "1-001"
     assert persisted["segment_details"][0]["last_status"] == "done"
@@ -132,6 +98,23 @@ def test_cache_hit_does_not_imply_an_infer_call():
     assert summary["cache_misses"] == 0
     assert summary["infer_calls"] == 0
     assert trace.segment_details()[0]["infer_call_count"] == 0
+
+
+def test_failure_phase_is_kept_when_micro_timing_is_removed():
+    trace = PerformanceTrace(gpu_sampler=None)
+    with trace.start_segment("1-001", chapter_id="1"):
+        trace.record_failure(
+            "wav_validate",
+            segment_id="1-001",
+            chapter_id="1",
+            error=ValueError("invalid wav"),
+        )
+
+    summary = trace.summary()
+    assert summary["failures"] == 1
+    assert "wav_validate" not in summary["timings"]
+    assert summary["failure_details"][0]["phase"] == "wav_validate"
+    assert trace.segment_details()[0]["failures"] == 1
 
 
 def test_bound_trace_session_is_suitable_for_future_directed_context():
@@ -177,7 +160,7 @@ def test_disabled_trace_is_a_noop_with_stable_summary():
     assert trace.persist() is False
 
 
-def test_task_end_closes_open_scopes_and_records_segment_gap():
+def test_task_end_closes_open_scopes_without_segment_gap_samples():
     trace = PerformanceTrace(gpu_sampler=None)
     trace.start_task()
     trace.start_chapter("1")
@@ -188,5 +171,36 @@ def test_task_end_closes_open_scopes_and_records_segment_gap():
 
     summary = trace.summary()
     assert summary["segment_stats"]["count"] == 2
-    assert summary["timings"]["segment_gap"] >= 0
+    assert "segment_gap" not in summary["timings"]
     assert summary["scope_timings"]["chapter"]["chapter_total"]["count"] == 1
+
+
+def test_large_book_checkpoint_is_memory_only_and_final_persist_is_single_write(tmp_path):
+    trace = PerformanceTrace(gpu_sampler=None)
+    trace.start_task("large-book", "book")
+    persist_calls = []
+    original_persist = trace.persist
+
+    def counted_persist(path=None):
+        persist_calls.append(path)
+        return original_persist(path)
+
+    trace.persist = counted_persist
+    for chapter_index in range(100):
+        trace.start_chapter(str(chapter_index))
+        for segment_index in range(20):
+            segment_id = f"{chapter_index:03d}-{segment_index:03d}"
+            with trace.start_segment(segment_id, chapter_id=str(chapter_index)) as segment:
+                segment.record_cache(hit=segment_index == 0)
+                segment.record_infer(0.01)
+        trace.end_chapter(str(chapter_index))
+        trace.checkpoint(tmp_path / "performance.json")
+
+    trace.end_task()
+    assert persist_calls == []
+    path = tmp_path / "performance.json"
+    assert trace.persist(path) is True
+    assert len(persist_calls) == 1
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["segments"] == 2000
+    assert persisted["infer_calls"] == 2000

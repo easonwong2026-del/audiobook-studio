@@ -248,6 +248,96 @@ class TestPrewarmStaleTaskAndReasons:
         assert PrewarmService.prewarm_skip_reason() is None
 
 
+class TestCanonicalLiveTtsPredicate:
+    def test_live_and_stale_rows_share_one_repository_policy(self):
+        reference = datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc)
+        recent = "2026-08-26T11:59:00Z"
+        old = "2026-08-26T10:00:00Z"
+        rows = [
+            _make_task(
+                task_id="fresh-claimed",
+                status="running",
+                task_type="synthesis",
+                owner_id="runtime-live",
+                heartbeat=recent,
+                created=old,
+            ),
+            _make_task(
+                task_id="stale-claimed",
+                status="running",
+                task_type="synthesis",
+                owner_id="runtime-dead",
+                heartbeat=old,
+                created=old,
+            ),
+            _make_task(
+                task_id="recent-pending",
+                status="pending",
+                task_type="export",
+                owner_id="",
+                heartbeat="",
+                created=recent,
+            ),
+            _make_task(
+                task_id="old-pending",
+                status="pending",
+                task_type="export",
+                owner_id="",
+                heartbeat="",
+                created=old,
+            ),
+            _make_task(
+                task_id="terminal",
+                status="done",
+                task_type="synthesis",
+                owner_id="runtime-old",
+                heartbeat=old,
+                created=old,
+            ),
+        ]
+
+        live = TaskRepository.list_live_tts_tasks(rows, now=reference)
+        assert {record.task_id for record in live} == {
+            "fresh-claimed", "recent-pending",
+        }
+
+    @pytest.mark.parametrize(
+        ("status", "owner_id", "heartbeat_age", "created_age", "expected"),
+        [
+            ("running", "runtime-live", "fresh", "old", True),
+            ("running", "runtime-dead", "old", "old", False),
+            ("pending", "", "recent", "recent", True),
+            ("pending", "", "old", "old", False),
+            ("done", "runtime-old", "old", "old", False),
+        ],
+    )
+    def test_prewarm_runtime_and_settings_use_same_live_result(
+        self, monkeypatch, status, owner_id, heartbeat_age, created_age, expected,
+    ):
+        now = datetime.now(timezone.utc)
+        heartbeat_delta = timedelta(seconds=30 if heartbeat_age == "fresh" else 3600)
+        created_delta = timedelta(minutes=5 if created_age == "recent" else 120)
+        heartbeat = (now - heartbeat_delta).isoformat(timespec="seconds").replace("+00:00", "Z")
+        created = (now - created_delta).isoformat(timespec="seconds").replace("+00:00", "Z")
+        record = _make_task(
+            task_id=f"semantic-{status}-{expected}",
+            status=status,
+            task_type="synthesis",
+            owner_id=owner_id,
+            heartbeat=heartbeat,
+            created=created,
+        )
+        monkeypatch.setattr(
+            TaskRepository, "list_tasks", staticmethod(lambda: [record]),
+        )
+        from services.production_runtime import ProductionRuntime
+        from ui import settings_handlers
+
+        assert PrewarmService.has_active_tts_tasks() is expected
+        assert ProductionRuntime._durable_tts_task_active() is expected
+        assert bool(settings_handlers._active_tts_tasks()) is expected
+
+
 # ──────────────────────────────── H: encoding ───────────────────────────────
 
 
