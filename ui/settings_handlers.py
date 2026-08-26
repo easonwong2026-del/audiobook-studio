@@ -45,10 +45,6 @@ _ENGINE_ALIASES = {
         "index_tts25", "index_tts_2_5", "index_tts_25",
     },
 }
-_ACTIVE_TTS_STATES = frozenset({
-    "active", "pending", "queued", "starting", "preparing", "submitting",
-    "running", "pausing", "paused", "recovering", "cancelling",
-})
 _TASK_TYPE_LABELS = {
     "synthesis": "合成",
     "voice_preview": "试听",
@@ -66,22 +62,18 @@ _TASK_REJECTION_MESSAGES = {
     "export": "当前有导出任务正在运行，请等待导出结束或取消后再切换 TTS 引擎。",
 }
 
-_PREWARM_CONFIG_KEY = "prewarm_default_engine"
-
-
 def get_prewarm_setting() -> bool:
     """Read the「启动后预热默认 TTS 引擎」toggle (default enabled)."""
-    raw = _read_raw_config().get(_PREWARM_CONFIG_KEY, True)
-    return bool(raw) if isinstance(raw, (bool, int)) else True
+    from services.prewarm import PrewarmService
+
+    return PrewarmService.is_enabled()
 
 
 def apply_prewarm_setting(enabled: bool) -> str:
     """Persist the prewarm toggle; returns a user-facing message."""
-    data = _read_raw_config()
-    data[_PREWARM_CONFIG_KEY] = bool(enabled)
-    atomic_write(_config_path(), data)
-    state = "开启" if bool(enabled) else "关闭"
-    return f"✅ 已{state}「启动后预热默认 TTS 引擎」；{state}后下次启动生效。"
+    from services.prewarm import PrewarmService
+
+    return PrewarmService.set_enabled(enabled)
 
 
 def _first(*values: Any) -> Any:
@@ -241,15 +233,10 @@ def _ready_message(model_dir: str, version: str | None = None) -> str:
 
 def _active_tts_tasks() -> list[Any]:
     try:
-        records = TaskRepository.list_tasks()
-    except (OSError, RuntimeError, TypeError, ValueError):
+        return TaskRepository.list_live_tts_tasks()
+    except Exception:  # pragma: no cover - engine switching must fail closed
         logger.debug("读取活动 TTS 任务失败", exc_info=True)
-        return []
-    return [
-        record for record in records
-        if str(getattr(record, "task_type", "")) in _TASK_TYPE_LABELS
-        and str(getattr(record, "status", "")) in _ACTIVE_TTS_STATES
-    ]
+        return [None]
 
 
 def _engine_from_task(record: Any) -> str | None:
