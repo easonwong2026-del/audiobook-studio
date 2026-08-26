@@ -271,8 +271,8 @@ def test_R3_late_validation_failure_restores_v2_and_reads(tmp_path, monkeypatch)
     # 真实业务服务全部可正常读取原 v2 项目
     meta, _script, _bindings = ProjectRepository.load_project("v2rich")
     assert meta.storage_version == 2
-    report = QualityService.get_quality_report("v2rich")
-    assert report is not None
+    inventory = QualityService.get_active_revision_inventory("v2rich")
+    assert inventory is not None
     exports = ExportService.list_exports("v2rich")
     assert len(exports) >= 1
     # 被引用的导出文件确实存在于 v2 位置
@@ -335,7 +335,7 @@ def test_rollback_copied_project_smoke(tmp_path, monkeypatch):
     assert (rec.options or {}).get("revision_snapshot")[0]["relative_path"] == _V2_SEG
     # 真实服务链路
     ProjectRepository.load_project("v2rich")
-    QualityService.get_quality_report("v2rich")
+    QualityService.get_active_revision_inventory("v2rich")
     TaskRepository.load_task("t1")
     ExportService.list_exports("v2rich")
     assert (project_dir / "user_note.txt").is_file()

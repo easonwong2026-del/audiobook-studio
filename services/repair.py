@@ -11,6 +11,7 @@ import shutil
 import hashlib
 from typing import Any
 
+from lib.audio_validation import is_valid_wav_file
 from repositories.project_repo import ProjectRepository
 from repositories.quality_repo import QualityRepository
 from services.production_jobs import ProductionJobError, ProductionJobService
@@ -378,19 +379,13 @@ class RepairService:
 
         completed: list[str] = []
         failed: list[str] = []
-        qa_results: list[dict[str, Any]] = []
         for item in repair.get("prepared", []):
             segment_id = str(item.get("segment_id") or "")
             revision_id = str(item.get("revision_id") or "")
             target = QualityService._absolute(project, item.get("target_relative_path", ""))
-            if os.path.isfile(target) and os.path.getsize(target) > 0:
+            if is_valid_wav_file(target):
                 QualityService.register_completed_revision(
                     project, revision_id, target, source_task_id=task_id
-                )
-                qa_results.append(
-                    QualityService.run_technical_qa(
-                        project, segment_id, revision_id=revision_id
-                    )
                 )
                 completed.append(segment_id)
             else:
@@ -425,14 +420,6 @@ class RepairService:
                 "finalized": True,
                 "completed_segment_ids": completed,
                 "failed_segment_ids": failed,
-                "technical_qa": [
-                    {
-                        "segment_id": item.get("segment_id"),
-                        "revision_id": item.get("revision_id"),
-                        "outcome": item.get("outcome"),
-                    }
-                    for item in qa_results
-                ],
             },
         )
         return cls._public(repair)

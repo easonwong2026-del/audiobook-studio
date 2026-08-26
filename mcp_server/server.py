@@ -41,14 +41,9 @@ from .tools.projects import (
     list_segments,
 )
 from .tools.quality import (
-    get_quality_report,
     get_repair_task,
-    get_segment_review,
     list_repairs,
-    list_review_segments,
-    mark_segment_review,
     regenerate_segments,
-    run_technical_qa,
 )
 from .tools.scripts import create_project, validate_structured_script
 from .tools.voice_assets import get_voice_asset, list_voice_assets
@@ -173,7 +168,7 @@ _TOOLS: dict[str, dict[str, Any]] = {
     },
     "list_segments": {
         "name": "list_segments",
-        "description": "按稳定 structured_script 顺序分页读取段落摘要，可按章节或 synthesis/quality 状态过滤。",
+        "description": "按稳定 structured_script 顺序分页读取段落摘要，可按章节或 synthesis/audio 状态过滤。",
         "inputSchema": {
             "type": "object",
             "required": ["project_name"],
@@ -200,7 +195,8 @@ _TOOLS: dict[str, dict[str, Any]] = {
                         "type": "object",
                         "required": [
                             "segment_id", "chapter_id", "role", "role_id", "text_preview",
-                            "synthesis_status", "quality_status",
+                            "synthesis_status", "audio_status", "audio_available",
+                            "audio_revision",
                         ],
                         "properties": {
                             "segment_id": {"type": "string"},
@@ -209,7 +205,9 @@ _TOOLS: dict[str, dict[str, Any]] = {
                             "role_id": {"type": ["string", "null"]},
                             "text_preview": {"type": "string"},
                             "synthesis_status": {"type": "string"},
-                            "quality_status": {"type": "string"},
+                            "audio_status": {"type": "string"},
+                            "audio_available": {"type": "boolean"},
+                            "audio_revision": {"type": ["string", "null"]},
                         },
                         "additionalProperties": False,
                     },
@@ -621,81 +619,6 @@ _TOOLS.update({
             "additionalProperties": False,
         },
     },
-    "get_quality_report": {
-        "name": "get_quality_report",
-        "description": "返回项目技术 QA 与人工 Review 分离的质量汇总。",
-        "inputSchema": {
-            "type": "object",
-            "required": ["project_name"],
-            "properties": {"project_name": {"type": "string"}},
-            "additionalProperties": False,
-        },
-    },
-    "list_review_segments": {
-        "name": "list_review_segments",
-        "description": "按质量状态列出待检查或待修复段落。",
-        "inputSchema": {
-            "type": "object",
-            "required": ["project_name"],
-            "properties": {
-                "project_name": {"type": "string"},
-                "status": {
-                    "type": "string",
-                    "enum": [
-                        "not_started", "unreviewed", "needs_review", "needs_fix", "passed",
-                        "technical_warning", "regenerating", "pass", "warning", "fail",
-                    ],
-                },
-            },
-            "additionalProperties": False,
-        },
-    },
-    "get_segment_review": {
-        "name": "get_segment_review",
-        "description": "读取单段 active audio revision、技术 QA 与人工 Review。",
-        "inputSchema": {
-            "type": "object",
-            "required": ["project_name", "segment_id"],
-            "properties": {
-                "project_name": {"type": "string"},
-                "segment_id": {"type": "string"},
-            },
-            "additionalProperties": False,
-        },
-    },
-    "mark_segment_review": {
-        "name": "mark_segment_review",
-        "description": "标记单段人工 Review 状态、问题类型和备注。",
-        "inputSchema": {
-            "type": "object",
-            "required": ["project_name", "segment_id", "review_status"],
-            "properties": {
-                "project_name": {"type": "string"},
-                "segment_id": {"type": "string"},
-                "review_status": {
-                    "type": "string",
-                    "enum": ["unreviewed", "needs_review", "needs_fix", "passed"],
-                },
-                "issue_type": {"type": "string"},
-                "review_note": {"type": "string"},
-                "reviewed_by": {"type": "string"},
-            },
-            "additionalProperties": False,
-        },
-    },
-    "run_technical_qa": {
-        "name": "run_technical_qa",
-        "description": "对指定段落或整项目 active revisions 运行非 AI 技术 QA。",
-        "inputSchema": {
-            "type": "object",
-            "required": ["project_name"],
-            "properties": {
-                "project_name": {"type": "string"},
-                "segment_ids": {"type": "array", "items": {"type": "string"}},
-            },
-            "additionalProperties": False,
-        },
-    },
     "regenerate_segments": {
         "name": "regenerate_segments",
         "description": "创建 revision-safe Repair Job 并通过唯一 Production Runtime 重合成。",
@@ -743,17 +666,13 @@ _TOOLS.update({
     },
     "plan_export": {
         "name": "plan_export",
-        "description": "检查 active revisions、QA、metadata 与 FFmpeg 交付准备度。",
+        "description": "检查 active revisions、音频完整性、metadata 与 FFmpeg 交付准备度。",
         "inputSchema": {
             "type": "object",
             "required": ["project_name"],
             "properties": {
                 "project_name": {"type": "string"},
                 "format": {"type": "string", "enum": ["wav", "mp3", "m4b"]},
-                "qa_policy": {
-                    "type": "string",
-                    "enum": ["require_passed", "technical", "allow_unreviewed"],
-                },
                 "subtitle_formats": {
                     "type": "array",
                     "items": {"type": "string", "enum": ["srt", "lrc"]},
@@ -772,10 +691,6 @@ _TOOLS.update({
                 "project_name": {"type": "string"},
                 "format": {"type": "string", "enum": ["wav", "mp3", "m4b"]},
                 "bitrate": {"type": "string"},
-                "qa_policy": {
-                    "type": "string",
-                    "enum": ["require_passed", "technical", "allow_unreviewed"],
-                },
                 "subtitle_formats": {
                     "type": "array",
                     "items": {"type": "string", "enum": ["srt", "lrc"]},
@@ -834,11 +749,9 @@ _READ_ONLY_TOOLS = {
     "get_voice_cast_confirmation",
     "get_production_task",
     "list_production_tasks",
-    "get_quality_report",
     "get_project",
     "get_production_performance",
     "list_projects",
-    "get_segment_review",
     "get_repair_task",
     "list_repairs",
     "plan_export",
@@ -860,8 +773,6 @@ _MUTATION_TOOLS = {
     "resume_production",
     "cancel_production",
     "retry_failed_segments",
-    "mark_segment_review",
-    "run_technical_qa",
     "regenerate_segments",
     "start_export",
 }
@@ -882,7 +793,6 @@ for _tool_name in _MUTATION_TOOLS:
             },
             "idempotentHint": _tool_name in {
                 "pause_production", "resume_production", "cancel_production",
-                "mark_segment_review", "run_technical_qa",
             },
             "openWorldHint": False,
         }
@@ -928,7 +838,6 @@ for _tool_name in (
     "get_runtime_health",
     "plan_production",
     "get_production_task",
-    "get_quality_report",
 ):
     if _tool_name in _TOOLS:
         _TOOLS[_tool_name].setdefault("outputSchema", _OBJECT_OUTPUT_SCHEMA)
@@ -969,11 +878,6 @@ _HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "retry_failed_segments": retry_failed_segments,
     "get_runtime_health": get_runtime_health,
     "get_workflow_state": get_workflow_state,
-    "get_quality_report": get_quality_report,
-    "list_review_segments": list_review_segments,
-    "get_segment_review": get_segment_review,
-    "mark_segment_review": mark_segment_review,
-    "run_technical_qa": run_technical_qa,
     "regenerate_segments": regenerate_segments,
     "get_repair_task": get_repair_task,
     "list_repairs": list_repairs,

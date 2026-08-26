@@ -1,13 +1,11 @@
 """Project inspection MCP adapters."""
 from __future__ import annotations
 
-import os
 import re
 from typing import Any
 
 from lib import script_loader
 from repositories.project_repo import ProjectRepository
-from repositories.quality_repo import QualityRepository
 from services import ProjectService
 from services.quality import QualityService
 from services.voice_cast import VoiceCastError, VoiceCastResolver
@@ -65,55 +63,6 @@ def _preview_text(value: Any, limit: int = 160) -> str:
     if len(text) <= limit:
         return text
     return text[: max(limit - 1, 1)].rstrip() + "…"
-
-
-def _quality_statuses(
-    project_name: str,
-    synthesis_statuses: dict[str, str],
-) -> dict[str, str]:
-    """Read canonical quality state without bootstrapping new revisions."""
-    try:
-        if not os.path.isfile(QualityRepository.state_path(project_name, create=False)):
-            return {
-                segment_id: (
-                    "technical_warning"
-                    if status == "failed" else "not_started"
-                )
-                for segment_id, status in synthesis_statuses.items()
-            }
-        state = QualityRepository.load(project_name)
-    except Exception:  # noqa: BLE001  # malformed projects stay inspectable
-        return {}
-    statuses: dict[str, str] = {}
-    active_revisions = state.get("active_revisions", {})
-    revisions = state.get("revisions", {})
-    if not isinstance(active_revisions, dict):
-        active_revisions = {}
-    if not isinstance(revisions, dict):
-        revisions = {}
-    for segment_id in synthesis_statuses:
-        revision_id = active_revisions.get(segment_id)
-        revision = revisions.get(revision_id)
-        if not isinstance(revision, dict):
-            statuses[segment_id] = (
-                "technical_warning"
-                if synthesis_statuses.get(segment_id) == "failed"
-                else "not_started"
-            )
-            continue
-        try:
-            statuses[segment_id] = str(
-                QualityService._quality_item(  # noqa: SLF001  # canonical read-only calculation
-                    project_name,
-                    segment_id,
-                    state,
-                    revision,
-                ).get("quality_status")
-                or "not_available"
-            )
-        except (OSError, TypeError, ValueError, KeyError):
-            statuses[segment_id] = "not_available"
-    return statuses
 
 
 def list_projects(_arguments: dict[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -205,7 +154,12 @@ def list_segments(arguments: dict[str, Any]) -> dict[str, Any]:
 
     meta, script, _bindings = ProjectRepository.load_project(project_name)
     statuses = dict(getattr(meta, "segments_status", {}) or {})
-    quality_statuses = _quality_statuses(project_name, statuses)
+    inventory = QualityService.get_active_revision_inventory(project_name)
+    audio_by_segment = {
+        str(item.get("segment_id") or ""): item
+        for item in inventory.get("segments", [])
+        if isinstance(item, dict)
+    }
     records: list[dict[str, Any]] = []
     for chapter in _script_chapters(script):
         current_chapter_id = _chapter_id(chapter)
@@ -220,8 +174,9 @@ def list_segments(arguments: dict[str, Any]) -> dict[str, Any]:
             if not segment_id:
                 continue
             synthesis_status = str(statuses.get(segment_id) or "pending")
-            quality_status = quality_statuses.get(segment_id, "not_available")
-            if status_filter and status_filter not in {synthesis_status, quality_status}:
+            audio = audio_by_segment.get(segment_id, {})
+            audio_status = str(audio.get("audio_status") or "missing")
+            if status_filter and status_filter not in {synthesis_status, audio_status}:
                 continue
             role_id, role_name = _role_info(project_name, segment)
             records.append({
@@ -231,7 +186,11 @@ def list_segments(arguments: dict[str, Any]) -> dict[str, Any]:
                 "role_id": role_id,
                 "text_preview": _preview_text(segment.get("text")),
                 "synthesis_status": synthesis_status,
-                "quality_status": quality_status,
+                "audio_status": audio_status,
+                "audio_available": bool(audio.get("audio_valid")),
+                "audio_revision": (
+                    audio.get("audio_revision") or {}
+                ).get("revision_id") if isinstance(audio.get("audio_revision"), dict) else None,
             })
 
     total = len(records)

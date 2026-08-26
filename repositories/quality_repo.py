@@ -1,9 +1,9 @@
-"""Project-local quality, revision, repair, export and delivery persistence.
+"""Project-local audio revision, repair, export and delivery persistence.
 
 The repository deliberately stores only JSON-safe, project-relative public
 records.  Audio files remain in the normal project layout; this file records
-which immutable revision is active and the history needed by QA, repair and
-delivery services.
+which immutable revision is active and the history needed by repair, export
+and delivery services.
 """
 from __future__ import annotations
 
@@ -50,8 +50,6 @@ def _empty_state() -> dict[str, Any]:
         "revision_counters": {},
         "revisions": {},
         "active_revisions": {},
-        "technical_qa": {},
-        "human_reviews": {},
         "repair_history": {},
         "export_jobs": {},
         "delivery_manifests": {},
@@ -60,7 +58,7 @@ def _empty_state() -> dict[str, Any]:
 
 
 class QualityRepository:
-    """Atomic project-local persistence for production quality state."""
+    """Atomic project-local persistence for audio revisions and delivery."""
 
     # Lock order is always:
     #   1. this process-local RLock
@@ -98,8 +96,6 @@ class QualityRepository:
             "revision_counters",
             "revisions",
             "active_revisions",
-            "technical_qa",
-            "human_reviews",
             "repair_history",
             "export_jobs",
             "delivery_manifests",
@@ -308,112 +304,6 @@ class QualityRepository:
                 int(item.get("audio_revision", 0) or 0),
             ),
         )
-
-    @classmethod
-    def save_technical_qa(
-        cls, project_name: str, revision_id: str, result: dict[str, Any]
-    ) -> dict[str, Any]:
-        payload = _json_safe(result)
-        payload["revision_id"] = str(revision_id)
-        payload.setdefault("checked_at", _now())
-
-        def change(state: dict[str, Any]) -> dict[str, Any]:
-            if revision_id not in state["revisions"]:
-                raise KeyError(f"音频 revision 不存在: {revision_id}")
-            state["technical_qa"][str(revision_id)] = payload
-            return payload
-
-        return cls._mutate(project_name, change)
-
-    @classmethod
-    def save_technical_qa_batch(
-        cls,
-        project_name: str,
-        results: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        """Persist many technical-QA results in one cross-process mutation.
-
-        ``quality_state.json`` is a whole-state snapshot.  Calling the
-        single-result mutation once per segment would therefore repeatedly
-        acquire the OS lock and rewrite the complete snapshot.  Batch callers
-        prepare one result per analyzed revision and pay that cost only once.
-        Results without a revision (for example an ``AUDIO_MISSING`` finding)
-        are returned to the caller but cannot be indexed in ``technical_qa``
-        and are consequently skipped here.
-        """
-        prepared: list[dict[str, Any]] = []
-        for result in results:
-            if isinstance(result, tuple) and len(result) == 2:
-                revision_id, raw_result = result
-                if not isinstance(raw_result, dict):
-                    continue
-                payload = _json_safe(raw_result)
-                payload.setdefault("revision_id", str(revision_id or ""))
-            elif isinstance(result, dict):
-                payload = _json_safe(result)
-            else:
-                continue
-            revision_id = str(payload.get("revision_id") or "").strip()
-            if not revision_id:
-                continue
-            payload["revision_id"] = revision_id
-            payload.setdefault("checked_at", _now())
-            prepared.append(payload)
-
-        def change(state: dict[str, Any]) -> list[dict[str, Any]]:
-            saved: list[dict[str, Any]] = []
-            for payload in prepared:
-                revision_id = str(payload["revision_id"])
-                if revision_id not in state["revisions"]:
-                    continue
-                state["technical_qa"][revision_id] = payload
-                saved.append(payload)
-            return saved
-
-        return cls._mutate(project_name, change) if prepared else []
-
-    @classmethod
-    def save_human_review(
-        cls, project_name: str, revision_id: str, review: dict[str, Any]
-    ) -> dict[str, Any]:
-        payload = _json_safe(review)
-        payload["revision_id"] = str(revision_id)
-        payload.setdefault("reviewed_at", _now())
-
-        def change(state: dict[str, Any]) -> dict[str, Any]:
-            if revision_id not in state["revisions"]:
-                raise KeyError(f"音频 revision 不存在: {revision_id}")
-            state["human_reviews"][str(revision_id)] = payload
-            return payload
-
-        return cls._mutate(project_name, change)
-
-    @classmethod
-    def save_human_reviews_batch(
-        cls,
-        project_name: str,
-        reviews: list[tuple[str, dict[str, Any]]],
-    ) -> list[dict[str, Any]]:
-        """Persist many human-review decisions in one cross-process mutation."""
-        prepared = [
-            (str(revision_id), _json_safe(review))
-            for revision_id, review in reviews
-            if str(revision_id)
-        ]
-
-        def change(state: dict[str, Any]) -> list[dict[str, Any]]:
-            saved: list[dict[str, Any]] = []
-            for revision_id, review in prepared:
-                if revision_id not in state["revisions"]:
-                    continue
-                payload = dict(review)
-                payload["revision_id"] = revision_id
-                payload.setdefault("reviewed_at", _now())
-                state["human_reviews"][revision_id] = payload
-                saved.append(payload)
-            return saved
-
-        return cls._mutate(project_name, change) if prepared else []
 
     @classmethod
     def create_history_record(

@@ -10,7 +10,7 @@ structured_script.json
         ↓
 Audiobook Studio 导入与校验
         ↓
-角色与声音 → 合成 → 试听质检 → WAV / MP3 / M4B / 字幕导出
+角色与声音 → 合成 → 试听与修复 → WAV / MP3 / M4B / 字幕导出
 ```
 
 ## 快速开始
@@ -31,7 +31,7 @@ Audiobook Studio 导入与校验
    ```
 
 4. 打开「新建项目」，上传 JSON，查看预览和 warning/error。
-5. 创建后进入「角色与声音」，绑定参考音频，再进入生产、质检和交付。
+5. 创建后进入「角色与声音」，绑定参考音频，再进入生产、试听与修复和交付。
 
 `python tools/validate_structured_script.py` 与 UI 复用同一个
 `StructuredScriptImportService`，不访问网络。

@@ -20,7 +20,6 @@ def plan_export(arguments: dict[str, Any]) -> dict[str, Any]:
     return ExportService.plan_export(
         str(arguments.get("project_name") or ""),
         fmt=str(arguments.get("format") or "m4b"),
-        qa_policy=str(arguments.get("qa_policy") or "require_passed"),
         subtitle_formats=_subtitle_formats(arguments.get("subtitle_formats")),
     )
 
@@ -30,7 +29,6 @@ def start_export(arguments: dict[str, Any]) -> dict[str, Any]:
         str(arguments.get("project_name") or ""),
         fmt=str(arguments.get("format") or "m4b"),
         bitrate=str(arguments.get("bitrate") or "192k"),
-        qa_policy=str(arguments.get("qa_policy") or "require_passed"),
         subtitle_formats=_subtitle_formats(arguments.get("subtitle_formats")),
         idempotency_key=str(arguments.get("idempotency_key") or ""),
     )

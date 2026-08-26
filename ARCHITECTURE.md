@@ -21,7 +21,7 @@ StructuredScriptImportService
        ├─ ProjectSnapshot / voice_bindings.json
        ├─ 本地角色声音绑定
        ├─ SynthesisService → lib.queue → TTS Adapter → IndexTTS 2 / 2.5
-       ├─ 试听与质检
+       ├─ 试听与修复
        └─ ExportService → WAV / MP3 / M4B / 字幕
 ```
 
@@ -70,17 +70,17 @@ ui/
 99_系统数据/
   配置/                 project.json、structured_script.json、voice_bindings.json 等
   章节数据/             按章节拆分的剧本 JSON
-  质检/、任务/、缓存/、日志/、临时/
+  质检/（历史兼容目录，存放 revision/repair 等系统数据）、任务/、缓存/、日志/、临时/
 ```
 
 v1/v2 项目仍通过 `lib.project_paths` 兼容读取；存储升级必须由用户显式发起，
 打开项目不会自动迁移或批量清理用户数据。
 
 角色、章节和声音资产在工作台中使用下拉/单选控件完成选择，旧版内联入口的功能等价
-路径已经收敛到「项目管理 → 角色与声音 → 生产与质检」。
+路径已经收敛到「项目管理 → 角色与声音 → 生产与试听修复」。
 
 `lib.script_loader` 是 JSON 结构的唯一解析入口；`StructuredScriptImportService` 不
-维护第二套 Schema。质量检查由 `validate_script` 和
+维护第二套 Schema。结构校验由 `validate_script` 和
 `check_script_consistency` 分工完成：前者负责阻止结构错误，后者负责错误和可继续创建
 的 warning。
 

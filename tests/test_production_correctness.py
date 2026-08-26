@@ -666,8 +666,8 @@ def test_review_finds_task_audio_when_settings_is_v2(vc_project, tmp_path, engin
     assert os.path.basename(audio) == f"{engine25_key}.wav"
 
 
-def test_chapter_preview_and_qa_resolve_engine_aware_audio(vc_project, engine_config):
-    """Chapter preview and QA must locate the same engine-aware segment."""
+def test_chapter_preview_and_inventory_resolve_engine_aware_audio(vc_project, engine_config):
+    """Chapter preview and revision inventory locate the same engine-aware segment."""
     engine_config("2.5")
     seg_dir = _segments_dir(vc_project)
     fingerprint = _speaker_fingerprint(vc_project, "role_xiaoming")
@@ -694,8 +694,10 @@ def test_chapter_preview_and_qa_resolve_engine_aware_audio(vc_project, engine_co
     revision = QualityService.ensure_active_revision(vc_project, "1-001")
     assert revision is not None
     assert revision.get("params", {}).get("engine_snapshot", {}).get("engine_version") == "2.5"
-    qa = QualityService.run_technical_qa(vc_project, "1-001")
-    assert qa["outcome"] == "pass"
+    inventory = QualityService.get_active_revision_inventory(vc_project)
+    item = next(item for item in inventory["segments"] if item["segment_id"] == "1-001")
+    assert item["audio_valid"] is True
+    assert item["engine_provenance"]["engine_version"] == "2.5"
 
 
 def test_plan_counts_other_engine_files_as_remaining(vc_project, engine_config):

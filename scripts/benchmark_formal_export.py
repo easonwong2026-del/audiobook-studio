@@ -30,7 +30,6 @@ if ROOT not in sys.path:
 
 from lib import project_paths
 from repositories.project_repo import ProjectRepository
-from repositories.quality_repo import QualityRepository
 from services.export import ExportService
 from services.quality import QualityService
 from services.production_runtime import ProductionRuntimeClient
@@ -85,7 +84,7 @@ def benchmark(segment_count: int) -> dict:
         project_dir = ProjectRepository.get_project_dir(project)
         segments_dir = project_paths.project_dir(project_dir, "segments", create=True)
         sample = os.path.join(segments_dir, "sample.wav")
-        # Keep the synthetic segment above Technical QA's minimum duration.
+        # Use a readable, non-empty WAV for every synthetic segment.
         wavfile.write(sample, 16000, np.full(4000, 5000, dtype=np.int16))
         segment_ids = [
             f"001-{index:06d}" for index in range(1, segment_count + 1)
@@ -98,13 +97,7 @@ def benchmark(segment_count: int) -> dict:
                 with open(sample, "rb") as source, open(target, "wb") as destination:
                     destination.write(source.read())
             ProjectRepository.update_segment_status(project, segment_id, "done")
-        QualityService.get_quality_report(project)
-        QualityService.run_technical_qa_batch(project, segment_ids)
-        state = QualityRepository.load(project)
-        reviews = []
-        for revision_id in state.get("active_revisions", {}).values():
-            reviews.append((revision_id, {"review_status": "passed"}))
-        QualityRepository.save_human_reviews_batch(project, reviews)
+        QualityService.get_active_revision_inventory(project)
 
         rss_before = _rss_mb()
         tracemalloc.start()

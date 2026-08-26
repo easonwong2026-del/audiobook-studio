@@ -187,7 +187,7 @@ def test_production_stage_has_internal_navigation_and_check():
     app = _text("app.py")
     assert '"production-nav"' in navigation
     assert '"🎛 合成中心", "synth"' in production
-    assert '"🔍 试听质检", "review"' in production
+    assert '"🔍 试听与修复", "review"' in production
     assert '"🎤 角色补录", "supplement"' in production
     assert "def refresh_production_check" in app
     assert "production_stage.change(_goto" in app

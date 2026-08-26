@@ -5,10 +5,10 @@ import logging
 import os
 import time
 import uuid
-import wave
 from typing import Generator, Optional
 
 from . import project_paths, script_loader, segment_cache
+from .audio_validation import is_valid_wav_file
 from .failures import (
     DEFAULT_RECOVERY_BUDGET,
     PHASE_ATOMIC_PUBLISH,
@@ -66,9 +66,8 @@ def _publish_segment(
     try:
         if not os.path.isfile(temp_path) or os.path.getsize(temp_path) <= 0:
             raise RuntimeError("合成结果为空")
-        with wave.open(temp_path, "rb") as audio:
-            if audio.getnframes() <= 0 or audio.getframerate() <= 0:
-                raise RuntimeError("合成结果不是有效 WAV")
+        if not is_valid_wav_file(temp_path):
+            raise RuntimeError("合成结果不是有效 WAV")
     except Exception as exc:
         _trace_call(
             performance_trace,

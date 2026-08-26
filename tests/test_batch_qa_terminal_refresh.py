@@ -1,4 +1,4 @@
-"""Focused coverage for Batch QA and review repair observer behavior."""
+"""Focused coverage for repair scope and review repair observer behavior."""
 from __future__ import annotations
 
 import os
@@ -83,104 +83,6 @@ def batch_project(tmp_path):
 def _ensure(project, segment_ids):
     for segment_id in segment_ids:
         assert QualityService.ensure_active_revision(project, segment_id)
-
-
-def test_batch_technical_qa_isolates_errors_and_persists_each_result(
-    batch_project, monkeypatch
-):
-    _ensure(batch_project, ["001-001", "001-002", "001-003"])
-    original = QualityService._analyze_technical_qa
-
-    def flaky(project_name, segment_id, revision_id=None, **kwargs):
-        if segment_id == "001-003":
-            raise RuntimeError("simulated analyzer failure")
-        return original(project_name, segment_id, revision_id, **kwargs)
-
-    monkeypatch.setattr(QualityService, "_analyze_technical_qa", flaky)
-    results = QualityService.run_technical_qa_batch(
-        batch_project,
-        ["001-001", "001-002", "001-003"],
-    )
-
-    assert [item["segment_id"] for item in results] == [
-        "001-001", "001-002", "001-003"
-    ]
-    assert results[0]["outcome"] == "pass"
-    assert results[1]["outcome"] == "warning"
-    assert results[2]["outcome"] == "fail"
-    assert results[2]["checks"][0]["code"] == "QA_ITEM_ERROR"
-
-    state = QualityRepository.load(batch_project)
-    revision_ids = {
-        QualityRepository.get_active_revision(batch_project, segment_id)["revision_id"]
-        for segment_id in ("001-001", "001-002", "001-003")
-    }
-    assert revision_ids <= set(state["technical_qa"])
-    assert QualityService.get_segment_quality(batch_project, "001-001")["review_status"] == "unreviewed"
-
-
-def test_batch_human_pass_only_passes_technical_clean_segments(batch_project):
-    _ensure(batch_project, ["001-001", "001-002", "001-003"])
-    QualityService.run_technical_qa_batch(
-        batch_project,
-        ["001-001", "001-002", "001-003"],
-    )
-    result = QualityService.pass_technically_clean(
-        batch_project,
-        ["001-001", "001-002", "001-004"],
-        reviewed_by="batch-test",
-    )
-
-    assert result["passed"] == 1
-    assert result["segment_ids"] == ["001-001"]
-    assert set(result["skipped_segment_ids"]) == {"001-002", "001-004"}
-    assert QualityService.get_segment_quality(batch_project, "001-001")["review_status"] == "passed"
-    assert QualityService.get_segment_quality(batch_project, "001-002")["review_status"] != "passed"
-    assert QualityService.get_segment_quality(batch_project, "001-004")["quality_status"] == "not_started"
-
-
-def test_batch_review_ui_renders_one_line_per_technical_result(monkeypatch):
-    import app
-
-    script = {
-        "chapters": [{
-            "id": "001",
-            "segments": [
-                {"id": "001-001"},
-                {"id": "001-002"},
-                {"id": "001-003"},
-            ],
-        }],
-    }
-    session = SimpleNamespace(project="book")
-    monkeypatch.setattr(app, "_snap", lambda _ss: SimpleNamespace(script=script))
-    monkeypatch.setattr(
-        app.QualityService,
-        "run_technical_qa_batch",
-        staticmethod(lambda *_args, **_kwargs: [
-            {"segment_id": "001-001", "outcome": "pass", "checks": []},
-            {
-                "segment_id": "001-002", "outcome": "warning",
-                "checks": [{"code": "LONG_SILENCE", "severity": "warning"}],
-            },
-            {
-                "segment_id": "001-003", "outcome": "fail",
-                "checks": [{"code": "AUDIO_MISSING", "severity": "error"}],
-            },
-        ]),
-    )
-    monkeypatch.setattr(
-        app,
-        "_review_workspace_values",
-        lambda *_args, **_kwargs: ("summary", "preview", "selection", "quality"),
-    )
-
-    result = app.batch_technical_qa(
-        ["001-001", "001-002", "001-003"], "all", None, session
-    )
-    assert "001-001  technical pass" in result[0]
-    assert "001-002  technical warning" in result[0]
-    assert "001-003  error: audio missing" in result[0]
 
 
 def test_batch_repair_keeps_one_exact_production_scope_and_prior_revisions(

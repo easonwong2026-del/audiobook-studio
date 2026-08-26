@@ -1,4 +1,4 @@
-"""生产与质检：合成控制台 UI builder — 对齐 Pencil 合成中心画板。"""
+"""生产：合成控制台 UI builder — 对齐 Pencil 合成中心画板。"""
 from __future__ import annotations
 
 import gradio as gr
@@ -80,7 +80,7 @@ def create_synthesis_page() -> dict:
                         interactive=True,
                     )
                     gr.Markdown(
-                        "已完成段不会由普通生产重做；需要重新生成请使用试听质检中的修复/重生成。",
+                        "已完成段不会由普通生产重做；需要重新生成请使用试听与修复中的修复/重生成。",
                         elem_classes=["production-scope-note"],
                     )
                 s_preview_df = gr.Dataframe(

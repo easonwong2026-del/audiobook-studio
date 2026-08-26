@@ -114,13 +114,6 @@ class WorkflowService:
             "recommended_poll_seconds": 0,
             "terminal": False,
         },
-        "review_segments": {
-            "action_type": "human",
-            "requires_confirmation": True,
-            "retryable": False,
-            "recommended_poll_seconds": 0,
-            "terminal": False,
-        },
     }
 
     @classmethod
@@ -249,13 +242,25 @@ class WorkflowService:
                 "pausing", "paused", "cancelling",
             }
         ]
-        quality = QualityService.get_quality_report(project)
-        quality_summary = quality["summary"]
-        technical_failures = sum(
-            item.get("technical_outcome") == "fail"
-            and statuses.get(str(item.get("segment_id") or "")) == "done"
-            for item in quality.get("segments", [])
-        )
+        inventory = QualityService.get_active_revision_inventory(project)
+        audio_by_segment = {
+            str(item.get("segment_id") or ""): item
+            for item in inventory.get("segments", [])
+            if isinstance(item, dict)
+        }
+        missing_audio_ids = [
+            str(segment.get("id") or "")
+            for segment in segments
+            if statuses.get(str(segment.get("id") or "")) == "done"
+            and not audio_by_segment.get(str(segment.get("id") or ""), {}).get("audio_revision")
+        ]
+        invalid_audio_ids = [
+            str(segment.get("id") or "")
+            for segment in segments
+            if statuses.get(str(segment.get("id") or "")) == "done"
+            and audio_by_segment.get(str(segment.get("id") or ""), {}).get("audio_revision")
+            and not audio_by_segment.get(str(segment.get("id") or ""), {}).get("audio_valid")
+        ]
 
         exports = QualityRepository.list_history(project, "export_jobs")
         active_exports = []
@@ -388,7 +393,7 @@ class WorkflowService:
                 include_project_name=False,
             ))
         elif active_repairs:
-            stage = "needs_fix"
+            stage = "needs_repair"
             actions.append(cls._action(
                 "check_repair",
                 "get_repair_task",
@@ -396,8 +401,8 @@ class WorkflowService:
                 "段落修复任务正在运行。",
                 repair_id=active_repairs[0].get("repair_id"),
             ))
-        elif failed or technical_failures or quality_summary.get("needs_fix", 0):
-            stage = "needs_fix"
+        elif failed or missing_audio_ids or invalid_audio_ids:
+            stage = "needs_repair"
             if failed:
                 failed_segment_ids = {
                     str(segment.get("id") or "")
@@ -431,20 +436,31 @@ class WorkflowService:
                         count=failed,
                         status="error",
                     ))
-            quality_fix = int(quality_summary.get("needs_fix", 0) or 0) + technical_failures
-            if quality_fix:
+            if missing_audio_ids:
                 blockers.append({
-                    "code": "QUALITY_FIX_REQUIRED",
-                    "message": f"有 {quality_fix} 个段落需要修复。",
-                    "count": quality_fix,
+                    "code": "AUDIO_MISSING",
+                    "message": f"有 {len(missing_audio_ids)} 个已完成段落缺少 active revision。",
+                    "count": len(missing_audio_ids),
+                    "segment_ids": missing_audio_ids,
                 })
+            if invalid_audio_ids:
+                blockers.append({
+                    "code": "AUDIO_INVALID",
+                    "message": f"有 {len(invalid_audio_ids)} 个 active revision WAV 无法读取。",
+                    "count": len(invalid_audio_ids),
+                    "segment_ids": invalid_audio_ids,
+                })
+            audio_problem_ids = missing_audio_ids + [
+                item for item in invalid_audio_ids if item not in missing_audio_ids
+            ]
+            if audio_problem_ids:
                 actions.append(cls._action(
                     "repair_segments",
-                    "list_review_segments",
+                    "regenerate_segments",
                     project,
-                    "读取需要修复的 QA 段落。",
-                    count=quality_fix,
-                    status="needs_fix",
+                    "重新生成缺少或无效音频的段落。",
+                    count=len(audio_problem_ids),
+                    segment_ids=audio_problem_ids,
                 ))
         elif remaining:
             stage = "ready_for_production"
@@ -456,7 +472,7 @@ class WorkflowService:
                 count=remaining,
                 scope={"all": True},
             ))
-        elif quality_summary.get("passed", 0) == total and total > 0:
+        elif total > 0:
             if active_exports:
                 stage = "exporting"
                 actions.append(cls._action(
@@ -475,12 +491,12 @@ class WorkflowService:
                     "当前项目输入与最近一次可交付成品一致。",
                 ))
             else:
-                stage = "quality_passed"
+                stage = "ready_for_export"
                 reason = (
                     "历史 Delivery Manifest 缺少 freshness hash 或输入已变化，"
                     "需要重新导出。"
                     if latest_manifest
-                    else "全部段落已通过质量检查，可以规划交付。"
+                    else "所有必需段落已完成且 active revision 有效，可以规划交付。"
                 )
                 actions.append(cls._action(
                     "plan_export",
@@ -489,22 +505,14 @@ class WorkflowService:
                     reason,
                 ))
         else:
-            stage = "quality_check"
-            unchecked = (
-                int(quality_summary.get("needs_review", 0) or 0)
-                + int(quality_summary.get("technical_warning", 0) or 0)
-            )
-            blockers.append({
-                "code": "QUALITY_REVIEW_REQUIRED",
-                "message": f"还有 {unchecked} 个段落需要质量检查。",
-                "count": unchecked,
-            })
+            stage = "ready_for_production"
             actions.append(cls._action(
-                "review_segments",
-                "list_review_segments",
+                "produce_remaining",
+                "start_production",
                 project,
-                "检查尚未通过的段落音频。",
-                count=unchecked,
+                "项目还没有可生产的段落。",
+                count=0,
+                scope={"all": True},
             ))
 
         return {
@@ -522,7 +530,10 @@ class WorkflowService:
                 "engine_ready": engine_ready,
                 "engine_state": engine_state,
                 "runtime_status": runtime_status,
-                "quality": quality_summary,
+                "active_revisions": int(inventory.get("summary", {}).get("active_revisions", 0) or 0),
+                "valid_audio": int(inventory.get("summary", {}).get("valid_audio", 0) or 0),
+                "missing_audio": len(missing_audio_ids),
+                "invalid_audio": len(invalid_audio_ids),
                 "active_production_task": (
                     active_task.get("task_id") if active_task else None
                 ),

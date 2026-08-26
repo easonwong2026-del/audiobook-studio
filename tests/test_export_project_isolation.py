@@ -116,7 +116,7 @@ def test_open_project_reconciliation_clears_all_formal_export_outputs(monkeypatc
         lambda project: {"summary": {"delivered": False}},
     )
     default_dir = export_ui.refresh_export_default_dir(session)
-    readiness = export_ui.refresh_export_readiness("wav", "require_passed", session)
+    readiness = export_ui.refresh_export_readiness("wav", session)
     assert str(tmp_path / "B") in default_dir
     assert str(tmp_path / "A") not in default_dir
     assert planned_projects == ["B", "B"]
@@ -224,7 +224,7 @@ def test_validated_export_active_race_adopts_new_task_after_project_reconcile(mo
         _export_ui_output_dir="",
     )
 
-    result = export_ui.do_export("mp3", "192k", "", "require_passed", session)
+    result = export_ui.do_export("mp3", "192k", "", session)
 
     assert result[2] == "export-race"
     assert "正在导出" in result[1]

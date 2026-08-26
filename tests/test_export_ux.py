@@ -139,7 +139,7 @@ def test_export_start_returns_durable_task_and_immediate_pending(monkeypatch):
 
     task = {"task_id": "export-1", "project": "book", "status": "pending"}
     _install_export_backend(monkeypatch, export_ui, task)
-    result = export_ui.do_export("mp3", "192k", "", "require_passed", _session())
+    result = export_ui.do_export("mp3", "192k", "", _session())
 
     assert result[0] is None
     assert "等待导出" in result[1]
@@ -166,7 +166,6 @@ def test_second_export_click_keeps_existing_active_task(monkeypatch):
         "mp3",
         "192k",
         "",
-        "require_passed",
         session,
     )
 
@@ -198,7 +197,7 @@ def test_export_active_race_error_keeps_backend_task(monkeypatch):
         raise ActiveExportError()
 
     monkeypatch.setattr(export_ui.ExportService, "start_export", reject_second_start)
-    result = export_ui.do_export("mp3", "192k", "", "require_passed", _session())
+    result = export_ui.do_export("mp3", "192k", "", _session())
 
     assert result[2] == "export-race"
     assert "正在导出" in result[1]

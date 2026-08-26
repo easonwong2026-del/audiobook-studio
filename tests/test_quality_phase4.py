@@ -1,4 +1,4 @@
-"""Phase-4 audio revision, technical QA and human review contracts."""
+"""Audio revision, legacy bootstrap and repository persistence contracts."""
 from __future__ import annotations
 
 import json
@@ -90,58 +90,66 @@ def quality_project(tmp_path):
     ) = original
 
 
-def test_technical_qa_and_human_review_are_independent(quality_project):
-    revision = QualityService.ensure_active_revision(quality_project, "001-001")
-    assert revision and revision["audio_revision"] == 1
+def test_revision_inventory_bootstraps_legacy_audio(quality_project):
+    inventory = QualityService.get_active_revision_inventory(quality_project)
 
-    technical = QualityService.run_technical_qa(quality_project, "001-001")
-    assert technical["outcome"] == "pass"
-    before_human = QualityService.get_segment_quality(quality_project, "001-001")
-    assert before_human["quality_status"] == "needs_review"
-    assert before_human["review_status"] == "unreviewed"
+    assert inventory["summary"] == {
+        "segments": 2,
+        "active_revisions": 2,
+        "valid_audio": 2,
+        "missing_revisions": 0,
+        "invalid_audio": 0,
+    }
+    first = inventory["segments"][0]
+    assert first["audio_revision"]["audio_revision"] == 1
+    assert first["audio_status"] == "valid"
+    assert first["checksum"]
+    assert not os.path.isabs(first["relative_path"])
 
-    QualityService.mark_review(
+
+def test_new_state_omits_decommissioned_maps(quality_project):
+    state = QualityRepository.load(quality_project)
+    assert "technical_qa" not in state
+    assert "human_reviews" not in state
+
+
+def test_old_qa_maps_are_tolerated_without_being_used(quality_project):
+    state = QualityRepository.load(quality_project)
+    legacy = {
+        "technical_qa": {"rev_old": {"outcome": "pass"}},
+        "human_reviews": {"rev_old": {"status": "passed"}},
+    }
+    state.update(legacy)
+    QualityRepository.save(quality_project, state)
+
+    inventory = QualityService.get_active_revision_inventory(quality_project)
+    loaded = QualityRepository.load(quality_project)
+
+    assert inventory["summary"]["valid_audio"] == 2
+    assert loaded["technical_qa"] == legacy["technical_qa"]
+    assert loaded["human_reviews"] == legacy["human_reviews"]
+
+
+def test_invalid_active_revision_is_reported_without_bootstrap(quality_project):
+    project_dir = ProjectRepository.get_project_dir(quality_project)
+    segments = project_paths.project_dir(project_dir, "segments", create=True)
+    corrupt = os.path.join(segments, "corrupt.wav")
+    revision = QualityRepository.create_revision(
         quality_project,
         "001-001",
-        "passed",
-        review_note="人工听感通过",
-        reviewed_by="tester",
+        relative_path=project_paths.make_relative(project_dir, corrupt),
+        status="ready",
+        activate=True,
     )
-    after_human = QualityService.get_segment_quality(quality_project, "001-001")
-    assert after_human["quality_status"] == "passed"
-    assert after_human["technical_outcome"] == "pass"
+    with open(corrupt, "wb") as file:
+        file.write(b"not a wav")
 
-
-def test_all_silence_is_technical_failure_without_faking_human_state(quality_project):
-    QualityService.ensure_active_revision(quality_project, "001-002")
-    result = QualityService.run_technical_qa(quality_project, "001-002")
-    assert result["outcome"] == "fail"
-    assert "ALL_SILENCE" in {item["code"] for item in result["checks"]}
-    view = QualityService.get_segment_quality(quality_project, "001-002")
-    assert view["quality_status"] == "technical_warning"
-    assert view["review_status"] == "unreviewed"
-
-
-def test_bulk_pass_only_accepts_technically_clean_active_revisions(quality_project):
-    QualityService.ensure_active_revision(quality_project, "001-001")
-    QualityService.ensure_active_revision(quality_project, "001-002")
-    QualityService.run_technical_qa(quality_project, "001-001")
-    QualityService.run_technical_qa(quality_project, "001-002")
-
-    result = QualityService.pass_technically_clean(
-        quality_project,
-        ["001-001", "001-002"],
-        reviewed_by="batch-test",
-    )
-
-    assert result["passed"] == 1
-    assert result["segment_ids"] == ["001-001"]
-    assert QualityService.get_segment_quality(
-        quality_project, "001-001"
-    )["review_status"] == "passed"
-    assert QualityService.get_segment_quality(
-        quality_project, "001-002"
-    )["review_status"] == "unreviewed"
+    inventory = QualityService.get_active_revision_inventory(quality_project)
+    item = next(item for item in inventory["segments"] if item["segment_id"] == "001-001")
+    assert item["audio_revision"]["revision_id"] == revision["revision_id"]
+    assert item["audio_exists"] is True
+    assert item["audio_valid"] is False
+    assert item["audio_status"] == "invalid"
 
 
 def test_revision_history_is_project_local_and_json_safe(quality_project):
@@ -224,41 +232,6 @@ def test_failed_mutation_releases_process_lock(quality_project):
     assert record["after_failure"] is True
 
 
-def test_technical_qa_batch_rewrites_quality_state_once(quality_project, monkeypatch):
-    """Batch QA performs one quality-state snapshot write for many segments."""
-    for segment_id in ("001-001", "001-002"):
-        assert QualityService.ensure_active_revision(quality_project, segment_id)
-
-    writes: list[str] = []
-    original_atomic_write = __import__(
-        "repositories.quality_repo", fromlist=["atomic_write"]
-    ).atomic_write
-
-    def counted_atomic_write(path, payload):
-        writes.append(path)
-        return original_atomic_write(path, payload)
-
-    monkeypatch.setattr(
-        "repositories.quality_repo.atomic_write",
-        counted_atomic_write,
-    )
-    analyzed = QualityService.analyze_technical_qa_batch(
-        quality_project,
-        ["001-001", "001-002"],
-    )
-    assert len(analyzed) == 2
-    assert writes == []
-
-    results = QualityService.run_technical_qa_batch(
-        quality_project,
-        ["001-001", "001-002"],
-    )
-
-    assert len(results) == 2
-    assert {item["revision_id"] for item in results}
-    assert writes == [QualityRepository.state_path(quality_project)]
-
-
 SCRIPT_THREE = {
     "meta": {"title": "质量测试-三段", "author": "测试作者"},
     "voices": {"旁白": {}},
@@ -274,36 +247,11 @@ SCRIPT_THREE = {
 }
 
 
-def test_never_produced_segment_is_not_started(quality_project):
-    """从未生产的段落 → not_started，而不是 technical_warning。"""
+def test_never_produced_project_inventory_has_missing_audio(quality_project):
+    """A project without generated files remains queryable as missing audio."""
     ProjectRepository.create_project_from_data("never3", SCRIPT_THREE)
-    item = QualityService.get_segment_quality("never3", "001-003")
-    assert item["quality_status"] == "not_started"
-    assert item["technical_outcome"] == "none"
-    assert item["review_status"] == "not_started"
-    assert item["technical_qa"] is None
-
-
-def test_never_produced_project_report_shows_not_started(quality_project):
-    """0 WAV 且从未执行生产的项目 → production_status=not_started / not_available。"""
-    ProjectRepository.create_project_from_data("never3", SCRIPT_THREE)
-    report = QualityService.get_quality_report("never3")
-    assert report["production_status"] == "not_started"
-    assert report["quality_status"] == "not_available"
-    assert report["summary"]["not_started"] == 3
-    assert report["summary"]["technical_warning"] == 0
-    for item in report["segments"]:
-        assert item["quality_status"] == "not_started"
-
-
-def test_failed_segment_keeps_technical_warning(quality_project):
-    """真实失败（meta.segments_status=failed）→ 仍为 technical_warning。"""
-    ProjectRepository.create_project_from_data("never3", SCRIPT_THREE)
-    meta, _, _ = ProjectRepository.load_project("never3")
-    meta.segments_status["001-003"] = "failed"
-    ProjectRepository._save_meta(
-        ProjectRepository.get_project_dir("never3"), meta
-    )
-    item = QualityService.get_segment_quality("never3", "001-003")
-    assert item["quality_status"] == "technical_warning"
-    assert item["technical_outcome"] == "fail"
+    inventory = QualityService.get_active_revision_inventory("never3")
+    assert inventory["summary"]["active_revisions"] == 0
+    assert inventory["summary"]["valid_audio"] == 0
+    assert inventory["summary"]["missing_revisions"] == 3
+    assert {item["audio_status"] for item in inventory["segments"]} == {"missing"}
