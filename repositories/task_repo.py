@@ -46,6 +46,19 @@ _UTILITY_DB_FILENAME = "utility_tasks.sqlite3"
 _ACTIVE_STATES = ("pending", "running", "pausing", "paused", "recovering", "cancelling")
 _TERMINAL_STATES = ("cancelled", "done", "error", "interrupted", "needs_attention")
 
+# One read-only liveness policy shared by engine switching and prewarm.  The
+# SQLite active-state tuple above remains the persistence/claim contract; this
+# wider set also recognizes legacy UI aliases while applying one freshness rule.
+LIVE_TTS_TASK_TYPES = frozenset({
+    "synthesis", "voice_preview", "preview", "supplement", "quick_tts", "export",
+})
+LIVE_TTS_STATES = frozenset({
+    "active", "pending", "queued", "starting", "preparing", "submitting",
+    "running", "pausing", "paused", "recovering", "cancelling",
+})
+LIVE_TTS_HEARTBEAT_MAX_SECONDS = 90.0
+LIVE_TTS_PENDING_MAX_SECONDS = 3600.0
+
 # P1-1: schema-once。同一 path + 进程内只执行一次重 schema ensure / legacy
 # 迁移；缓存值 (schema_version, legacy_done)。失效条件见 `_ensure_schema_once`：
 # 探针（sqlite_master + repository_meta + 必需列 LIMIT 0）失败时自动走重路径，
@@ -158,6 +171,19 @@ def _json_list(value: str | None) -> list[Any]:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _parse_utc_timestamp(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (TypeError, ValueError, OSError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _canonical_scope(value: Any) -> dict[str, Any]:
@@ -1034,6 +1060,56 @@ class TaskRepository:
         )
 
     @staticmethod
+    def list_live_tts_tasks(
+        records: list[TaskRecord] | None = None,
+        *,
+        now: datetime | None = None,
+    ) -> list[TaskRecord]:
+        """Return TTS/export rows that still own a live execution lane.
+
+        A claimed row is live while its owner heartbeat is fresh.  An
+        unclaimed row is live only during the pending grace period.  Missing or
+        malformed timestamps fail closed and remain live; terminal rows and
+        stale rows are inactive.  Callers that need the boolean form should
+        use :meth:`has_live_tts_tasks` so this policy cannot drift by caller.
+        """
+        reference = now or datetime.now(timezone.utc)
+        if reference.tzinfo is None:
+            reference = reference.replace(tzinfo=timezone.utc)
+        candidates = TaskRepository.list_tasks() if records is None else records
+        live: list[TaskRecord] = []
+        for record in candidates:
+            if str(getattr(record, "task_type", "")) not in LIVE_TTS_TASK_TYPES:
+                continue
+            if str(getattr(record, "status", "")) not in LIVE_TTS_STATES:
+                continue
+
+            owner = str(getattr(record, "owner_id", "") or "")
+            if owner:
+                heartbeat = _parse_utc_timestamp(getattr(record, "heartbeat_at", ""))
+                if heartbeat is not None and (
+                    reference - heartbeat
+                ).total_seconds() > LIVE_TTS_HEARTBEAT_MAX_SECONDS:
+                    continue
+            else:
+                created = _parse_utc_timestamp(getattr(record, "created_at", ""))
+                if created is not None and (
+                    reference - created
+                ).total_seconds() > LIVE_TTS_PENDING_MAX_SECONDS:
+                    continue
+            live.append(record)
+        return live
+
+    @staticmethod
+    def has_live_tts_tasks(
+        records: list[TaskRecord] | None = None,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """Return the canonical live-task predicate used by safety guards."""
+        return bool(TaskRepository.list_live_tts_tasks(records, now=now))
+
+    @staticmethod
     def find_by_idempotency(
         project: str,
         task_type: str,
@@ -1620,4 +1696,12 @@ class TaskRepository:
         return changed
 
 
-__all__ = ["TaskRecord", "TaskRepository", "RuntimePendingSignal"]
+__all__ = [
+    "LIVE_TTS_HEARTBEAT_MAX_SECONDS",
+    "LIVE_TTS_PENDING_MAX_SECONDS",
+    "LIVE_TTS_STATES",
+    "LIVE_TTS_TASK_TYPES",
+    "TaskRecord",
+    "TaskRepository",
+    "RuntimePendingSignal",
+]

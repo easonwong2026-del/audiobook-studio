@@ -100,66 +100,10 @@ class PrewarmService:
 
     @staticmethod
     def has_active_tts_tasks() -> bool:
-        """Whether any TTS/export lane is genuinely live (not merely stale).
-
-        A task is only "active" when it has a live owner runtime behind it
-        (fresh heartbeat) or is still pending/unclaimed with a recent
-        timestamp.  A ``cancelling`` / ``running`` row whose owner runtime
-        died days ago must NOT block prewarm forever — it is stale, not
-        active (see incident: a 5-day-old ``cancelling`` task previously
-        blocked prewarm permanently).
-        """
+        """Whether the canonical task repository sees a live TTS lane."""
         try:
-            from datetime import datetime, timezone
-
             from repositories.task_repo import TaskRepository
-
-            active_statuses = {
-                "active", "pending", "queued", "starting", "preparing",
-                "submitting", "running", "pausing", "paused", "recovering",
-                "cancelling",
-            }
-            now = datetime.now(timezone.utc)
-            for record in TaskRepository.list_tasks():
-                status = str(getattr(record, "status", "") or "")
-                task_type = str(getattr(record, "task_type", "") or "")
-                if task_type not in {
-                    "synthesis", "voice_preview", "preview", "supplement",
-                    "quick_tts", "export",
-                }:
-                    continue
-                if status not in active_statuses:
-                    continue
-                owner = str(getattr(record, "owner_id", "") or "")
-                # A claimed task (owner set) is live only while its heartbeat
-                # is fresh (<= 90s).  Stale claimed rows => dead owner.
-                if owner:
-                    heartbeat = str(getattr(record, "heartbeat_at", "") or "")
-                    if heartbeat:
-                        try:
-                            parsed = datetime.fromisoformat(
-                                heartbeat.replace("Z", "+00:00")
-                            )
-                            if parsed.tzinfo is None:
-                                parsed = parsed.replace(tzinfo=timezone.utc)
-                            age = (now - parsed).total_seconds()
-                            if age > 90.0:
-                                continue
-                        except (ValueError, TypeError):
-                            pass
-                # Unclaimed but very old pending rows are leftovers too.
-                created = str(getattr(record, "created_at", "") or "")
-                if not owner and created:
-                    try:
-                        parsed = datetime.fromisoformat(created.replace("Z", "+00:00"))
-                        if parsed.tzinfo is None:
-                            parsed = parsed.replace(tzinfo=timezone.utc)
-                        if (now - parsed).total_seconds() > 3600.0:
-                            continue
-                    except (ValueError, TypeError):
-                        pass
-                return True
-            return False
+            return TaskRepository.has_live_tts_tasks()
         except Exception:  # pragma: no cover - a read failure must not crash
             logger.debug("读取活动任务失败", exc_info=True)
             return True
@@ -297,32 +241,19 @@ def _log_active_task_detail() -> None:
     try:
         from repositories.task_repo import TaskRepository
 
-        active_statuses = {
-            "active", "pending", "queued", "starting", "preparing",
-            "submitting", "running", "pausing", "paused", "recovering",
-            "cancelling",
-        }
-        for record in TaskRepository.list_tasks():
+        for record in TaskRepository.list_live_tts_tasks():
             status = str(getattr(record, "status", "") or "")
             task_type = str(getattr(record, "task_type", "") or "")
-            if (
-                task_type
-                in {
-                    "synthesis", "voice_preview", "preview", "supplement",
-                    "quick_tts", "export",
-                }
-                and status in active_statuses
-            ):
-                logger.info(
-                    "prewarm_blocker task_id=%s task_type=%s task_status=%s "
-                    "owner=%s heartbeat=%s created=%s",
-                    getattr(record, "task_id", ""),
-                    task_type,
-                    status,
-                    str(getattr(record, "owner_id", "") or ""),
-                    str(getattr(record, "heartbeat_at", "") or ""),
-                    str(getattr(record, "created_at", "") or ""),
-                )
+            logger.info(
+                "prewarm_blocker task_id=%s task_type=%s task_status=%s "
+                "owner=%s heartbeat=%s created=%s",
+                getattr(record, "task_id", ""),
+                task_type,
+                status,
+                str(getattr(record, "owner_id", "") or ""),
+                str(getattr(record, "heartbeat_at", "") or ""),
+                str(getattr(record, "created_at", "") or ""),
+            )
     except Exception:  # pragma: no cover - diagnostic must not crash
         logger.debug("prewarm_blocker 详情读取失败", exc_info=True)
 

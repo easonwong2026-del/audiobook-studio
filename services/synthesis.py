@@ -227,11 +227,6 @@ class SynthesisService:
         state.cancel = True
         state.cancel_requested = True
         state.status = "cancelling"
-        if state.performance_trace is not None:
-            try:
-                state.performance_trace.record_event("cancel_requested")
-            except Exception:  # noqa: BLE001  # diagnostics must not alter control
-                logger.debug("记录 cancel trace 失败", exc_info=True)
         state.notify()
 
     @staticmethod
@@ -244,11 +239,6 @@ class SynthesisService:
         state.paused = True
         if state.status in {"pending", "running"}:
             state.status = "pausing"
-        if state.performance_trace is not None:
-            try:
-                state.performance_trace.record_event("pause_requested")
-            except Exception:  # noqa: BLE001  # diagnostics must not alter control
-                logger.debug("记录 pause trace 失败", exc_info=True)
         state.notify()
 
     @staticmethod
@@ -257,11 +247,6 @@ class SynthesisService:
         state.paused = False
         if state.status in {"paused", "pausing"}:
             state.status = "running"
-        if state.performance_trace is not None:
-            try:
-                state.performance_trace.record_event("resume_requested")
-            except Exception:  # noqa: BLE001  # diagnostics must not alter control
-                logger.debug("记录 resume trace 失败", exc_info=True)
         state.notify()
 
     @staticmethod

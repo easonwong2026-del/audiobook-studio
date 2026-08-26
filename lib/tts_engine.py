@@ -516,7 +516,8 @@ def _record_adapter_report(report: dict, trace=None) -> None:
     unsupported = report.get("unsupported") or []
     if unsupported:
         logger.warning("TTS adapter unsupported fields: %s", unsupported)
-    if trace is not None:
+    diagnostic_keys = ("unsupported", "fallback", "warning", "error")
+    if trace is not None and any(report.get(key) for key in diagnostic_keys):
         try:
             trace.record_event("adapter_mapping", data=dict(report))
         except Exception:  # noqa: BLE001

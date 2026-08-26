@@ -75,6 +75,10 @@ def synthesize(
         adapter_report["unsupported"].append({"field": "pitch", "reason": "IndexTTS adapter has no pitch control"})
     if breath not in (None, "", "none"):
         adapter_report["unsupported"].append({"field": "breath", "reason": "IndexTTS adapter has no breath control"})
+    adapter_has_diagnostic = any(
+        adapter_report.get(key)
+        for key in ("unsupported", "fallback", "warning", "error")
+    )
     record_report = getattr(engine, "record_adapter_report", None)
     if record_report is None:
         try:
@@ -115,7 +119,7 @@ def synthesize(
             started = time.perf_counter()
         try:
             result = engine.synthesize_segment(**engine_kwargs)
-            if callable(record_report):
+            if callable(record_report) and adapter_has_diagnostic:
                 record_report(adapter_report, trace)
             return result
         finally:
@@ -161,7 +165,7 @@ def synthesize(
                 })
             engine.synthesize_segment(**engine_kwargs)
             wav_parts.append((str(part_path), internal_pause))
-        if callable(record_report):
+        if callable(record_report) and adapter_has_diagnostic:
             record_report(adapter_report, trace)
         compose_started = None
         if trace is not None:

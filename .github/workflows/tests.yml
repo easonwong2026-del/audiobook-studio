@@ -110,5 +110,6 @@ jobs:
             tests/test_{export_*,workflow_export*.py,audio_pipeline*.py,metadata.py} \
             tests/test_{supplement*,unified_supplement_quick_tts.py} \
             tests/test_{voice_*,o5_preview.py,o9_voice_lib.py,o13_merge_preview.py,tts_engine*.py,tts_profile_adapter.py,mcp_server.py} \
+            tests/test_{prewarm.py,performance_trace.py,performance_trace_integration.py,incident_observability.py} \
             tests/test_{structured_script_import.py,task_repo.py,binding_repo.py,session_snapshot.py,hotpath_optimizations.py} \
             tests/workflows/test_{*_lifecycle.py,export_mixed_audio.py,data_dir_switch.py}

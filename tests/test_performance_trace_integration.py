@@ -62,6 +62,7 @@ def test_directed_synthesis_records_real_infer_boundary_and_parts(tmp_path, monk
     assert summary["timings"]["engine_infer"] > 0
     assert summary["timings"]["directed_synthesis_total"] > 0
     assert summary["timings"]["wav_compose"] > 0
+    assert summary["events"] == []
     assert detail["directed_part_count"] == 2
     assert detail["infer_call_count"] == 2
     assert Path(output).is_file()

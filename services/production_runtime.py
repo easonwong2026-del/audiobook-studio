@@ -349,20 +349,10 @@ class ProductionRuntime:
 
     @staticmethod
     def _durable_tts_task_active() -> bool:
-        active_states = {
-            "active", "pending", "queued", "starting", "preparing", "submitting",
-            "running", "pausing", "paused", "recovering", "cancelling",
-        }
-        task_types = {
-            "synthesis", "voice_preview", "preview", "supplement", "quick_tts", "export",
-        }
         try:
-            return any(
-                str(getattr(record, "task_type", "")) in task_types
-                and str(getattr(record, "status", "")) in active_states
-                for record in TaskRepository.list_tasks()
-            )
-        except (OSError, RuntimeError, TypeError, ValueError):
+            return TaskRepository.has_live_tts_tasks()
+        except Exception:  # pragma: no cover - a safety guard fails closed
+            logger.debug("读取活动 TTS 任务失败，阻止引擎切换", exc_info=True)
             return True
 
     def start_background(self) -> bool:

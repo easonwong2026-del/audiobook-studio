@@ -30,18 +30,12 @@ TIMING_PHASES = (
     "task_total",
     "chapter_total",
     "segment_total",
-    "cache_lookup",
-    "speaker_resolution",
-    "speaker_fingerprint",
-    "effective_params",
     "directed_synthesis_total",
     "engine_infer",
     "wav_compose",
-    "wav_validate",
     "atomic_publish",
-    "status_persist",
-    "segment_gap",
 )
+_PERCENTILE_PHASES = frozenset({"segment_total", "engine_infer"})
 SCOPES = frozenset({"task", "chapter", "segment"})
 _LOCAL_PATH_RE = re.compile(
     r"(?:[A-Za-z]:[\\/]|/(?:Users|home|private|tmp|var|opt)/)[^\s,;)]*"
@@ -85,13 +79,16 @@ def _percentile(values: Iterable[float], percentile: float) -> float:
 class _Timing:
     total: float = 0.0
     count: int = 0
-    samples: list[float] = field(default_factory=list)
+    samples: list[float] | None = None
 
-    def add(self, elapsed: Any) -> None:
+    def add(self, elapsed: Any, *, keep_sample: bool = False) -> None:
         value = _number(elapsed)
         self.total += value
         self.count += 1
-        self.samples.append(value)
+        if keep_sample:
+            if self.samples is None:
+                self.samples = []
+            self.samples.append(value)
 
     def as_dict(self, *, statistics: bool = False) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -99,11 +96,12 @@ class _Timing:
             "count": self.count,
         }
         if statistics:
+            samples = self.samples or []
             result.update(
                 {
-                    "median_seconds": _percentile(self.samples, 0.5),
-                    "p95_seconds": _percentile(self.samples, 0.95),
-                    "max_seconds": max(self.samples, default=0.0),
+                    "median_seconds": _percentile(samples, 0.5),
+                    "p95_seconds": _percentile(samples, 0.95),
+                    "max_seconds": max(samples, default=0.0),
                 }
             )
         return result
@@ -157,6 +155,7 @@ class PerformanceTrace:
         gpu_sampler: Callable[[], Mapping[str, Any]] | None = default_gpu_snapshot,
         persist_path: str | os.PathLike[str] | None = None,
         max_failures: int = 100,
+        max_events: int = 100,
         engine: Mapping[str, Any] | None = None,
     ) -> None:
         self.task_id = str(task_id) if task_id is not None else None
@@ -167,6 +166,7 @@ class PerformanceTrace:
         self._gpu_sampler = gpu_sampler
         self._persist_path = str(persist_path) if persist_path is not None else None
         self._max_failures = max(0, int(max_failures))
+        self._max_events = max(0, int(max_events))
         self._task_started_at: float | None = None
         self._task_active = False
         self._chapters: dict[str, dict[str, Any]] = {}
@@ -180,13 +180,12 @@ class PerformanceTrace:
         self._cache_hits = 0
         self._cache_misses = 0
         self._infer_calls = 0
-        self._infer_samples: list[float] = []
+        self._failure_count = 0
         self._failures: list[dict[str, Any]] = []
         self._gpu_snapshots: list[dict[str, Any]] = []
         self._events: list[dict[str, Any]] = []
         self._trace_errors = 0
         self._checkpoint_count = 0
-        self._last_segment_finished_at: float | None = None
 
     # --- isolation and clock helpers ---------------------------------
 
@@ -215,9 +214,8 @@ class PerformanceTrace:
         self._capture_gpu(str(boundary))
 
     def _timing(self, phase: str, scope: str) -> _Timing:
-        phase = str(phase or "unknown")
         scope = scope if scope in SCOPES else "segment"
-        timing = self._timings.setdefault(phase, _Timing())
+        timing = self._timings[phase]
         scoped = self._scope_timings[scope].setdefault(phase, _Timing())
         return timing, scoped
 
@@ -295,7 +293,6 @@ class PerformanceTrace:
                 if chapter is not None and not chapter["active"]:
                     chapter["started_at"] = self._now()
                     chapter["active"] = True
-                    self._capture_gpu(f"chapter:{key}:start")
             except Exception as exc:  # noqa: BLE001  # trace must not alter production
                 self._trace_errors += 1
                 logger.debug("performance trace start_chapter failed: %s", exc)
@@ -313,7 +310,6 @@ class PerformanceTrace:
             elapsed = max(0.0, finished_at - started_at) if started_at is not None else 0.0
             self.add_timing("chapter_total", elapsed, scope="chapter", chapter_id=chapter_id)
             chapter["active"] = False
-            self._capture_gpu(f"chapter:{chapter_id}:end")
         except Exception as exc:  # noqa: BLE001  # trace must not alter production
             self._trace_errors += 1
             logger.debug("performance trace end_chapter failed: %s", exc)
@@ -331,14 +327,6 @@ class PerformanceTrace:
                 if record is not None and not record.active:
                     record.started_at = self._now()
                     record.active = True
-                    if self._last_segment_finished_at is not None:
-                        self.add_timing(
-                            "segment_gap",
-                            max(0.0, record.started_at - self._last_segment_finished_at),
-                            scope="segment",
-                            chapter_id=record.chapter_id,
-                            segment_id=record.segment_id,
-                        )
             except Exception as exc:  # noqa: BLE001  # trace must not alter production
                 self._trace_errors += 1
                 logger.debug("performance trace start_segment failed: %s", exc)
@@ -368,7 +356,6 @@ class PerformanceTrace:
                 segment_id=record.segment_id,
             )
             record.active = False
-            self._last_segment_finished_at = self._now()
         except Exception as exc:  # noqa: BLE001  # trace must not alter production
             self._trace_errors += 1
             logger.debug("performance trace end_segment failed: %s", exc)
@@ -408,19 +395,22 @@ class PerformanceTrace:
         if not self.enabled:
             return
         try:
+            phase_name = str(phase or "")
+            if phase_name not in TIMING_PHASES:
+                return
             value = _number(elapsed)
-            timing, scoped = self._timing(phase, scope)
-            timing.add(value)
+            timing, scoped = self._timing(phase_name, scope)
+            timing.add(value, keep_sample=phase_name in _PERCENTILE_PHASES)
             scoped.add(value)
             if segment_id is not None:
                 record = self._segment(segment_id, chapter_id)
                 if record is not None:
-                    segment_timing = record.timing.setdefault(str(phase), _Timing())
+                    segment_timing = record.timing.setdefault(phase_name, _Timing())
                     segment_timing.add(value)
             if chapter_id is not None:
                 chapter = self._chapter(chapter_id)
                 if chapter is not None:
-                    chapter_timing = chapter["timings"].setdefault(str(phase), _Timing())
+                    chapter_timing = chapter["timings"].setdefault(phase_name, _Timing())
                     chapter_timing.add(value)
         except Exception as exc:  # noqa: BLE001  # trace must not alter production
             self._trace_errors += 1
@@ -473,7 +463,6 @@ class PerformanceTrace:
             record.infer_calls += 1
             record.infer_elapsed_total += value
             self._infer_calls += 1
-            self._infer_samples.append(value)
             self.add_timing(
                 "engine_infer",
                 value,
@@ -513,14 +502,6 @@ class PerformanceTrace:
                 self._cache_misses += 1
                 if record is not None:
                     record.cache_misses += 1
-            if lookup_elapsed is not None:
-                self.add_timing(
-                    "cache_lookup",
-                    lookup_elapsed,
-                    scope="segment",
-                    chapter_id=chapter_id,
-                    segment_id=segment_id,
-                )
         except Exception as exc:  # noqa: BLE001  # trace must not alter production
             self._trace_errors += 1
             logger.debug("performance trace record_cache failed: %s", exc)
@@ -551,7 +532,7 @@ class PerformanceTrace:
 
     def record_status(
         self,
-        elapsed: float,
+        elapsed: float | None = None,
         *,
         status: str | None = None,
         segment_id: str | None = None,
@@ -559,13 +540,6 @@ class PerformanceTrace:
         success: bool = True,
         error: BaseException | str | None = None,
     ) -> None:
-        self.add_timing(
-            "status_persist",
-            elapsed,
-            scope="segment",
-            chapter_id=chapter_id,
-            segment_id=segment_id,
-        )
         try:
             if segment_id is not None:
                 record = self._segment(segment_id, chapter_id)
@@ -611,6 +585,7 @@ class PerformanceTrace:
                 "message": message[:500] if message else None,
                 "recoverable": bool(recoverable),
             }
+            self._failure_count += 1
             if len(self._failures) < self._max_failures:
                 self._failures.append(item)
             record = self._segment(segment_id, chapter_id)
@@ -629,9 +604,10 @@ class PerformanceTrace:
         if not self.enabled:
             return
         try:
-            self._events.append(
-                {"name": str(name), "data": _public_value(dict(data or {}))}
-            )
+            if len(self._events) < self._max_events:
+                self._events.append(
+                    {"name": str(name), "data": _public_value(dict(data or {}))}
+                )
         except (TypeError, ValueError, RuntimeError) as exc:
             self._trace_errors += 1
             logger.debug("performance trace record_event failed: %s", exc)
@@ -673,6 +649,7 @@ class PerformanceTrace:
                 "cache_hits": 0,
                 "cache_misses": 0,
                 "infer_calls": 0,
+                "failure_details": [],
                 "timings": {},
                 "segment_stats": {
                     "count": 0,
@@ -687,11 +664,7 @@ class PerformanceTrace:
                 },
             }
         try:
-            segment_totals = []
-            for record in self._segments.values():
-                timing = record.timing.get("segment_total")
-                if timing is not None:
-                    segment_totals.extend(timing.samples)
+            segment_totals = self._timings["segment_total"].samples or []
             phase_seconds = {
                 name: timing.total for name, timing in sorted(self._timings.items())
             }
@@ -703,8 +676,8 @@ class PerformanceTrace:
                 ),
                 "wav_compose_seconds": phase_seconds.get("wav_compose", 0.0),
                 "publish_seconds": phase_seconds.get("atomic_publish", 0.0),
-                "status_persist_seconds": phase_seconds.get("status_persist", 0.0),
             })
+            infer_samples = self._timings["engine_infer"].samples or []
             result: dict[str, Any] = {
                 "trace_available": True,
                 "task_id": self.task_id,
@@ -728,14 +701,15 @@ class PerformanceTrace:
                     "max_seconds": max(segment_totals, default=0.0),
                 },
                 "inference": {
-                    "median_seconds": _percentile(self._infer_samples, 0.5),
-                    "p95_seconds": _percentile(self._infer_samples, 0.95),
-                    "max_seconds": max(self._infer_samples, default=0.0),
+                    "median_seconds": _percentile(infer_samples, 0.5),
+                    "p95_seconds": _percentile(infer_samples, 0.95),
+                    "max_seconds": max(infer_samples, default=0.0),
                     "calls_per_segment": self._infer_calls / len(self._segments)
                     if self._segments
                     else 0.0,
                 },
-                "failures": len(self._failures),
+                "failures": self._failure_count,
+                "failure_details": list(self._failures),
                 "trace_errors": self._trace_errors,
                 "gpu_snapshots": list(self._gpu_snapshots),
                 "events": list(self._events),
@@ -755,18 +729,17 @@ class PerformanceTrace:
                 "cache_hits": 0,
                 "cache_misses": 0,
                 "infer_calls": 0,
+                "failures": self._failure_count,
+                "failure_details": list(self._failures),
                 "timings": {},
                 "trace_errors": self._trace_errors,
             }
 
     def checkpoint(self, path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
-        """Return a compact snapshot and optionally batch-persist full details."""
+        """Return a cheap in-memory snapshot; full persistence belongs at task end."""
 
         snapshot = self.summary()
         self._checkpoint_count += 1
-        target = path if path is not None else self._persist_path
-        if target is not None:
-            self.persist(target)
         return snapshot
 
     def persist(self, path: str | os.PathLike[str] | None = None) -> bool:
@@ -914,7 +887,7 @@ class TraceSession:
 
     def record_status(
         self,
-        elapsed: float,
+        elapsed: float | None = None,
         *,
         status: str | None = None,
         success: bool = True,

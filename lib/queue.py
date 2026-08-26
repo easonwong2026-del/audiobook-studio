@@ -63,7 +63,6 @@ def _publish_segment(
     OSError(errno=22) raised here is a file-system/publish problem and must
     never be classified as an engine-runtime failure.
     """
-    validate_started = time.perf_counter()
     try:
         if not os.path.isfile(temp_path) or os.path.getsize(temp_path) <= 0:
             raise RuntimeError("合成结果为空")
@@ -85,16 +84,6 @@ def _publish_segment(
         except OSError:
             pass
         raise _PhaseFailure(PHASE_WAV_VALIDATE, exc) from exc
-    finally:
-        _trace_call(
-            performance_trace,
-            "add_timing",
-            "wav_validate",
-            time.perf_counter() - validate_started,
-            scope="segment",
-            segment_id=segment_id,
-            chapter_id=chapter_id,
-        )
     publish_started = time.perf_counter()
     publish_succeeded = False
     publish_error: BaseException | None = None
@@ -129,14 +118,12 @@ def _status_update(
     performance_trace=None,
     chapter_id: str | None = None,
 ) -> None:
-    started = time.perf_counter()
     try:
         status_writer.update(segment_id, status)
     except Exception as exc:
         _trace_call(
             performance_trace,
             "record_status",
-            time.perf_counter() - started,
             status=status,
             segment_id=segment_id,
             chapter_id=chapter_id,
@@ -147,7 +134,6 @@ def _status_update(
     _trace_call(
         performance_trace,
         "record_status",
-        time.perf_counter() - started,
         status=status,
         segment_id=segment_id,
         chapter_id=chapter_id,
@@ -401,8 +387,6 @@ def synthesize_project(
                     chapter_id=ch_label,
                 )
                 active_segment_trace = segment_trace
-                speaker_started = time.perf_counter()
-
                 speaker = per_segment_voice.get(str(seg.id)) or voice_bindings.get(seg.role)
                 if not speaker and cast_active and getattr(seg, "role_id", None):
                     cast_binding = cast_role_bindings.get(str(seg.role_id))
@@ -448,50 +432,20 @@ def synthesize_project(
                     _trace_call(segment_trace, "close")
                     continue
 
-                _trace_call(
-                    performance_trace,
-                    "add_timing",
-                    "speaker_resolution",
-                    time.perf_counter() - speaker_started,
-                    scope="segment",
-                    chapter_id=ch_label,
-                    segment_id=str(seg.id),
-                )
-
                 speaker_fingerprint = None
                 if cast_active or str(seg.id) in per_segment_voice:
                     resolved_speaker = speaker
                     if resolved_speaker not in speaker_fingerprints:
-                        fingerprint_started = time.perf_counter()
                         speaker_fingerprints[resolved_speaker] = (
                             segment_cache.speaker_fingerprint_for_path(resolved_speaker)
-                        )
-                        _trace_call(
-                            performance_trace,
-                            "add_timing",
-                            "speaker_fingerprint",
-                            time.perf_counter() - fingerprint_started,
-                            scope="segment",
-                            chapter_id=ch_label,
-                            segment_id=str(seg.id),
                         )
                     speaker_fingerprint = speaker_fingerprints[resolved_speaker]
 
                 seg_start = time.time()
                 # 2.3 O2：用有效合成参数（全局覆盖 + 段落默认）派生缓存键与调用参数，
                 # 保证「覆盖变化 → 文件名变化 → 重合成命中一致」（一致性根因修复）。
-                effective_started = time.perf_counter()
                 emotion_eff, emo_alpha_eff, speech_rate_eff = segment_cache.effective_params(
                     seg, overrides
-                )
-                _trace_call(
-                    performance_trace,
-                    "add_timing",
-                    "effective_params",
-                    time.perf_counter() - effective_started,
-                    scope="segment",
-                    chapter_id=ch_label,
-                    segment_id=str(seg.id),
                 )
                 # B7：缓存键 = 段标识 + 合成参数内容哈希。
                 seg_path = os.path.join(
@@ -866,7 +820,6 @@ def synthesize_project(
             status_writer.checkpoint()
             _trace_call(chapter_trace, "close")
             active_chapter_trace = None
-            _trace_call(performance_trace, "checkpoint")
             yield f"[=] ch{ch.id}|{ch.title}"
 
         elapsed_total = time.time() - start_time
