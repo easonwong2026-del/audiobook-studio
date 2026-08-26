@@ -67,14 +67,6 @@ class ProjectMeta:
     storage_version: int = 1
     directories: dict[str, str] = field(default_factory=dict)
     source_file: str = ""
-    # Phase B logical Catalog relationship metadata.  These fields are
-    # appended with defaults so legacy project.json files remain readable
-    # without a migration step.
-    project_id: str | None = None
-    project_kind: str = "book"
-    parent_project_id: str | None = None
-    chapter_title: str | None = None
-    chapter_order: int | None = None
 
 
 @dataclass(frozen=True)
@@ -97,13 +89,3 @@ class ProjectSummary:
     failed: int = 0
     status: str = "⚪未开始"    # ✅完成 / 🟢进行中 / 🟡部分 / ⚪未开始 / 🔴有失败
     progress: float = 0.0
-    # Phase B hierarchy fields.  ``None`` is intentional for legacy projects
-    # that have never participated in an explicit relationship operation.
-    project_id: str | None = None
-    project_kind: str = "book"
-    parent_project_id: str | None = None
-    chapter_title: str | None = None
-    chapter_order: int | None = None
-    parent_project_name: str | None = None
-    relation_status: str = "standalone"
-    relation_message: str = ""

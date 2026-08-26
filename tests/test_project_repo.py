@@ -78,6 +78,20 @@ class TestProjectRepository:
             assert "旁白" in bindings.get("bindings", {})
             assert "1-001" in meta.segments_status
             assert meta.segments_status["1-001"] == "pending"
+            meta_path = project_paths.project_file(
+                ProjectRepository.get_project_dir("my_book"),
+                "project_meta",
+            )
+            with open(meta_path, encoding="utf-8") as file:
+                raw_meta = json.load(file)
+            assert not {
+                "project_id",
+                "project_kind",
+                "parent_project_id",
+                "chapter_title",
+                "chapter_order",
+                "relation_status",
+            }.intersection(raw_meta)
         finally:
             ProjectRepository.WORKSPACE_ROOT = orig_ws
             ProjectRepository.LEGACY_ROOT = orig_lg
@@ -280,6 +294,108 @@ class TestProjectRepository:
             meta, loaded_script, bindings = ProjectRepository.load_project("old_book")
             assert meta.project_name == "old_book"
             assert meta.total_segments == 1
+        finally:
+            ProjectRepository.WORKSPACE_ROOT = orig_ws
+            ProjectRepository.LEGACY_ROOT = orig_lg
+
+    def test_legacy_relation_metadata_is_read_only(self, tmp_path):
+        """旧关系字段不阻止打开，也不会触发 project.json 回写。"""
+        orig_ws = ProjectRepository.WORKSPACE_ROOT
+        orig_lg = ProjectRepository.LEGACY_ROOT
+        old_project_dir = tmp_path / "legacy_old" / "legacy_relation"
+        try:
+            ProjectRepository.WORKSPACE_ROOT = str(tmp_path / "ws_new")
+            ProjectRepository.LEGACY_ROOT = str(tmp_path / "legacy_old")
+            old_project_dir.mkdir(parents=True)
+
+            old_meta = {
+                "project_name": "legacy_relation",
+                "created_at": "2024-01-01T00:00:00",
+                "updated_at": "2024-01-01T00:00:00",
+                "total_chapters": 2,
+                "total_segments": 4,
+                "completed_count": 0,
+                "failed_count": 0,
+                "pending_count": 4,
+                "segments_status": {
+                    "1-001": "pending",
+                    "1-002": "pending",
+                    "2-001": "pending",
+                    "2-002": "pending",
+                },
+                "voice_bindings_path": "voice_bindings.json",
+                "project_kind": "chapter",
+                "parent_project_id": "some-old-parent",
+                "chapter_title": "old title",
+                "chapter_order": 3,
+                "relation_status": "active",
+            }
+            meta_path = old_project_dir / "project.json"
+            meta_path.write_text(
+                json.dumps(old_meta, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            script = {
+                "meta": {"title": "旧关系项目", "author": "旧作者"},
+                "voices": {"旁白": {"name": "旁白", "description": ""}},
+                "chapters": [
+                    {
+                        "id": 1,
+                        "title": "第一章",
+                        "segments": [
+                            {"id": "1-001", "role": "旁白", "text": "一"},
+                            {"id": "1-002", "role": "旁白", "text": "二"},
+                        ],
+                    },
+                    {
+                        "id": 2,
+                        "title": "第二章",
+                        "segments": [
+                            {"id": "2-001", "role": "旁白", "text": "三"},
+                            {"id": "2-002", "role": "旁白", "text": "四"},
+                        ],
+                    },
+                ],
+            }
+            (old_project_dir / "structured_script.json").write_text(
+                json.dumps(script, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            (old_project_dir / "voice_bindings.json").write_text(
+                json.dumps(
+                    {"bindings": {"旁白": None}, "bound_at": "", "verified": []},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            before = meta_path.read_bytes()
+
+            assert "legacy_relation" in ProjectRepository.scan_projects()
+            summaries = ProjectRepository.list_project_summaries()
+            summary = next(
+                item for item in summaries if item.project_name == "legacy_relation"
+            )
+            assert summary.chapters == 2
+            assert summary.segments == 4
+
+            meta, loaded_script, bindings = ProjectRepository.load_project(
+                "legacy_relation"
+            )
+            assert meta.project_name == "legacy_relation"
+            assert len(loaded_script["chapters"]) == 2
+            assert loaded_script["chapters"][1]["segments"][0]["id"] == "2-001"
+            assert bindings["bindings"]["旁白"] is None
+            assert meta_path.read_bytes() == before
+
+            ProjectRepository.update_segment_status(
+                "legacy_relation", "1-001", "done"
+            )
+            saved_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            assert saved_meta["project_kind"] == "chapter"
+            assert saved_meta["parent_project_id"] == "some-old-parent"
+            assert saved_meta["chapter_title"] == "old title"
+            assert saved_meta["chapter_order"] == 3
+            assert saved_meta["relation_status"] == "active"
         finally:
             ProjectRepository.WORKSPACE_ROOT = orig_ws
             ProjectRepository.LEGACY_ROOT = orig_lg

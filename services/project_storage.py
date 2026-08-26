@@ -272,12 +272,6 @@ class ProjectStorageService:
     @staticmethod
     def archive(name: str) -> str:
         ensure_project_mutation_allowed(name, "archive_project")
-        # Catalog hierarchy is a logical relationship, but archive safety is
-        # enforced at this service boundary so non-Gradio callers cannot
-        # silently orphan a book's chapters.
-        from services.project_catalog import ProjectCatalogService
-
-        ProjectCatalogService.assert_archive_allowed(name)
         return ProjectStorageRepository.archive_project(name)
 
     @staticmethod

@@ -19,12 +19,7 @@ import gradio as gr
 
 from lib import dataframe_style as df_style
 from services import ProjectBackupService, ProjectStorageService
-from services.project_catalog import (
-    RELATION_INVALID,
-    RELATION_ORPHAN,
-    RELATION_VALID,
-    ProjectCatalogService,
-)
+from services.project_catalog import ProjectCatalogService
 
 logger = logging.getLogger(__name__)
 
@@ -85,60 +80,13 @@ def _format_modified_at(value: object) -> str:
     return text.replace("T", " ", 1)[:16]
 
 
-def _structure_label(summary, hierarchy) -> str:
-    """Render Catalog structure semantics, not ``ProjectSummary.chapters``."""
-    if summary.project_kind != "chapter":
-        child_count = sum(
-            1
-            for chapter in hierarchy.chapters
-            if chapter.relation_status == RELATION_VALID
-            and chapter.parent_project_id
-            and chapter.parent_project_id == summary.project_id
-        )
-        return f"整书 · 关联 {child_count} 个章节项目"
-
-    if summary.relation_status == RELATION_VALID:
-        if summary.chapter_order is None:
-            return "章节 · 顺序未设置"
-        return f"第 {int(summary.chapter_order):02d} 章"
-    if summary.relation_status == RELATION_ORPHAN:
-        message = summary.relation_message or "未设置所属整书"
-        return f"⚠ 未归属章节 · {message}"
-    if summary.relation_status == RELATION_INVALID:
-        return f"⚠ {summary.relation_message or '关系无效'}"
-    return f"⚠ {summary.relation_message or '章节关系待诊断'}"
-
-
-def _chapter_relation_warning(summary) -> str:
-    """Render the selected Chapter relation warning without changing Catalog state."""
-    message = html.escape(summary.relation_message or "关系待诊断")
-    if summary.relation_status == RELATION_ORPHAN:
-        return f"⚠ 未归属章节 · {message}"
-    if summary.relation_status == RELATION_INVALID:
-        return f"⚠ 关系无效 · {message}"
-    return f"⚠ {message}"
-
-
 def _render_bookshelf_summaries(projects, *, catalog_summaries=None) -> dict:
     """Render rows from an already-scanned catalog snapshot."""
     visible_projects = list(projects or [])
-    snapshot = (
-        list(catalog_summaries)
-        if catalog_summaries is not None
-        else visible_projects
-    )
-    hierarchy = ProjectCatalogService.hierarchy_from_summaries(snapshot)
-    normalized_by_name = {
-        summary.project_name: summary for summary in hierarchy.projects
-    }
     rows = [
         [
-            ProjectCatalogService.display_name(
-                normalized_by_name.get(project.project_name, project)
-            ),
-            _structure_label(
-                normalized_by_name.get(project.project_name, project), hierarchy
-            ),
+            ProjectCatalogService.display_name(project),
+            f"{project.chapters} 个章节",
             f"{project.completed}/{project.segments}",
             ProjectCatalogService.display_status(project),
             _format_modified_at(project.modified_at),
@@ -230,55 +178,19 @@ def _selected_info(name: str, ss=None, summary=None, *, summaries=None) -> str:
             "（项目摘要读取失败，仍可执行管理操作。）\n\n"
             f"### 当前工作项目\n{opened_text}"
         )
-    if summaries is None:
-        summaries = ProjectCatalogService.scan()
-    hierarchy = ProjectCatalogService.hierarchy_from_summaries(summaries)
-    structure = _structure_label(summary, hierarchy)
     lines = [
         "### 当前选择",
         f"**当前选择：** `{selected_label}`",
         f"- 项目名：`{selected_label}`",
         f"- 书名：{html.escape(summary.title)}",
         f"- 作者：{html.escape(summary.author)}",
+        f"- 内部剧本章节：{summary.chapters}",
+        f"- 段数：{summary.segments} · 已完成：{summary.completed} · 失败：{summary.failed}",
+        f"- 状态：{html.escape(summary.status)}",
+        "",
+        "### 当前工作项目",
+        opened_text,
     ]
-    if summary.project_kind == "chapter":
-        lines.extend(
-            [
-                "- 类型：**章节**",
-                f"- 章节标题：{html.escape(summary.chapter_title or summary.title or '未设置')}",
-                (
-                    f"- 所属整书：`{html.escape(summary.parent_project_name)}`"
-                    if summary.relation_status == RELATION_VALID
-                    and summary.parent_project_name
-                    else f"- 关系警告：**{_chapter_relation_warning(summary)}**"
-                ),
-                f"- 章节顺序：{summary.chapter_order if summary.chapter_order is not None else '未设置'}",
-            ]
-        )
-    else:
-        child_count = sum(
-            1
-            for chapter in hierarchy.chapters
-            if chapter.relation_status == RELATION_VALID
-            and chapter.parent_project_id == summary.project_id
-        )
-        lines.extend(
-            [
-                "- 类型：**整书**",
-                f"- 结构：{html.escape(structure)}",
-                f"- 内部剧本章节：{summary.chapters}",
-                f"- 章节项目数量：{child_count}",
-            ]
-        )
-    lines.extend(
-        [
-            f"- 段数：{summary.segments} · 已完成：{summary.completed} · 失败：{summary.failed}",
-            f"- 状态：{html.escape(summary.status)}",
-            "",
-            "### 当前工作项目",
-            opened_text,
-        ]
-    )
     return "\n".join(lines)
 
 
@@ -459,130 +371,6 @@ def reconcile_bookshelf_selection_context(ss) -> tuple:
 def reconcile_bookshelf_selection(ss) -> tuple:
     """Compatibility name for the bookshelf context reconciler."""
     return reconcile_bookshelf_selection_context(ss)
-
-
-def _hierarchy_control_updates(ss, summaries=None) -> tuple:
-    """Render relationship controls from one normalized Catalog snapshot.
-
-    The first four outputs preserve the Phase B relationship-control order;
-    the four appended outputs are the Phase B.5 kind/title/order/update
-    controls.  Keeping the old prefix stable makes the dedicated hierarchy
-    path additive without changing the 25-output bookshelf contract.
-    """
-    if summaries is None:
-        summaries = ProjectCatalogService.scan()
-    hierarchy = ProjectCatalogService.hierarchy_from_summaries(summaries)
-    selected = str(getattr(ss, "selected_project", "") or "") if ss is not None else ""
-    selected_summary = next(
-        (item for item in hierarchy.projects if item.project_name == selected),
-        None,
-    )
-    choices = ProjectCatalogService.book_choices(
-        hierarchy.projects,
-        exclude_name=selected,
-    )
-    parent_value = (
-        selected_summary.parent_project_name
-        if selected_summary is not None
-        and selected_summary.relation_status == "valid"
-        else None
-    )
-    has_selection = bool(selected_summary)
-    is_chapter = bool(
-        selected_summary is not None and selected_summary.project_kind == "chapter"
-    )
-    if selected_summary is None:
-        status = "选择项目后，可在此设置或解除所属整书。"
-    elif selected_summary.relation_status == "valid":
-        status = f"当前所属整书：`{selected_summary.parent_project_name}`"
-    elif is_chapter:
-        status = f"⚠ {selected_summary.relation_message or '孤立章节'}"
-    else:
-        status = "当前项目是独立整书；选择所属整书可将其转换为章节。"
-    kind = "章节" if is_chapter else "整书" if selected_summary else "未选择"
-    title_value = (
-        selected_summary.chapter_title or ""
-        if is_chapter and selected_summary is not None
-        else ""
-    )
-    order_value = (
-        str(selected_summary.chapter_order)
-        if is_chapter and selected_summary is not None
-        and selected_summary.chapter_order is not None
-        else ""
-    )
-    return (
-        _update(
-            choices=choices,
-            value=parent_value,
-            interactive=has_selection and bool(choices),
-        ),
-        _update(interactive=has_selection and bool(choices)),
-        _update(interactive=is_chapter),
-        _update(value=status),
-        _update(value=kind),
-        _update(value=title_value, interactive=is_chapter),
-        _update(value=order_value, interactive=is_chapter),
-        _update(interactive=is_chapter),
-    )
-
-
-def reconcile_bookshelf_hierarchy_selection(ss) -> tuple:
-    """Reset relationship controls after the canonical bookshelf selection changes."""
-    return _hierarchy_control_updates(ss)
-
-
-def bind_selected_chapter(
-    project_name: str,
-    parent_name: str,
-    ss=None,
-    chapter_title: str | None = None,
-    chapter_order: object = None,
-) -> str:
-    """Explicitly bind/designate the selected project under the chosen book."""
-    if not project_name:
-        return "⚪ 请先从书架选择项目。"
-    try:
-        ProjectCatalogService.bind_chapter(
-            project_name,
-            parent_name,
-            chapter_title=chapter_title,
-            chapter_order=chapter_order,
-        )
-        return f"✅ 已将「{project_name}」设置为「{parent_name}」的章节。"
-    except Exception as exc:  # noqa: BLE001
-        return f"❌ 设置所属整书失败：{exc}"
-
-
-def update_selected_chapter(
-    project_name: str,
-    chapter_title: str | None,
-    chapter_order: object,
-    ss=None,
-) -> str:
-    """Explicitly update the selected chapter's display title and order."""
-    if not project_name:
-        return "⚪ 请先从书架选择项目。"
-    try:
-        ProjectCatalogService.update_chapter_metadata(
-            project_name,
-            chapter_title,
-            chapter_order,
-        )
-        return f"✅ 已更新「{project_name}」的章节标题和顺序。"
-    except Exception as exc:  # noqa: BLE001
-        return f"❌ 更新章节信息失败：{exc}"
-
-
-def unbind_selected_chapter(project_name: str, ss=None) -> str:
-    """Explicitly turn the selected chapter back into an independent book."""
-    if not project_name:
-        return "⚪ 请先从书架选择项目。"
-    try:
-        ProjectCatalogService.clear_chapter_parent(project_name)
-        return f"✅ 已解除「{project_name}」的章节关系；项目恢复为独立整书。"
-    except Exception as exc:
-        return f"❌ 解除章节关系失败：{exc}"
 
 
 # ── 打开项目 / 目录 ──
@@ -1256,20 +1044,6 @@ def refresh_bookshelf_management_view(
     return result
 
 
-def refresh_bookshelf_management_view_with_hierarchy(
-    search_query: str = "", ss=None
-) -> tuple:
-    """Refresh Bookshelf Management plus Phase B/B.5 relationship controls.
-
-    The hierarchy controls are derived from the same Catalog snapshot as the
-    24 bookshelf outputs; no second scan is introduced on the main refresh path.
-    The resulting contract is 32 outputs: the stable 24-output bookshelf
-    prefix followed by eight dedicated hierarchy outputs.
-    """
-    result, summaries = _refresh_bookshelf_management_state(search_query, ss)
-    return (*result, *_hierarchy_control_updates(ss, summaries))
-
-
 def _format_size(value: int) -> str:
     """格式化字节数（避免与 handler 内散落的 format_size 重复）。"""
     from services.project_storage import format_size
@@ -1290,7 +1064,6 @@ __all__ = [
     "archive_selected",
     "archive_selected_with_event",
     "bind_open_project",
-    "bind_selected_chapter",
     "cancel_selected_cleanup",
     "cancel_selected_storage_upgrade",
     "check_selected_integrity",
@@ -1314,6 +1087,4 @@ __all__ = [
     "scan_selected_storage_upgrade",
     "select_bookshelf_row",
     "selection_ui_output_keys",
-    "unbind_selected_chapter",
-    "update_selected_chapter",
 ]

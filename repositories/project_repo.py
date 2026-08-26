@@ -13,7 +13,7 @@ import os
 import shutil
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import ClassVar, Optional, TextIO
 
 from lib import chapter_identity, project_paths, script_loader
@@ -38,6 +38,17 @@ _MARKER_FILE_KEYS = {
     "structured_script.json": "structured_script",
     "voice_bindings.json": "voice_bindings",
 }
+
+_RETIRED_PROJECT_METADATA = frozenset(
+    {
+        "project_id",
+        "project_kind",
+        "parent_project_id",
+        "chapter_title",
+        "chapter_order",
+        "relation_status",
+    }
+)
 
 
 def sanitize_project_name(value: str) -> str:
@@ -216,10 +227,19 @@ class ProjectRepository:
 
     @staticmethod
     def _load_meta(project_dir: str) -> ProjectMeta:
-        """从 project_dir 加载 ProjectMeta，自动修复 segments_status。"""
+        """从 project_dir 加载 ProjectMeta，并忽略已退休的关系字段。"""
         with open(ProjectRepository._meta_path(project_dir), encoding="utf-8") as f:
             data = json.load(f)
-        meta = ProjectMeta(**data)
+        if not isinstance(data, dict):
+            raise ValueError("project.json 顶层必须是对象")
+        known = {item.name for item in fields(ProjectMeta)}
+        meta = ProjectMeta(**{
+            key: value for key, value in data.items() if key in known
+        })
+        if _RETIRED_PROJECT_METADATA.intersection(data):
+            # Historical relation metadata is read-only compatibility data.
+            # Do not let opening/scanning such a project rewrite the source file.
+            return meta
         ProjectRepository._repair_meta(project_dir, meta)
         ProjectRepository._replay_status_journal(project_dir, meta)
         return meta
@@ -350,12 +370,23 @@ class ProjectRepository:
             "storage_version": meta.storage_version,
             "directories": meta.directories,
             "source_file": meta.source_file,
-            "project_id": meta.project_id,
-            "project_kind": meta.project_kind,
-            "parent_project_id": meta.parent_project_id,
-            "chapter_title": meta.chapter_title,
-            "chapter_order": meta.chapter_order,
         }
+        # Preserve already-present retired metadata without interpreting it.
+        # New projects never receive these keys, and normal writes do not
+        # invent or update their values.
+        try:
+            with open(path, encoding="utf-8") as file:
+                existing = json.load(file)
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            existing = None
+        if isinstance(existing, dict):
+            payload.update(
+                {
+                    key: existing[key]
+                    for key in _RETIRED_PROJECT_METADATA
+                    if key in existing
+                }
+            )
         _atomic_write(path, payload)
         # v2 项目保留「根权威 + 配置目录镜像」的历史行为；v3 已无根副本。
         if meta.storage_version == 2:
@@ -791,9 +822,7 @@ class ProjectRepository:
                                segments_status={seg.id: "pending" for ch in parsed_script.chapters for seg in ch.segments},
                                storage_version=project_paths.STORAGE_VERSION,
                                directories=project_paths.layout_manifest(tmp_dir),
-                               source_file=os.path.relpath(source_target, tmp_dir),
-                               project_id=str(uuid.uuid4()),
-                               project_kind="book")
+                               source_file=os.path.relpath(source_target, tmp_dir))
             # 先落权威 project.json（storage_version=3），后续 JSON 写入即可按 v3 解析。
             ProjectRepository._save_meta(tmp_dir, meta)
             bindings = {"bindings": {n: None for n in parsed_script.voices},
@@ -817,145 +846,6 @@ class ProjectRepository:
         project_dir = ProjectRepository._resolve_dir(name)
         if os.path.isdir(project_dir):
             shutil.rmtree(project_dir)
-
-    @staticmethod
-    def ensure_project_id(name: str) -> str:
-        """Return a stable identity, materializing it only on explicit use.
-
-        Normal Catalog scans never call this method.  A legacy project gets an
-        ID only when a relationship operation explicitly includes it.  The
-        metadata update itself uses the repository's existing atomic writer.
-        """
-        project_dir = ProjectRepository._resolve_dir(name)
-        meta = ProjectRepository._load_meta(project_dir)
-        current = str(meta.project_id or "").strip()
-        if current:
-            return current
-        meta.project_id = str(uuid.uuid4())
-        meta.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S")
-        ProjectRepository._save_meta(project_dir, meta)
-        return meta.project_id
-
-    @staticmethod
-    def set_project_relationship(
-        chapter_name: str,
-        parent_project_id: str,
-        *,
-        chapter_title: str | None = None,
-        chapter_order: int | None = None,
-    ) -> None:
-        """Persist one explicit chapter → book relationship atomically.
-
-        Validation of the relationship graph belongs to the Catalog service;
-        this repository method only owns the metadata write and keeps the
-        physical project directory untouched.
-        """
-        project_dir = ProjectRepository._resolve_dir(chapter_name)
-        meta = ProjectRepository._load_meta(project_dir)
-        meta.project_id = meta.project_id or str(uuid.uuid4())
-        meta.project_kind = "chapter"
-        meta.parent_project_id = str(parent_project_id or "") or None
-        meta.chapter_title = str(chapter_title or "").strip() or None
-        meta.chapter_order = chapter_order
-        meta.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S")
-        ProjectRepository._save_meta(project_dir, meta)
-
-    @staticmethod
-    def set_chapter_relationship(
-        chapter_name: str,
-        parent_name: str,
-        *,
-        chapter_title: str | None = None,
-        chapter_order: int | None = None,
-    ) -> tuple[str, str]:
-        """Persist a chapter → book relationship with participant rollback.
-
-        A relationship operation may lazily materialize identities for both
-        participants.  Each project file is still published through the
-        existing atomic writer; if the second publish fails, the first file is
-        restored from its pre-operation metadata so a failed operation cannot
-        leave a half-materialized relationship behind.
-        """
-        child_name = str(chapter_name or "").strip()
-        book_name = str(parent_name or "").strip()
-        if not child_name or not book_name:
-            raise ValueError("章节项目和所属整书不能为空")
-        if child_name == book_name:
-            raise ValueError("项目不能绑定自己")
-
-        child_dir = ProjectRepository._resolve_dir(child_name)
-        parent_dir = ProjectRepository._resolve_dir(book_name)
-        child_meta = ProjectRepository._load_meta(child_dir)
-        parent_meta = ProjectRepository._load_meta(parent_dir)
-        original_child = ProjectMeta(**vars(child_meta))
-        original_parent = ProjectMeta(**vars(parent_meta))
-
-        child_id = str(child_meta.project_id or "").strip() or str(uuid.uuid4())
-        parent_id = str(parent_meta.project_id or "").strip() or str(uuid.uuid4())
-        child_meta.project_id = child_id
-        child_meta.project_kind = "chapter"
-        child_meta.parent_project_id = parent_id
-        child_meta.chapter_title = str(chapter_title or "").strip() or None
-        child_meta.chapter_order = chapter_order
-        child_meta.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S")
-        parent_needs_write = not str(parent_meta.project_id or "").strip()
-        if parent_needs_write:
-            parent_meta.project_id = parent_id
-            parent_meta.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S")
-
-        child_attempted = False
-        parent_attempted = False
-        try:
-            child_attempted = True
-            ProjectRepository._save_meta(child_dir, child_meta)
-            if parent_needs_write:
-                parent_attempted = True
-                ProjectRepository._save_meta(parent_dir, parent_meta)
-        except Exception as exc:
-            rollback_errors: list[str] = []
-            if parent_attempted:
-                try:
-                    ProjectRepository._save_meta(parent_dir, original_parent)
-                except Exception as rollback_exc:  # pragma: no cover - defensive  # noqa: BLE001
-                    rollback_errors.append(f"parent rollback failed: {rollback_exc}")
-            if child_attempted:
-                try:
-                    ProjectRepository._save_meta(child_dir, original_child)
-                except Exception as rollback_exc:  # pragma: no cover - defensive  # noqa: BLE001
-                    rollback_errors.append(f"chapter rollback failed: {rollback_exc}")
-            detail = f"关系写入失败：{exc}"
-            if rollback_errors:
-                detail += "；" + "；".join(rollback_errors)
-            raise RuntimeError(detail) from exc
-
-        return child_id, parent_id
-
-    @staticmethod
-    def update_chapter_metadata(
-        name: str,
-        *,
-        chapter_title: str | None,
-        chapter_order: int | None,
-    ) -> None:
-        """Atomically update explicit chapter display metadata only."""
-        project_dir = ProjectRepository._resolve_dir(name)
-        meta = ProjectRepository._load_meta(project_dir)
-        meta.chapter_title = str(chapter_title or "").strip() or None
-        meta.chapter_order = chapter_order
-        meta.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S")
-        ProjectRepository._save_meta(project_dir, meta)
-
-    @staticmethod
-    def clear_project_relationship(name: str) -> None:
-        """Explicitly turn a chapter back into an independent book."""
-        project_dir = ProjectRepository._resolve_dir(name)
-        meta = ProjectRepository._load_meta(project_dir)
-        meta.project_kind = "book"
-        meta.parent_project_id = None
-        meta.chapter_title = None
-        meta.chapter_order = None
-        meta.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S")
-        ProjectRepository._save_meta(project_dir, meta)
 
     @staticmethod
     def archive_project(name: str) -> str:
@@ -1134,15 +1024,6 @@ class ProjectRepository:
                     failed=failed,
                     status=status,
                     progress=progress,
-                    project_id=str(getattr(meta, "project_id", "") or "") or None,
-                    project_kind=str(getattr(meta, "project_kind", "book") or "book"),
-                    parent_project_id=(
-                        str(getattr(meta, "parent_project_id", "") or "") or None
-                    ),
-                    chapter_title=(
-                        str(getattr(meta, "chapter_title", "") or "") or None
-                    ),
-                    chapter_order=getattr(meta, "chapter_order", None),
                 ))
             except Exception as exc:
                 logger.warning("list_project_summaries 读 %s 失败: %s", name, exc)
@@ -1154,7 +1035,6 @@ class ProjectRepository:
                     segments=0,
                     completed=0,
                     modified_at=None,
-                    project_kind="book",
                 ))
         return summaries
 

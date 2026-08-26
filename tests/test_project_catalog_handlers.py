@@ -145,7 +145,7 @@ def test_select_bookshelf_row_maps_display_name_and_preserves_on_deselect(
     event = _FakeEvent(
         0,
         3,
-        row_value=["↳ 第一章 · beta", "1", "0/1", "章节 · ⚪未开始"],
+        row_value=["alpha", "1 个章节", "0/1", "⚪未开始"],
         selected=False,
     )
 

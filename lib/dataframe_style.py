@@ -59,8 +59,7 @@ STATUS_WORD_COLORS: dict[str, str] = {
 }
 
 # Dataframe 列定义（与 Workbench 组件定义一致，集中来源避免硬编码）。
-# ``结构`` 是 Catalog hierarchy 的展示列；``ProjectSummary.chapters`` 仍
-# 只用于项目自身 structured_script 的章节数，不能拿来代替 Book 的子项目数。
+# ``结构`` 是项目自身 structured_script 的章节数。
 BOOKSHELF_HEADERS = ["项目", "结构", "段进度", "状态", "最近修改"]
 VOICE_HEADERS = ["名称", "分类", "大小(KB)", "试听"]
 
