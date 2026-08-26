@@ -43,8 +43,6 @@ from .supplement import SupplementService, SupplementTaskState
 from .synthesis import SynthesisService, SynthesisState
 from .voice_assets import VoiceAssetError, VoiceAssetService
 from .voice_cast import VoiceCastError, VoiceCastResolver, VoiceCastService
-from .whole_book_assembly import WholeBookAssemblyService
-from .whole_book_assembly_operations import WholeBookAssemblyOperationsService
 from .workflow import WorkflowService
 
 __all__ = [
@@ -81,8 +79,6 @@ __all__ = [
     "VoiceCastError",
     "VoiceCastResolver",
     "VoiceCastService",
-    "WholeBookAssemblyOperationsService",
-    "WholeBookAssemblyService",
     "WorkflowService",
     "get_application_lifecycle",
 ]
