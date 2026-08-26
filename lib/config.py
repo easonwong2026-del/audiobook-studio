@@ -75,8 +75,8 @@ def get_int(key: str, default: int = 0) -> int:
 def _data_dir_path() -> str:
     """返回数据根目录路径（不创建目录），供各子目录在「运行时」再按需 makedirs。
 
-    拆分为纯路径解析，避免在模块导入期就创建目录（导入 project_manager /
-    app 不应在用户主目录落下空文件夹；测试也可借环境变量把数据重定向到临时区）。
+    拆分为纯路径解析，避免在模块导入期就创建目录（导入 app 不应在用户主目录落下
+    空文件夹；测试也可借环境变量把数据重定向到临时区）。
     """
     d = os.environ.get(ENV_DATA_DIR)
     if not d:

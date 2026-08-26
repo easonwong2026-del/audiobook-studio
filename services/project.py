@@ -9,8 +9,7 @@ mirror，而不是依赖原地 mutate 或返回值自动传播。这与 R1「多
 ``SessionState``」的隔离约定一致。
 ``save_to_lib`` ���把音频存入 ``voice_library`` 目录，不改变角色绑定表。
 
-阶段四重构：所有磁盘操作从 ``lib.project_manager (pm)`` 改为
-``repositories.ProjectRepository`` / ``ConfigRepository``；pm 仅作为旧调用方兼容壳。
+所有磁盘操作由 ``repositories.ProjectRepository`` / ``ConfigRepository`` 负责。
 """
 from __future__ import annotations
 
@@ -108,9 +107,9 @@ class ProjectService:
     @staticmethod
     def create_project(name: str, script_file: str) -> None:
         """创建项目（统一委托结构化 JSON 导入服务）。"""
-        from services.project_creation import ProjectCreationService
+        from services.structured_script_import import StructuredScriptImportService
 
-        ProjectCreationService.create_from_structured_script(name, script_file)
+        StructuredScriptImportService.create(name, script_file)
 
     @staticmethod
     def open_project(name: str):
@@ -145,9 +144,9 @@ class ProjectService:
     @staticmethod
     def create_project_from_data(name: str, script: dict) -> Any:
         """Create a project from an in-memory structured script."""
-        from services.project_creation import ProjectCreationService
+        from services.structured_script_import import StructuredScriptImportService
 
-        return ProjectCreationService.create_from_structured_data(name, script)
+        return StructuredScriptImportService.create_from_data(name, script)
 
     @staticmethod
     def list_project_summaries() -> list[dict[str, Any]]:
@@ -311,17 +310,9 @@ class ProjectService:
         """
         ensure_project_mutation_allowed(None, "set_data_dir")
         d = ConfigRepository.set_data_dir(new_dir)
-        # Immediately move both the canonical repository and the short-lived
-        # compatibility wrapper.  The wrapper delegates every disk operation
-        # back to ProjectRepository, but its mutable roots remain for legacy
-        # tests/integrations until that API is retired.
         ProjectRepository.WORKSPACE_ROOT = config.get_projects_root()
         ProjectRepository.LEGACY_ROOT = config.get_legacy_dir()
         ProjectRepository._INITIALIZED = True
-        from lib import project_manager as compatibility_manager
-
-        compatibility_manager.WORKSPACE_ROOT = ProjectRepository.WORKSPACE_ROOT
-        compatibility_manager.LEGACY_ROOT = ProjectRepository.LEGACY_ROOT
         return d
 
     @staticmethod

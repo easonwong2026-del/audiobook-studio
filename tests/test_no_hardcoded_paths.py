@@ -34,7 +34,6 @@ PYTHON_SOURCE_FILES = [
     "lib/audio_pipeline.py",
     "lib/script_loader.py",
     "lib/segment_cache.py",
-    "lib/project_manager.py",
     "lib/voice_lib.py",
     "lib/progress.py",
     "lib/dataframe_style.py",

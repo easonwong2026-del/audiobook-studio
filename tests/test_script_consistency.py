@@ -60,7 +60,7 @@ def test_v3_intensity_pause_and_empty_id_boundaries():
 def test_warning_does_not_block_project_creation(monkeypatch, tmp_path):
     import json
 
-    from services.project_creation import ProjectCreationService
+    from services.structured_script_import import StructuredScriptImportService
     source = tmp_path / "script.json"
     source.write_text(json.dumps(script(voices={"旁白": {}, "未使用": {}}, segments=[
         {"id": "1", "role": "旁白", "text": "正常文本"},
@@ -69,7 +69,7 @@ def test_warning_does_not_block_project_creation(monkeypatch, tmp_path):
         "services.structured_script_import.ProjectRepository.create_project",
         lambda *a: None,
     )
-    result = ProjectCreationService.create_from_structured_script("ok", str(source))
+    result = StructuredScriptImportService.create("ok", str(source))
     assert result.warnings
 
 
@@ -78,11 +78,11 @@ def test_error_blocks_project_creation(monkeypatch, tmp_path):
 
     import pytest
 
-    from services.project_creation import ProjectCreationService
+    from services.structured_script_import import StructuredScriptImportService
     source = tmp_path / "script.json"
     source.write_text(json.dumps(script(voices={"旁白": {}}, segments=[
         {"id": "same", "role": "旁白", "text": "一"},
         {"id": "same", "role": "旁白", "text": "二"},
     ]), ensure_ascii=False), encoding="utf-8")
     with pytest.raises(ValueError, match="校验"):
-        ProjectCreationService.create_from_structured_script("bad", str(source))
+        StructuredScriptImportService.create("bad", str(source))

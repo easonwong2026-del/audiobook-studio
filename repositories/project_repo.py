@@ -1,10 +1,8 @@
 """ProjectRepository：项目 CRUD + 原子写 project.json + 快照集成。
 
-将 ``lib/project_manager.py`` 的所有磁盘操作收拢到此，
-全部方法为 @staticmethod，无实例状态。
+所有项目磁盘操作均集中于此，全部方法为 @staticmethod，无实例状态。
 
-WORKSPACE_ROOT / LEGACY_ROOT 为类变量（与 pm 模块级变量语义一致），
-测试可通过 monkeypatch.setattr 覆盖。
+WORKSPACE_ROOT / LEGACY_ROOT 为类变量，测试可通过 monkeypatch.setattr 覆盖。
 初值延迟到首次调用时通过 lib.config 初始化，避免循环导入。
 """
 from __future__ import annotations

@@ -6,7 +6,6 @@ import logging
 import os
 
 from repositories.project_repo import ProjectRepository, sanitize_project_name
-from services.project_creation import ProjectCreationService
 from services.structured_script_import import StructuredScriptImportService
 
 logger = logging.getLogger(__name__)
@@ -187,7 +186,7 @@ def create_from_json(project_name, json_file, ss=None) -> tuple[str, bool]:
     if not source or not os.path.isfile(source):
         return "### ⚠ 请上传 structured_script.json", False
     try:
-        result = ProjectCreationService.create_from_structured_script(name, source)
+        result = StructuredScriptImportService.create(name, source)
         if ss is not None:
             from services import ProjectService
 

@@ -21,7 +21,7 @@ from lib import project_paths
 
 
 # 辅助：创建最小的剧本 JSON
-def _make_minimal_script(tmp_path, name="test_script.json") -> str:
+def _make_minimal_script(tmp_path, name="structured_script_test.json") -> str:
     path = str(tmp_path / name)
     data = {
         "meta": {"title": "测试", "author": "T"},
@@ -140,6 +140,35 @@ class TestProjectRepository:
             assert meta.completed_count == 1
             assert meta.failed_count == 1
             assert meta.pending_count == 0
+        finally:
+            ProjectRepository.WORKSPACE_ROOT = orig_ws
+            ProjectRepository.LEGACY_ROOT = orig_lg
+
+    def test_get_remaining_resets_missing_done(self, tmp_path):
+        """done 段缺少 WAV 时回到 remaining，且计数不为负。"""
+        orig_ws = ProjectRepository.WORKSPACE_ROOT
+        orig_lg = ProjectRepository.LEGACY_ROOT
+        try:
+            ProjectRepository.WORKSPACE_ROOT = str(tmp_path / "ws")
+            ProjectRepository.LEGACY_ROOT = str(tmp_path / "legacy")
+            script_path = _make_minimal_script(tmp_path, "remaining.json")
+            ProjectRepository.create_project("remaining_test", script_path)
+            ProjectRepository.update_segment_status("remaining_test", "1-001", "done")
+
+            segments = project_paths.project_dir(
+                ProjectRepository.get_project_dir("remaining_test"),
+                "segments",
+                create=True,
+            )
+            wav_path = os.path.join(segments, "1-001.wav")
+            with open(wav_path, "wb") as file:
+                file.write(b"dummy")
+            os.remove(wav_path)
+
+            assert "1-001" in ProjectRepository.get_remaining("remaining_test")
+            meta, _, _ = ProjectRepository.load_project("remaining_test")
+            assert meta.segments_status["1-001"] == "pending"
+            assert meta.completed_count >= 0
         finally:
             ProjectRepository.WORKSPACE_ROOT = orig_ws
             ProjectRepository.LEGACY_ROOT = orig_lg
