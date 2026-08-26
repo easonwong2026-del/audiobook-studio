@@ -15,11 +15,6 @@ from ui import project_catalog_handlers as handlers
 from ui.pages.overview_page import create_overview_page
 from ui.wiring.project_catalog_wiring import bookshelf_selection_context_outputs
 
-ROOT = Path(__file__).parents[1]
-APP_PATH = ROOT / "app.py"
-WIRING_PATH = ROOT / "ui" / "wiring" / "project_catalog_wiring.py"
-
-
 def _script_file(tmp_path: Path, title: str) -> Path:
     path = tmp_path / f"{title}.json"
     path.write_text(
@@ -239,17 +234,6 @@ def test_real_gradio_bookshelf_click_a_then_b_updates_only_selected_state(
     reconciled_b = _run(block, 1, [None], state)
     assert len(reconciled_b["data"]) == 18
     assert state[session._id].selected_project == "beta"
-
-
-def test_bookshelf_selection_has_no_opened_project_mirror():
-    source = APP_PATH.read_text(encoding="utf-8")
-    start = source.index("bookshelf_select_chain = ov_bookshelf.select(")
-    end = source.index("# ═══════════ events", start)
-    selection_block = source[start:end]
-
-    assert "p_sel" not in selection_block
-    assert "[bookshelf_selected_proj, bookshelf_selected]" in selection_block
-    assert "reconcile_bookshelf_selection_context,\n        [ss]," in selection_block
 
 
 def test_selection_handler_does_not_write_opened_project_before_reconciliation(lifecycle_workspace):

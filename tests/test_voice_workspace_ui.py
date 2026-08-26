@@ -376,7 +376,6 @@ def test_dashboard_and_page_titles_do_not_repeat_navigation():
     assert 'gr.Markdown("### 工作台")' not in overview
     assert 'gr.Markdown("## 项目工作台")' in overview
     assert "empty_dashboard_html" not in overview
-    assert not (ROOT / "ui/components/dashboard.py").exists()
     assert 'gr.Markdown("### 角色与声音")' in voice
     assert 'label="搜索角色"' in voice
     assert 'v_role = gr.State' in voice

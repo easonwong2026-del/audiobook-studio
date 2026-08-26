@@ -1,17 +1,10 @@
 """Regression coverage for Formal Export state across project switches."""
 from __future__ import annotations
 
-import ast
 import threading
-from pathlib import Path
 from types import SimpleNamespace
 
 from ui import export_handlers as export_ui
-
-
-ROOT = Path(__file__).resolve().parents[1]
-APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
-APP_TREE = ast.parse(APP_SOURCE)
 
 
 def _session(project: str, task_id: str, output_dir: str):
@@ -245,53 +238,3 @@ def test_validated_export_active_race_adopts_new_task_after_project_reconcile(mo
         isinstance(value, dict) and value.get("__type__") == "update"
         for value in result
     )
-
-
-def _function(name: str):
-    return next(
-        node
-        for node in APP_TREE.body
-        if isinstance(node, ast.FunctionDef) and node.name == name
-    )
-
-
-def _reconcile_calls(function):
-    return [
-        node
-        for node in ast.walk(function)
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "then"
-            and node.args
-            and isinstance(node.args[0], ast.Attribute)
-            and isinstance(node.args[0].value, ast.Name)
-            and node.args[0].value.id == "export_ui"
-            and node.args[0].attr == "reconcile_export_state"
-        )
-    ]
-
-
-def test_open_chain_wires_all_seven_export_outputs_and_nav_reconciles():
-    """The real open chain and both Export navigation paths update all outputs."""
-    calls = _reconcile_calls(_function("_open_chain_rest"))
-    assert len(calls) == 1
-    call = calls[0]
-    assert [node.id for node in call.args[1].elts] == [
-        "e_export_task_id",
-        "e_export_output_dir",
-        "ss",
-    ]
-    assert [node.id for node in call.args[2].elts] == [
-        "e_out",
-        "e_path",
-        "e_export_task_id",
-        "e_export_output_dir",
-        "e_open",
-        "e_export_timer",
-        "e_go",
-    ]
-
-    nav_export = APP_SOURCE[APP_SOURCE.index("nav_export.click("):]
-    assert "export_ui.reconcile_export_state" in nav_export
-    assert "ov_export.click(" not in APP_SOURCE

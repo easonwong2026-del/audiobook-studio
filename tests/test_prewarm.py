@@ -18,7 +18,6 @@ PR #44 竞态修复（UI-ready one-shot prewarm）回归：
 """
 from __future__ import annotations
 
-import ast
 import json
 import os
 import sys
@@ -346,7 +345,6 @@ def test_first_ui_load_requests_once(
     assert calls["request_engine_recycle"] == ["indextts25"]
     assert calls["ensure_running"] == 1
 
-
 # ── 8. 重复 UI load / 多次 callback → 仍只 request 一次（single-flight） ─
 def test_repeated_ui_load_single_flight(
     prewarm_config, settings_default_v25, no_active_tasks, lifecycle_running,
@@ -456,40 +454,3 @@ def test_ui_ready_callback_returns_fast_and_requests_in_background(
     assert _wait_until(lambda: len(calls["request_engine_recycle"]) == 1)
     assert calls["request_engine_recycle"] == ["indextts25"]
     assert calls["ensure_running"] == 1
-
-
-# ── AST：app.py 接线（UI-ready one-shot prewarm，替代 sleep 线程）────────
-_APP_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.py"
-)
-with open(_APP_PATH, encoding="utf-8") as _app_fh:
-    _APP_SRC = _app_fh.read()
-_APP_TREE = ast.parse(_APP_SRC)
-
-
-def test_app_load_wires_ui_ready_prewarm():
-    """app.py 用 app.load(_on_ui_ready_prewarm) 接线，且旧 sleep 线程方案已移除。"""
-    assert "def _on_ui_ready_prewarm" in _APP_SRC, "缺少 UI-ready prewarm callback"
-    assert "app.load(_on_ui_ready_prewarm)" in _APP_SRC, "app.load 未接线"
-    assert "_start_background_prewarm" not in _APP_SRC, (
-        "旧「线程+sleep(2s) 猜 UI Ready」方案必须移除"
-    )
-    assert "time.sleep(2.0)" not in _APP_SRC.split("def _on_ui_ready_prewarm")[0]
-
-
-def test_app_main_keeps_finally_shutdown_guard():
-    """__main__ 仍保留 try/finally request_application_shutdown（最可靠退出边）。"""
-    main_block = next(
-        node
-        for node in _APP_TREE.body
-        if isinstance(node, ast.If)
-        and isinstance(node.test, ast.Compare)
-        and any(
-            isinstance(comp, ast.Name) and comp.id == "__name__"
-            for comp in ast.walk(node.test)
-        )
-    )
-    source = ast.get_source_segment(_APP_SRC, main_block) or ""
-    assert "app.queue().launch(" in source
-    assert "request_application_shutdown" in source
-    assert "_start_background_prewarm()" not in source

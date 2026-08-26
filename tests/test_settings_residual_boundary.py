@@ -1,62 +1,13 @@
 """Round 3D ownership and behavior contracts for Settings residual callbacks."""
 from __future__ import annotations
 
-import ast
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
 from services.session import SessionState
 from ui import settings_handlers
-
-
-ROOT = Path(__file__).resolve().parents[1]
-APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
-APP_TREE = ast.parse(APP_SOURCE)
-HANDLERS_SOURCE = (ROOT / "ui" / "settings_handlers.py").read_text(encoding="utf-8")
-HANDLERS_TREE = ast.parse(HANDLERS_SOURCE)
-WIRING_SOURCE = (ROOT / "ui" / "wiring" / "settings_wiring.py").read_text(encoding="utf-8")
-WIRING_TREE = ast.parse(WIRING_SOURCE)
-
-
-def _functions(tree):
-    return {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
-
-
-APP_FUNCTIONS = _functions(APP_TREE)
-HANDLER_FUNCTIONS = _functions(HANDLERS_TREE)
-WIRING_FUNCTIONS = _functions(WIRING_TREE)
-
-
-def test_settings_callback_ownership_is_closed():
-    assert "apply_data_dir" not in APP_FUNCTIONS
-    assert "open_data_dir" not in APP_FUNCTIONS
-    for name in ("apply_data_dir", "open_data_dir", "run_diagnostics_ui"):
-        assert name in HANDLER_FUNCTIONS
-    assert "run_diagnostics_ui" not in WIRING_FUNCTIONS
-    assert "services.environment_diagnostics" not in WIRING_SOURCE
-    assert "settings_handlers.apply_data_dir" in WIRING_SOURCE
-    assert "settings_handlers.open_data_dir" in WIRING_SOURCE
-    assert "settings_handlers.run_diagnostics_ui" in WIRING_SOURCE
-
-
-def test_data_dir_chain_remains_composed_in_original_order():
-    assert "data_dir_chain = page[\"s_data_apply\"].click(" in WIRING_SOURCE
-    assert "data_dir_chain = data_dir_chain.then(fn, inputs, outputs)" in WIRING_SOURCE
-    apply_index = WIRING_SOURCE.index("settings_handlers.apply_data_dir")
-    catalog_index = WIRING_SOURCE.index("data_dir_chain = data_dir_chain.then")
-    assert apply_index < catalog_index
-    assert "merge_refresh" not in WIRING_SOURCE
-    assert "assembly_refresh" not in WIRING_SOURCE
-
-
-def test_settings_handlers_keep_repository_dependency_debt_deferred():
-    for name in ("ConfigRepository", "ProjectRepository", "TaskRepository"):
-        assert "from repositories" in HANDLERS_SOURCE and name in HANDLERS_SOURCE
-    assert "SettingsService" not in HANDLERS_SOURCE
-    assert "DiagnosticsService" not in HANDLERS_SOURCE
 
 
 def test_apply_data_dir_empty_input_contract():

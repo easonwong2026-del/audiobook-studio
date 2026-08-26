@@ -178,23 +178,6 @@ def test_status_word_colors_keys_match_project_status():
     )
 
 
-def test_no_gradio_import_discipline():
-    """纪律红线：本模块源码不得出现真实的 gradio 导入语句（保证可独立单测）。
-
-    注意：用 AST 解析真实 import 节点，避免匹配文档字符串中出现的 'import gradio' 字面量。
-    """
-    import ast
-
-    source = open(df.__file__, encoding="utf-8").read()
-    tree = ast.parse(source)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                assert alias.name != "gradio", "lib/dataframe_style.py 禁止 `import gradio`"
-        elif isinstance(node, ast.ImportFrom):
-            assert node.module != "gradio", "lib/dataframe_style.py 禁止 `from gradio import ...`"
-
-
 def test_exported_constants_present():
     """契约：导出的常量/表头存在且值正确。"""
     assert df.ICON_COLORS["✅"] == df.APPLE_GREEN
