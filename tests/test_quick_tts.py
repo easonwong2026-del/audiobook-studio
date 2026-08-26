@@ -116,6 +116,103 @@ def _submit_spy(monkeypatch, tmp_path):
     return captured
 
 
+_LIVENESS_NOW = datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc)
+_LIVENESS_RECENT = "2026-08-26T11:59:00Z"
+_LIVENESS_OLD = "2026-08-26T10:00:00Z"
+
+
+def _liveness_record(
+    *, task_type: str, status: str, owner_id: str,
+    heartbeat_at: str, created_at: str,
+) -> TaskRecord:
+    return TaskRecord(
+        task_id=f"lane-{task_type}-{status}-{owner_id or 'pending'}",
+        task_type=task_type,
+        project="book",
+        status=status,
+        created_at=created_at,
+        updated_at=created_at,
+        owner_id=owner_id,
+        heartbeat_at=heartbeat_at,
+    )
+
+
+@pytest.mark.parametrize(
+    ("task_type", "status", "owner_id", "heartbeat_at", "created_at", "expected"),
+    [
+        ("synthesis", "running", "runtime-live", _LIVENESS_RECENT, _LIVENESS_OLD, True),
+        ("synthesis", "running", "runtime-dead", _LIVENESS_OLD, _LIVENESS_OLD, False),
+        ("export", "pending", "", "", _LIVENESS_RECENT, True),
+        ("export", "pending", "", "", _LIVENESS_OLD, False),
+        ("synthesis", "done", "runtime-old", _LIVENESS_OLD, _LIVENESS_OLD, False),
+        ("voice_preview", "running", "runtime-live", _LIVENESS_RECENT, _LIVENESS_OLD, True),
+        ("preview", "running", "runtime-live", _LIVENESS_RECENT, _LIVENESS_OLD, True),
+        ("supplement", "running", "runtime-live", _LIVENESS_RECENT, _LIVENESS_OLD, True),
+        ("quick_tts", "running", "runtime-live", _LIVENESS_RECENT, _LIVENESS_OLD, True),
+    ],
+)
+def test_quick_tts_busy_uses_canonical_liveness(
+    quick_env, tmp_path, monkeypatch,
+    task_type, status, owner_id, heartbeat_at, created_at, expected,
+):
+    record = _liveness_record(
+        task_type=task_type,
+        status=status,
+        owner_id=owner_id,
+        heartbeat_at=heartbeat_at,
+        created_at=created_at,
+    )
+    canonical = TaskRepository.list_live_tts_tasks
+    monkeypatch.setattr(
+        TaskRepository, "list_tasks", staticmethod(lambda: [record]),
+    )
+
+    def fixed_live(records=None, *, now=None):
+        return canonical(records, now=_LIVENESS_NOW)
+
+    monkeypatch.setattr(
+        TaskRepository, "list_live_tts_tasks", staticmethod(fixed_live),
+    )
+    captured = _submit_spy(monkeypatch, tmp_path)
+
+    if expected:
+        with pytest.raises(QuickTTSBusyError) as exc_info:
+            RuntimeTTSService.quick_tts_synthesize(
+                text="canonical lane", speaker_audio="/tmp/v.wav", timeout=10,
+            )
+        assert exc_info.value.task_id == record.task_id
+        assert exc_info.value.task_type == record.task_type
+        assert captured == {}
+    else:
+        wav = RuntimeTTSService.quick_tts_synthesize(
+            text="canonical lane", speaker_audio="/tmp/v.wav", timeout=10,
+        )
+        assert os.path.isfile(wav)
+        assert captured["task_type"] == "quick_tts"
+
+
+def test_quick_tts_liveness_read_failure_fails_closed(quick_env, monkeypatch):
+    def fail(*_args, **_kwargs):
+        raise OSError("task repository unavailable")
+
+    monkeypatch.setattr(
+        TaskRepository, "list_live_tts_tasks", staticmethod(fail),
+    )
+
+    def submit_must_not_run(cls, **_kwargs):
+        pytest.fail("repository read failure must block utility submission")
+
+    monkeypatch.setattr(
+        RuntimeTTSService, "_submit", classmethod(submit_must_not_run),
+    )
+    with pytest.raises(QuickTTSBusyError) as exc_info:
+        RuntimeTTSService.quick_tts_synthesize(
+            text="fail closed", speaker_audio="/tmp/v.wav", timeout=10,
+        )
+    assert exc_info.value.code == "QUICK_TTS_BUSY"
+    assert exc_info.value.task_id == "runtime_tts_liveness_unknown"
+
+
 # ── E1: 无 project + 全局 voice + 一句台词 → durable utility task ─────────
 def test_quick_tts_creates_utility_task(quick_env, tmp_path, monkeypatch, global_default_v25):
     captured = _submit_spy(monkeypatch, tmp_path)

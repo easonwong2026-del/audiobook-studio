@@ -261,35 +261,25 @@ def _select_utility_engine(
     return resolve_profile({}), "global_default"
 
 
-_ACTIVE_LANE_STATES = frozenset({
-    "active", "pending", "queued", "starting", "preparing", "submitting",
-    "running", "pausing", "paused", "recovering", "cancelling",
-})
-_ACTIVE_LANE_TASK_TYPES = frozenset({
-    "synthesis", "voice_preview", "preview", "supplement", "quick_tts", "export",
-})
-
-
 def _active_tts_lane() -> TaskRecord | None:
     """Return the first active TTS/export lane task across all projects + utility.
 
     The singleton runtime is serial, so Quick TTS must not queue behind an
     active production/supplement/preview/export: the client returns a busy
-    error immediately instead of waiting for the engine to free up.
+    error immediately instead of waiting for the engine to free up.  Liveness
+    and freshness are owned by ``TaskRepository`` so this lane cannot drift
+    from prewarm or engine-switch guards.
     """
     try:
-        return next(
-            (
-                record
-                for record in TaskRepository.list_tasks()
-                if str(getattr(record, "task_type", "")) in _ACTIVE_LANE_TASK_TYPES
-                and str(getattr(record, "status", "")) in _ACTIVE_LANE_STATES
-            ),
-            None,
-        )
+        return next(iter(TaskRepository.list_live_tts_tasks()), None)
     except Exception:  # pragma: no cover - a read failure must not crash
-        logger.debug("读取活动 TTS lane 失败", exc_info=True)
-        return None
+        logger.warning("读取活动 TTS lane 失败，按 busy fail-closed", exc_info=True)
+        return TaskRecord(
+            task_id="runtime_tts_liveness_unknown",
+            task_type="runtime_tts",
+            project="",
+            status="unknown",
+        )
 
 
 class RuntimeTTSBusyError(RuntimeError):
