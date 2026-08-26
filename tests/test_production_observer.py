@@ -457,8 +457,12 @@ def test_production_tick_controls_active_timer(app_module, monkeypatch, task, ac
         "list_tasks",
         staticmethod(lambda **_kwargs: task),
     )
-    monkeypatch.setattr(app_module, "refresh_queue_list", lambda _ss: "queue")
-    monkeypatch.setattr(app_module, "refresh_production_engine_status", lambda _ss: "engine")
+    monkeypatch.setattr(app_module, "_format_queue_list", lambda _ss, _task: "queue")
+    monkeypatch.setattr(
+        app_module,
+        "_format_production_engine_status",
+        lambda _ss, _health: "engine",
+    )
     session = SimpleNamespace(project="book")
 
     result = app_module.refresh_production_task_tick(session)
@@ -467,6 +471,54 @@ def test_production_tick_controls_active_timer(app_module, monkeypatch, task, ac
     assert result[-1].active is active
     if active is False and task:
         assert "**总耗时**" in result[0]
+
+
+def test_production_tick_reads_task_and_health_once(app_module, monkeypatch):
+    task = _task("running")
+    calls = {"tasks": 0, "health": 0}
+
+    def list_tasks(**_kwargs):
+        calls["tasks"] += 1
+        return [task]
+
+    def get_health():
+        calls["health"] += 1
+        return {}
+
+    monkeypatch.setattr(
+        app_module.ProductionJobService,
+        "list_tasks",
+        staticmethod(list_tasks),
+    )
+    monkeypatch.setattr(
+        app_module.ProductionJobService,
+        "get_runtime_health",
+        staticmethod(get_health),
+    )
+    monkeypatch.setattr(
+        app_module.ProductionJobService,
+        "get_runtime_state",
+        staticmethod(lambda *_args: None),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "_production_task_markdown",
+        lambda _task, **_kwargs: "markdown",
+    )
+    monkeypatch.setattr(app_module, "_format_queue_list", lambda _ss, _task: "queue")
+    monkeypatch.setattr(
+        app_module,
+        "_format_production_engine_status",
+        lambda _ss, _health: "engine",
+    )
+
+    result = app_module.refresh_production_task_tick(
+        SimpleNamespace(project="book", synthesis=None),
+    )
+
+    assert calls == {"tasks": 1, "health": 1}
+    assert result[:3] == ("markdown", "queue", "engine")
+    assert result[-1].active is True
 
 
 def test_start_action_activates_production_timer(app_module):
@@ -481,8 +533,12 @@ def test_external_mcp_task_is_discovered_once_without_repaint(app_module, monkey
         "list_tasks",
         staticmethod(lambda **_kwargs: tasks),
     )
-    monkeypatch.setattr(app_module, "refresh_queue_list", lambda _ss: "queue")
-    monkeypatch.setattr(app_module, "refresh_production_engine_status", lambda _ss: "engine")
+    monkeypatch.setattr(app_module, "_format_queue_list", lambda _ss, _task: "queue")
+    monkeypatch.setattr(
+        app_module,
+        "_format_production_engine_status",
+        lambda _ss, _health: "engine",
+    )
     session = SimpleNamespace(project="book")
 
     first = app_module.watch_external_production_task(session)
