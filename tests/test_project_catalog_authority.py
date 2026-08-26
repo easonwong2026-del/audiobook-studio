@@ -95,9 +95,6 @@ def test_project_catalog_actions_are_wired_to_catalog_handlers():
         "bookshelf_storage_cancel": "cancel_selected_storage_upgrade",
         "bookshelf_integrity": "check_selected_integrity",
         "bookshelf_integrity_repair": "repair_selected_integrity",
-        "bookshelf_bind_chapter": "bind_selected_chapter",
-        "bookshelf_update_chapter": "update_selected_chapter",
-        "bookshelf_unbind_chapter": "unbind_selected_chapter",
         "bookshelf_archive": "archive_selected_with_event",
         "bookshelf_restore": "restore_backup_global",
         "bookshelf_trash_refresh": "refresh_archived_projects_global",
@@ -107,7 +104,7 @@ def test_project_catalog_actions_are_wired_to_catalog_handlers():
     wiring_source = ast.unparse(WIRING_TREE)
     assert (
         "management_refresh = deps.get('management_refresh', "
-        "catalog_handlers.refresh_bookshelf_management_view_with_hierarchy)"
+        "catalog_handlers.refresh_bookshelf_management_view)"
         in wiring_source
     )
 
