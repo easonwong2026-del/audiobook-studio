@@ -1,5 +1,7 @@
 # Audiobook Studio v3.2.0 UI/UX 重构 PRD
 
+> 文档状态：历史 PRD（v3.2 UI/UX 重构）；当前 UI 行为以代码、README 和最新 release 文档为准。
+
 ## 目标
 
 将 Audiobook Studio 从“功能集合型工具”升级为“有声书生产工作台”。

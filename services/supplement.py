@@ -3,10 +3,14 @@
 职责边界（与整本合成链路解耦）：
 - 输入：界面粘贴文本（按行）或上传的小 JSON（单角色单章，voices 必须命中父剧本）。
 - ���成：逐句调用 ``lib.tts_engine.synthesize_segment``（引擎互斥锁自含，
-  本服务与调用方均无需再加锁）；中间 wav 写入独立 ``supplement_cache/``，
-  绝不写入整本 ``segments/`` 与 ``project.json``。
+  本服务与调用方均无需再加锁）；无 durable task 时，中间 wav 写入
+  ``<preview>/supplement_cache/supplement_tasks/<task_id>/``；由 production
+  runtime 传入 task 时则写入该 task 的项目内 artifact 目录，不写入整本
+  ``segments/`` 缓存。
 - 导出：委托 ``lib.audio_pipeline.export_supplement`` 把多段独立 wav 拼为
-  一条音频并转码 / 写标签，产物默认落 ``<project_dir>/output/supplement_{role}_{时间戳}.{ext}``。
+  一条音频并转码 / 写标签；v3 项目产物落
+  ``<project_dir>/03_导出成品/补录/supplement_{role}_{时间戳}.{ext}``，
+  v1/v2 项目由 resolver 保持历史导出路径兼容。
 
 所有方法均为 ``@staticmethod``，便于在单元测试中以假引擎 / 假 ffmpeg 直接调用。
 
@@ -54,8 +58,10 @@ class SupplementItemResult:
 class SupplementTaskState:
     """一次补录任务的隔离态（方案 §5.3）。
 
-    每次补录生成独立 ``task_id``（uuid4().hex，禁止只用秒级时间戳），
-    产物落在 ``<preview>/supplement_tasks/<task_id>/``，与整本 ``segments/`` 解耦。
+    每次补录生成独立 ``task_id``（uuid4().hex，禁止只用秒级时间戳）。未接入
+    durable runtime 时，产物落在 ``<preview>/supplement_cache/supplement_tasks/
+    <task_id>/``；接入 runtime 时复用传入的项目内 task 目录，均与整本
+    ``segments/`` 解耦。
 
     Attributes:
         task_id: 任务唯一标识（uuid4().hex）。
@@ -382,10 +388,11 @@ class SupplementService:
         逐句调用 ``tts_engine.synthesize_segment``（引擎互斥锁自含，调用方无需加锁）。
         每句独立 try/except，单句失败不影响其余句子，便于 UI 逐句反馈。
 
-        产物隔离（方案 §5.3）：每次补录落到独立任务目录
-        ``<preview>/supplement_tasks/<task_id>/``，写入 ``001.wav`` / ``002.wav`` …
-        及 ``manifest.json`` / ``preview.wav``；``task_id`` 用 ``uuid.uuid4().hex``，
-        连续 / 并发执行互不覆盖。传入 ``task`` 时复用其 ``task_dir`` 并回写 ``items``。
+        产物隔离（方案 §5.3）：未传入 ``task`` 时，每次补录落到独立任务目录
+        ``<preview>/supplement_cache/supplement_tasks/<task_id>/``，写入 ``001.wav`` /
+        ``002.wav`` …及 ``manifest.json`` / ``preview.wav``；传入 ``task`` 时复用其
+        ``task_dir`` 并回写 ``items``。``task_id`` 用 ``uuid.uuid4().hex``，连续 /
+        并发执行互不覆盖。
 
         阶段四：创建 SupplementTaskState ��同步写 TaskRecord。
 
