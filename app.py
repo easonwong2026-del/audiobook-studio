@@ -388,7 +388,11 @@ def _format_task_elapsed(task: dict[str, Any]) -> str:
 
 
 
-def _production_task_markdown(task: dict | None) -> str:
+def _production_task_markdown(
+    task: dict | None,
+    *,
+    runtime_health: dict | None = None,
+) -> str:
     """Render a task snapshot without exposing private filesystem paths."""
     if not task:
         return "当前没有运行中的生产任务。"
@@ -407,7 +411,11 @@ def _production_task_markdown(task: dict | None) -> str:
     else:
         scope_text = "未指定"
     engine = task.get("engine_snapshot") or task.get("options", {}).get("engine_snapshot", {})
-    runtime = ProductionJobService.get_runtime_health()
+    runtime = (
+        runtime_health
+        if runtime_health is not None
+        else ProductionJobService.get_runtime_health()
+    )
     engine_label = _engine_label(engine)
     global_label = _engine_label(
         runtime.get("global_default_engine") or _global_default_engine()
@@ -521,6 +529,14 @@ def _production_task_fingerprint(task: dict | None):
     )
 
 
+def _production_refresh_snapshot(project: str | None) -> tuple[dict | None, dict]:
+    """Read the durable task and runtime health once for one UI callback."""
+    return (
+        _latest_production_task(project or ""),
+        ProductionJobService.get_runtime_health(),
+    )
+
+
 def refresh_production_task(ss):
     """Refresh the shared task panel from ProductionJobService."""
     if not ss or not ss.project:
@@ -545,6 +561,11 @@ def refresh_production_engine_status(_ss=None):
     project is open its historical task provenance is shown.
     """
     health = ProductionJobService.get_runtime_health()
+    return _format_production_engine_status(_ss, health)
+
+
+def _format_production_engine_status(_ss, health: dict) -> str:
+    """Render engine status from a same-callback health snapshot."""
     project = getattr(_ss, "project", None) if _ss is not None else None
     project_text = (
         _project_production_engine_text(project)
@@ -556,10 +577,15 @@ def refresh_production_engine_status(_ss=None):
 
 def refresh_production_task_tick(ss):
     """Refresh all production outputs once and stop after the final snapshot."""
-    markdown = refresh_production_task(ss)
-    task = _latest_production_task(getattr(ss, "project", None)) if ss else None
-    queue = refresh_queue_list(ss)
-    engine = refresh_production_engine_status(ss)
+    project = getattr(ss, "project", None) if ss else None
+    task, health = _production_refresh_snapshot(project)
+    if task:
+        runtime = ProductionJobService.get_runtime_state(task.get("task_id"))
+        if runtime is not None:
+            ss.synthesis = runtime
+    markdown = _production_task_markdown(task, runtime_health=health)
+    queue = _format_queue_list(ss, task)
+    engine = _format_production_engine_status(ss, health)
     log = "\n".join(task.get("log_lines") or []) if task else ""
     active = bool(
         task and str(task.get("status") or "") in ACTIVE_PRODUCTION_STATES
@@ -581,10 +607,11 @@ def watch_external_production_task(ss):
     if task is None:
         return gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip()
     active = str(task.get("status") or "") in ACTIVE_PRODUCTION_STATES
+    health = ProductionJobService.get_runtime_health()
     return (
-        _production_task_markdown(task),
-        refresh_queue_list(ss),
-        refresh_production_engine_status(ss),
+        _production_task_markdown(task, runtime_health=health),
+        _format_queue_list(ss, task),
+        _format_production_engine_status(ss, health),
         "\n".join(task.get("log_lines") or []),
         gr.Timer(active=active),
     )
@@ -1334,6 +1361,11 @@ def refresh_queue_list(ss):
     ``state.segment_states``（细粒度）；不互相写、不反向写 meta。
     """
     task = _latest_production_task(ss.project) if ss and ss.project else None
+    return _format_queue_list(ss, task)
+
+
+def _format_queue_list(ss, task):
+    """Render queue output from a task already read by this callback."""
     if task:
         runtime = ProductionJobService.get_runtime_state(task.get("task_id"))
         if runtime is not None:
