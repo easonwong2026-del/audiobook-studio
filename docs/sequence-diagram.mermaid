@@ -7,22 +7,23 @@ sequenceDiagram
     participant TR as TaskRepository
     participant SS as SynthesisService
     participant SPS as SupplementService
-    participant Disk as 磁盘 JSON
+    participant Disk as v3/全局持久化
 
     Note over App,Disk: == 打开项目链路 ==
     
     App->>PS: open_project_as_snapshot(name)
     PS->>PR: load_snapshot(name)
-    PR->>Disk: 读 project.json
-    PR->>Disk: 读 structured_script.json
-    PR->>Disk: 读 voice_bindings.json
+    PR->>Disk: 读 99_系统数据/配置/project.json
+    PR->>Disk: 读 99_系统数据/配置/structured_script.json
+    PR->>Disk: 读 99_系统数据/配置/voice_bindings.json
     PR-->>PS: ProjectSnapshot
     PS-->>App: ProjectSnapshot
 
     Note over App,Disk: == 创建项目链路 ==
     App->>PS: create_project(name, script_file)
     PS->>PR: create_project(name, script_path)
-    PR->>Disk: makedirs + copy2 + atomic write project.json + voice_bindings.json
+    PR->>Disk: 创建纯 v3 布局 + 复制 01_原始资料/书稿 + 写入 99_系统数据/配置/*.json
+    PR->>Disk: 写入 99_系统数据/章节数据/*.json
     PR-->>PS: name
     PS-->>App: None
 
@@ -30,12 +31,12 @@ sequenceDiagram
     App->>PS: bind_voice(project, role, src, category)
     PS->>PR: get_project_dir(project)
     PR-->>PS: project_dir
-    PS->>Disk: copy2(src → project_dir/voices/)
+    PS->>Disk: copy2(src → 01_原始资料/项目音色/)
     PS->>PR: load_project(project)
     PR-->>PS: (meta, script, bd)
     PS->>PS: update bd dict
     PS->>PR: save_bindings(project_dir, bd)
-    PR->>Disk: atomic write voice_bindings.json
+    PR->>Disk: atomic write 99_系统数据/配置/voice_bindings.json
     PR-->>PS: None
     PS->>PR: load_snapshot(project)
     PR-->>PS: fresh snapshot
@@ -45,7 +46,7 @@ sequenceDiagram
     App->>PS: set_data_dir(new_dir)
     PS->>CR: set_data_dir(new_dir)
     CR->>CR: read old config
-    CR->>Disk: atomic write config.json
+    CR->>Disk: atomic write 全局 config.json
     PS->>PR: set WORKSPACE_ROOT
     PS-->>App: abs_path
 
@@ -53,19 +54,21 @@ sequenceDiagram
     App->>SS: SynthesisService.start(state, project, bindings, ...)
     SS->>SS: submit worker thread
     SS->>TR: save_task(TaskRecord(task_id, "synthesis", project, "running"))
-    TR->>Disk: atomic write task_records/<task_id>.json
+    TR->>Disk: atomic write 99_系统数据/任务/production_tasks.sqlite3
     SS-->>App: task_id
 
     Note over App,Disk: == 合成完成 ==
     SS->>SS: worker 完成
     SS->>TR: save_task(TaskRecord(task_id, ..., "done"))
-    TR->>Disk: atomic write task_records/<task_id>.json
+    TR->>Disk: atomic write 99_系统数据/任务/production_tasks.sqlite3
     
     Note over App,Disk: == 补录提交 ==
     App->>SPS: synthesize_lines(role, lines, speaker, ...)
     SPS->>TR: save_task(TaskRecord(task_id, "supplement", project, "running"))
-    TR->>Disk: atomic write
+    TR->>Disk: atomic write 99_系统数据/任务/production_tasks.sqlite3
     SPS->>SPS: 逐句合成
     SPS->>TR: save_task(TaskRecord(task_id, ..., "done"))
-    TR->>Disk: atomic write
+    TR->>Disk: atomic write 99_系统数据/任务/production_tasks.sqlite3
     SPS-->>App: results
+
+    Note over PR,Disk: v1/v2 项目仅通过 lib.project_paths 兼容读取；当前新建项目只写纯 v3 布局

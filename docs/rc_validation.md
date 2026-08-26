@@ -2,7 +2,7 @@
 
 This document records reproducible local diagnostics for the Phase 4
 consolidation. It is not a Release/Tag checklist and does not replace the final
-Windows + real IndexTTS2 acceptance run.
+Windows + real configured IndexTTS 2 / 2.5 acceptance run.
 
 ## Commands
 
@@ -49,7 +49,7 @@ Formal export has a separate reproducible benchmark:
 `scripts/benchmark_formal_export.py`.  It uses WAV output and the runtime's
 durable async job, records wall time, peak RSS where the platform exposes it,
 Python allocation peak, and published artifact bytes.  It does not claim real
-IndexTTS2, CUDA, FFmpeg M4B, or listening acceptance.
+IndexTTS 2 / 2.5 inference, CUDA, FFmpeg M4B, or listening acceptance.
 
 One local 1k-segment run completed with status `done` in 5.070 s, 151.6 MB
 process peak RSS, 24.8 MB peak Python allocation, and a 17.6 MB published WAV

@@ -1,5 +1,6 @@
 # Audiobook Studio v3.2.0 UI/UX 重构审计
 
+> 文档状态：历史审计记录（v3.2）；不作为当前 UI 实施计划，当前实现以代码和 README 为准。
 > 基线：v3.1.1  
 > 审计范围：`app.py`、`ui/navigation.py`、`ui/pages/*`、`ui/shared.py`、`ui/theme.py`  
 > 结论：本次为纯 UI/UX 产品化重构；不修改 `lib/`、`services/`、`repositories/`、推理逻辑或数据协议。

@@ -1,5 +1,6 @@
 # v3 ProjectLayout Resolver 设计
 
+> 文档状态：历史 v3 resolver 设计说明（已实现）；当前行为以 `lib/project_paths.py` 和 `ARCHITECTURE.md` 为准。
 > 目标：`STORAGE_VERSION = 3`，项目根只暴露 4 个用户可理解一级目录；建立**唯一** resolver，业务模块禁止散落路径猜测、禁止新代码 `os.path.join(project_dir, "exports")` 等硬编码。
 
 ---

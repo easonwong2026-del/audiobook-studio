@@ -31,7 +31,7 @@ def create_review_page() -> dict:
             )
             e_chapter_reload = gr.Button("重新加载试听", size="sm", scale=1)
             e_chapter_audio = gr.Audio(
-                label="章节合并试听", type="filepath", interactive=False, scale=3,
+                label="章节试听", type="filepath", interactive=False, scale=3,
             )
         e_chapter_audio_status = gr.Markdown(
             "请选择章节。没有生成音频时，这里会显示明确原因。",

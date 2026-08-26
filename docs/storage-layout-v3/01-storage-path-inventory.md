@@ -1,5 +1,6 @@
 # Storage Path Inventory（v3 前置核实报告）
 
+> 文档状态：历史 v3 前置核实报告；当前实现以 `lib/project_paths.py`、`services/project_storage.py` 和 `ARCHITECTURE.md` 为准。
 > 核实基准：worktree `D:/AudiobookStudio/project/audiobook-studio-v3`，HEAD `a0cfb24`（含 #45/#46）。
 > 全部结论均有代码行证据。路径均为相对 worktree 根。
 

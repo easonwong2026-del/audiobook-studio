@@ -1,5 +1,7 @@
 # 阶段四：Repository 层收拢 — 系统设计 + 任务分解
 
+> 文档状态：历史 Phase 4 系统设计与任务分解；当前实现以代码、`ARCHITECTURE.md`、README 和 `docs/mcp_v1.md` 为准。
+
 ## Part A: System Design
 
 ### 1. Implementation Approach

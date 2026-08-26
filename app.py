@@ -3316,9 +3316,9 @@ def render_preview(ss):
 
 
 # ── O9：音色库浏览 / 搜索 ──
-# ── O13：章节级合并试听 ──
+# ── O13：章节试听（拼接预览） ──
 def preview_chapter_options(ss):
-    """刷新章节合并试听下拉选项。"""
+    """刷新章节试听下拉选项。"""
     if not ss or not ss.project:
         return gr.update(choices=[], value=None)
     script = _snap(ss).script
@@ -3331,7 +3331,7 @@ def preview_chapter_options(ss):
 
 
 def preview_chapter(ss, chapter_id):
-    """合并试听单章，并始终返回播放器状态说明。"""
+    """生成单章试听，并始终返回播放器状态说明。"""
     if not ss or not ss.project or not chapter_id:
         yield _audio_update(None), "⚪ 请先打开项目并选择章节。"
         return
@@ -3339,7 +3339,7 @@ def preview_chapter(ss, chapter_id):
     if not snapshot:
         yield _audio_update(None), "⚪ 请先打开项目。"
         return
-    yield _audio_update(None), "⏳ 正在生成章节合并试听，请稍候…"
+    yield _audio_update(None), "⏳ 正在生成章节试听，请稍候…"
     result = ReviewAudioService.render_chapter_preview(
         ss.project,
         ProjectService.get_project_dir(ss.project),

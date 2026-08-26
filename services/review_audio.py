@@ -254,7 +254,7 @@ def render_chapter_preview(project_name: str, project_dir: str, script: dict[str
         result = audio_pipeline.concat_for_preview(project_dir, chapter_id, output_path)
         if not result or not _valid_wav_file(result):
             _record_event(project_dir, "chapter_preview", "merge_failed", chapter_id=str(chapter_id))
-            return ReviewAudioResult(None, f"⚠ {label} 合并试听失败，未生成有效音频。")
+            return ReviewAudioResult(None, f"⚠ {label} 试听音频拼接失败，未生成有效音频。")
         safe_result = _allowed_audio_path(project_name, result, "chapters")
         if not safe_result:
             _record_event(project_dir, "chapter_preview", "unavailable", chapter_id=str(chapter_id))
@@ -264,7 +264,7 @@ def render_chapter_preview(project_name: str, project_dir: str, script: dict[str
     except Exception as exc:
         logger.exception("章节试听生成失败")
         _record_event(project_dir, "chapter_preview", "error", chapter_id=str(chapter_id), error=str(exc)[:240])
-        return ReviewAudioResult(None, f"❌ {label} 合并试听失败，请点击重新加载。")
+        return ReviewAudioResult(None, f"❌ {label} 试听音频拼接失败，请点击重新加载。")
 
 
 def build_chapter_table(project_name: str, project_dir: str, script: dict[str, Any], meta: Any) -> tuple[str, list[tuple[str, str]]]:

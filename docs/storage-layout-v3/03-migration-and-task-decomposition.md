@@ -1,5 +1,7 @@
 # v2→v3 迁移器设计 + 任务分解
 
+> 文档状态：历史 v2→v3 迁移计划（已实施）；当前行为以 `services/project_storage.py` 和 `ARCHITECTURE.md` 为准。
+
 ---
 
 ## 1. 迁移器设计（`services/project_storage.py` 扩展）
