@@ -953,12 +953,12 @@ def _scope_start_update(plan: dict | None):
     return gr.update(interactive=_scope_can_start(plan))
 
 
-def _production_scope_plans(project_name: str, scope: dict) -> tuple[dict, dict]:
-    """Return the selected-scope plan and the authoritative whole-book plan."""
+def _production_scope_plans(project_name: str, scope: dict) -> tuple[dict, dict | None]:
+    """Return the current-scope plan and an optional whole-book plan."""
     current = ProductionJobService.plan(project_name, scope)
     if scope.get("all"):
         return current, current
-    return current, ProductionJobService.plan(project_name, {"all": True})
+    return current, None
 
 
 def _plan_to_synthesize(plan: dict | None) -> int:
@@ -976,18 +976,23 @@ def _format_scope_plan(
         return "当前没有可用的生产范围计划。"
     if plan.get("project_name") == "" and plan.get("blockers"):
         return "⚠ " + str(plan["blockers"][0].get("message") or "无法读取生产计划")
-    project_plan = project_plan or plan
     current_remaining = _plan_to_synthesize(plan)
-    project_remaining = _plan_to_synthesize(project_plan)
+    project_remaining = (
+        _plan_to_synthesize(project_plan)
+        if isinstance(project_plan, dict)
+        else None
+    )
     voice = plan.get("voice_cast", {}) or {}
     required = int(voice.get("required_role_count", 0) or 0)
     bound = int(voice.get("bound_role_count", 0) or 0)
     if _scope_can_start(plan):
         headline = "✅ 当前选择可以开始生产"
-    elif plan.get("ready") and project_remaining == 0:
-        headline = "✅ 项目已全部生产完成"
     elif plan.get("ready") and current_remaining == 0:
-        headline = "✅ 本次选择已全部完成"
+        headline = (
+            "✅ 项目已全部生产完成"
+            if scope_mode == "all"
+            else "✅ 本次选择已全部完成"
+        )
     else:
         headline = "⚠ 当前选择暂不可生产"
     lines = [
@@ -1075,13 +1080,15 @@ def render_scope_controls(ss):
         gr.update(choices=[("全部章节", "__all__"), *options], value=filter_value),
         gr.update(choices=segment_choices, value=segment_value),
         full_segment_value,
-        df_style.style_dataframe(
-            _scope_preview_rows(ss, mode, chapters_value, full_segment_value),
-            synth_progress.SCOPE_PREVIEW_HEADERS,
-            status_col=5,
-            status_color_map=df_style.ICON_COLORS,
+        gr.update(
+            value=df_style.style_dataframe(
+                _scope_preview_rows(ss, mode, chapters_value, full_segment_value),
+                synth_progress.SCOPE_PREVIEW_HEADERS,
+                status_col=5,
+                status_color_map=df_style.ICON_COLORS,
+            ),
+            visible=mode == "chapters",
         ),
-        gr.update(visible=mode == "chapters"),
         _format_scope_plan(plan, mode, project_plan),
         _scope_start_update(plan),
     )
@@ -4186,7 +4193,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         [ss, s_scope_mode, s_chapters_sel, s_segment_chapter_filter, s_segment_selection_state],
         [s_preview_df, s_scope_readiness, s_start],
     )
-    s_segments_sel.change(
+    s_segments_sel.input(
         merge_segment_selection,
         [s_segments_sel, s_segment_selection_state, s_segment_chapter_filter, ss],
         [s_segments_sel, s_segment_selection_state],

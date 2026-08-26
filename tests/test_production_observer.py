@@ -1,6 +1,7 @@
 """Regression tests for the synthesis observer lifecycle and task card."""
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -166,7 +167,7 @@ def test_scope_plan_separates_selected_scope_from_whole_book(app_module):
     assert "当前选择无需重复生产" not in rendered
 
 
-def test_scope_plan_only_reports_whole_book_complete_from_whole_plan(app_module):
+def test_scope_plan_reports_current_scope_complete_without_fallback(app_module):
     selected = {
         "ready": True,
         "segments": 3,
@@ -187,11 +188,11 @@ def test_scope_plan_only_reports_whole_book_complete_from_whole_plan(app_module)
 
     rendered = app_module._format_scope_plan(selected, "segments", whole_book)
 
-    assert "✅ 项目已全部生产完成" in rendered
-    assert "✅ 本次选择已全部完成" not in rendered
+    assert "✅ 本次选择已全部完成" in rendered
+    assert "✅ 项目已全部生产完成" not in rendered
 
 
-def test_scope_plans_reuse_service_for_selected_and_whole_book(app_module, monkeypatch):
+def test_scope_plans_only_replan_whole_book_for_all_scope(app_module, monkeypatch):
     calls = []
     selected_plan = {"scope": {"all": False}}
     whole_plan = {"scope": {"all": True}}
@@ -202,22 +203,237 @@ def test_scope_plans_reuse_service_for_selected_and_whole_book(app_module, monke
 
     monkeypatch.setattr(app_module.ProductionJobService, "plan", staticmethod(fake_plan))
 
-    current, whole = app_module._production_scope_plans(
+    current, project_plan = app_module._production_scope_plans(
         "book", {"all": False, "segment_ids": ["11-007"]},
     )
 
     assert current is selected_plan
-    assert whole is whole_plan
+    assert project_plan is None
+    assert calls == [("book", {"all": False, "segment_ids": ["11-007"]})]
+
+    current, project_plan = app_module._production_scope_plans(
+        "book", {"all": True},
+    )
+
+    assert current is whole_plan
+    assert project_plan is whole_plan
     assert calls == [
         ("book", {"all": False, "segment_ids": ["11-007"]}),
         ("book", {"all": True}),
     ]
+
+    selected_plan.update({
+        "ready": True,
+        "segments": 1,
+        "already_completed": 0,
+        "remaining": 1,
+        "to_synthesize": 1,
+        "failed": 0,
+    })
+    rendered = app_module._format_scope_plan(selected_plan, "segments", None)
+    assert "本次选择：1 段" in rendered
+    assert "项目整体：" not in rendered
+    assert app_module._scope_start_update(selected_plan)["interactive"] is True
+
+    selected_plan.update({"already_completed": 1, "remaining": 0, "to_synthesize": 0})
+    assert "✅ 项目已全部生产完成" in app_module._format_scope_plan(
+        selected_plan, "all", selected_plan,
+    )
 
 
 def test_scope_preview_is_only_visible_for_chapter_mode(app_module):
     assert app_module.update_scope_visibility("all")[2]["visible"] is False
     assert app_module.update_scope_visibility("segments")[2]["visible"] is False
     assert app_module.update_scope_visibility("chapters")[2]["visible"] is True
+
+
+def test_scope_controls_output_contract_matches_wiring(app_module, monkeypatch):
+    monkeypatch.setattr(
+        app_module,
+        "_chapter_options",
+        lambda _ss: ([("第 1 章", "c1")], ["c1"]),
+    )
+    monkeypatch.setattr(
+        app_module.ProjectService,
+        "get_synthesis_selections",
+        staticmethod(lambda _project: {"mode": "chapters", "chapters": ["c1"]}),
+    )
+    monkeypatch.setattr(app_module, "_segment_choices", lambda *_args: ([], []))
+    monkeypatch.setattr(app_module, "_segment_records", lambda *_args: [])
+    monkeypatch.setattr(app_module, "_scope_preview_rows", lambda *_args: [])
+    monkeypatch.setattr(
+        app_module,
+        "_production_scope_plans",
+        lambda *_args: (
+            {
+                "project_name": "book",
+                "ready": True,
+                "segments": 1,
+                "chapters": 1,
+                "already_completed": 0,
+                "remaining": 1,
+                "to_synthesize": 1,
+                "failed": 0,
+                "voice_cast": {},
+                "blockers": [],
+                "warnings": [],
+            },
+        ) * 2,
+    )
+    monkeypatch.setattr(
+        app_module.df_style,
+        "style_dataframe",
+        lambda *_args, **_kwargs: "styled-preview",
+    )
+
+    result = app_module.render_scope_controls(SimpleNamespace(project="book"))
+
+    assert len(result) == 10
+    assert result[-3]["value"] == "styled-preview"
+    assert result[-3]["visible"] is True
+    assert "### 按章节" in result[-2]
+    assert result[-1]["interactive"] is True
+
+    source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+
+    def function(name):
+        return next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == name
+        )
+
+    def return_counts(name):
+        returns = [node for node in ast.walk(function(name)) if isinstance(node, ast.Return)]
+        return [len(node.value.elts) for node in returns]
+
+    def wired_output_counts(name):
+        counts = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or len(node.args) < 3:
+                continue
+            callback = node.args[0]
+            if isinstance(callback, ast.Name) and callback.id == name:
+                outputs = node.args[2]
+                if isinstance(outputs, ast.List):
+                    counts.append(len(outputs.elts))
+        return counts
+
+    assert return_counts("render_scope_controls") == [10]
+    assert return_counts("refresh_scope_preview") == [3, 3]
+    assert return_counts("update_scope_visibility") == [3]
+    assert wired_output_counts("render_scope_controls") == [10, 10]
+    assert wired_output_counts("refresh_scope_preview") == [3, 3, 3, 3, 3]
+    assert wired_output_counts("update_scope_visibility") == [3]
+
+
+def test_custom_segment_selection_accumulates_and_reaches_scope_plan(app_module, monkeypatch):
+    visible_by_chapter = {
+        "11": ["11-001", "11-002", "11-003"],
+        "12": ["12-001", "12-004"],
+    }
+    monkeypatch.setattr(
+        app_module,
+        "_segment_choices",
+        lambda _ss, chapter: ([], visible_by_chapter[str(chapter)]),
+    )
+    session = SimpleNamespace(project="book")
+
+    visible_update, state = app_module.merge_segment_selection(
+        ["11-002", "11-003"], [], "11", session,
+    )
+    assert visible_update["value"] == ["11-002", "11-003"]
+    assert state == ["11-002", "11-003"]
+
+    _, state = app_module.merge_segment_selection(
+        ["12-004"], state, "12", session,
+    )
+    assert state == ["11-002", "11-003", "12-004"]
+    assert app_module.refresh_segment_filter(session, "11", state)["value"] == [
+        "11-002", "11-003",
+    ]
+
+    plan_calls = []
+
+    def fake_plan(_project, scope):
+        plan_calls.append(scope)
+        selected_count = len(scope.get("segment_ids", []))
+        return {
+            "project_name": "book",
+            "ready": True,
+            "segments": selected_count or 3,
+            "chapters": 1,
+            "already_completed": 0,
+            "remaining": selected_count or 3,
+            "to_synthesize": selected_count or 3,
+            "failed": 0,
+            "voice_cast": {},
+            "blockers": [],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(
+        app_module.ProductionJobService,
+        "plan",
+        staticmethod(fake_plan),
+    )
+    monkeypatch.setattr(app_module, "_scope_preview_rows", lambda *_args: [])
+    monkeypatch.setattr(
+        app_module.df_style,
+        "style_dataframe",
+        lambda *_args, **_kwargs: [],
+    )
+
+    _, readiness, start = app_module.refresh_scope_preview(
+        session, "segments", [], "11", state,
+    )
+
+    assert plan_calls[0]["segment_ids"] == ["11-002", "11-003", "12-004"]
+    assert "本次选择：3 段" in readiness
+    assert start["interactive"] is True
+
+
+def test_segment_action_preserves_other_chapter_selection(app_module, monkeypatch):
+    records = {
+        "11": [
+            {"id": "11-001", "status": "pending"},
+            {"id": "11-002", "status": "done"},
+            {"id": "11-003", "status": "failed"},
+        ],
+    }
+    monkeypatch.setattr(
+        app_module,
+        "_segment_choices",
+        lambda _ss, chapter: ([], [item["id"] for item in records[str(chapter)]]),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "_segment_records",
+        lambda _ss, chapter: records[str(chapter)],
+    )
+    session = SimpleNamespace(project="book")
+
+    _, cleared = app_module.clear_scope_segments(
+        "11", ["12-004", "11-002"], session,
+    )
+    assert cleared == ["12-004"]
+    _, pending = app_module.select_pending_scope_segments("11", cleared, session)
+    assert pending == ["12-004", "11-001", "11-003"]
+    _, failed = app_module.select_failed_scope_segments("11", pending, session)
+    assert failed == ["12-004", "11-003"]
+
+
+def test_custom_segment_checkbox_listens_only_to_user_input(app_module):
+    merge_event = next(
+        item
+        for item in app_module.app.get_config_file()["dependencies"]
+        if item.get("api_name") == "merge_segment_selection"
+    )
+
+    assert merge_event["targets"] == [(app_module.s_segments_sel._id, "input")]
 
 
 def test_latest_task_keeps_terminal_result(app_module, monkeypatch):
