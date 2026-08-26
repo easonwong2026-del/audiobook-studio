@@ -30,30 +30,9 @@ def storage_upgrade_outputs(page: dict) -> list:
     ]
 
 
-def hierarchy_outputs(page: dict) -> list:
-    """Return the dedicated Phase B.5 relationship-control output contract.
-
-    The first four outputs keep the Phase B order.  The four appended outputs
-    expose project kind, chapter title, chapter order, and the title/order
-    update action without changing the 24-output bookshelf prefix.
-    """
+def bookshelf_management_outputs(page: dict) -> list:
+    """Return the stable bookshelf management output contract."""
     return [
-        page["bookshelf_parent_book"],
-        page["bookshelf_bind_chapter"],
-        page["bookshelf_unbind_chapter"],
-        page["bookshelf_relation_status"],
-        page["bookshelf_project_kind"],
-        page["bookshelf_chapter_title"],
-        page["bookshelf_chapter_order"],
-        page["bookshelf_update_chapter"],
-    ]
-
-
-def bookshelf_management_outputs(
-    page: dict, *, include_hierarchy: bool = False
-) -> list:
-    """Return the 24-output bookshelf contract, optionally plus hierarchy."""
-    outputs = [
         page["ov_bookshelf"],
         page["bookshelf_trash_table"],
         page["bookshelf_trash_sel"],
@@ -62,9 +41,6 @@ def bookshelf_management_outputs(
         page["bookshelf_selected"],
         *bookshelf_selection_context_outputs(page),
     ]
-    if include_hierarchy:
-        outputs.extend(hierarchy_outputs(page))
-    return outputs
 
 
 def bookshelf_selection_context_outputs(page: dict) -> list:
@@ -102,31 +78,16 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
             - ``groups``: 导航 ``_GROUPS``（供打开项目后切页）。
     """
     session = deps["session"]
-    management_outputs = deps.get("management_outputs") or bookshelf_management_outputs(
-        page, include_hierarchy=True
-    )
+    management_outputs = deps.get("management_outputs") or bookshelf_management_outputs(page)
     management_refresh = deps.get(
         "management_refresh",
-        catalog_handlers.refresh_bookshelf_management_view_with_hierarchy,
+        catalog_handlers.refresh_bookshelf_management_view,
     )
     selection_outputs = bookshelf_selection_context_outputs(page)
-    relationship_outputs = hierarchy_outputs(page)
     cleanup_handler_outputs = cleanup_outputs(page)
     storage_handler_outputs = storage_upgrade_outputs(page)
     cb = deps.get("callbacks", {})
     groups = deps.get("groups", [])
-    merge_refresh = deps.get("merge_refresh")
-    merge_outputs = deps.get("merge_outputs") or []
-    assembly_refresh = deps.get("assembly_refresh")
-    assembly_outputs = deps.get("assembly_outputs") or []
-
-    def refresh_merge_after(chain):
-        """Refresh the dedicated planner state without growing catalog outputs."""
-        if merge_refresh and merge_outputs:
-            chain = chain.then(merge_refresh, [session], merge_outputs)
-        if assembly_refresh and assembly_outputs:
-            chain = chain.then(assembly_refresh, [session], assembly_outputs)
-        return chain
 
     # ── 搜索 → 过滤书架行（ss.catalog_query 单一状态来源；选中项被过滤出
     #    结果时同步清空 ss.selected_project + UI 选中态，杜绝幽灵状态） ──
@@ -145,12 +106,6 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
             [session],
             selection_outputs,
         )
-        search_chain = search_chain.then(
-            catalog_handlers.reconcile_bookshelf_hierarchy_selection,
-            [session],
-            relationship_outputs,
-        )
-        search_chain = refresh_merge_after(search_chain)
 
     # 注：书架 select → 只设 ss.selected_project 的接线在 app.py 内联完成
     # （``ov_bookshelf.select(catalog_ui.select_bookshelf_row, ...)``），保持
@@ -170,18 +125,16 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
             [page["bookshelf_search"], session],
             management_outputs,
         )
-        chain = refresh_merge_after(chain)
         goto = cb.get("goto_project")
         if goto is not None and groups:
             chain.then(goto, None, groups)
 
     # ── 手动刷新：query 保持，selection 仅在不可见/不存在时清除 ──
-    refresh_chain = page["bookshelf_refresh"].click(
+    page["bookshelf_refresh"].click(
         management_refresh,
         [page["bookshelf_search"], session],
         management_outputs,
     )
-    refresh_merge_after(refresh_chain)
 
     # ── 打开目录 / 备份 / 清理 / 整理存储布局 / 诊断 / 移入回收站 ──
     page["bookshelf_open_dir"].click(
@@ -247,49 +200,6 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
         [page["bookshelf_msg"], page["bookshelf_integrity_repair"]],
     )
 
-    # ── Phase B/B.5：显式建立、编辑 / 解除 Book ← Chapter 逻辑关系 ──
-    bind_chain = page["bookshelf_bind_chapter"].click(
-        catalog_handlers.bind_selected_chapter,
-        [
-            page["bookshelf_selected_proj"],
-            page["bookshelf_parent_book"],
-            session,
-            page["bookshelf_chapter_title"],
-            page["bookshelf_chapter_order"],
-        ],
-        [page["bookshelf_msg"],],
-    ).then(
-        management_refresh,
-        [page["bookshelf_search"], session],
-        management_outputs,
-    )
-    bind_chain = refresh_merge_after(bind_chain)
-    update_chain = page["bookshelf_update_chapter"].click(
-        catalog_handlers.update_selected_chapter,
-        [
-            page["bookshelf_selected_proj"],
-            page["bookshelf_chapter_title"],
-            page["bookshelf_chapter_order"],
-            session,
-        ],
-        [page["bookshelf_msg"],],
-    ).then(
-        management_refresh,
-        [page["bookshelf_search"], session],
-        management_outputs,
-    )
-    update_chain = refresh_merge_after(update_chain)
-    unbind_chain = page["bookshelf_unbind_chapter"].click(
-        catalog_handlers.unbind_selected_chapter,
-        [page["bookshelf_selected_proj"], session],
-        [page["bookshelf_msg"],],
-    ).then(
-        management_refresh,
-        [page["bookshelf_search"], session],
-        management_outputs,
-    )
-    unbind_chain = refresh_merge_after(unbind_chain)
-
     # ── 移入回收站：两步确认（确认态绑定项目名） ──
     # 前四个输出保持既有 archive handler 契约；第五个是只在真正归档成功
     # 时递增的 State revision。首次确认 / guard 阻止不会触发后续刷新链。
@@ -319,10 +229,9 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
     )
     if "post_archive_reconcile" in cb:
         archive_success_chain = cb["post_archive_reconcile"](archive_success_chain)
-    archive_success_chain = refresh_merge_after(archive_success_chain)
 
     # ── 全局：从备份恢复 ──
-    restore_chain = page["bookshelf_restore"].click(
+    page["bookshelf_restore"].click(
         catalog_handlers.restore_backup_global,
         [page["bookshelf_restore_file"]],
         [page["bookshelf_msg"]],
@@ -331,7 +240,6 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
         [page["bookshelf_search"], session],
         management_outputs,
     )
-    restore_chain = refresh_merge_after(restore_chain)
 
     # ── 全局：回收站（列表 / 恢复 / 永久删除） ──
     page["bookshelf_trash_refresh"].click(
@@ -343,7 +251,7 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
             page["bookshelf_trash_status"],
         ],
     )
-    trash_restore_chain = page["bookshelf_trash_restore"].click(
+    page["bookshelf_trash_restore"].click(
         catalog_handlers.restore_archived_global,
         [page["bookshelf_trash_sel"]],
         [page["bookshelf_msg"]],
@@ -352,8 +260,7 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
         [page["bookshelf_search"], session],
         management_outputs,
     )
-    trash_restore_chain = refresh_merge_after(trash_restore_chain)
-    trash_delete_chain = page["bookshelf_trash_delete"].click(
+    page["bookshelf_trash_delete"].click(
         catalog_handlers.permanently_delete_archived_global,
         [page["bookshelf_trash_sel"], page["bookshelf_trash_confirm"]],
         [page["bookshelf_msg"]],
@@ -366,150 +273,6 @@ def wire_project_catalog(page: dict, deps: dict) -> None:
         [],
         [page["bookshelf_trash_confirm"]],
     )
-    trash_delete_chain = refresh_merge_after(trash_delete_chain)
-
-    # ── Phase C.1：独立只读 Chapter → Book planner 状态路径 ──
-    merge_source = page.get("merge_source_chapter")
-    merge_target = page.get("merge_target_book")
-    merge_analyze = page.get("merge_analyze")
-    merge_result = page.get("merge_plan_result")
-    merge_state = page.get("merge_plan_state")
-    merge_resolution = page.get("merge_resolution")
-    merge_confirm = page.get("merge_confirm")
-    merge_confirmation_state = page.get("merge_confirmation_state")
-    merge_execute = page.get("merge_execute")
-    merge_execution_result = page.get("merge_execution_result")
-    merge_transaction_state = page.get("merge_transaction_state")
-    merge_analyze_callback = deps.get("merge_analyze")
-    merge_invalidate_callback = deps.get("merge_invalidate")
-    merge_prepare_callback = deps.get("merge_prepare_execution")
-    merge_clear_callback = deps.get("merge_clear_execution")
-    merge_invalidate_execution_callback = deps.get("merge_invalidate_execution")
-    merge_confirm_callback = deps.get("merge_confirm")
-    merge_execute_callback = deps.get("merge_execute")
-    if (
-        all(item is not None for item in (merge_source, merge_target, merge_analyze, merge_result, merge_state))
-        and merge_analyze_callback is not None
-        and merge_invalidate_callback is not None
-    ):
-        analyze_chain = merge_analyze.click(
-            merge_analyze_callback,
-            [merge_source, merge_target, session],
-            [merge_result, merge_state],
-        )
-        if merge_prepare_callback and all(
-            item is not None
-            for item in (
-                merge_resolution,
-                merge_confirm,
-                merge_confirmation_state,
-                merge_execute,
-                merge_execution_result,
-                merge_transaction_state,
-            )
-        ):
-            analyze_chain.then(
-                merge_prepare_callback,
-                [merge_state],
-                [
-                    merge_resolution,
-                    merge_confirm,
-                    merge_confirmation_state,
-                    merge_execute,
-                    merge_execution_result,
-                    merge_transaction_state,
-                ],
-            )
-        for component in (merge_source, merge_target):
-            input_chain = component.change(
-                merge_invalidate_callback,
-                [],
-                [merge_result, merge_state],
-            )
-            if merge_clear_callback and all(
-                item is not None
-                for item in (
-                    merge_resolution,
-                    merge_confirm,
-                    merge_confirmation_state,
-                    merge_execute,
-                    merge_execution_result,
-                    merge_transaction_state,
-                )
-            ):
-                input_chain.then(
-                    merge_clear_callback,
-                    [],
-                    [
-                        merge_resolution,
-                        merge_confirm,
-                        merge_confirmation_state,
-                        merge_execute,
-                        merge_execution_result,
-                        merge_transaction_state,
-                    ],
-                )
-        if merge_resolution is not None and merge_invalidate_execution_callback and all(
-            item is not None
-            for item in (
-                merge_confirm,
-                merge_confirmation_state,
-                merge_execute,
-                merge_execution_result,
-                merge_transaction_state,
-            )
-        ):
-            merge_resolution.change(
-                merge_invalidate_execution_callback,
-                [],
-                [
-                    merge_confirm,
-                    merge_confirmation_state,
-                    merge_execute,
-                    merge_execution_result,
-                    merge_transaction_state,
-                ],
-            )
-        if merge_confirm is not None and merge_confirm_callback and all(
-            item is not None
-            for item in (
-                merge_confirmation_state,
-                merge_execute,
-                merge_execution_result,
-                merge_transaction_state,
-            )
-        ):
-            merge_confirm.change(
-                merge_confirm_callback,
-                [merge_confirm, merge_source, merge_target, merge_state, merge_resolution, session],
-                [
-                    merge_confirmation_state,
-                    merge_execute,
-                    merge_execution_result,
-                    merge_transaction_state,
-                ],
-            )
-        if merge_execute is not None and merge_execute_callback and all(
-            item is not None
-            for item in (
-                merge_execution_result,
-                merge_transaction_state,
-                merge_confirmation_state,
-            )
-        ):
-            merge_execute.click(
-                merge_execute_callback,
-                [merge_state, merge_resolution, merge_confirmation_state, session],
-                [
-                    merge_execution_result,
-                    merge_transaction_state,
-                    merge_execute,
-                    merge_confirm,
-                    merge_confirmation_state,
-                ],
-            )
-
-
 def _update_checkbox_false() -> Any:
     """永久删除完成后复位二次确认 Checkbox（延迟加载 gradio）。"""
     from ui.project_catalog_handlers import _update

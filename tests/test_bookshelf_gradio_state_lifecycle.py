@@ -187,8 +187,8 @@ def test_real_gradio_bookshelf_click_a_then_b_updates_only_selected_state(
     rows = {
         "headers": ["项目", "结构", "段进度", "状态", "最近修改"],
         "data": [
-            ["alpha", "整书 · 关联 0 个章节项目", "0/1", "⚪未开始", "—"],
-            ["beta", "整书 · 关联 0 个章节项目", "0/1", "⚪未开始", "—"],
+            ["alpha", "1 个章节", "0/1", "⚪未开始", "—"],
+            ["beta", "1 个章节", "0/1", "⚪未开始", "—"],
         ],
     }
     with gr.Blocks() as block:

@@ -4,11 +4,9 @@ from __future__ import annotations
 import ast
 import inspect
 from pathlib import Path
-from types import SimpleNamespace
 
 import gradio as gr
 
-from services.project_catalog import RELATION_INVALID, RELATION_ORPHAN
 from services.session import SessionState
 from ui import project_catalog_handlers as catalog_handlers
 from ui.pages.overview_page import create_overview_page
@@ -34,27 +32,6 @@ PRODUCTION_SOURCE = "\n".join(
     for path in root.rglob("*.py")
 )
 PRODUCTION_SOURCE += "\n" + APP_SOURCE
-
-
-def _summary(status: str, message: str):
-    return SimpleNamespace(
-        project_name="chapter",
-        project_kind="chapter",
-        relation_status=status,
-        relation_message=message,
-        title="章节标题",
-        author="作者",
-        chapter_title="章节标题",
-        chapter_order=1,
-        parent_project_name=None,
-        project_id="chapter-id",
-        parent_project_id=None,
-        chapters=1,
-        segments=1,
-        completed=0,
-        failed=0,
-        status="⚪未开始",
-    )
 
 
 def test_project_page_and_project_view_compatibility_modules_are_retired():
@@ -100,9 +77,7 @@ def test_session_has_separate_selected_and_opened_truth_sources():
 
 def test_catalog_contract_has_no_project_selector_dependency():
     management_signature = inspect.signature(bookshelf_management_outputs)
-    refresh_signature = inspect.signature(
-        catalog_handlers.refresh_bookshelf_management_view_with_hierarchy
-    )
+    refresh_signature = inspect.signature(catalog_handlers.refresh_bookshelf_management_view)
     assert "project_sel" not in management_signature.parameters
     assert list(refresh_signature.parameters) == ["search_query", "ss"]
     assert "project_sel" not in CATALOG_WIRING_SOURCE
@@ -111,7 +86,6 @@ def test_catalog_contract_has_no_project_selector_dependency():
     with gr.Blocks():
         page = create_overview_page()
     assert len(bookshelf_management_outputs(page)) == 24
-    assert len(bookshelf_management_outputs(page, include_hierarchy=True)) == 32
 
 
 def test_navigation_has_only_live_top_level_items_and_no_hidden_project_buttons():
@@ -196,7 +170,7 @@ def test_open_chain_keeps_live_downstream_refresh_and_removes_project_view_sinks
         "refresh_production_check",
         "export_ui.refresh_export_default_dir",
         "export_ui.refresh_export_readiness",
-        "catalog_ui.refresh_bookshelf_management_view_with_hierarchy",
+        "catalog_ui.refresh_bookshelf_management_view",
     ):
         assert marker in source
     for marker in (
@@ -206,20 +180,6 @@ def test_open_chain_keeps_live_downstream_refresh_and_removes_project_view_sinks
         "reconcile_project_selector",
     ):
         assert marker not in source
-
-
-def test_inspector_distinguishes_orphan_and_invalid_relation_copy():
-    ss = SessionState()
-    orphan = catalog_handlers._selected_info(
-        "chapter", ss, _summary(RELATION_ORPHAN, "缺少所属整书"), summaries=[]
-    )
-    invalid = catalog_handlers._selected_info(
-        "chapter", ss, _summary(RELATION_INVALID, "所属整书身份冲突"), summaries=[]
-    )
-    assert "⚠ 未归属章节 · 缺少所属整书" in orphan
-    assert "⚠ 关系无效 · 所属整书身份冲突" in invalid
-    assert "⚠ 关系无效 · 缺少所属整书" not in orphan
-    assert "⚠ 未归属章节 · 所属整书身份冲突" not in invalid
 
 
 def test_ia2a_legacy_workbench_sinks_remain_permanently_retired():

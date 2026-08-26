@@ -45,12 +45,11 @@ def test_settings_callback_ownership_is_closed():
 def test_data_dir_chain_remains_composed_in_original_order():
     assert "data_dir_chain = page[\"s_data_apply\"].click(" in WIRING_SOURCE
     assert "data_dir_chain = data_dir_chain.then(fn, inputs, outputs)" in WIRING_SOURCE
-    assert "data_dir_chain.then(fn, inputs, outputs)" in WIRING_SOURCE
     apply_index = WIRING_SOURCE.index("settings_handlers.apply_data_dir")
     catalog_index = WIRING_SOURCE.index("data_dir_chain = data_dir_chain.then")
-    merge_index = WIRING_SOURCE.index("data_dir_chain.then", catalog_index + 1)
-    assert apply_index < catalog_index < merge_index
-    assert "assembly_refresh" in WIRING_SOURCE
+    assert apply_index < catalog_index
+    assert "merge_refresh" not in WIRING_SOURCE
+    assert "assembly_refresh" not in WIRING_SOURCE
 
 
 def test_settings_handlers_keep_repository_dependency_debt_deferred():

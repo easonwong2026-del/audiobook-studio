@@ -6,11 +6,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from lib.types import ProjectSummary
-from services.project_catalog import (
-    RELATION_INVALID,
-    RELATION_ORPHAN,
-    ProjectCatalogService,
-)
 from services.session import SessionState
 from ui import project_catalog_handlers as handlers
 from ui.navigation import NAV_ITEMS
@@ -22,12 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def _summary(
     name: str,
     *,
-    kind: str = "book",
-    project_id: str | None = None,
-    parent_id: str | None = None,
     title: str | None = None,
-    chapter_title: str | None = None,
-    chapter_order: int | None = None,
     chapters: int = 8,
     modified_at: str | None = "2026-08-23T10:20:30",
 ) -> ProjectSummary:
@@ -39,11 +29,6 @@ def _summary(
         segments=10,
         completed=4,
         modified_at=modified_at,
-        project_id=project_id,
-        project_kind=kind,
-        parent_project_id=parent_id,
-        chapter_title=chapter_title,
-        chapter_order=chapter_order,
     )
 
 
@@ -68,53 +53,24 @@ def test_visible_navigation_is_workbench_first_and_project_page_free():
     assert "新建项目" not in labels
 
 
-def test_bookshelf_structure_column_uses_catalog_relationships_and_existing_timestamp():
-    book = _summary("book", project_id="book-id", chapters=8)
-    chapter = _summary(
-        "chapter",
-        kind="chapter",
-        project_id="chapter-id",
-        parent_id="book-id",
-        title="章节项目",
-        chapter_title="第三章",
-        chapter_order=3,
-    )
-    orphan = _summary(
-        "orphan",
-        kind="chapter",
-        project_id="orphan-id",
-        chapter_title="未归属章节",
-        modified_at=None,
-    )
+def test_bookshelf_structure_column_uses_internal_script_chapters():
+    book = _summary("book", title="完整作品", chapters=8)
+    other = _summary("other", title="另一本书", chapters=3, modified_at=None)
 
-    rendered = handlers.render_bookshelf_rows("", [book, chapter, orphan])
+    rendered = handlers.render_bookshelf_rows("", [book, other])
     assert rendered["headers"] == ["项目", "结构", "段进度", "状态", "最近修改"]
-    rows = {
-        ProjectCatalogService.project_name_from_display(row[0]): row
-        for row in rendered["data"]
-    }
-    assert rows["book"][1] == "整书 · 关联 1 个章节项目"
+    rows = {row[0]: row for row in rendered["data"]}
+    assert rows["book"][1] == "8 个章节"
     assert rows["book"][4] == "2026-08-23 10:20"
-    assert rows["chapter"][1] == "第 03 章"
-    assert rows["orphan"][1].startswith("⚠ 未归属章节")
-    # The Book's structured-script chapter count remains independent from its
-    # Catalog child-project count.
+    assert rows["other"][1] == "3 个章节"
     assert book.chapters == 8
 
 
-def test_search_keeps_parent_context_and_never_changes_opened_project(monkeypatch):
-    book = _summary("book", project_id="book-id")
-    chapter = _summary(
-        "chapter",
-        kind="chapter",
-        project_id="chapter-id",
-        parent_id="book-id",
-        title="章节项目",
-        chapter_title="第三章",
-        chapter_order=3,
-    )
+def test_search_never_changes_opened_project(monkeypatch):
+    book = _summary("book", title="完整作品")
+    chapter = _summary("chapter", title="第三章")
     monkeypatch.setattr(
-        ProjectCatalogService,
+        handlers.ProjectCatalogService,
         "scan",
         classmethod(lambda cls: [book, chapter]),
     )
@@ -122,11 +78,8 @@ def test_search_keeps_parent_context_and_never_changes_opened_project(monkeypatc
     ss = SessionState(project="book", script={"sentinel": "opened-book"})
     ss.set_selected("chapter")
     rendered, _hint, selected_state = handlers.apply_project_search("第三章", ss)
-    names = {
-        ProjectCatalogService.project_name_from_display(row[0])
-        for row in rendered["data"]
-    }
-    assert names == {"book", "chapter"}
+    names = {row[0] for row in rendered["data"]}
+    assert names == {"chapter"}
     assert selected_state == "chapter"
     assert ss.project == "book"
 
@@ -137,119 +90,27 @@ def test_search_keeps_parent_context_and_never_changes_opened_project(monkeypatc
     assert ss.script == {"sentinel": "opened-book"}
 
 
-def test_search_uses_full_catalog_child_count_for_visible_book_row(monkeypatch):
-    book = _summary("book", project_id="book-id", title="完整作品")
-    chapters = [
-        _summary(
-            f"chapter-{order}",
-            kind="chapter",
-            project_id=f"chapter-{order}-id",
-            parent_id="book-id",
-            title=f"第{order}章项目",
-            chapter_title=f"第{order}章",
-            chapter_order=order,
-        )
-        for order in (1, 2, 3)
-    ]
-    catalog = [book, *chapters]
-    scan_calls = 0
-
-    def scan(_cls):
-        nonlocal scan_calls
-        scan_calls += 1
-        return catalog
-
-    monkeypatch.setattr(ProjectCatalogService, "scan", classmethod(scan))
-
-    ss = SessionState(project="chapter-2", script={"sentinel": "opened"})
-    ss.set_selected("book")
-    rendered, _info, selected_state = handlers.apply_project_search("第3章", ss)
-
-    names = [
-        ProjectCatalogService.project_name_from_display(row[0])
-        for row in rendered["data"]
-    ]
-    assert names == ["book", "chapter-3"]
-    assert rendered["data"][0][1] == "整书 · 关联 3 个章节项目"
-    assert selected_state == "book"
-    assert ss.selected_project == "book"
-    assert ss.project == "chapter-2"
-    assert ss.script == {"sentinel": "opened"}
-    assert scan_calls == 1
-
-
-def test_inspector_relation_warning_distinguishes_orphan_and_invalid(monkeypatch):
-    orphan = _summary(
-        "orphan",
-        kind="chapter",
-        project_id="orphan-id",
-        title="孤立章节",
-        chapter_title="孤立章节",
-    )
-    invalid = _summary(
-        "invalid",
-        kind="chapter",
-        project_id="invalid-id",
-        parent_id="invalid-id",
-        title="无效章节",
-        chapter_title="无效章节",
-    )
-    hierarchy = ProjectCatalogService.hierarchy_from_summaries([orphan, invalid])
-    by_name = {item.project_name: item for item in hierarchy.projects}
-    assert by_name["orphan"].relation_status == RELATION_ORPHAN
-    assert by_name["invalid"].relation_status == RELATION_INVALID
-    monkeypatch.setattr(
-        ProjectCatalogService,
-        "scan",
-        classmethod(lambda cls: [orphan, invalid]),
-    )
-
-    ss = SessionState(project="opened", script={"sentinel": "opened"})
-    ss.set_selected("orphan")
-    _rows, orphan_info, _selected = handlers.apply_project_search("孤立", ss)
-    assert "⚠ 未归属章节 · 未设置所属整书" in orphan_info
-    assert "⚠ 关系无效" not in orphan_info
-    assert ss.project == "opened"
-    assert ss.selected_project == "orphan"
-
-    ss.set_selected("invalid")
-    _rows, invalid_info, _selected = handlers.apply_project_search("无效", ss)
-    assert "⚠ 关系无效 · 章节不能将自己设为所属整书" in invalid_info
-    assert "⚠ 未归属章节" not in invalid_info
-    assert ss.project == "opened"
-    assert ss.selected_project == "invalid"
-
-
 def test_row_select_updates_only_selected_and_inspector_names_both_contexts(monkeypatch):
-    book = _summary("book", project_id="book-id")
-    chapter = _summary(
-        "chapter",
-        kind="chapter",
-        project_id="chapter-id",
-        parent_id="book-id",
-        chapter_title="第三章",
-        chapter_order=3,
-    )
+    book = _summary("book", title="完整作品")
     monkeypatch.setattr(
-        ProjectCatalogService,
+        handlers.ProjectCatalogService,
         "scan",
-        classmethod(lambda cls: [book, chapter]),
+        classmethod(lambda cls: [book]),
     )
     ss = SessionState(project="book", script={"sentinel": "opened-book"})
 
     selected, info = handlers.select_bookshelf_row(
-        {"data": [["chapter", "第 03 章", "4/10", "🟡部分", "—"]]},
+        {"data": [["book", "8 个章节", "4/10", "🟡部分", "—"]]},
         ss,
-        _fake_event(["chapter", "第 03 章", "4/10", "🟡部分", "—"]),
+        _fake_event(["book", "8 个章节", "4/10", "🟡部分", "—"]),
     )
 
-    assert selected == "chapter"
-    assert ss.selected_project == "chapter"
+    assert selected == "book"
+    assert ss.selected_project == "book"
     assert ss.project == "book"
     assert ss.script == {"sentinel": "opened-book"}
     assert "当前选择：" in info
     assert "当前工作项目" in info
-    assert "当前选择尚未打开" in info
 
 
 def test_workbench_open_is_not_wired_to_project_page_navigation():

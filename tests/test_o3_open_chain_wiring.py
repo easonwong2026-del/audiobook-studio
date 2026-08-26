@@ -38,7 +38,7 @@ def test_open_chain_wires_all_pages():
     assert ".then(voice_ui.refresh_voice_lib, [v_lib_search, v_lib_category]" in SRC, "缺失 refresh_voice_lib 接线"
     assert "refresh_overview" not in SRC, "旧 dashboard refresh 不应继续注册"
     assert "_dashboard_snapshot" not in SRC, "旧 dashboard snapshot 不应继续注册"
-    assert "catalog_ui.refresh_bookshelf_management_view_with_hierarchy" in SRC, \
+    assert "catalog_ui.refresh_bookshelf_management_view" in SRC, \
         "工作台应由 Catalog authority 刷新"
     assert "project_view_ui" not in SRC
     assert "reconcile_project_selector" not in SRC

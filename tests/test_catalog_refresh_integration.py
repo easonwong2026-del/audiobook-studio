@@ -1,12 +1,9 @@
 """T04 统一刷新集成：目录类变更链尾统一接 state-aware bookshelf refresh。
 
 验证（设计 B5 / B9-9），AST + 纯函数：
-- 移入回收站成功（archive）→ 链尾 state-aware hierarchy refresh；
-- 回收站恢复成功（restore_archived）→ 链尾 state-aware hierarchy refresh；
-- 回收站永久删除成功 → 链尾 state-aware hierarchy refresh；
-- 从备份恢复成功（restore_backup）→ 链尾 state-aware hierarchy refresh；
-- 创建项目成功（cp_json_create 链尾）→ hierarchy refresh；
-- 切换数据目录（apply_data_dir）→ hierarchy refresh；
+- 目录变更成功后进入 state-aware bookshelf refresh；
+- 创建项目成功（cp_json_create 链尾）→ bookshelf refresh；
+- 切换数据目录（apply_data_dir）→ bookshelf refresh；
 - ``_open_chain_rest``（打开项目后的工作流刷新）**不受影响**（不含目录刷新）。
 """
 from __future__ import annotations
@@ -75,8 +72,8 @@ def test_catalog_wiring_has_four_mutation_refresh_subscriptions():
 
 
 def test_create_project_chain_refreshes_catalog():
-    assert "catalog_ui.refresh_bookshelf_management_view_with_hierarchy" in APP_SRC
-    assert "voice_create_chain.then(\n        catalog_ui.refresh_bookshelf_management_view_with_hierarchy" in APP_SRC
+    assert "catalog_ui.refresh_bookshelf_management_view" in APP_SRC
+    assert "voice_create_chain.then(\n        catalog_ui.refresh_bookshelf_management_view" in APP_SRC
 
 
 def test_data_dir_chain_refreshes_catalog():
@@ -98,6 +95,6 @@ def test_open_chain_rest_untouched():
         "refresh_top_status", "preview_chapters", "refresh_queue_list",
         "render_preview", "voice_ui.refresh_voice_lib",
         "refresh_production_check", "refresh_export_default_dir",
-        "catalog_ui.refresh_bookshelf_management_view_with_hierarchy",
+        "catalog_ui.refresh_bookshelf_management_view",
     ):
         assert marker in src, f"_open_chain_rest 应保留 {marker} 刷新"
