@@ -232,18 +232,19 @@ def _seg_cache_key(seg, emotion: str = None, emo_alpha: float = None,
     Returns:
         ``{seg_id}_{md5前8位}`` 形式、不含扩展名的缓存键。
     """
+    value = seg.get if isinstance(seg, dict) else lambda name, default=None: getattr(seg, name, default)
     if emotion is None:
-        emotion = getattr(seg, "emotion", "neutral")
+        emotion = value("emotion", "neutral")
     if emo_alpha is None:
-        emo_alpha = getattr(seg, "emo_alpha", 1.0)
+        emo_alpha = value("emo_alpha", 1.0)
     if speech_rate is None:
-        speech_rate = getattr(seg, "speech_rate", 1.0)
+        speech_rate = value("speech_rate", 1.0)
     return segment_cache.segment_cache_key(
-        seg.id,
+        value("id"),
         emotion,
         emo_alpha,
         speech_rate,
-        getattr(seg, "pinyin_hints", None),
+        value("pinyin_hints", None),
         segment_cache.director_metadata_for(seg),
         speaker_fingerprint,
         engine_identity,
@@ -338,8 +339,8 @@ def synthesize_project(
     overrides = {
         "emotion": emotion,  # None = 按剧本每段自身值
         "override": (emo_alpha is not None or speech_rate is not None),
-        "emo_alpha": emo_alpha if emo_alpha is not None else 1.0,
-        "speech_rate": speech_rate if speech_rate is not None else 1.0,
+        "emo_alpha": emo_alpha,
+        "speech_rate": speech_rate,
     }
 
     status_writer = ProjectRepository.segment_status_batch(project_name, flush_every=0)

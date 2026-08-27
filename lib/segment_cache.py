@@ -274,15 +274,26 @@ def effective_params(seg, overrides: dict) -> tuple:
         ``(emotion, emo_alpha, speech_rate)`` 有效三元组。
     """
     overrides = overrides or {}
+
+    def _segment_value(name: str, default: Any) -> Any:
+        if isinstance(seg, dict):
+            return seg.get(name, default)
+        return getattr(seg, name, default)
+
     # 情感：覆盖非 None 时优先（None 表示「按剧本」），否则沿用段落自身
-    emotion = overrides.get("emotion") or getattr(seg, "emotion", "neutral")
-    # alpha / rate：仅当 override=True 时采用全局值，否则用段落自身默认值
+    emotion = overrides.get("emotion") or _segment_value("emotion", "neutral")
+    # alpha / rate：override 开启时也逐项继承，避免只覆盖其中一项时把另一项
+    # 静默重置为 1.0。
     if overrides.get("override"):
-        emo_alpha = overrides.get("emo_alpha", getattr(seg, "emo_alpha", 1.0))
-        speech_rate = overrides.get("speech_rate", getattr(seg, "speech_rate", 1.0))
+        emo_alpha = overrides.get("emo_alpha")
+        speech_rate = overrides.get("speech_rate")
+        if emo_alpha is None:
+            emo_alpha = _segment_value("emo_alpha", 1.0)
+        if speech_rate is None:
+            speech_rate = _segment_value("speech_rate", 1.0)
     else:
-        emo_alpha = getattr(seg, "emo_alpha", 1.0)
-        speech_rate = getattr(seg, "speech_rate", 1.0)
+        emo_alpha = _segment_value("emo_alpha", 1.0)
+        speech_rate = _segment_value("speech_rate", 1.0)
     return emotion, emo_alpha, speech_rate
 
 
