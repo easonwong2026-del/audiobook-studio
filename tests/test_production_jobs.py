@@ -360,14 +360,16 @@ def test_web_source_is_visible_to_task_listing(production_project, monkeypatch):
 
 
 def test_mcp_server_has_phase3_tools_and_no_ui_dependency():
-    from mcp_server.server import _HANDLERS, _TOOLS
+    from mcp_server.server import _ALL_TOOLS, _HANDLERS, _TOOLS
 
     names = {
         "plan_production", "start_production", "get_production_task",
         "list_production_tasks", "pause_production", "resume_production",
         "cancel_production", "retry_failed_segments",
     }
-    assert names <= set(_TOOLS) <= set(_HANDLERS) | {"server_info"}
+    assert names <= set(_ALL_TOOLS)
+    assert set(_ALL_TOOLS) == set(_HANDLERS)
+    assert set(_TOOLS) <= set(_ALL_TOOLS)
     source = open("mcp_server/server.py", encoding="utf-8").read()
     assert "import gradio" not in source
     assert "import app" not in source

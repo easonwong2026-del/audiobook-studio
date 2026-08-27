@@ -1,4 +1,4 @@
-"""MCP V1 contract tests without Gradio or a running server process."""
+"""MCP contract tests without Gradio or a running server process."""
 from __future__ import annotations
 
 import ast
@@ -7,7 +7,12 @@ import os
 
 import pytest
 
-from mcp_server.server import _TOOLS, handle_request
+from mcp_server.server import (
+    _ADVERTISED_TOOL_NAMES,
+    _ALL_TOOLS,
+    _TOOLS,
+    handle_request,
+)
 from mcp_server.tools.projects import (
     get_project,
     get_project_outline,
@@ -16,6 +21,27 @@ from mcp_server.tools.projects import (
 )
 from mcp_server.tools.scripts import create_project, validate_structured_script
 from repositories.project_repo import ProjectRepository
+
+
+ADVERTISED_TOOLS = {
+    "list_projects", "create_project", "get_project", "list_segments",
+    "list_voice_assets", "configure_voice_cast", "get_voice_cast",
+    "confirm_voice_cast", "get_workflow_state", "plan_production",
+    "start_production", "get_production_task", "control_production",
+    "retry_failed_segments", "regenerate_segments", "get_repair_task",
+    "plan_export", "start_export", "get_export_task", "get_delivery_manifest",
+    "validate_structured_script", "list_production_tasks", "get_runtime_health",
+    "get_production_performance",
+}
+
+
+def _call_tool(name, arguments=None):
+    return handle_request({
+        "jsonrpc": "2.0",
+        "id": name,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments or {}},
+    })["result"]
 
 
 def _script():
@@ -105,7 +131,14 @@ def test_create_duplicate_list_and_get_summary(isolated_projects):
     assert detail["script_summary"]["title"] == "MCP 测试书"
     assert detail["roles"] == ["旁白", "小雨"]
     assert "chapters" not in detail
+    assert set(detail) == {
+        "project_name", "meta", "project_meta", "script_summary", "roles",
+        "voice_bindings", "synthesis", "storage", "integrity",
+    }
     assert detail["integrity"]["ok"] is True
+    with_outline = get_project({"project_name": "MCP 测试", "include_outline": True})
+    assert set(with_outline) == set(detail) | {"outline"}
+    assert with_outline["outline"]["chapter_count"] == 1
 
 
 def test_project_outline_and_segment_listing_are_compact_and_stable(isolated_projects):
@@ -143,17 +176,28 @@ def test_project_outline_and_segment_listing_are_compact_and_stable(isolated_pro
 
 def test_mcp_metadata_declares_query_and_mutation_semantics():
     for tool_name in (
-        "get_project_outline",
         "list_segments",
         "get_workflow_state",
         "get_runtime_health",
         "plan_production",
         "get_production_task",
+        "get_production_performance",
     ):
         metadata = _TOOLS[tool_name]
         assert metadata["annotations"]["readOnlyHint"] is True
         assert metadata["outputSchema"]["type"] == "object"
     assert "next_actions" in _TOOLS["get_workflow_state"]["outputSchema"]["required"]
+    assert _TOOLS["get_voice_cast"]["annotations"]["readOnlyHint"] is True
+    assert _TOOLS["list_voice_assets"]["annotations"]["readOnlyHint"] is True
+    assert _TOOLS["validate_structured_script"]["annotations"]["readOnlyHint"] is True
+    assert _TOOLS["get_repair_task"]["annotations"] == {
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    }
+    assert _TOOLS["configure_voice_cast"]["annotations"]["readOnlyHint"] is False
+    assert _TOOLS["control_production"]["annotations"]["readOnlyHint"] is False
 
     assert _TOOLS["start_production"]["annotations"] == {
         "readOnlyHint": False,
@@ -174,21 +218,12 @@ def test_stdio_methods_and_no_gradio_import():
     assert initialize["result"]["capabilities"]["tools"]
     tools = handle_request({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
     tool_names = {item["name"] for item in tools["result"]["tools"]}
-    assert tool_names >= {
-        "server_info", "validate_structured_script", "create_project", "list_projects", "get_project",
-        "get_project_outline", "list_segments", "get_production_performance",
-        "list_voice_assets", "get_voice_asset",
-        "set_character_roster", "get_character_roster", "add_character_roles",
-        "update_character_role", "validate_character_roster",
-        "set_voice_cast", "get_voice_cast", "bind_cast_role",
-        "validate_voice_cast", "finalize_voice_cast", "get_voice_binding_status",
-        "check_chapter_roles",
-        "get_workflow_state",
-        "regenerate_segments", "get_repair_task", "list_repairs",
-        "plan_export", "start_export", "get_export_task", "list_exports",
-        "get_delivery_manifest",
-        "get_runtime_health",
-    }
+    assert tool_names == ADVERTISED_TOOLS
+    assert [item["name"] for item in tools["result"]["tools"]] == list(
+        _ADVERTISED_TOOL_NAMES
+    )
+    assert len(tool_names) == 24
+    assert not tool_names & (set(_ALL_TOOLS) - ADVERTISED_TOOLS)
     assert not tool_names & {
         "get_quality_report", "list_review_segments", "get_segment_review",
         "mark_segment_review", "run_technical_qa",
@@ -204,6 +239,117 @@ def test_stdio_methods_and_no_gradio_import():
                 or isinstance(node, ast.ImportFrom) and node.module == "gradio"
                 for node in ast.walk(tree)
             )
+
+
+def test_hidden_compat_alias_is_callable_but_not_advertised(isolated_projects):
+    create_project({"project_name": "兼容书", "script": _script()})
+    result = _call_tool("get_project_outline", {"project_name": "兼容书"})
+    assert result["isError"] is False
+    assert result["structuredContent"]["project_name"] == "兼容书"
+
+
+def test_configure_voice_cast_aggregates_state_without_confirming(
+    isolated_projects,
+    monkeypatch,
+):
+    from services.voice_cast import VoiceCastResolver
+
+    create_project({"project_name": "V2 声音", "script": _script()})
+    library = os.path.join(isolated_projects, "data", "voice_library")
+    os.makedirs(library, exist_ok=True)
+    for filename, content in (("沉稳.wav", b"voice-one"), ("清亮.wav", b"voice-two")):
+        with open(os.path.join(library, filename), "wb") as file:
+            file.write(content)
+    assets = _call_tool("list_voice_assets")["structuredContent"]["items"]
+    assert len(assets) == 2
+    selected = _call_tool(
+        "list_voice_assets",
+        {"voice_asset_id": assets[0]["voice_asset_id"]},
+    )
+    assert selected["structuredContent"]["items"] == [assets[0]]
+
+    confirm_calls = []
+    original_confirm = VoiceCastResolver.confirm_voice_cast
+
+    def tracked_confirm(project_name):
+        confirm_calls.append(project_name)
+        return original_confirm(project_name)
+
+    monkeypatch.setattr(
+        VoiceCastResolver,
+        "confirm_voice_cast",
+        staticmethod(tracked_confirm),
+    )
+    roster = [
+        {"role_id": "role_narrator", "name": "旁白"},
+        {"role_id": "role_xiaoyu", "name": "小雨"},
+    ]
+    bindings = [
+        {"role_id": "role_narrator", "voice_asset_id": assets[0]["voice_asset_id"]},
+        {"role_id": "role_xiaoyu", "voice_asset_id": assets[1]["voice_asset_id"]},
+    ]
+    configured = _call_tool(
+        "configure_voice_cast",
+        {"project_name": "V2 声音", "roles": roster, "bindings": bindings},
+    )
+    state = configured["structuredContent"]
+    assert configured["isError"] is False
+    assert state["success"] is True
+    assert state["status"] == "draft"
+    assert state["validation"]["ready"] is True
+    assert state["roster"]["roles"]["role_narrator"]["name"] == "旁白"
+    assert state["bindings"]["role_narrator"]["voice_asset_id"] == assets[0]["voice_asset_id"]
+    assert state["lock_state"]["cast_locked"] is False
+    assert state["confirmation"]["confirmed"] is False
+    assert state["readiness"]["cast_ready"] is True
+    assert confirm_calls == []
+
+    updated = _call_tool(
+        "configure_voice_cast",
+        {
+            "project_name": "V2 声音",
+            "roles": [{"role_id": "role_narrator", "description": "主叙述角色"}],
+        },
+    )
+    assert updated["structuredContent"]["roster"]["roles"]["role_narrator"]["description"] == "主叙述角色"
+    assert updated["structuredContent"]["confirmation"]["confirmed"] is False
+
+    confirmed = _call_tool("confirm_voice_cast", {"project_name": "V2 声音"})
+    assert confirmed["isError"] is False
+    assert confirmed["structuredContent"]["confirmed"] is True
+    assert confirm_calls == ["V2 声音"]
+
+
+def test_control_production_preserves_pause_resume_cancel_dispatch(monkeypatch):
+    from services.production_jobs import ProductionJobService
+
+    calls = []
+
+    def fake_operation(action):
+        def operation(task_id):
+            calls.append((action, task_id))
+            return {"action": action, "task_id": task_id}
+
+        return operation
+
+    for name in ("pause", "resume", "cancel"):
+        monkeypatch.setattr(
+            ProductionJobService,
+            name,
+            staticmethod(fake_operation(name)),
+        )
+
+    for action in ("pause", "resume", "cancel"):
+        result = _call_tool(
+            "control_production",
+            {"task_id": "task-v2", "action": action},
+        )
+        assert result["isError"] is False
+        assert result["structuredContent"] == {
+            "action": action,
+            "task_id": "task-v2",
+        }
+    assert calls == [("pause", "task-v2"), ("resume", "task-v2"), ("cancel", "task-v2")]
 
 
 def test_phase4_workflow_smoke_and_schema_errors_are_structured(isolated_projects):
@@ -264,6 +410,36 @@ def test_phase4_workflow_smoke_and_schema_errors_are_structured(isolated_project
     assert set(rejected["structuredContent"]["error"]) == {
         "code", "message", "fix_hint", "details",
     }
+    configured_rejected = _call_tool(
+        "configure_voice_cast",
+        {"project_name": "不存在"},
+    )
+    assert configured_rejected["isError"] is True
+    assert set(configured_rejected["structuredContent"]["error"]) == {
+        "code", "message", "fix_hint", "details",
+    }
+
+
+def test_workflow_next_actions_only_reference_advertised_tools(isolated_projects):
+    create_project({"project_name": "V2 工作流", "script": _script()})
+    result = _call_tool("get_workflow_state", {"project_name": "V2 工作流"})
+    assert {
+        item["tool"] for item in result["structuredContent"]["next_actions"]
+    } <= ADVERTISED_TOOLS
+
+    workflow_path = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), "services", "workflow.py",
+    )
+    with open(workflow_path, encoding="utf-8") as file:
+        tree = ast.parse(file.read())
+    referenced = {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and node.value in _ALL_TOOLS
+    }
+    assert referenced <= ADVERTISED_TOOLS
 
 
 def test_list_projects_structured_content_is_object_and_json_safe(isolated_projects):
