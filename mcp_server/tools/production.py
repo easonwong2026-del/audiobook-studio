@@ -76,6 +76,19 @@ def cancel_production(arguments: dict[str, Any]) -> dict[str, Any]:
     return _call(ProductionJobService.cancel, str(arguments.get("task_id") or ""))
 
 
+def control_production(arguments: dict[str, Any]) -> dict[str, Any]:
+    action = str(arguments.get("action") or "").strip().lower()
+    operations = {
+        "pause": ProductionJobService.pause,
+        "resume": ProductionJobService.resume,
+        "cancel": ProductionJobService.cancel,
+    }
+    operation = operations.get(action)
+    if operation is None:
+        raise ValueError("action 必须是 pause、resume 或 cancel")
+    return _call(operation, str(arguments.get("task_id") or ""))
+
+
 def retry_failed_segments(arguments: dict[str, Any]) -> dict[str, Any]:
     return _call(
         ProductionJobService.retry_failed_segments,
@@ -91,6 +104,7 @@ def get_runtime_health(arguments: dict[str, Any] | None = None) -> dict[str, Any
 
 __all__ = [
     "cancel_production",
+    "control_production",
     "get_production_task",
     "get_runtime_health",
     "list_production_tasks",

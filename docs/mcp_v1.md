@@ -1,6 +1,6 @@
-# Audiobook Studio MCP V1
+# Audiobook Studio MCP V2 Phase 1
 
-MCP V1 是独立于 Gradio 的本地 stdio 入口：
+MCP V2 surface 通过独立于 Gradio 的本地 stdio 入口提供：
 
 ~~~text
 External Agent
@@ -17,6 +17,22 @@ lib / project storage
 mcp_server 不 import app.py、Gradio 或任何模型/LLM provider。它只把 MCP
 参数转换为现有 Service 调用，并把结果包装为 JSON-RPC tools/call 响应。
 
+当前 `tools/list` 只有一个统一的 24-tool surface：20 个 Core 工具和 4 个
+Advanced 工具。旧 MCP handler 名称保留一个兼容周期，仍可通过 `tools/call`
+调用，但不会出现在 `tools/list`；不提供 Core/Advanced runtime profiles。
+
+| Core | Core | Core | Core |
+| --- | --- | --- | --- |
+| list_projects | create_project | get_project | list_segments |
+| list_voice_assets | configure_voice_cast | get_voice_cast | confirm_voice_cast |
+| get_workflow_state | plan_production | start_production | get_production_task |
+| control_production | retry_failed_segments | regenerate_segments | get_repair_task |
+| plan_export | start_export | get_export_task | get_delivery_manifest |
+
+| Advanced | Advanced | Advanced | Advanced |
+| --- | --- | --- | --- |
+| validate_structured_script | list_production_tasks | get_runtime_health | get_production_performance |
+
 ## 启动
 
 在仓库根目录运行：
@@ -32,11 +48,10 @@ stderr。当前没有网络监听，也不要求 Gradio 已启动。
 
 | Tool | 作用 |
 | --- | --- |
-| server_info | 返回 API、structured_script 和能力版本 |
 | validate_structured_script | 直接校验内存 JSON，返回 valid/can_create/summary/errors/warnings/script_summary |
 | create_project | 复用校验、项目槽位检查、canonical storage 和原子创建 |
 | list_projects | 返回对象 `{"projects": [...]}`：项目名、书名、章节/片段统计、进度、占用和修改时间 |
-| get_project | 返回 meta、角色、声音绑定、合成、存储和完整性摘要，不嵌入完整剧本 |
+| get_project | 返回 meta、角色、声音绑定、合成、存储和完整性摘要；`include_outline=true` 时附加 outline |
 
 validate_structured_script 和 create_project 接受：
 
@@ -58,15 +73,18 @@ role、id、expected 等定位信息。warning 不阻止创建，error 会使 ca
 
 ## Phase 2 tools
 
-Phase 2 增加全局音色资产目录和项目角色/演员表生命周期：
+Phase 2 的能力收敛到统一的声音配置 surface：
 
 | Tool | 作用 |
 | --- | --- |
-| list_voice_assets / get_voice_asset | 返回稳定 voice_asset_id 和脱敏元数据 |
-| set/get/add/update/validate_character_roster | 管理 Character Roster |
-| set/get/bind/validate/finalize_voice_cast | 管理 Voice Cast、锁定和重绑定 |
-| get_voice_binding_status | 返回绑定、锁定、cast_ready、runtime_status/runtime_state、engine_state/engine_ready 与 synthesis_ready |
-| check_chapter_roles | 检查章节中的已知、新增和未绑定角色 |
+| list_voice_assets | 返回稳定 voice_asset_id 和脱敏元数据；可按 `voice_asset_id` 精确读取 |
+| configure_voice_cast | 合并 Character Roster 创建/更新、声音绑定和校验；不会确认或锁定 |
+| get_voice_cast | 聚合 roster、bindings、validation/readiness、锁定、确认和 runtime/engine 状态 |
+| confirm_voice_cast | 唯一的显式人工确认门 |
+
+Character Roster 与 Voice Cast 的旧 set/get/add/update/bind/validate/finalize 名称、
+`get_voice_binding_status`、`check_chapter_roles` 和 `get_voice_asset` 只作为隐藏兼容
+handler 保留；新调用应使用上述 4 个 advertised 工具。
 
 所有 list_* 工具都把数组包在对象里返回（如 `{"projects": [...]}`、
 `{"tasks": [...]}`），保证 `structuredContent` 始终是 JSON object，避免
@@ -104,8 +122,7 @@ Web ─────┘                         SynthesisService / lib / TTS
 | start_production | 异步创建任务，返回稳定 task_id；支持 chapter scope、all scope、options 和 idempotency_key |
 | get_production_task | 返回持久化状态、进度、当前段和失败段，不解析日志判断状态 |
 | list_production_tasks | 按 project_name、status、source 倒序过滤任务 |
-| pause_production / resume_production | 在段边界协作暂停/恢复 |
-| cancel_production | 返回 cancelling，worker 到段边界后写 cancelled |
+| control_production | 通过 `action=pause/resume/cancel` 在段边界协作控制 |
 | retry_failed_segments | 只重试实际失败或缺失的段落 |
 | get_runtime_health | GPU-free 运行时/引擎健康快照，不加载模型 |
 
@@ -114,8 +131,8 @@ Web ─────┘                         SynthesisService / lib / TTS
 `needs_attention`。`pause`/`cancel` 先持久化意图，worker 到段边界后确认
 最终状态。客户端读取永远不会把任务判成
 `interrupted`；只有新的 runtime 成功取得 OS 单实例锁后，才会修复上一 owner
-遗留的 active attempt。`resume_production` 会创建 child attempt，保留恢复历史；
-`resume_production` 也接受 `needs_attention` 任务（重试剩余段落）。
+遗留的 active attempt。`control_production(action=resume)` 会创建 child attempt，保留恢复历史；
+它也接受 `needs_attention` 任务（重试剩余段落）。旧 pause/resume/cancel 名称仍可兼容调用。
 
 ### Self-healing（失败驱动的引擎恢复）
 
@@ -176,14 +193,14 @@ snapshot，并生成 Delivery Manifest。
 | --- | --- |
 | get_workflow_state | 派生当前阶段、blockers 和 next_actions |
 | list_segments | 按章节或 synthesis/audio 状态读取段落摘要与 active revision 信息 |
-| regenerate_segments / get_repair_task / list_repairs | 创建和查询 revision-safe 修复 |
-| plan_export / start_export / get_export_task / list_exports | 正式导出的 readiness、执行和历史 |
+| regenerate_segments / get_repair_task | 创建和查询 revision-safe 修复 |
+| plan_export / start_export / get_export_task | 正式导出的 readiness、执行和状态 |
 | get_delivery_manifest | 获取交付物相对路径、校验和与 revision snapshot 摘要 |
 
 `get_workflow_state` 在任务 `recovering` 时建议等待 recovery（不推荐重复
-`start_production`）；任务 `needs_attention` 时返回 `retry_task`（
-`resume_production`）、`inspect_runtime_health`（`get_runtime_health`）与
-`cancel_task` 三个 next_actions。
+`start_production`）；任务 `needs_attention` 时返回 `retry_task`/`cancel_task`
+（`control_production`）和 `inspect_runtime_health`（`get_runtime_health`）三个
+next_actions。
 
 `plan_export` 会检查缺段、生产失败、metadata、active production/repair/export、
 regenerating revision、项目完成度和 FFmpeg。它同时返回确定性的
@@ -208,5 +225,5 @@ WAV-only 环境使用 bounded fallback，不会把整本书一次性读入 NumPy
 ## 后续边界
 
 当前不提供自动听感判定、云端 worker、分布式任务、多 GPU、权限系统或
-Streamable HTTP。API_VERSION 继续保持 `1`，Phase 1–4 共用同一 MCP V1 stdio
+Streamable HTTP。传输 API_VERSION 继续保持 `1`，Phase 1–4 共用同一 MCP stdio
 协议。

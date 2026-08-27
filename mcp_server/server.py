@@ -24,6 +24,7 @@ from .tools.export import (
 )
 from .tools.production import (
     cancel_production,
+    control_production,
     get_production_task,
     get_runtime_health,
     list_production_tasks,
@@ -51,6 +52,7 @@ from .tools.voice_cast import (
     add_character_roles,
     bind_cast_role,
     check_chapter_roles,
+    configure_voice_cast,
     confirm_voice_cast,
     finalize_voice_cast,
     get_character_roster,
@@ -109,7 +111,10 @@ _TOOLS: dict[str, dict[str, Any]] = {
         "inputSchema": {
             "type": "object",
             "required": ["project_name"],
-            "properties": {"project_name": {"type": "string"}},
+            "properties": {
+                "project_name": {"type": "string"},
+                "include_outline": {"type": "boolean", "default": False},
+            },
             "additionalProperties": False,
         },
     },
@@ -224,6 +229,7 @@ _TOOLS: dict[str, dict[str, Any]] = {
             "properties": {
                 "search": {"type": "string"},
                 "category": {"type": "string"},
+                "voice_asset_id": {"type": "string"},
             },
             "additionalProperties": False,
         },
@@ -309,6 +315,28 @@ _TOOLS: dict[str, dict[str, Any]] = {
             "type": "object",
             "required": ["project_name"],
             "properties": {"project_name": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
+    "configure_voice_cast": {
+        "name": "configure_voice_cast",
+        "description": (
+            "创建或更新 Character Roster 与 Voice Cast 绑定并返回校验后的 draft/ready 状态；"
+            "不会锁定或记录人工确认，确认必须显式调用 confirm_voice_cast。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_name"],
+            "properties": {
+                "project_name": {"type": "string"},
+                "roles": {"type": ["array", "object"], "description": "Character Roster，支持数组或 role_id 到角色对象的映射。"},
+                "roster": {"type": ["array", "object"], "description": "roles 的兼容别名。"},
+                "bindings": {"type": ["array", "object"], "description": "Voice Cast 绑定，支持数组或 role_id 到 voice_asset_id/对象的映射。"},
+                "voice_bindings": {"type": ["array", "object"], "description": "bindings 的兼容别名。"},
+                "voice_cast": {"type": ["array", "object"], "description": "bindings 的兼容别名。"},
+                "cast": {"type": ["array", "object"], "description": "bindings 的兼容别名。"},
+                "force_rebind": {"type": "boolean", "default": False},
+            },
             "additionalProperties": False,
         },
     },
@@ -588,6 +616,19 @@ _TOOLS: dict[str, dict[str, Any]] = {
             "additionalProperties": False,
         },
     },
+    "control_production": {
+        "name": "control_production",
+        "description": "统一控制生产任务，action 支持 pause、resume、cancel。",
+        "inputSchema": {
+            "type": "object",
+            "required": ["task_id", "action"],
+            "properties": {
+                "task_id": {"type": "string"},
+                "action": {"type": "string", "enum": ["pause", "resume", "cancel"]},
+            },
+            "additionalProperties": False,
+        },
+    },
     "retry_failed_segments": {
         "name": "retry_failed_segments",
         "description": "只重新生产指定任务中实际失败或缺失的段落。",
@@ -743,6 +784,9 @@ _TOOLS.update({
 _READ_ONLY_TOOLS = {
     "get_project_outline",
     "list_segments",
+    "list_voice_assets",
+    "get_voice_cast",
+    "validate_structured_script",
     "get_workflow_state",
     "get_runtime_health",
     "plan_production",
@@ -752,7 +796,6 @@ _READ_ONLY_TOOLS = {
     "get_project",
     "get_production_performance",
     "list_projects",
-    "get_repair_task",
     "list_repairs",
     "plan_export",
     "get_export_task",
@@ -761,6 +804,7 @@ _READ_ONLY_TOOLS = {
 }
 _MUTATION_TOOLS = {
     "create_project",
+    "configure_voice_cast",
     "set_character_roster",
     "add_character_roles",
     "update_character_role",
@@ -769,12 +813,14 @@ _MUTATION_TOOLS = {
     "finalize_voice_cast",
     "confirm_voice_cast",
     "start_production",
+    "control_production",
     "pause_production",
     "resume_production",
     "cancel_production",
     "retry_failed_segments",
     "regenerate_segments",
     "start_export",
+    "get_repair_task",
 }
 for _tool_name in _READ_ONLY_TOOLS:
     if _tool_name in _TOOLS:
@@ -789,7 +835,7 @@ for _tool_name in _MUTATION_TOOLS:
         _TOOLS[_tool_name]["annotations"] = {
             "readOnlyHint": False,
             "destructiveHint": _tool_name in {
-                "cancel_production", "regenerate_segments",
+                "cancel_production", "control_production", "regenerate_segments",
             },
             "idempotentHint": _tool_name in {
                 "pause_production", "resume_production", "cancel_production",
@@ -861,6 +907,7 @@ _HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "validate_character_roster": validate_character_roster,
     "set_voice_cast": set_voice_cast,
     "get_voice_cast": get_voice_cast,
+    "configure_voice_cast": configure_voice_cast,
     "bind_cast_role": bind_cast_role,
     "validate_voice_cast": validate_voice_cast,
     "finalize_voice_cast": finalize_voice_cast,
@@ -875,6 +922,7 @@ _HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "pause_production": pause_production,
     "resume_production": resume_production,
     "cancel_production": cancel_production,
+    "control_production": control_production,
     "retry_failed_segments": retry_failed_segments,
     "get_runtime_health": get_runtime_health,
     "get_workflow_state": get_workflow_state,
@@ -887,6 +935,37 @@ _HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "list_exports": list_exports,
     "get_delivery_manifest": get_delivery_manifest,
 }
+
+# Keep the complete registry for one compatibility cycle while exposing one
+# stable V2 surface through tools/list.
+_ALL_TOOLS = _TOOLS
+_ADVERTISED_TOOL_NAMES = (
+    "list_projects",
+    "create_project",
+    "get_project",
+    "list_segments",
+    "list_voice_assets",
+    "configure_voice_cast",
+    "get_voice_cast",
+    "confirm_voice_cast",
+    "get_workflow_state",
+    "plan_production",
+    "start_production",
+    "get_production_task",
+    "control_production",
+    "retry_failed_segments",
+    "regenerate_segments",
+    "get_repair_task",
+    "plan_export",
+    "start_export",
+    "get_export_task",
+    "get_delivery_manifest",
+    "validate_structured_script",
+    "list_production_tasks",
+    "get_runtime_health",
+    "get_production_performance",
+)
+_TOOLS = {name: _ALL_TOOLS[name] for name in _ADVERTISED_TOOL_NAMES}
 
 
 def _jsonrpc_result(request_id: Any, result: Any) -> dict[str, Any]:
@@ -1086,7 +1165,7 @@ def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
         if not isinstance(arguments, dict):
             return _jsonrpc_error(request_id, -32602, "tool arguments 必须是对象")
         try:
-            _validate_arguments(_TOOLS[name]["inputSchema"], arguments)
+            _validate_arguments(_ALL_TOOLS[name]["inputSchema"], arguments)
             payload = handler(arguments)
             payload, payload_is_error = _normalize_tool_payload(payload)
             result = _tool_call_result(

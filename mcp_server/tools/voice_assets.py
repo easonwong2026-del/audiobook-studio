@@ -18,6 +18,9 @@ def _failure(exc: Exception) -> dict[str, Any]:
 def list_voice_assets(arguments: dict[str, Any] | None = None) -> dict[str, Any]:
     arguments = arguments or {}
     try:
+        asset_id = str(arguments.get("voice_asset_id") or "").strip()
+        if asset_id:
+            return {"items": [VoiceAssetService.get_asset(asset_id)]}
         return {
             "items": VoiceAssetService.list_assets(
                 arguments.get("search"), arguments.get("category")

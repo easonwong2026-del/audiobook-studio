@@ -119,7 +119,7 @@ class WorkflowService:
     @classmethod
     def _action(
         cls,
-        action: str,
+        action_name: str,
         tool: str,
         project_name: str,
         reason: str,
@@ -128,7 +128,7 @@ class WorkflowService:
         include_project_name: bool = True,
         **arguments: Any,
     ) -> dict[str, Any]:
-        contract = dict(cls._ACTION_CONTRACTS.get(action, {
+        contract = dict(cls._ACTION_CONTRACTS.get(action_name, {
             "action_type": "observe",
             "requires_confirmation": False,
             "retryable": True,
@@ -139,7 +139,7 @@ class WorkflowService:
         if include_project_name:
             tool_arguments = {"project_name": project_name, **tool_arguments}
         return {
-            "action": action,
+            "action": action_name,
             "tool": tool,
             "arguments": tool_arguments,
             "reason": reason,
@@ -341,9 +341,9 @@ class WorkflowService:
             })
             actions.append(cls._action(
                 "complete_voice_cast",
-                "get_voice_binding_status",
+                "configure_voice_cast",
                 project,
-                "完成角色声音绑定并锁定 Voice Cast。",
+                "配置角色与声音绑定；完成后必须由用户显式确认 Voice Cast。",
                 count=unbound,
             ))
         elif active_task:
@@ -371,10 +371,11 @@ class WorkflowService:
             stage = "needs_attention"
             actions.append(cls._action(
                 "retry_task",
-                "resume_production",
+                "control_production",
                 project,
                 "自动恢复已耗尽，重试剩余段落。",
                 task_id=attention_task.task_id,
+                action="resume",
                 include_project_name=False,
             ))
             actions.append(cls._action(
@@ -386,10 +387,11 @@ class WorkflowService:
             ))
             actions.append(cls._action(
                 "cancel_task",
-                "cancel_production",
+                "control_production",
                 project,
                 "放弃当前任务。",
                 task_id=attention_task.task_id,
+                action="cancel",
                 include_project_name=False,
             ))
         elif active_repairs:

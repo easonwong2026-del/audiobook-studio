@@ -77,7 +77,13 @@ def list_projects(_arguments: dict[str, Any] | None = None) -> list[dict[str, An
 
 def get_project(arguments: dict[str, Any]) -> dict[str, Any]:
     project_name = _project_name(arguments)
-    return ProjectService.get_project_summary(project_name)
+    result = ProjectService.get_project_summary(project_name)
+    if arguments.get("include_outline", False):
+        result = {
+            **result,
+            "outline": get_project_outline({"project_name": project_name}),
+        }
+    return result
 
 
 def get_project_outline(arguments: dict[str, Any]) -> dict[str, Any]:
