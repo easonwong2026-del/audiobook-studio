@@ -135,7 +135,8 @@ def test_project_outline_and_segment_listing_are_compact_and_stable(isolated_pro
     assert first["segments"][0]["segment_id"] == "100-001"
     assert second["segments"][0]["segment_id"] == "100-002"
     assert first["segments"][0]["synthesis_status"] == "pending"
-    assert first["segments"][0]["quality_status"] == "not_started"
+    assert first["segments"][0]["audio_status"] == "missing"
+    assert first["segments"][0]["audio_available"] is False
     assert len(first["segments"][0]["text_preview"]) <= 160
     assert all("/" not in str(item) for item in first["segments"][0].values())
 
@@ -148,7 +149,6 @@ def test_mcp_metadata_declares_query_and_mutation_semantics():
         "get_runtime_health",
         "plan_production",
         "get_production_task",
-        "get_quality_report",
     ):
         metadata = _TOOLS[tool_name]
         assert metadata["annotations"]["readOnlyHint"] is True
@@ -173,7 +173,8 @@ def test_stdio_methods_and_no_gradio_import():
     })
     assert initialize["result"]["capabilities"]["tools"]
     tools = handle_request({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
-    assert {item["name"] for item in tools["result"]["tools"]} >= {
+    tool_names = {item["name"] for item in tools["result"]["tools"]}
+    assert tool_names >= {
         "server_info", "validate_structured_script", "create_project", "list_projects", "get_project",
         "get_project_outline", "list_segments", "get_production_performance",
         "list_voice_assets", "get_voice_asset",
@@ -182,12 +183,15 @@ def test_stdio_methods_and_no_gradio_import():
         "set_voice_cast", "get_voice_cast", "bind_cast_role",
         "validate_voice_cast", "finalize_voice_cast", "get_voice_binding_status",
         "check_chapter_roles",
-        "get_workflow_state", "get_quality_report", "list_review_segments",
-        "get_segment_review", "mark_segment_review", "run_technical_qa",
+        "get_workflow_state",
         "regenerate_segments", "get_repair_task", "list_repairs",
         "plan_export", "start_export", "get_export_task", "list_exports",
         "get_delivery_manifest",
         "get_runtime_health",
+    }
+    assert not tool_names & {
+        "get_quality_report", "list_review_segments", "get_segment_review",
+        "mark_segment_review", "run_technical_qa",
     }
     path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "mcp_server")
     for root, _dirs, files in os.walk(path):
@@ -223,46 +227,26 @@ def test_phase4_workflow_smoke_and_schema_errors_are_structured(isolated_project
         "id": 9,
         "method": "tools/call",
         "params": {
-            "name": "list_review_segments",
+            "name": "list_segments",
             "arguments": {
                 "project_name": "MCP 工作流",
-                "status": "not_started",
+                "status": "missing",
             },
         },
     })["result"]
     assert filtered["isError"] is False
-    # 从未生产的段落属于 not_started，不再是 technical_warning
+    # 从未生产的段落属于 missing audio。
     assert len(filtered["structuredContent"]["segments"]) == 2
-    # 而 technical_warning 筛选不应误报未生产段落
-    no_warning = handle_request({
-        "jsonrpc": "2.0",
-        "id": 12,
-        "method": "tools/call",
-        "params": {
-            "name": "list_review_segments",
-            "arguments": {
-                "project_name": "MCP 工作流",
-                "status": "technical_warning",
-            },
-        },
-    })["result"]
-    assert no_warning["isError"] is False
-    assert len(no_warning["structuredContent"]["segments"]) == 0
-
     invalid = handle_request({
         "jsonrpc": "2.0",
         "id": 11,
         "method": "tools/call",
         "params": {
             "name": "get_quality_report",
-            "arguments": {"project_name": "MCP 工作流", "unexpected": True},
+            "arguments": {"project_name": "MCP 工作流"},
         },
     })
-    error_result = invalid["result"]
-    assert error_result["isError"] is True
-    assert set(error_result["structuredContent"]["error"]) == {
-        "code", "message", "fix_hint", "details",
-    }
+    assert invalid["error"]["code"] == -32602
 
     rejected = handle_request({
         "jsonrpc": "2.0",
@@ -330,10 +314,10 @@ def test_list_projects_structured_content_is_object_and_json_safe(isolated_proje
     repairs = _call_list("list_repairs", {"project_name": "中文书"})
     assert isinstance(repairs["structuredContent"], dict)
     assert repairs["structuredContent"] == {"repairs": []}
-    review = _call_list("list_review_segments", {"project_name": "中文书"})
-    assert isinstance(review["structuredContent"], dict)
-    assert isinstance(review["structuredContent"]["segments"], list)
-    assert len(review["structuredContent"]["segments"]) == 2
+    segments = _call_list("list_segments", {"project_name": "中文书"})
+    assert isinstance(segments["structuredContent"], dict)
+    assert isinstance(segments["structuredContent"]["segments"], list)
+    assert len(segments["structuredContent"]["segments"]) == 2
     assets = _call_list("list_voice_assets")
     assert isinstance(assets["structuredContent"], dict)
     assert "items" in assets["structuredContent"]

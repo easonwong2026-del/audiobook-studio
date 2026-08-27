@@ -20,7 +20,6 @@ from services.export import (
     ExportCancelled,
     ExportOwnershipLost,
     ExportIdempotencyConflict,
-    ExportPlanError,
     ExportService,
 )
 from services.production_jobs import ProductionJobService
@@ -96,7 +95,7 @@ def delivery_project(tmp_path, monkeypatch):
     ) = original
 
 
-def _finish_and_review(project_name: str) -> None:
+def _finish_with_audio(project_name: str) -> None:
     project_dir = ProjectRepository.get_project_dir(project_name)
     segments = project_paths.project_dir(project_dir, "segments", create=True)
     time_axis = np.linspace(0, 1, 22050, endpoint=False)
@@ -104,19 +103,17 @@ def _finish_and_review(project_name: str) -> None:
     wavfile.write(os.path.join(segments, "001-001.wav"), 22050, audio)
     ProjectRepository.update_segment_status(project_name, "001-001", "done")
     QualityService.ensure_active_revision(project_name, "001-001")
-    QualityService.run_technical_qa(project_name, "001-001")
-    QualityService.mark_review(project_name, "001-001", "passed")
 
 
-def test_workflow_moves_from_ready_to_quality_passed(delivery_project):
+def test_workflow_moves_from_ready_to_export_without_qa(delivery_project):
     ready = WorkflowService.get_state(delivery_project)
     assert ready["stage"] == "ready_for_production"
     assert ready["next_actions"][0]["tool"] == "start_production"
 
-    _finish_and_review(delivery_project)
-    passed = WorkflowService.get_state(delivery_project)
-    assert passed["stage"] == "quality_passed"
-    assert passed["next_actions"][0]["tool"] == "plan_export"
+    _finish_with_audio(delivery_project)
+    ready_for_export = WorkflowService.get_state(delivery_project)
+    assert ready_for_export["stage"] == "ready_for_export"
+    assert ready_for_export["next_actions"][0]["tool"] == "plan_export"
 
 
 def test_workflow_failed_segment_exposes_direct_retry_when_task_is_unambiguous(
@@ -143,7 +140,7 @@ def test_workflow_failed_segment_exposes_direct_retry_when_task_is_unambiguous(
 
 
 def test_legacy_export_history_without_task_is_not_live(delivery_project):
-    _finish_and_review(delivery_project)
+    _finish_with_audio(delivery_project)
     QualityRepository.create_history_record(
         delivery_project,
         "export_jobs",
@@ -153,10 +150,10 @@ def test_legacy_export_history_without_task_is_not_live(delivery_project):
 
     state = WorkflowService.get_state(delivery_project)
     assert state["summary"]["active_exports"] == 0
-    assert state["stage"] == "quality_passed"
+    assert state["stage"] == "ready_for_export"
 
 
-def test_formal_export_requires_qa_and_returns_only_public_paths(delivery_project):
+def test_formal_export_without_qa_returns_only_public_paths(delivery_project):
     project_dir = ProjectRepository.get_project_dir(delivery_project)
     segments = project_paths.project_dir(project_dir, "segments", create=True)
     wavfile.write(
@@ -165,12 +162,6 @@ def test_formal_export_requires_qa_and_returns_only_public_paths(delivery_projec
         np.full(22050, 2000, dtype=np.int16),
     )
     ProjectRepository.update_segment_status(delivery_project, "001-001", "done")
-    with pytest.raises(ExportPlanError):
-        ExportService.start_export(delivery_project, "wav")
-
-    QualityService.ensure_active_revision(delivery_project, "001-001")
-    QualityService.run_technical_qa(delivery_project, "001-001")
-    QualityService.mark_review(delivery_project, "001-001", "passed")
     exported = ExportService.start_export(
         delivery_project,
         "wav",
@@ -198,8 +189,60 @@ def test_formal_export_requires_qa_and_returns_only_public_paths(delivery_projec
     assert workflow["stage"] == "delivered"
 
 
+def test_export_blocks_corrupt_active_wav(delivery_project):
+    _finish_with_audio(delivery_project)
+    active = QualityRepository.get_active_revision(delivery_project, "001-001")
+    assert active
+    corrupt = os.path.join(
+        ProjectRepository.get_project_dir(delivery_project),
+        *active["relative_path"].split("/"),
+    )
+    with open(corrupt, "wb") as file:
+        file.write(b"not a wav")
+
+    plan = ExportService.plan_export(delivery_project, "wav")
+
+    assert plan["ready"] is False
+    assert any(item["code"] == "AUDIO_INVALID" for item in plan["blockers"])
+
+
+def test_export_ignores_legacy_qa_maps(delivery_project):
+    _finish_with_audio(delivery_project)
+    state = QualityRepository.load(delivery_project)
+    state.update({
+        "technical_qa": {"old-revision": {"outcome": "fail"}},
+        "human_reviews": {"old-revision": {"status": "needs_fix"}},
+    })
+    QualityRepository.save(delivery_project, state)
+
+    plan = ExportService.plan_export(delivery_project, "wav")
+
+    assert plan["ready"] is True
+    assert "qa_policy" not in plan
+
+
+def test_export_replays_legacy_task_options_without_qa_policy_conflict(
+    delivery_project,
+):
+    _finish_with_audio(delivery_project)
+    first = ExportService.start_export(
+        delivery_project, "wav", idempotency_key="legacy-export-options"
+    )
+    record = TaskRepository.load_task(first["export_id"])
+    assert record is not None
+    record.options["qa_policy"] = "require_passed"
+    TaskRepository.save_task(record)
+
+    replay = ExportService.start_export(
+        delivery_project, "wav", idempotency_key="legacy-export-options"
+    )
+
+    assert replay["created"] is False
+    assert replay["export_id"] == first["export_id"]
+
+
 def test_export_plan_blocks_frozen_engine_mismatch(delivery_project):
-    _finish_and_review(delivery_project)
+    _finish_with_audio(delivery_project)
     active = QualityRepository.get_active_revision(delivery_project, "001-001")
     assert active
     params = dict(active.get("params") or {})
@@ -229,7 +272,7 @@ def test_export_plan_blocks_frozen_engine_mismatch(delivery_project):
 
 
 def test_plan_export_blocks_active_production_and_repair(delivery_project):
-    _finish_and_review(delivery_project)
+    _finish_with_audio(delivery_project)
     task = TaskRecord(
         task_id="synthesis_active_for_export",
         task_type="synthesis",
@@ -257,7 +300,7 @@ def test_plan_export_blocks_active_production_and_repair(delivery_project):
 
 
 def test_export_idempotency_replay_and_conflict(delivery_project):
-    _finish_and_review(delivery_project)
+    _finish_with_audio(delivery_project)
     first = ExportService.start_export(
         delivery_project, "wav", idempotency_key="export-same"
     )
@@ -273,7 +316,7 @@ def test_export_idempotency_replay_and_conflict(delivery_project):
 
 
 def test_export_worker_rejects_delivery_input_mutation(delivery_project, monkeypatch):
-    _finish_and_review(delivery_project)
+    _finish_with_audio(delivery_project)
     plan = ExportService.plan_export(delivery_project, "wav")
     record = TaskRecord(
         task_id="export_snapshot_toc",
@@ -304,7 +347,7 @@ def test_export_worker_cannot_publish_after_runtime_ownership_loss(
     delivery_project,
     monkeypatch,
 ):
-    _finish_and_review(delivery_project)
+    _finish_with_audio(delivery_project)
     plan = ExportService.plan_export(delivery_project, "wav")
     options = ExportService._task_options(plan, bitrate="192k")
     record = TaskRecord(
@@ -373,7 +416,7 @@ def test_export_cancel_fence_finishes_cancelled_not_error(
     monkeypatch,
     tmp_path,
 ):
-    _finish_and_review(delivery_project)
+    _finish_with_audio(delivery_project)
     plan = ExportService.plan_export(delivery_project, "wav")
     record = TaskRecord(
         task_id="export_cancel_fence",
@@ -445,7 +488,7 @@ def test_export_cancel_fence_finishes_cancelled_not_error(
 
 
 def test_start_export_returns_before_slow_worker_finishes(delivery_project, monkeypatch):
-    _finish_and_review(delivery_project)
+    _finish_with_audio(delivery_project)
     export_started = threading.Event()
     export_release = threading.Event()
     export_finished = threading.Event()

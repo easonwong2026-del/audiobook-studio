@@ -250,7 +250,6 @@ class ExportService:
         project_name: str,
         fmt: str = "wav",
         *,
-        qa_policy: str = "require_passed",
         subtitle_formats: tuple[str, ...] | list[str] = (),
         exclude_task_id: str = "",
         engine_snapshot: dict[str, Any] | None = None,
@@ -258,18 +257,12 @@ class ExportService:
         """Return a machine-readable readiness plan without exporting files."""
         project = str(project_name or "").strip()
         export_format = str(fmt or "").lower()
-        policy = str(qa_policy or "require_passed").lower()
         blockers: list[dict[str, Any]] = []
         warnings: list[dict[str, Any]] = []
         if export_format not in {"wav", "mp3", "m4b"}:
             blockers.append({
                 "code": "FORMAT_UNSUPPORTED",
                 "message": f"不支持的导出格式: {export_format}",
-            })
-        if policy not in {"require_passed", "technical", "allow_unreviewed"}:
-            blockers.append({
-                "code": "QA_POLICY_UNSUPPORTED",
-                "message": f"不支持的 QA 策略: {policy}",
             })
         blockers.extend(cls._active_blockers(project, exclude_task_id=exclude_task_id))
         meta, script, _bindings = ProjectRepository.load_project(project)
@@ -285,44 +278,49 @@ class ExportService:
             str(requested_engine.get("cache_identity") or "")
             if requested_engine else ""
         )
-        quality_report = QualityService.get_quality_report(project)
-        quality_by_segment = {
+        inventory = QualityService.get_active_revision_inventory(project)
+        inventory_by_segment = {
             str(item.get("segment_id") or ""): item
-            for item in quality_report.get("segments", [])
+            for item in inventory.get("segments", [])
+            if isinstance(item, dict)
         }
-        project_dir = ProjectRepository.get_project_dir(project)
         for segment in segments:
             segment_id = str(segment.get("id"))
-            quality = quality_by_segment.get(segment_id, {})
-            revision = quality.get("audio_revision")
-            if not revision:
+            item = inventory_by_segment.get(segment_id, {})
+            revision = item.get("audio_revision")
+            if not isinstance(revision, dict):
                 blockers.append({
                     "code": "AUDIO_MISSING",
                     "message": f"段落缺少可用音频: {segment_id}",
                     "segment_id": segment_id,
                 })
                 continue
-            relative_path = str(revision.get("relative_path") or "")
-            path = (
-                os.path.join(project_dir, *relative_path.split("/"))
-                if relative_path else ""
-            )
-            if not path or not os.path.isfile(path):
+            if not item.get("audio_exists"):
                 blockers.append({
                     "code": "AUDIO_MISSING",
                     "message": f"active revision 音频缺失: {segment_id}",
                     "segment_id": segment_id,
                 })
                 continue
+            if not item.get("audio_valid"):
+                blockers.append({
+                    "code": "AUDIO_INVALID",
+                    "message": f"active revision 不是可读取的 WAV: {segment_id}",
+                    "segment_id": segment_id,
+                })
+                continue
             revision_id = str(revision.get("revision_id") or "")
-            revision_engine = {}
-            raw_params = revision.get("params")
-            if isinstance(raw_params, dict):
-                raw_engine = raw_params.get("engine_snapshot")
-                if isinstance(raw_engine, dict):
-                    revision_engine = public_profile(resolve_profile(raw_engine))
+            revision_engine = (
+                item.get("engine_snapshot")
+                if isinstance(item.get("engine_snapshot"), dict)
+                else {}
+            )
             revision_cache_identity = str(revision_engine.get("cache_identity") or "")
-            if requested_cache_identity and revision_cache_identity and revision_cache_identity != requested_cache_identity:
+            if (
+                requested_cache_identity
+                and revision_cache_identity
+                and revision_cache_identity != requested_cache_identity
+            ):
                 blockers.append({
                     "code": "ENGINE_PROVENANCE_MISMATCH",
                     "message": f"段落 active revision 引擎与导出任务冻结引擎不一致: {segment_id}",
@@ -336,52 +334,13 @@ class ExportService:
                     "message": f"段落 active revision 没有历史 engine provenance: {segment_id}",
                     "segment_id": segment_id,
                 })
-            technical_outcome = str(
-                quality.get("technical_outcome") or "unreviewed"
-            )
-            human_status = str(quality.get("review_status") or "unreviewed")
-            if policy == "require_passed":
-                if technical_outcome != "pass":
-                    blockers.append({
-                        "code": "TECHNICAL_QA_NOT_PASSED",
-                        "message": f"段落技术 QA 未通过: {segment_id}",
-                        "segment_id": segment_id,
-                        "outcome": technical_outcome,
-                    })
-                if human_status != "passed":
-                    blockers.append({
-                        "code": "HUMAN_REVIEW_NOT_PASSED",
-                        "message": f"段落人工 Review 未通过: {segment_id}",
-                        "segment_id": segment_id,
-                        "review_status": human_status,
-                    })
-            elif policy == "technical" and technical_outcome != "pass":
-                blockers.append({
-                    "code": "TECHNICAL_QA_NOT_PASSED",
-                    "message": f"段落技术 QA 未通过: {segment_id}",
-                    "segment_id": segment_id,
-                    "outcome": technical_outcome,
-                })
-            elif policy == "allow_unreviewed":
-                if technical_outcome == "fail" or human_status == "needs_fix":
-                    blockers.append({
-                        "code": "QUALITY_FIX_REQUIRED",
-                        "message": f"段落存在阻断性质量问题: {segment_id}",
-                        "segment_id": segment_id,
-                    })
-                elif technical_outcome != "pass" or human_status != "passed":
-                    warnings.append({
-                        "code": "QUALITY_NOT_FULLY_REVIEWED",
-                        "message": f"段落尚未完全通过 Review: {segment_id}",
-                        "segment_id": segment_id,
-                    })
             revisions.append({
                 "segment_id": segment_id,
                 "revision_id": revision_id,
                 "audio_revision": int(revision.get("audio_revision", 0) or 0),
-                "relative_path": relative_path,
+                "relative_path": str(revision.get("relative_path") or ""),
                 "cache_identity": str(revision.get("cache_identity") or ""),
-                "sha256": str((revision.get("metadata") or {}).get("sha256") or ""),
+                "sha256": str(item.get("checksum") or ""),
                 "engine_snapshot": revision_engine,
             })
         failed_ids = [
@@ -456,7 +415,6 @@ class ExportService:
             "ready": not blockers,
             "project": project,
             "format": export_format,
-            "qa_policy": policy,
             "subtitle_formats": subtitles,
             "summary": {
                 "chapters": len(script.get("chapters", [])),
@@ -666,7 +624,6 @@ class ExportService:
         return {
             "format": str(plan["format"]),
             "bitrate": str(bitrate or "192k"),
-            "qa_policy": str(plan["qa_policy"]),
             "subtitle_formats": list(plan.get("subtitle_formats") or []),
             "revision_snapshot_hash": str(plan.get("revision_snapshot_hash") or ""),
             "revision_snapshot": list(plan.get("revision_snapshot") or []),
@@ -704,7 +661,6 @@ class ExportService:
                 "status": record.status,
                 "format": options.get("format", "wav"),
                 "bitrate": options.get("bitrate", "192k"),
-                "qa_policy": options.get("qa_policy", "require_passed"),
                 "subtitle_formats": list(options.get("subtitle_formats") or []),
                 "revision_snapshot_hash": options.get("revision_snapshot_hash", ""),
                 "revision_snapshot": list(options.get("revision_snapshot") or []),
@@ -759,7 +715,6 @@ class ExportService:
         current = cls.plan_export(
             record.project,
             str(options.get("format") or "wav"),
-            qa_policy=str(options.get("qa_policy") or "require_passed"),
             subtitle_formats=list(options.get("subtitle_formats") or []),
             exclude_task_id=record.task_id,
             engine_snapshot=options.get("engine_snapshot")
@@ -961,7 +916,6 @@ class ExportService:
                     "duration_seconds": duration,
                     "chapters": final["summary"]["chapters"],
                     "segments": final["summary"]["segments"],
-                    "qa_policy": options.get("qa_policy", "require_passed"),
                     "revision_snapshot_hash": options.get("revision_snapshot_hash", ""),
                     "revision_snapshot": options.get("revision_snapshot", []),
                     "delivery_input_hash": options.get("delivery_input_hash", ""),
@@ -1047,7 +1001,6 @@ class ExportService:
         fmt: str = "wav",
         *,
         bitrate: str = "192k",
-        qa_policy: str = "require_passed",
         subtitle_formats: tuple[str, ...] | list[str] = (),
         idempotency_key: str = "",
     ) -> dict[str, Any]:
@@ -1062,7 +1015,6 @@ class ExportService:
             replay_plan = cls.plan_export(
                 project,
                 fmt,
-                qa_policy=qa_policy,
                 subtitle_formats=subtitle_formats,
                 exclude_task_id=existing.task_id,
                 engine_snapshot=(
@@ -1073,13 +1025,14 @@ class ExportService:
             replay_options = cls._task_options(replay_plan, bitrate=bitrate)
             if isinstance(existing.options, dict) and isinstance(existing.options.get("engine_snapshot"), dict):
                 replay_options["engine_snapshot"] = existing.options["engine_snapshot"]
-            if existing.options == replay_options:
+            existing_options = dict(existing.options) if isinstance(existing.options, dict) else {}
+            existing_options.pop("qa_policy", None)
+            if existing_options == replay_options:
                 return {"created": False, **cls._public_export(existing)}
             raise ExportIdempotencyConflict(existing.task_id)
         plan = cls.plan_export(
             project,
             fmt,
-            qa_policy=qa_policy,
             subtitle_formats=subtitle_formats,
         )
         if not plan["ready"]:
@@ -1145,7 +1098,6 @@ class ExportService:
                 "status": record.status,
                 "format": options.get("format", "wav"),
                 "bitrate": options.get("bitrate", "192k"),
-                "qa_policy": options.get("qa_policy", "require_passed"),
                 "subtitle_formats": list(options.get("subtitle_formats") or []),
                 "revision_snapshot_hash": options.get("revision_snapshot_hash", ""),
                 "delivery_input_hash": options.get("delivery_input_hash", ""),
@@ -1174,7 +1126,6 @@ class ExportService:
                 "status",
                 "format",
                 "bitrate",
-                "qa_policy",
                 "subtitle_formats",
                 "revision_snapshot_hash",
                 "delivery_input_hash",
@@ -1204,7 +1155,6 @@ class ExportService:
                 "duration_seconds",
                 "chapters",
                 "segments",
-                "qa_policy",
                 "revision_snapshot_hash",
                 "delivery_input_hash",
                 "delivery_input_snapshot",

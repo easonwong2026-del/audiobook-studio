@@ -1,27 +1,24 @@
-"""生产阶段中的质检与局部修复 UI builder — 对齐 Pencil 试听质检画板。"""
+"""生产阶段中的试听与局部修复 UI builder。"""
 from __future__ import annotations
 
 import gradio as gr
 
-# 状态筛选选项。value 保持后端枚举（needs_review 等），仅 label 面向用户。
-REVIEW_STATUS_FILTER_CHOICES = [
+
+AUDIO_FILTER_CHOICES = [
     ("全部", "all"),
-    ("未生产", "not_started"),
-    ("待试听确认", "needs_review"),
-    ("需修复", "needs_fix"),
-    ("技术警告", "technical_warning"),
-    ("已通过", "passed"),
+    ("已生成", "generated"),
+    ("未生成", "missing"),
 ]
 
 
 def create_review_page() -> dict:
-    """创建章节试听、段落检查与按需重合成工具。"""
+    """创建章节试听、段落试听与按需重合成工具。"""
     with gr.Group(visible=False, elem_id="grp-review") as grp_review:
         with gr.Row(equal_height=True):
             gr.Markdown("##### 章节试听")
-            e_review_refresh = gr.Button("刷新质检状态", size="sm")
-        e_quality_summary = gr.Markdown(
-            "质量状态将在打开项目后显示。",
+            e_review_refresh = gr.Button("刷新试听状态", size="sm")
+        e_review_summary = gr.Markdown(
+            "生产与音频状态将在打开项目后显示。",
             elem_classes=["review-status"],
         )
         e_chapter_table = gr.Markdown("打开项目并完成部分合成后，章节状态会显示在这里。")
@@ -40,9 +37,9 @@ def create_review_page() -> dict:
 
         gr.Markdown("##### 段落试听与修复")
         with gr.Row():
-            e_quality_filter = gr.Dropdown(
-                label="状态筛选",
-                choices=REVIEW_STATUS_FILTER_CHOICES,
+            e_audio_filter = gr.Dropdown(
+                label="音频筛选",
+                choices=AUDIO_FILTER_CHOICES,
                 value="all",
                 scale=1,
             )
@@ -60,45 +57,18 @@ def create_review_page() -> dict:
             e_select_chapter_segments = gr.Button("选择当前章全部", size="sm")
             e_select_filtered_segments = gr.Button("选择当前筛选结果", size="sm")
             e_clear_segment_selection = gr.Button("清空选择", size="sm")
-        with gr.Row():
-            e_batch_qa = gr.Button("批量运行技术 QA", size="sm")
-            e_batch_repair = gr.Button(
-                "批量加入修复/重合成", size="sm", variant="primary"
-            )
+        e_batch_repair = gr.Button(
+            "批量加入修复/重合成", size="sm", variant="primary"
+        )
         e_seg_audio = gr.Audio(label="段落试听", type="filepath", interactive=False)
         e_seg_audio_status = gr.Markdown(
             "请选择已生成音频的段落。",
             elem_classes=["review-status"],
         )
-        e_segment_quality = gr.Markdown(
-            "选择段落后显示技术 QA 与人工 Review。",
+        e_segment_status = gr.Markdown(
+            "选择段落后显示音频 revision 与修复状态。",
             elem_classes=["review-status"],
         )
-        with gr.Row():
-            e_run_qa = gr.Button("运行技术 QA", size="sm")
-            e_review_status = gr.Dropdown(
-                label="人工 QA 状态",
-                choices=["needs_review", "needs_fix", "passed"],
-                value="needs_review",
-            )
-            e_issue_type = gr.Dropdown(
-                label="问题标签",
-                choices=[
-                    "emotion", "voice", "speed", "pronunciation",
-                    "pause", "noise", "clipping", "other",
-                ],
-                value="other",
-            )
-        e_review_note = gr.Textbox(
-            label="质检备注",
-            placeholder="记录情绪、语速、断句、发音等问题",
-            lines=2,
-        )
-        with gr.Row():
-            e_mark_review = gr.Button("保存质检标记")
-            e_mark_passed = gr.Button("通过并跳到下一未检", variant="primary")
-            e_bulk_pass = gr.Button("批量通过所选/本章技术 QA=pass 段")
-        e_bulk_pass_msg = gr.Markdown("")
 
         with gr.Accordion("修复参数", open=False):
             with gr.Row():
@@ -117,26 +87,22 @@ def create_review_page() -> dict:
     return {
         "group": grp_review,
         "e_review_refresh": e_review_refresh,
-        "e_quality_summary": e_quality_summary,
+        "e_review_summary": e_review_summary,
         "e_chapter_table": e_chapter_table,
         "e_chapter_sel": e_chapter_sel,
         "e_chapter_reload": e_chapter_reload,
         "e_chapter_audio": e_chapter_audio,
         "e_chapter_audio_status": e_chapter_audio_status,
-        # ``e_chapter_status`` / ``e_seg_sel`` / ``e_seg_status`` remain aliases
-        # for integrations written against the pre-3.3.3 page dictionary.
         "e_chapter_status": e_chapter_audio_status,
         "e_seg_preview_sel": e_seg_preview_sel,
-        "e_quality_filter": e_quality_filter,
+        "e_audio_filter": e_audio_filter,
         "e_prev": e_prev,
         "e_next": e_next,
         "e_seg_regen_sel": e_seg_regen_sel,
         "e_select_chapter_segments": e_select_chapter_segments,
         "e_select_filtered_segments": e_select_filtered_segments,
         "e_clear_segment_selection": e_clear_segment_selection,
-        "e_batch_qa": e_batch_qa,
         "e_batch_repair": e_batch_repair,
-        "e_seg_sel": e_seg_preview_sel,
         "e_emo": e_emo,
         "e_alpha": e_alpha,
         "e_rate": e_rate,
@@ -144,19 +110,9 @@ def create_review_page() -> dict:
         "e_regenerate": e_regenerate,
         "e_seg_audio": e_seg_audio,
         "e_seg_audio_status": e_seg_audio_status,
-        "e_segment_quality": e_segment_quality,
-        "e_run_qa": e_run_qa,
-        "e_review_status": e_review_status,
-        "e_issue_type": e_issue_type,
-        "e_review_note": e_review_note,
-        "e_mark_review": e_mark_review,
-        "e_mark_passed": e_mark_passed,
-        "e_bulk_pass": e_bulk_pass,
-        "e_bulk_pass_msg": e_bulk_pass_msg,
+        "e_segment_status": e_segment_status,
         "e_seg_status": e_seg_audio_status,
         "e_regenerate_msg": e_regenerate_msg,
-        # Session-local observer pointers; durable task/history remain in the
-        # service/repository layers and can be rediscovered after re-entry.
         "e_review_repair_id": gr.State(""),
         "e_review_repair_task_id": gr.State(""),
         "e_review_repair_project": gr.State(""),

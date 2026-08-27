@@ -347,20 +347,17 @@ def open_export_location(task_id: str, output_dir: str, ss):
         return f"❌ 打开导出位置失败：{exc}"
 
 
-def do_export(fmt, bitrate, output_dir, *args):
+def do_export(
+    fmt,
+    bitrate,
+    output_dir,
+    ss=None,
+    active_task_id="",
+    active_output_dir="",
+):
     """Start a durable export and immediately render its real task status."""
-    qa_policy = "require_passed"
-    ss = None
-    active_task_id = ""
-    active_output_dir = ""
-    if len(args) >= 2:
-        qa_policy, ss = args[0], args[1]
-        if len(args) >= 3:
-            active_task_id = str(args[2] or "").strip()
-        if len(args) >= 4:
-            active_output_dir = str(args[3] or "").strip()
-    elif args:
-        ss = args[0]
+    active_task_id = str(active_task_id or "").strip()
+    active_output_dir = str(active_output_dir or "").strip()
     requested_dir = str(output_dir or "").strip()
     if not ss or not ss.project:
         return _export_ui_reset("请先打开项目", output_dir=requested_dir)
@@ -387,7 +384,6 @@ def do_export(fmt, bitrate, output_dir, *args):
             ss.project,
             fmt,
             bitrate=bitrate,
-            qa_policy=str(qa_policy or "require_passed"),
         )
         export_id = str(result.get("task_id") or result.get("export_id") or "")
         if not export_id:
@@ -439,7 +435,7 @@ def do_export(fmt, bitrate, output_dir, *args):
         )
 
 
-def refresh_export_readiness(fmt, qa_policy, ss):
+def refresh_export_readiness(fmt, ss):
     """Render the formal delivery gate used by Web and MCP."""
     if not ss or not ss.project:
         return "#### 交付准备度\n请先打开项目。"
@@ -447,7 +443,6 @@ def refresh_export_readiness(fmt, qa_policy, ss):
         plan = ExportService.plan_export(
             ss.project,
             fmt or "wav",
-            qa_policy=qa_policy or "require_passed",
         )
         summary = plan.get("summary", {})
         metadata = summary.get("metadata", {})
@@ -475,7 +470,7 @@ def refresh_export_readiness(fmt, qa_policy, ss):
         except Exception:
             lines.append("- Delivery：状态暂不可用")
         if plan.get("ready"):
-            lines.append("\n✅ 已满足当前 QA 策略，可以导出成品。")
+            lines.append("\n✅ 已满足生产完整性检查，可以导出成品。")
         else:
             lines.append("\n**尚未就绪：**")
             lines.extend(
@@ -495,16 +490,14 @@ def do_export_subtitles(ss, sub_choice):
         return None, "未选择字幕格式"
     fmts = ("srt", "lrc") if sub_choice == "both" else (sub_choice,)
     try:
-        report = QualityService.get_quality_report(ss.project)
+        inventory = QualityService.get_active_revision_inventory(ss.project)
         segment_paths = {}
-        for item in report.get("segments", []):
-            revision = item.get("audio_revision") or {}
-            relative_path = str(revision.get("relative_path") or "")
-            if relative_path:
-                segment_paths[str(item.get("segment_id") or "")] = os.path.join(
-                    ProjectService.get_project_dir(ss.project),
-                    *relative_path.split("/"),
-                )
+        for item in inventory.get("segments", []):
+            if not isinstance(item, dict) or not item.get("audio_valid"):
+                continue
+            path = str(item.get("audio_path") or "")
+            if path:
+                segment_paths[str(item.get("segment_id") or "")] = path
         paths = ExportService.export_subtitles(
             ProjectService.get_project_dir(ss.project),
             formats=fmts,

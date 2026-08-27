@@ -217,7 +217,8 @@ def _active_revisions(
         metadata = metadata if isinstance(metadata, dict) else {}
         metadata_sha256 = str(metadata.get("sha256") or "")
         # A completed revision's metadata checksum is the immutable content
-        # identity recorded by QA/repair.  Avoid rereading every long-book WAV
+        # identity recorded at revision registration. Avoid rereading every
+        # long-book WAV
         # on each workflow poll; legacy records without a checksum fall back to
         # the file digest so they still receive a useful freshness identity.
         checksum = metadata_sha256 or _file_sha256(path)

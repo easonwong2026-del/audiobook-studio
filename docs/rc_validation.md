@@ -1,8 +1,11 @@
 # 3.3.3 RC validation
 
 This document records reproducible local diagnostics for the Phase 4
-consolidation. It is not a Release/Tag checklist and does not replace the final
+revision/repair/export consolidation. It is not a Release/Tag checklist and does not replace the final
 Windows + real configured IndexTTS 2 / 2.5 acceptance run.
+
+Metrics below that mention the retired technical QA path are historical
+baseline measurements only; they are not current product behavior.
 
 ## Commands
 
@@ -25,14 +28,15 @@ venv.
 | Metric | 1k segments | 5k segments | 10k segments |
 | --- | ---: | ---: | ---: |
 | Project open | 0.0047 s | 0.0202 s | 0.0398 s |
-| QA refresh | 0.0382 s | 0.1866 s | 0.3739 s |
+| Historical report refresh | 0.0382 s | 0.1866 s | 0.3739 s |
 | Task query | 0.0022 s | 0.0040 s | 0.0060 s |
 | 1,000 status updates | 0.0827 s | 0.1036 s | 0.1326 s |
 | Streaming WAV core | 0.0435 s | 0.2175 s | 0.4605 s |
 | Streaming peak Python allocation | 0.035 MB | 0.038 MB | 0.023 MB |
 
-The expanded QA benchmark uses real project-local tiny WAV files and separates
-analysis from persistence.  On the same macOS control-plane environment:
+Historical benchmark: the expanded QA benchmark used real project-local tiny
+WAV files and separated analysis from persistence. On the same macOS
+control-plane environment:
 
 | Metric | 1k | 5k | 10k |
 | --- | ---: | ---: | ---: |

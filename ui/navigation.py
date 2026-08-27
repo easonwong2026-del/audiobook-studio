@@ -13,7 +13,7 @@ from ui.components.brand_logo import create_brand_logo
 NAV_ITEMS = [
     ("overview", "🏠 工作台", "nav-overview"),
     ("voices", "① 角色与声音", "nav-voices"),
-    ("synth", "② 生产与质检", "nav-synth"),
+    ("synth", "② 生产与试听修复", "nav-synth"),
     ("export", "③ 交付", "nav-export"),
 ]
 

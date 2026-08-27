@@ -2,8 +2,9 @@
 """Synthetic 1k/5k/10k project scaling benchmark.
 
 This benchmark does not run TTS.  It measures the large-book control-plane hot
-paths that should scale independently of GPU availability: project open, QA
-index refresh, task query, batched status persistence, and streaming WAV write.
+paths that should scale independently of GPU availability: project open,
+active-revision inventory, task query, status persistence, and streaming WAV
+write.
 """
 from __future__ import annotations
 
@@ -25,7 +26,6 @@ if ROOT not in sys.path:
 from lib import audio_pipeline
 from lib import project_paths
 from repositories.project_repo import ProjectRepository
-from repositories.quality_repo import QualityRepository
 from repositories.task_repo import TaskRepository
 from services.quality import QualityService
 
@@ -78,17 +78,17 @@ def _tiny_wav(path: str) -> None:
         audio.writeframes(b"\0\0" * 160)
 
 
-def _prepare_qa_audio(project: str, segment_ids: list[str]) -> None:
+def _prepare_revision_audio(project: str, segment_ids: list[str]) -> None:
     """Create one tiny, project-local WAV for each synthetic segment.
 
-    ``get_quality_report`` discovers legacy ``{segment_id}.wav`` files and
+    The revision inventory discovers legacy ``{segment_id}.wav`` files and
     bootstraps active revisions in one repository mutation.  Hard links keep
     setup storage small on POSIX while the copy fallback keeps the benchmark
     usable on filesystems (including Windows) that do not support them.
     """
     project_dir = ProjectRepository.get_project_dir(project)
     segments_dir = project_paths.project_dir(project_dir, "segments", create=True)
-    sample = os.path.join(segments_dir, "__benchmark_qa_sample.wav")
+    sample = os.path.join(segments_dir, "__benchmark_audio_sample.wav")
     _tiny_wav(sample)
     for segment_id in segment_ids:
         target = os.path.join(segments_dir, f"{segment_id}.wav")
@@ -110,22 +110,15 @@ def _benchmark_size(root: str, segment_count: int, status_updates: int) -> dict[
         for chapter in script.get("chapters", [])
         for segment in chapter.get("segments", [])
     ]
-    _prepare_qa_audio(project, segment_ids)
+    _prepare_revision_audio(project, segment_ids)
 
-    # The first refresh discovers real WAV files and bootstraps active
-    # revisions; subsequent measurements isolate analysis, batch persistence,
-    # and the normal post-QA report refresh.
-    _report, qa_seconds, qa_peak = _measure(
-        lambda: QualityService.get_quality_report(project)
+    # The first inventory discovers real WAV files and bootstraps active
+    # revisions; the second measures the normal read path after bootstrap.
+    _inventory, revision_seconds, revision_peak = _measure(
+        lambda: QualityService.get_active_revision_inventory(project)
     )
-    analyzed, qa_analyze_seconds, qa_analyze_peak = _measure(
-        lambda: QualityService.analyze_technical_qa_batch(project, segment_ids)
-    )
-    persisted, qa_persist_seconds, qa_persist_peak = _measure(
-        lambda: QualityRepository.save_technical_qa_batch(project, analyzed)
-    )
-    refreshed, quality_refresh_seconds, quality_refresh_peak = _measure(
-        lambda: QualityService.get_quality_report(project)
+    refreshed, revision_refresh_seconds, revision_refresh_peak = _measure(
+        lambda: QualityService.get_active_revision_inventory(project)
     )
     tasks, task_seconds, task_peak = _measure(
         lambda: TaskRepository.list_tasks(project=project)
@@ -165,17 +158,11 @@ def _benchmark_size(root: str, segment_count: int, status_updates: int) -> dict[
         "chapters": len(script.get("chapters", [])),
         "project_open_seconds": open_seconds,
         "project_open_peak_python_mb": open_peak,
-        "qa_refresh_seconds": qa_seconds,
-        "qa_refresh_peak_python_mb": qa_peak,
-        "qa_analyze_seconds": qa_analyze_seconds,
-        "qa_analyze_peak_python_mb": qa_analyze_peak,
-        "qa_analyzed_results": len(analyzed),
-        "qa_batch_persistence_seconds": qa_persist_seconds,
-        "qa_batch_persistence_peak_python_mb": qa_persist_peak,
-        "qa_persisted_results": len(persisted),
-        "quality_refresh_seconds": quality_refresh_seconds,
-        "quality_refresh_peak_python_mb": quality_refresh_peak,
-        "quality_segments": refreshed["summary"]["segments"],
+        "revision_inventory_seconds": revision_seconds,
+        "revision_inventory_peak_python_mb": revision_peak,
+        "revision_refresh_seconds": revision_refresh_seconds,
+        "revision_refresh_peak_python_mb": revision_refresh_peak,
+        "active_revisions": refreshed["summary"]["active_revisions"],
         "task_query_seconds": task_seconds,
         "task_query_peak_python_mb": task_peak,
         "task_count": len(tasks),

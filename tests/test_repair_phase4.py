@@ -10,7 +10,9 @@ from scipy.io import wavfile
 from lib import project_paths
 from repositories.project_repo import ProjectRepository
 from repositories.quality_repo import QualityRepository
+from repositories.task_repo import TaskRecord
 from services.production_jobs import ProductionJobService
+from services.production_runtime import ProductionRuntime
 from services.quality import QualityService
 from services.repair import RepairService
 
@@ -112,7 +114,8 @@ def test_repair_submits_segment_scope_and_activates_new_revision(
     assert active["params"]["emotion"] == "happy"
     assert os.path.isfile(QualityService.resolve_active_audio(repair_project, "001-001"))
     state = QualityRepository.load(repair_project)
-    assert state["technical_qa"][active["revision_id"]]["outcome"] == "pass"
+    assert state["active_revisions"]["001-001"] == active["revision_id"]
+    assert active["status"] == "ready"
 
     replay = RepairService.start(
         repair_project,
@@ -122,6 +125,91 @@ def test_repair_submits_segment_scope_and_activates_new_revision(
     )
     assert replay["created"] is False
     assert replay["repair_id"] == result["repair_id"]
+
+
+def test_repair_runtime_callback_does_not_create_duplicate_revision(
+    repair_project, monkeypatch
+):
+    old = QualityService.ensure_active_revision(repair_project, "001-001")
+
+    def fake_start(project, _scope, options, **_kwargs):
+        target, _identity, _fingerprint, _params = QualityService.expected_audio_path(
+            project, "001-001", params=options
+        )
+        wavfile.write(target, 22050, np.full(22050, 3000, dtype=np.int16))
+        callback = ProductionRuntime._on_segment_audio(
+            TaskRecord(
+                task_id="task_fake_repair_callback",
+                task_type="synthesis",
+                project=project,
+                status="running",
+                options=options,
+                scope={"all": False, "chapter_ids": [], "segment_ids": ["001-001"]},
+            )
+        )
+        callback("001-001", target)
+        ProjectRepository.update_segment_status(project, "001-001", "done")
+        return {"task_id": "task_fake_repair_callback", "status": "done"}
+
+    monkeypatch.setattr(ProductionJobService, "start", staticmethod(fake_start))
+    monkeypatch.setattr(
+        ProductionJobService,
+        "get_task_snapshot",
+        staticmethod(lambda _task_id: {
+            "task_id": "task_fake_repair_callback",
+            "status": "done",
+            "progress": {"total": 1, "completed": 1},
+            "finished_at": "2026-08-09T00:00:00Z",
+            "error_summary": "",
+        }),
+    )
+
+    result = RepairService.start(repair_project, ["001-001"])
+
+    assert result["status"] == "done"
+    revisions = QualityRepository.list_revisions(repair_project, "001-001")
+    assert len(revisions) == 2
+    active = QualityRepository.get_active_revision(repair_project, "001-001")
+    assert active["revision_id"] != old["revision_id"]
+    assert active["revision_id"] == result["revision_ids"][0]
+
+
+def test_repair_corrupt_output_keeps_previous_active_revision(
+    repair_project, monkeypatch
+):
+    old = QualityService.ensure_active_revision(repair_project, "001-001")
+
+    def fake_start(project, _scope, options, **_kwargs):
+        target, _identity, _fingerprint, _params = QualityService.expected_audio_path(
+            project, "001-001", params=options
+        )
+        with open(target, "wb") as file:
+            file.write(b"not a wav")
+        ProjectRepository.update_segment_status(project, "001-001", "done")
+        return {"task_id": "task_corrupt_repair", "status": "done"}
+
+    monkeypatch.setattr(ProductionJobService, "start", staticmethod(fake_start))
+    monkeypatch.setattr(
+        ProductionJobService,
+        "get_task_snapshot",
+        staticmethod(lambda _task_id: {
+            "task_id": "task_corrupt_repair",
+            "status": "done",
+            "progress": {"total": 1, "completed": 1},
+            "finished_at": "2026-08-09T00:00:00Z",
+            "error_summary": "",
+        }),
+    )
+
+    result = RepairService.start(repair_project, ["001-001"])
+
+    assert result["status"] == "error"
+    assert result["result"]["failed_segment_ids"] == ["001-001"]
+    active = QualityRepository.get_active_revision(repair_project, "001-001")
+    assert active["revision_id"] == old["revision_id"]
+    assert QualityService.resolve_active_audio(repair_project, "001-001")
+    meta, _script, _bindings = ProjectRepository.load_project(repair_project)
+    assert getattr(meta, "segments_status", {}).get("001-001") == "done"
 
 
 def test_repair_copies_temporary_voice_and_routes_it_per_segment(

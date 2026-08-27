@@ -9,7 +9,7 @@ def create_create_project_page() -> dict:
         gr.Markdown("### 从剧本分析 JSON 创建项目")
         gr.Markdown(
             "请先使用有声书分析 Skill 将小说分析为 `structured_script.json`，"
-            "再导入工作台完成角色声音绑定、合成、试听质检和导出。"
+            "再导入工作台完成角色声音绑定、合成、试听与修复和导出。"
         )
 
         with gr.Row(equal_height=True, elem_classes=["stage-row"]):

@@ -79,7 +79,7 @@ def freshness_project(tmp_path, monkeypatch):
     ) = original
 
 
-def _finish_and_review(project_name: str) -> None:
+def _finish_with_audio(project_name: str) -> None:
     project_dir = ProjectRepository.get_project_dir(project_name)
     segments = project_paths.project_dir(project_dir, "segments", create=True)
     time_axis = np.linspace(0, 1, 22050, endpoint=False)
@@ -87,8 +87,6 @@ def _finish_and_review(project_name: str) -> None:
     wavfile.write(os.path.join(segments, "001-001.wav"), 22050, audio)
     ProjectRepository.update_segment_status(project_name, "001-001", "done")
     QualityService.ensure_active_revision(project_name, "001-001")
-    QualityService.run_technical_qa(project_name, "001-001")
-    QualityService.mark_review(project_name, "001-001", "passed")
 
 
 def _set_revision_engine(project_name: str, version: str) -> None:
@@ -120,7 +118,7 @@ def _manifest(project_name: str, *, with_hash: bool = True) -> dict:
 def test_delivery_snapshot_is_deterministic_and_manifest_history_is_queryable(
     freshness_project,
 ):
-    _finish_and_review(freshness_project)
+    _finish_with_audio(freshness_project)
     first = compute_delivery_input_snapshot(freshness_project)
     second = compute_delivery_input_snapshot(freshness_project)
     assert first == second
@@ -140,7 +138,7 @@ def test_delivery_snapshot_is_deterministic_and_manifest_history_is_queryable(
 
     historical = _manifest(freshness_project, with_hash=False)
     state = WorkflowService.get_state(freshness_project)
-    assert state["stage"] == "quality_passed"
+    assert state["stage"] == "ready_for_export"
     assert state["summary"]["delivered"] is False
     assert QualityRepository.get_history_record(
         freshness_project, "delivery_manifests", historical["manifest_id"]
@@ -148,7 +146,7 @@ def test_delivery_snapshot_is_deterministic_and_manifest_history_is_queryable(
 
 
 def test_delivery_snapshot_records_uniform_engine_provenance(freshness_project):
-    _finish_and_review(freshness_project)
+    _finish_with_audio(freshness_project)
     _set_revision_engine(freshness_project, "2.5")
 
     snapshot = compute_delivery_input_snapshot(freshness_project)
@@ -159,7 +157,7 @@ def test_delivery_snapshot_records_uniform_engine_provenance(freshness_project):
 
 
 def test_delivery_snapshot_marks_mixed_engine_provenance(freshness_project):
-    _finish_and_review(freshness_project)
+    _finish_with_audio(freshness_project)
     # Add a second segment revision with the other native engine identity to
     # exercise the same provenance shape used by a mixed historical project.
     project_dir = ProjectRepository.get_project_dir(freshness_project)
@@ -195,7 +193,7 @@ def test_delivery_snapshot_marks_mixed_engine_provenance(freshness_project):
 def test_repair_revision_stales_manifest_and_new_export_restores_delivery(
     freshness_project,
 ):
-    _finish_and_review(freshness_project)
+    _finish_with_audio(freshness_project)
     old_manifest = _manifest(freshness_project)
     assert WorkflowService.get_state(freshness_project)["stage"] == "delivered"
 
@@ -218,12 +216,10 @@ def test_repair_revision_stales_manifest_and_new_export_restores_delivery(
     assert stale["summary"]["delivered"] is False
 
     # The old record remains available for audit, while a fresh export records
-    # the new active revision and makes delivery current again after QA.
+    # the new active revision and makes delivery current again.
     assert QualityRepository.get_history_record(
         freshness_project, "delivery_manifests", old_manifest["manifest_id"]
     )
-    QualityService.run_technical_qa(freshness_project, "001-001")
-    QualityService.mark_review(freshness_project, "001-001", "passed")
     new_manifest = _manifest(freshness_project)
     assert old_manifest["delivery_input_hash"] != new_manifest["delivery_input_hash"]
     restored = WorkflowService.get_state(freshness_project)
@@ -234,7 +230,7 @@ def test_repair_revision_stales_manifest_and_new_export_restores_delivery(
 def test_voice_cast_change_and_invalidation_stale_delivery(
     freshness_project,
 ):
-    _finish_and_review(freshness_project)
+    _finish_with_audio(freshness_project)
     _manifest(freshness_project)
     assert WorkflowService.get_state(freshness_project)["stage"] == "delivered"
 
@@ -254,7 +250,7 @@ def test_voice_cast_change_and_invalidation_stale_delivery(
         },
     })
     changed_cast = WorkflowService.get_state(freshness_project)
-    assert changed_cast["stage"] == "quality_passed"
+    assert changed_cast["stage"] == "ready_for_export"
     assert changed_cast["summary"]["delivered"] is False
 
     ProjectRepository.invalidate_done_segments(freshness_project, ["001-001"])

@@ -12,11 +12,11 @@ import logging
 import os
 import shutil
 import time
-import wave
 from dataclasses import dataclass, field
 from typing import Any
 
 from lib import chapter_identity, config, project_paths, segment_cache
+from lib.audio_validation import is_valid_wav_file
 
 logger = logging.getLogger(__name__)
 
@@ -67,15 +67,7 @@ def _nonempty_file(path: str | None) -> bool:
         return False
 
 
-def _valid_wav_file(path: str | None) -> bool:
-    """Check that a segment points to a readable, non-empty WAV file."""
-    if not _nonempty_file(path):
-        return False
-    try:
-        with wave.open(str(path), "rb") as audio:
-            return audio.getnframes() > 0 and audio.getframerate() > 0
-    except (OSError, wave.Error):
-        return False
+_valid_wav_file = is_valid_wav_file
 
 
 def _allowed_audio_path(project_name: str, path: str, kind: str = "segments") -> str | None:
@@ -334,7 +326,7 @@ def _record_event(project_dir: str, action: str, status: str, **details) -> None
         with open(os.path.join(quality_dir, "review_events.jsonl"), "a", encoding="utf-8") as file:
             file.write(json.dumps(event, ensure_ascii=False) + "\n")
     except (OSError, TypeError, ValueError) as exc:
-        logger.debug("记录质检事件失败: %s", exc)
+        logger.debug("记录试听事件失败: %s", exc)
 
 
 class ReviewAudioService:

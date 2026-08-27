@@ -166,17 +166,16 @@ active production task。重复的 `project + task_type + idempotency_key` 且 p
 生产状态不返回本机绝对路径；任务 API 只返回 task、scope、状态、进度、错误摘要和
 稳定的段/项目标识。
 
-## Phase 4 quality、repair、workflow 与 delivery
+## Phase 4 revision、repair、workflow 与 delivery
 
-Phase 4 的 UI 与 MCP 共用项目内 Revision/QA/Review、修复任务、工作流与正式交付
-模型。技术 QA 和人工 Review 分开记录，修复只在新 revision 通过技术检查后切换
-active pointer；正式导出固定一份 revision snapshot，并生成 Delivery Manifest。
+Phase 4 的 UI 与 MCP 共用项目内 audio revision、试听/修复任务、工作流与正式交付
+模型。修复完成并通过可读 WAV 校验后切换 active pointer；正式导出固定一份 revision
+snapshot，并生成 Delivery Manifest。
 
 | Tool | 作用 |
 | --- | --- |
 | get_workflow_state | 派生当前阶段、blockers 和 next_actions |
-| get_quality_report / list_review_segments / get_segment_review | 查询技术 QA、人工 Review 与 active revision |
-| mark_segment_review / run_technical_qa | 写入人工 Review、运行技术检查 |
+| list_segments | 按章节或 synthesis/audio 状态读取段落摘要与 active revision 信息 |
 | regenerate_segments / get_repair_task / list_repairs | 创建和查询 revision-safe 修复 |
 | plan_export / start_export / get_export_task / list_exports | 正式导出的 readiness、执行和历史 |
 | get_delivery_manifest | 获取交付物相对路径、校验和与 revision snapshot 摘要 |
@@ -186,7 +185,7 @@ active pointer；正式导出固定一份 revision snapshot，并生成 Delivery
 `resume_production`）、`inspect_runtime_health`（`get_runtime_health`）与
 `cancel_task` 三个 next_actions。
 
-`plan_export` 会检查缺段、生产失败、QA policy、metadata、active production/repair/export、
+`plan_export` 会检查缺段、生产失败、metadata、active production/repair/export、
 regenerating revision、项目完成度和 FFmpeg。它同时返回确定性的
 `delivery_input_snapshot` / `delivery_input_hash`，覆盖 structured script、段落顺序、
 active revision、音频 checksum、cache identity、voice fingerprint、Voice Cast 和正式
@@ -203,13 +202,11 @@ publish；runtime 中断会把任务标记为 `interrupted`，不会留下 `read
 字幕使用同一 active revision snapshot，并在任何段落缺失时整体失败，不会静默生成部分
 字幕。所有公开返回只包含项目相对路径，不暴露本机绝对路径。
 
-Technical QA 在多段/全书 MCP 调用中先 analyze，再通过一次 batch mutation 保存
-`quality_state.json`；单段 API 保持兼容。正式整书后处理使用 bounded streaming
-buffers，FFmpeg 可用时走 loudnorm two-pass，WAV-only 环境使用 bounded fallback，
-不会把整本书一次性读入 NumPy float64。
+正式整书后处理使用 bounded streaming buffers，FFmpeg 可用时走 loudnorm two-pass，
+WAV-only 环境使用 bounded fallback，不会把整本书一次性读入 NumPy float64。
 
 ## 后续边界
 
-当前不实现 AI 听感 QA、云端 worker、分布式任务、多 GPU、权限系统或
+当前不提供自动听感判定、云端 worker、分布式任务、多 GPU、权限系统或
 Streamable HTTP。API_VERSION 继续保持 `1`，Phase 1–4 共用同一 MCP V1 stdio
 协议。

@@ -2,7 +2,7 @@
 
 Audiobook Studio 不分析小说原文。外部 Agent 或 Skill 负责理解原文，并交付一个
 `structured_script.json`；工作台只负责离线检查、项目管理、角色声音绑定、合成、
-试听质检和导出。
+试听与修复和导出。
 
 ## 顶层结构
 
@@ -59,7 +59,7 @@ Audiobook Studio 不分析小说原文。外部 Agent 或 Skill 负责理解原�
 
 | 字段 | 必填/可选 | 说明 |
 | --- | --- | --- |
-| `id` | 必填 | 全书唯一、非空；用于合成缓存、状态和质检跳转 |
+| `id` | 必填 | 全书唯一、非空；用于合成缓存、状态和试听跳转 |
 | `role` 或 `speaker` | 必填 | 必须命中 `voices`；V3 读取器兼容两种写法 |
 | `text` | 必填 | 非空原文；工作台保留其内容，不负责重写 |
 | `emotion` | 可选 | 缺失按 `neutral`；支持 `neutral`、`angry`、`happy`、`sad`、`excited`、`whisper`、`cold`、`confident`、`fearful`、`hesitant`、`tense` |
@@ -91,7 +91,7 @@ Adapter 的每次合成都应保留结构化映射报告，至少区分：
 
 这些结果必须进入 runtime trace 或任务诊断，不能静默丢失。IndexTTS 2.5 的
 `<text|pronunciation>`、`lang`、`duration_factor` 等调用格式只存在于 Adapter 内部；
-Canonical JSON 保持原样。缓存、任务快照、质检 revision 和导出 manifest 必须同时带有
+Canonical JSON 保持原样。缓存、任务快照、音频 revision 和导出 manifest 必须同时带有
 冻结的 `engine_identity`，避免 UI 显示新引擎而实际复用旧引擎音频。
 
 ## 导入结果

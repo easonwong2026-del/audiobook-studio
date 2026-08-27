@@ -24,7 +24,6 @@ CAPABILITIES = [
     "engine_self_healing",
     "workflow_state",
     "agent_action_contract",
-    "quality_review",
     "repair_jobs",
     "export_jobs",
     "delivery_manifests",

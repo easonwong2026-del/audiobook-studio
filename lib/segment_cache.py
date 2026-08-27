@@ -317,7 +317,7 @@ def director_metadata_for(seg) -> dict | None:
 #
 # 背景：生产端自双引擎起把 engine_identity/cache_identity 加入 segment cache
 # key（文件名形如 ``{seg_id}_{md5(参数|speaker|engine)}.wav``），但读取链
-# （Review / Chapter Preview / Export / QA / Repair）长期只按 speaker 查找，
+# （Review / Chapter Preview / Export / Repair）长期只按 speaker 查找，
 # 导致 "音频已生成但试听/导出找不到"。本模块是唯一 artifact 解析入口：
 #
 #   - 权威 engine provenance 优先：调用方显式 engine_snapshot >
