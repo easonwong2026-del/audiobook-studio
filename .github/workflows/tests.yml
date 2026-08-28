@@ -101,7 +101,7 @@ jobs:
           PYTHONUTF8: "1"
         run: |
           python -m pytest -q \
-            tests/test_{windows_*,start_bat_encoding.py,no_hardcoded_paths.py,workspace_paths.py,environment_diagnostics.py,launcher.py,chapter_identity.py} \
+            tests/test_{windows_*,start_bat_encoding.py,no_hardcoded_paths.py,workspace_paths.py,environment_diagnostics.py,launcher.py,studio_lifecycle.py,chapter_identity.py} \
             tests/test_{project_*,catalog_*,bookshelf_*}.py \
             tests/test_storage_*.py \
             tests/test_{engine_*,runtime_*,production_*,startup_phases.py,application_lifecycle.py} \

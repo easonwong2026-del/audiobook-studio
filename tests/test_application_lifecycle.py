@@ -129,6 +129,9 @@ def test_install_process_exit_hooks_registers_signal_and_atexit(lifecycle, monke
 
     assert signal.SIGINT in installed
     assert getattr(signal, "SIGTERM", None) in installed
+    sigbreak = getattr(signal, "SIGBREAK", None)
+    if sigbreak is not None:
+        assert sigbreak in installed
     assert len(registered) == 1
 
     # 重复安装是 no-op（不会叠加处理器 / 重复注册 atexit）。

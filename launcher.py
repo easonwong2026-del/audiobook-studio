@@ -18,16 +18,20 @@ Resolution priority
 
 from __future__ import annotations
 
+import argparse
 import os
 import shutil
 import subprocess
 import sys
+import uuid
+from lib import studio_lifecycle
 from lib.environment import resolve_python_interpreter
 
 # ---------------------------------------------------------------------------
 # 程序目录：由本文件位置推导（仓库可整体移动，不依赖绝对路径）
 # ---------------------------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+APP_PATH = os.path.join(BASE_DIR, "app.py")
 
 # ---------------------------------------------------------------------------
 # Python 解释器解析（入口：若起 launcher 的 python 没有 subprocess 可用，
@@ -38,6 +42,10 @@ PYTHON: str = ""   # will be filled by _resolve_python()
 
 REQUIRED_MODULES = ("gradio", "numpy", "scipy", "pyloudnorm", "mutagen")
 REQUIREMENTS_FILE = os.path.join(BASE_DIR, "requirements.txt")
+
+
+def _is_windows() -> bool:
+    return os.name == "nt"
 
 
 def _resolve_python() -> str:
@@ -117,20 +125,101 @@ def _install_runtime_dependencies(python: str) -> None:
         print("   请检查该 Python 环境后重试。")
         raise SystemExit(1)
 
-# ────────────────────────────────────────────────────────────────────────────
-# main
-# ────────────────────────────────────────────────────────────────────────────
+
+def _current_instance() -> studio_lifecycle.InstanceCheck:
+    return studio_lifecycle.check_instance(
+        studio_lifecycle.load_instance_state(),
+        BASE_DIR,
+        APP_PATH,
+    )
 
 
-def main() -> None:
-    """Entry point: prepare runtime environment, check deps, start app."""
+def _print_running(state: dict[str, object]) -> None:
+    print("Audiobook Studio 已在运行")
+    print(f"地址：{studio_lifecycle.STUDIO_URL}")
+    print(f"PID：{state.get('pid')}")
+    print()
+    print("如需停止：")
+    print("python launcher.py --stop")
+
+
+def _print_foreign_port() -> None:
+    print(f"端口 {studio_lifecycle.STUDIO_PORT} 已被其他程序占用。")
+    print("Audiobook Studio 未启动。")
+
+
+def _app_environment(instance_id: str) -> dict[str, str]:
+    environment = dict(os.environ)
+    environment[studio_lifecycle.INSTANCE_ID_ENVIRONMENT] = instance_id
+    return environment
+
+
+def _start_app(python: str, instance_id: str) -> subprocess.Popen:
+    kwargs: dict[str, object] = {
+        "cwd": BASE_DIR,
+        "env": _app_environment(instance_id),
+    }
+    if _is_windows():
+        flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        if flags:
+            kwargs["creationflags"] = flags
+    return subprocess.Popen(
+        [python, APP_PATH, f"{studio_lifecycle.INSTANCE_ID_ARGUMENT}{instance_id}"],
+        **kwargs,
+    )
+
+
+def _instance_state(instance_id: str, pid: int) -> dict[str, object]:
+    return {
+        "pid": int(pid),
+        "started_at": studio_lifecycle.now_utc(),
+        "port": studio_lifecycle.STUDIO_PORT,
+        "instance_id": instance_id,
+        "repo_path": os.path.abspath(BASE_DIR),
+        "app_path": os.path.abspath(APP_PATH),
+    }
+
+
+def _cleanup_owned_process(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+        process.wait(timeout=5.0)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
+def _start_locked() -> int:
     global PYTHON
-    PYTHON = _resolve_python()
 
     os.chdir(BASE_DIR)
 
     # 双击后的首个中文即时反馈（由 Python 输出，避免 .bat 中文编码乱码）
     print("有声书工作台启动中，请稍后...")
+
+    existing = _current_instance()
+    if existing.status == "running" and existing.state is not None:
+        _print_running(existing.state)
+        return 0
+    if existing.status == "unknown":
+        print("无法安全确认现有 Studio 进程身份，未启动新的实例。")
+        print("请稍后重试，或检查当前用户是否有读取进程信息的权限。")
+        return 1
+    if existing.status == "foreign" and existing.reason == "different_repo":
+        _print_foreign_port()
+        return 1
+    if existing.status in {"stale", "foreign"}:
+        studio_lifecycle.remove_instance_state(existing.state)
+
+    if studio_lifecycle.port_is_in_use():
+        _print_foreign_port()
+        return 1
+
+    PYTHON = _resolve_python()
 
     # 检查运行环境（依赖检查较慢，先给出提示，避免控制台空屏）
     print("正在检查运行环境，请稍候...")
@@ -151,6 +240,24 @@ def main() -> None:
         print("=" * 50)
         print()
 
+    # 依赖检查期间可能有其他程序占用端口，启动前再拒绝一次。
+    if studio_lifecycle.port_is_in_use():
+        _print_foreign_port()
+        return 1
+
+    instance_id = uuid.uuid4().hex
+    process = None
+    state = _instance_state(instance_id, 0)
+    try:
+        process = _start_app(PYTHON, instance_id)
+        state["pid"] = int(process.pid)
+        studio_lifecycle.write_instance_state(state)
+    except Exception as exc:  # noqa: BLE001 - state failure must reap this exact child
+        if process is not None:
+            _cleanup_owned_process(process)
+        print(f"Audiobook Studio 启动失败：{exc}")
+        return 1
+
     # 启动标题
     print()
     print("=" * 50)
@@ -158,18 +265,134 @@ def main() -> None:
     print("=" * 50)
     print()
     print("  浏览器访问地址：")
-    print("  -->  http://localhost:7862  <--")
+    print(f"  -->  {studio_lifecycle.STUDIO_URL}  <--")
     print()
     print("  首次加载模型需要等待 10-30 秒")
-    print("  关闭此窗口即可停止服务")
+    print("  关闭此窗口即可停止服务，或运行 python launcher.py --stop")
     print()
     print("=" * 50)
     print()
 
     # 加载语音合成引擎（首次约 10-30 秒），先给出提示
     print("正在加载语音合成引擎，首次约 10-30 秒...")
-    subprocess.run([PYTHON, "app.py"], check=True)
+    try:
+        return int(process.wait())
+    except KeyboardInterrupt:
+        # Ctrl+C may reach the launcher before the app's own signal hook.
+        if process.poll() is None:
+            studio_lifecycle.send_graceful_shutdown(process.pid)
+        try:
+            process.wait(timeout=10.0)
+        except subprocess.TimeoutExpired:
+            _cleanup_owned_process(process)
+        return 130
+    finally:
+        studio_lifecycle.remove_instance_state(state)
 
 
+def _start() -> int:
+    lock = studio_lifecycle.acquire_start_lock()
+    if lock is None:
+        current = _current_instance()
+        if current.status == "running" and current.state is not None:
+            _print_running(current.state)
+        else:
+            print("已有 Studio 启动操作正在进行，请稍后查看状态。")
+        return 0
+    try:
+        return _start_locked()
+    finally:
+        lock.release()
+
+
+def _status() -> int:
+    current = _current_instance()
+    if current.status == "running" and current.state is not None:
+        print("Audiobook Studio：运行中")
+        print(f"PID：{current.state.get('pid')}")
+        print(f"地址：{studio_lifecycle.STUDIO_URL}")
+        return 0
+    if current.status in {"stale", "foreign"} and current.reason != "different_repo":
+        studio_lifecycle.remove_instance_state(current.state)
+        print("Audiobook Studio：未运行")
+        return 0
+    if current.status == "foreign":
+        print("Audiobook Studio：未运行")
+        print(f"端口 {studio_lifecycle.STUDIO_PORT} 由其他 Studio 实例占用。")
+        return 1
+    if current.status == "unknown":
+        print("Audiobook Studio：状态无法确认")
+        print("无法安全验证记录中的 PID，未执行任何停止操作。")
+        return 1
+    print("Audiobook Studio：未运行")
+    return 0
+
+
+def _stop() -> int:
+    current = _current_instance()
+    if current.status == "absent":
+        print("Audiobook Studio：未运行")
+        return 0
+    if current.status in {"stale", "foreign"} and current.reason != "different_repo":
+        studio_lifecycle.remove_instance_state(current.state)
+        if current.status == "foreign":
+            print("Audiobook Studio：未运行")
+            print("记录中的 PID 已属于其他进程，未发送终止信号。")
+        else:
+            print("Audiobook Studio：未运行（已清理过期状态）")
+        return 0
+    if current.status == "foreign":
+        print("记录属于另一个 Audiobook Studio 实例，未发送终止信号。")
+        return 1
+    if current.status == "unknown" or current.state is None:
+        print("无法安全确认 Studio 进程身份，未发送终止信号。")
+        return 1
+
+    pid = int(current.state["pid"])
+    print(f"正在停止 Audiobook Studio（PID：{pid}）...")
+    studio_lifecycle.send_graceful_shutdown(pid)
+    if studio_lifecycle.wait_for_pid_exit(pid, timeout=10.0):
+        studio_lifecycle.remove_instance_state(current.state)
+        print("Audiobook Studio：已停止")
+        return 0
+
+    # Timeout fallback is guarded by a fresh identity check.  The port is
+    # intentionally never used to choose a termination target.
+    refreshed = _current_instance()
+    if refreshed.status in {"stale", "foreign"}:
+        if refreshed.reason != "different_repo":
+            studio_lifecycle.remove_instance_state(current.state)
+        print("Audiobook Studio：目标进程已退出，未发送额外终止信号。")
+        return 0
+    if refreshed.status != "running" or refreshed.state is None:
+        print("无法安全确认 Studio 进程身份，未发送额外终止信号。")
+        return 1
+    if not studio_lifecycle.terminate_confirmed_process(pid):
+        print("Audiobook Studio 未能正常退出，且安全终止失败。")
+        return 1
+    if not studio_lifecycle.wait_for_pid_exit(pid, timeout=10.0):
+        print("Audiobook Studio 未能在限定时间内退出。")
+        return 1
+    studio_lifecycle.remove_instance_state(refreshed.state)
+    print("Audiobook Studio：已停止")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the start, status, or stop command."""
+    parser = argparse.ArgumentParser(description="Audiobook Studio lifecycle control")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--status", action="store_true", help="show Studio status")
+    group.add_argument("--stop", action="store_true", help="stop the Studio instance")
+    arguments = parser.parse_args([] if argv is None else argv)
+    if arguments.status:
+        return _status()
+    if arguments.stop:
+        return _stop()
+    return _start()
+
+# ────────────────────────────────────────────────────────────────────────────
+# legacy start implementation removed; lifecycle-aware entry point is above
+# ────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main(sys.argv[1:]))

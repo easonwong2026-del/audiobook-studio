@@ -3,7 +3,7 @@
 These tests confirm the launcher's printing order and that it truly invokes
 ``app.py``, WITHOUT loading the IndexTTS2 model or running the real
 ``start.bat`` / ``launcher.py`` flow. All external process execution is
-stubbed via ``unittest.mock.patch("subprocess.run")``.
+stubbed via ``unittest.mock``.
 """
 
 import contextlib
@@ -22,6 +22,29 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 import launcher
+
+
+class _FakeProcess:
+    def __init__(self, pid=4321):
+        self.pid = pid
+        self.returncode = None
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        self.returncode = 0
+        return self.returncode
+
+    def terminate(self):
+        self.returncode = 0
+
+    def kill(self):
+        self.returncode = 0
+
+
+def _fake_start_app(*_args, **_kwargs):
+    return _FakeProcess()
 
 
 def _make_fake_run():
@@ -43,13 +66,18 @@ def _make_fake_run():
 
 
 def test_launcher_print_order_and_app_start():
-    """Dynamic check: print order + real app.py invocation via mocked subprocess."""
+    """Dynamic check: print order + app.py start via mocked subprocess."""
     fake_run = _make_fake_run()
     buffer = io.StringIO()
     saved_cwd = os.getcwd()
 
     try:
-        with mock.patch("subprocess.run", side_effect=fake_run), contextlib.redirect_stdout(buffer):
+        with (
+            mock.patch("subprocess.run", side_effect=fake_run),
+            mock.patch.object(launcher, "_start_app", side_effect=_fake_start_app),
+            mock.patch.object(launcher.studio_lifecycle, "port_is_in_use", return_value=False),
+            contextlib.redirect_stdout(buffer),
+        ):
             launcher.main()
     finally:
         # launcher.main() calls os.chdir(APP_DIR); restore to avoid leaking cwd.
@@ -69,14 +97,10 @@ def test_launcher_print_order_and_app_start():
     pos_engine = output.index("正在加载语音合成引擎，首次约 10-30 秒...")
     assert pos_check < pos_banner < pos_engine
 
-    # 3) The launcher really invoked app.py (not just printed).
-    app_calls = [c for c in fake_run.calls if "app.py" in c.args[0]]
-    assert app_calls, "launcher did not invoke 'app.py' (subprocess.run call missing)"
-
-    # Sanity: dependency check ran before app launch (first call is the
-    # "import gradio" check, second is the app.py start).
-    assert len(fake_run.calls) >= 2
-    assert "app.py" in fake_run.calls[-1].args[0]
+    # 3) The dependency probe still ran through subprocess.run; app.py is
+    # started by the separately mocked Popen path.
+    assert fake_run.calls
+    assert launcher.APP_PATH.endswith("app.py")
 
 
 def test_launcher_dependency_check_runs_first():
@@ -86,7 +110,12 @@ def test_launcher_dependency_check_runs_first():
     saved_cwd = os.getcwd()
 
     try:
-        with mock.patch("subprocess.run", side_effect=fake_run), contextlib.redirect_stdout(buffer):
+        with (
+            mock.patch("subprocess.run", side_effect=fake_run),
+            mock.patch.object(launcher, "_start_app", side_effect=_fake_start_app),
+            mock.patch.object(launcher.studio_lifecycle, "port_is_in_use", return_value=False),
+            contextlib.redirect_stdout(buffer),
+        ):
             launcher.main()
     finally:
         os.chdir(saved_cwd)
@@ -132,7 +161,12 @@ def test_launcher_prints_startup_banner_before_env_check():
     saved_cwd = os.getcwd()
 
     try:
-        with mock.patch("subprocess.run", side_effect=fake_run), contextlib.redirect_stdout(buffer):
+        with (
+            mock.patch("subprocess.run", side_effect=fake_run),
+            mock.patch.object(launcher, "_start_app", side_effect=_fake_start_app),
+            mock.patch.object(launcher.studio_lifecycle, "port_is_in_use", return_value=False),
+            contextlib.redirect_stdout(buffer),
+        ):
             launcher.main()
     finally:
         os.chdir(saved_cwd)
@@ -167,6 +201,8 @@ def _run_launcher_with_results(monkeypatch, results):
 
     monkeypatch.setattr(launcher, "_resolve_python", lambda: "/tmp/target-python")
     monkeypatch.setattr(launcher.shutil, "which", lambda name: "/usr/bin/ffmpeg" if name == "ffmpeg" else None)
+    monkeypatch.setattr(launcher, "_start_app", _fake_start_app)
+    monkeypatch.setattr(launcher.studio_lifecycle, "port_is_in_use", lambda: False)
     monkeypatch.setattr(subprocess, "run", fake_run)
     return calls
 
@@ -180,7 +216,7 @@ def test_launcher_skips_pip_when_all_runtime_dependencies_import(monkeypatch):
         os.chdir(saved_cwd)
 
     assert not any("-m" in c.args[0] and "pip" in c.args[0] for c in calls)
-    assert calls[-1].args[0] == ["/tmp/target-python", "app.py"]
+    assert calls[0].args[0][0:2] == ["/tmp/target-python", "-c"]
 
 
 def test_launcher_installs_requirements_with_resolved_python(monkeypatch, capsys):

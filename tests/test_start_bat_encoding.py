@@ -86,3 +86,13 @@ def test_pause_is_last_meaningful_line(bat_text: str) -> None:
     non_empty = [l for l in bat_text.splitlines() if l.strip()]
     assert non_empty, "start.bat is empty"
     assert non_empty[-1].strip() == "pause", "last meaningful line must be 'pause'"
+
+
+def test_stop_bat_is_ascii_and_delegates_to_launcher() -> None:
+    path = os.path.join(_PROJECT_ROOT, "stop.bat")
+    with open(path, "rb") as fh:
+        data = fh.read()
+    text = data.decode("ascii")
+    assert "launcher.py" in text
+    assert "--stop" in text
+    assert text.splitlines()[-1].strip() == "pause"
