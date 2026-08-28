@@ -1,7 +1,7 @@
 """Application lifecycle coordinator (graceful shutdown owner).
 
 Single-flight orchestrator that owns the "shut the application down" sequence.
-Every exit trigger — ``atexit``, ``SIGINT``/``SIGTERM`` handlers, and the Gradio
+Every exit trigger — ``atexit``, ``SIGINT``/``SIGTERM``/``SIGBREAK`` handlers, and the Gradio
 server-close ``finally`` block — funnels into ``request_application_shutdown``
 so there is exactly one shutdown path.  The coordinator then asks the detached
 production runtime to stop gracefully and waits for it, avoiding the orphan
@@ -69,7 +69,11 @@ class ApplicationLifecycleService:
 
         candidates: list[Any]
         if signums is None:
-            candidates = [getattr(signal, "SIGINT", None), getattr(signal, "SIGTERM", None)]
+            candidates = [
+                getattr(signal, "SIGINT", None),
+                getattr(signal, "SIGTERM", None),
+                getattr(signal, "SIGBREAK", None),
+            ]
         else:
             candidates = list(signums)
 

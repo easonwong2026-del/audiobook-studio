@@ -4527,7 +4527,7 @@ if __name__ == "__main__":
     config.migrate_legacy_voice_library()
 
     # ── 应用生命周期：把「应用退出」接通到「Runtime 优雅停机」这一缺失 edge ──
-    # 所有退出触发源（Gradio server close / SIGINT / SIGTERM / atexit）统一汇入
+    # 所有退出触发源（Gradio server close / SIGINT / SIGTERM / SIGBREAK / atexit）统一汇入
     # ApplicationLifecycleService，由它 single-flight 编排 Runtime 关机，避免孤儿进程。
     _lifecycle = get_application_lifecycle()
     _lifecycle.install_process_exit_hooks()
