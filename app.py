@@ -1433,34 +1433,67 @@ def _review_summary_markdown(inventory, project_name=None):
     )
 
 
-def _segment_audio_status_markdown(item):
-    if not isinstance(item, dict):
-        return "选择段落后显示音频 revision 与修复状态。"
-    revision = item.get("audio_revision") or {}
-    engine = item.get("engine_snapshot") or {}
-    engine_name = _engine_name(
-        engine.get("engine_id") or engine.get("engine_identity")
+def _review_segment(script, segment_id):
+    target = str(segment_id or "").strip()
+    if not target:
+        return None
+    for chapter in (script or {}).get("chapters", []):
+        for segment in chapter.get("segments", []):
+            if str(segment.get("id") or "") == target:
+                return segment
+    return None
+
+
+def _review_segment_identity(segment):
+    if not isinstance(segment, dict):
+        return ""
+    return (
+        f"{segment.get('id') or ''} · "
+        f"{segment.get('role') or segment.get('speaker') or '未指定角色'}"
+    ).strip(" ·")
+
+
+def _review_voice_name(ss, segment):
+    snapshot = _snap(ss) if ss else None
+    bindings = getattr(snapshot, "bindings", {}) if snapshot else {}
+    role = str((segment or {}).get("role") or (segment or {}).get("speaker") or "")
+    role_id = str((segment or {}).get("role_id") or "")
+    value = (
+        (bindings.get(role) or bindings.get(role_id))
+        if isinstance(bindings, dict) else ""
     )
-    lines = [
-        f"#### 段落 {item.get('segment_id', '')}",
-        f"- Audio revision：{revision.get('audio_revision', '—')}",
-        f"- 音频：{ {'valid': '可试听', 'invalid': '文件无效', 'missing': '未生成'}.get(item.get('audio_status'), '不可用') }",
-        f"- Revision 状态：{revision.get('status', '—')}",
-    ]
-    if item.get("relative_path"):
-        lines.append(f"- 文件：{item['relative_path']}")
-    if engine_name:
-        lines.append(f"- Engine：{engine_name}")
-    if item.get("cache_identity"):
-        lines.append(f"- Cache identity：{item['cache_identity']}")
-    return "\n".join(lines)
+    if isinstance(value, dict):
+        value = value.get("project_voice_path") or value.get("name") or ""
+    name = os.path.splitext(os.path.basename(str(value or "")))[0]
+    return name or "未绑定"
 
 
-def _review_segment_choices(ss, status_filter="all", chapter_id=None, *, include_missing=False):
+def _review_segment_label(segment, item):
+    segment_id = str((segment or {}).get("id") or "")
+    role = (segment or {}).get("role") or (segment or {}).get("speaker") or "未指定角色"
+    text = " ".join(str((segment or {}).get("text") or "").split())
+    if len(text) > 36:
+        text = text[:36] + "…"
+    valid = bool((item or {}).get("audio_valid"))
+    status = str((item or {}).get("audio_status") or "missing")
+    suffix = "" if valid else (" · 文件无效" if status == "invalid" else " · 未生成")
+    return f"{'✅' if valid else '⚪'} {segment_id} · {role} · {text}{suffix}"
+
+
+def _review_segment_choices(
+    ss,
+    status_filter="all",
+    chapter_id=None,
+    *,
+    include_missing=True,
+):
+    """Build one chapter-scoped selector; missing items remain repairable."""
     if not ss or not ss.project:
         return [], {}, {}
     snapshot = _snap(ss)
-    inventory = QualityService.get_active_revision_inventory(ss.project)
+    if not snapshot:
+        return [], {}, {}
+    inventory = _review_inventory(ss, snapshot)
     audio_by_id = {
         str(item.get("segment_id")): item
         for item in inventory.get("segments", [])
@@ -1468,25 +1501,191 @@ def _review_segment_choices(ss, status_filter="all", chapter_id=None, *, include
     }
     choices = []
     selected_chapter = str(chapter_id or "").strip()
+    requested_filter = str(status_filter or "all")
     for chapter in snapshot.script.get("chapters", []):
         if selected_chapter and str(chapter.get("id") or "") != selected_chapter:
             continue
         for segment in chapter.get("segments", []):
             segment_id = str(segment.get("id") or "")
-            audio = audio_by_id.get(segment_id, {})
-            if status_filter == "generated" and not audio.get("audio_valid"):
+            item = audio_by_id.get(segment_id, {})
+            valid = bool(item.get("audio_valid"))
+            if requested_filter == "generated" and not valid:
                 continue
-            if status_filter == "missing" and audio.get("audio_valid"):
+            if requested_filter == "missing" and valid:
                 continue
-            if not include_missing and not audio.get("audio_valid"):
+            if not include_missing and not valid:
                 continue
-            text = " ".join(str(segment.get("text") or "").split())
-            label = (
-                f"{segment_id} · {segment.get('role') or segment.get('speaker') or ''} · "
-                f"{text[:36]}{'…' if len(text) > 36 else ''}"
-            )
-            choices.append((label, segment_id))
+            choices.append((_review_segment_label(segment, item), segment_id))
     return choices, audio_by_id, inventory
+
+
+def _review_inventory(ss, snapshot=None):
+    """Reuse one inventory per opened snapshot during a page refresh chain."""
+    snapshot = snapshot or (_snap(ss) if ss else None)
+    try:
+        from repositories.quality_repo import QualityRepository
+
+        quality_mtime = os.path.getmtime(
+            QualityRepository.state_path(ss.project, create=False)
+        )
+    except (AttributeError, OSError, TypeError, ValueError):
+        quality_mtime = None
+    cached = getattr(ss, "_review_inventory_cache", None) if ss else None
+    if cached and cached[0] is snapshot and cached[1] == quality_mtime:
+        return cached[2]
+
+    inventory = _review_inventory_from_snapshot(ss, snapshot)
+    if ss is not None:
+        try:
+            ss._review_inventory_cache = (snapshot, quality_mtime, inventory)
+        except AttributeError:
+            pass
+    return inventory
+
+
+def _review_inventory_from_snapshot(ss, snapshot):
+    """Read revision metadata without re-reading structured_script.json."""
+    if not ss or not getattr(ss, "project", None) or not snapshot:
+        return {"project": "", "segments": [], "summary": {}}
+    from lib.audio_validation import is_valid_wav_file
+    from repositories.quality_repo import QualityRepository
+
+    state_path = QualityRepository.state_path(ss.project, create=False)
+    state = QualityRepository.load(ss.project) if os.path.isfile(state_path) else {}
+    revisions = state.get("revisions", {}) if isinstance(state, dict) else {}
+    active_revisions = state.get("active_revisions", {}) if isinstance(state, dict) else {}
+    project_dir = snapshot.project_dir
+    items = []
+    for chapter in snapshot.script.get("chapters", []):
+        for segment in chapter.get("segments", []):
+            segment_id = str(segment.get("id") or "")
+            revision_id = active_revisions.get(segment_id)
+            revision = revisions.get(revision_id) if revision_id else None
+            revision = revision if isinstance(revision, dict) else None
+            relative_path = str(revision.get("relative_path") or "") if revision else ""
+            audio_path = None
+            if relative_path:
+                try:
+                    audio_path = project_paths.resolve_relative(project_dir, relative_path)
+                except (OSError, ValueError):
+                    audio_path = None
+            audio_exists = bool(audio_path and os.path.isfile(audio_path))
+            audio_valid = bool(audio_exists and is_valid_wav_file(audio_path))
+            revision_view = {
+                key: revision.get(key)
+                for key in (
+                    "revision_id", "audio_revision", "relative_path",
+                    "cache_identity", "voice_fingerprint", "params",
+                    "source_task_id", "status", "created_at", "metadata",
+                )
+            } if revision else None
+            params = revision.get("params") if revision else None
+            items.append({
+                "segment_id": segment_id,
+                "audio_revision": revision_view,
+                "relative_path": relative_path,
+                "audio_path": audio_path,
+                "audio_exists": audio_exists,
+                "audio_valid": audio_valid,
+                "cache_identity": str(revision.get("cache_identity") or "")
+                if revision else "",
+                "voice_fingerprint": str(revision.get("voice_fingerprint") or "")
+                if revision else "",
+                "engine_snapshot": (
+                    params.get("engine_snapshot", {})
+                    if isinstance(params, dict) else {}
+                ),
+                "engine_provenance": (
+                    params.get("engine_snapshot", {})
+                    if isinstance(params, dict) else {}
+                ),
+                "checksum": str((revision.get("metadata") or {}).get("sha256") or "")
+                if isinstance(revision, dict) else "",
+                "audio_status": (
+                    "valid" if audio_valid
+                    else "invalid" if audio_exists
+                    else "missing"
+                ),
+            })
+
+    # Legacy projects can have valid segment files before the revision ledger
+    # exists.  Bootstrap them through the existing service only when needed.
+    if not any(item["audio_revision"] for item in items):
+        legacy_choices = ReviewAudioService.build_segment_choices(
+            ss.project, project_dir, snapshot.script
+        )
+        if legacy_choices:
+            return QualityService.get_active_revision_inventory(ss.project)
+
+    return {
+        "project": ss.project,
+        "segments": items,
+        "summary": {
+            "segments": len(items),
+            "active_revisions": sum(1 for item in items if item["audio_revision"]),
+            "valid_audio": sum(1 for item in items if item["audio_valid"]),
+            "missing_revisions": sum(
+                1 for item in items if not item["audio_revision"]
+            ),
+            "invalid_audio": sum(
+                1
+                for item in items
+                if item["audio_exists"] and not item["audio_valid"]
+            ),
+        },
+    }
+
+
+def _review_segment_detail(ss, segment_id, item=None):
+    if not ss or not getattr(ss, "project", None) or not segment_id:
+        return "当前段落信息将在这里显示。"
+    snapshot = _snap(ss)
+    segment = _review_segment(snapshot.script if snapshot else {}, segment_id)
+    if segment is None:
+        return "⚠ 未找到当前段落，请刷新项目后重试。"
+    item = item if isinstance(item, dict) else {}
+    revision = item.get("audio_revision") or {}
+    audio_label = {
+        "valid": "可试听",
+        "invalid": "文件无效",
+        "missing": "未生成",
+    }.get(str(item.get("audio_status") or "missing"), "不可用")
+    role = escape(str(segment.get("role") or segment.get("speaker") or "未指定角色"))
+    text = escape(" ".join(str(segment.get("text") or "").split()))
+    return "\n".join([
+        f"#### 当前段落 · {escape(str(segment.get('id') or segment_id))}",
+        f"- 角色：{role}",
+        f"- 文本：{text or '（空）'}",
+        f"- 当前声音：{escape(_review_voice_name(ss, segment))}",
+        f"- 剧本情感：{escape(str(segment.get('emotion') or 'neutral'))}",
+        f"- 情绪强度：{segment.get('emo_alpha', 1.0)}",
+        f"- 语速：{segment.get('speech_rate', 1.0)}",
+        f"- Active revision：{revision.get('audio_revision', '—')}",
+        f"- 音频：{audio_label}",
+    ])
+
+
+def _review_repair_target(ss, segment_id):
+    if not ss or not segment_id:
+        return "目标：尚未选择段落。"
+    snapshot = _snap(ss)
+    segment = _review_segment(snapshot.script if snapshot else {}, segment_id)
+    if segment is None:
+        return "目标：⚠ 未找到当前段落。"
+    role = escape(str(segment.get("role") or segment.get("speaker") or "未指定角色"))
+    text = escape(" ".join(str(segment.get("text") or "").split()))
+    return (
+        f"**目标：** {escape(str(segment.get('id') or segment_id))} · {role}\n\n"
+        f"**文本：** {text or '（空）'}"
+    )
+
+
+def _review_button_update(segment_id):
+    target = str(segment_id or "").strip()
+    return gr.update(
+        value=f"重新合成 {target}" if target else "重新合成当前段落",
+        interactive=bool(target),
+    )
 
 _REVIEW_REPAIR_ACTIVE_STATES = frozenset({
     "pending", "running", "pausing", "paused", "recovering", "cancelling",
@@ -1721,77 +1920,104 @@ def _review_selection_ids(selected, script):
     return ids, invalid
 
 
-def _review_workspace_values(ss, status_filter="all", chapter_id=None, preferred=None):
-    """Build the four preview/repair workspace outputs from the current project."""
+def _review_context(ss, status_filter="all", chapter_id=None, preferred=None):
     choices, audio_by_id, inventory = _review_segment_choices(
-        ss, status_filter or "all", chapter_id
+        ss, status_filter, chapter_id, include_missing=True
     )
-    batch_choices, _batch_audio, _batch_inventory = _review_segment_choices(
-        ss, status_filter or "all", chapter_id, include_missing=True
-    )
-    preview_values = [value for _label, value in choices]
-    batch_values = [value for _label, value in batch_choices]
-    preferred_ids = [str(item) for item in (preferred or []) if str(item)]
-    selected = next(
-        (item for item in preferred_ids if item in preview_values),
-        preview_values[0] if preview_values else None,
-    )
-    selected_for_batch = [item for item in preferred_ids if item in batch_values]
-    return (
-        _review_summary_markdown(inventory, ss.project if ss else None),
-        gr.update(choices=choices, value=selected),
-        gr.update(choices=batch_choices, value=selected_for_batch),
-        _segment_audio_status_markdown(audio_by_id.get(str(selected)) if selected else None),
-    )
-
-
-def _review_batch_error(message, ss, status_filter="all", chapter_id=None):
-    try:
-        workspace = _review_workspace_values(ss, status_filter, chapter_id)
-    except Exception:
-        workspace = (
-            "#### 试听与生产",
-            gr.update(),
-            gr.update(),
-            "选择段落后显示音频 revision 与修复状态。",
+    values = [value for _label, value in choices]
+    preferred_ids = [str(value) for value in (preferred or []) if str(value)]
+    selected = next((value for value in preferred_ids if value in values), None)
+    if selected is None:
+        selected = next(
+            (
+                value for value in values
+                if audio_by_id.get(value, {}).get("audio_valid")
+            ),
+            values[0] if values else None,
         )
-    return (message, *workspace)
+    item = audio_by_id.get(str(selected)) if selected else None
+    return {
+        "summary": _review_summary_markdown(
+            inventory, ss.project if ss else None
+        ),
+        "choices": choices,
+        "selected": selected,
+        "item": item,
+        "detail": _review_segment_detail(ss, selected, item),
+        "target": _review_repair_target(ss, selected),
+    }
+
+
+def _review_workspace_values(ss, status_filter="all", chapter_id=None, preferred=None):
+    """Return summary, the single current segment, detail and repair target."""
+    context = _review_context(ss, status_filter, chapter_id, preferred)
+    return (
+        context["summary"],
+        gr.update(choices=context["choices"], value=context["selected"]),
+        context["detail"],
+        context["target"],
+    )
+
+
+def _review_segment_audio(choice, ss):
+    if not ss or not getattr(ss, "project", None) or not choice:
+        return _audio_update(None), "当前试听：尚未选择段落。"
+    snapshot = _snap(ss)
+    if not snapshot:
+        return _audio_update(None), "当前试听：请先打开项目。"
+    segment_id = _selected_segment_id(choice, snapshot.script)
+    result = ReviewAudioService.play_segment(
+        ss.project,
+        ProjectService.get_project_dir(ss.project),
+        snapshot.script,
+        segment_id,
+    )
+    segment = _review_segment(snapshot.script, segment_id)
+    label = _review_segment_identity(segment) or segment_id
+    return _audio_update(result.path), f"当前试听：{label}\n{result.status}"
+
+
+def _review_workspace_display_values(ss, status_filter="all", chapter_id=None, preferred=None):
+    context = _review_context(ss, status_filter, chapter_id, preferred)
+    audio, audio_status = _review_segment_audio(context["selected"], ss)
+    return (
+        context["summary"],
+        gr.update(choices=context["choices"], value=context["selected"]),
+        context["detail"],
+        context["target"],
+        audio,
+        audio_status,
+    )
 
 
 def refresh_review_workspace(status_filter, chapter_id, ss):
-    """Refresh preview choices from one revision inventory."""
+    """Refresh one chapter-scoped workspace and load its current segment."""
     try:
-        choices, audio_by_id, inventory = _review_segment_choices(
-            ss, status_filter or "all", chapter_id
-        )
-        batch_choices, _batch_audio_by_id, _batch_inventory = _review_segment_choices(
-            ss,
-            status_filter or "all",
-            chapter_id,
-            include_missing=True,
-        )
-        selected = choices[0][1] if choices else None
-        item = audio_by_id.get(str(selected)) if selected else None
-        return (
-            _review_summary_markdown(inventory, ss.project),
-            gr.update(choices=choices, value=selected),
-            gr.update(choices=batch_choices, value=[]),
-            _segment_audio_status_markdown(item),
-        )
+        return _review_workspace_display_values(ss, status_filter, chapter_id)
     except Exception as exc:
         return (
             f"#### 试听与生产\n❌ 刷新失败：{exc}",
             gr.update(choices=[], value=None),
-            gr.update(choices=[], value=[]),
-            "无法读取音频 revision 状态。",
+            "无法读取当前段落信息。",
+            "目标：尚未选择段落。",
+            _audio_update(None),
+            "当前试听：无法读取音频状态。",
         )
+
+
+def refresh_review_workspace_for_chapter(chapter_id, ss):
+    """UI adapter that keeps chapter as the only workspace filter."""
+    return refresh_review_workspace(None, chapter_id, ss)
 
 
 def show_segment_status(choice, ss):
     if not ss or not ss.project or not choice:
-        return "选择段落后显示音频 revision 与修复状态。"
-    segment_id = _selected_segment_id(choice, _snap(ss).script)
-    inventory = QualityService.get_active_revision_inventory(ss.project)
+        return "当前段落信息将在这里显示。"
+    snapshot = _snap(ss)
+    if not snapshot:
+        return "当前段落信息将在这里显示。"
+    segment_id = _selected_segment_id(choice, snapshot.script)
+    inventory = _review_inventory(ss, snapshot)
     item = next(
         (
             value
@@ -1801,70 +2027,135 @@ def show_segment_status(choice, ss):
         ),
         None,
     )
-    return _segment_audio_status_markdown(item)
+    return _review_segment_detail(ss, segment_id, item)
 
-def select_review_segments(mode, status_filter, chapter_id, ss):
-    """Select the current chapter or current filtered review result."""
-    if not ss or not ss.project:
-        return gr.update(choices=[], value=[])
-    if mode == "chapter" and not chapter_id:
-        return gr.update(choices=[], value=[])
-    effective_filter = "all" if mode == "chapter" else (status_filter or "all")
-    choices, _audio_by_id, _inventory = _review_segment_choices(
-        ss, effective_filter, chapter_id, include_missing=True
+
+def reset_review_overrides(_ss=None):
+    """Reset temporary repair overrides whenever the current segment changes."""
+    return (
+        gr.update(value=None),
+        gr.update(value=None),
+        gr.update(value=False),
+        gr.update(value=0.8, interactive=False),
+        gr.update(value=False),
+        gr.update(value=1.0, interactive=False),
     )
-    return gr.update(choices=choices, value=[value for _label, value in choices])
 
 
-def clear_review_segment_selection(status_filter, chapter_id, ss):
-    """Clear only the current project's review selection."""
-    if not ss or not ss.project:
-        return gr.update(choices=[], value=[])
-    choices, _audio_by_id, _inventory = _review_segment_choices(
-        ss, status_filter or "all", chapter_id, include_missing=True
+def _review_override_outputs():
+    return [
+        e_voice,
+        e_emo,
+        e_alpha_override,
+        e_alpha,
+        e_rate_override,
+        e_rate,
+    ]
+
+
+def refresh_review_segment_context(choice, ss):
+    if not ss or not getattr(ss, "project", None) or not choice:
+        return (
+            "当前段落信息将在这里显示。",
+            "目标：尚未选择段落。",
+            _review_button_update(None),
+        )
+    snapshot = _snap(ss)
+    if not snapshot:
+        return (
+            "当前段落信息将在这里显示。",
+            "目标：尚未选择段落。",
+            _review_button_update(None),
+        )
+    segment_id = _selected_segment_id(choice, snapshot.script)
+    inventory = _review_inventory(ss, snapshot)
+    item = next(
+        (
+            value
+            for value in inventory.get("segments", [])
+            if isinstance(value, dict)
+            and str(value.get("segment_id") or "") == segment_id
+        ),
+        None,
     )
-    return gr.update(choices=choices, value=[])
+    return (
+        _review_segment_detail(ss, segment_id, item),
+        _review_repair_target(ss, segment_id),
+        _review_button_update(segment_id),
+    )
 
 
 def navigate_review_segment(direction, choice, status_filter, chapter_id, ss):
-    choices, audio_by_id, _inventory = _review_segment_choices(
-        ss, status_filter or "all", chapter_id
-    )
+    context = _review_context(ss, status_filter, chapter_id)
+    choices = context["choices"]
     values = [value for _label, value in choices]
     if not values:
-        return gr.update(value=None), "当前筛选没有可试听段落。"
-    current = str(choice or "")
+        return (
+            gr.update(choices=[], value=None),
+            _audio_update(None),
+            "当前试听：当前章节没有可选择的段落。",
+            "当前段落信息将在这里显示。",
+            "目标：尚未选择段落。",
+        )
+    snapshot = _snap(ss)
+    current = _selected_segment_id(choice, snapshot.script) if choice and snapshot else ""
     index = values.index(current) if current in values else 0
-    index = (index + (1 if direction == "next" else -1)) % len(values)
-    selected = values[index]
+    delta = 1 if direction == "next" else -1
+    selected = values[max(0, min(len(values) - 1, index + delta))]
+    audio, audio_status = _review_segment_audio(selected, ss)
+    item = context["item"] if selected == context["selected"] else None
+    if item is None:
+        refreshed = _review_context(ss, status_filter, chapter_id, [selected])
+        item = refreshed["item"]
     return (
         gr.update(choices=choices, value=selected),
-        _segment_audio_status_markdown(audio_by_id.get(selected)),
+        audio,
+        audio_status,
+        _review_segment_detail(ss, selected, item),
+        _review_repair_target(ss, selected),
     )
 
 
 def initialize_review_page(ss):
-    """Initialize all review controls and proactively load the first previews."""
+    """Initialize chapter, current segment, detail and the shared player."""
     if not ss or not ss.project:
         state = ReviewAudioService.initialize(None, None, None)
-    else:
-        snapshot = _snap(ss)
-        state = ReviewAudioService.initialize(
-            ss.project,
-            ProjectService.get_project_dir(ss.project),
-            snapshot.script if snapshot else None,
-            snapshot.meta if snapshot else None,
+        return (
+            state.chapter_table,
+            "#### 试听与生产\n请先打开项目。",
+            gr.update(choices=[], value=None),
+            gr.update(choices=[], value=None),
+            "当前段落信息将在这里显示。",
+            "目标：尚未选择段落。",
+            _audio_update(None),
+            "当前试听：尚未打开项目。",
+            gr.update(value=""),
+            _review_button_update(None),
         )
+    snapshot = _snap(ss)
+    state = ReviewAudioService.initialize(
+        ss.project,
+        ProjectService.get_project_dir(ss.project),
+        snapshot.script if snapshot else None,
+        snapshot.meta if snapshot else None,
+    )
+    context = _review_context(
+        ss,
+        chapter_id=state.selected_chapter,
+        preferred=[state.selected_segment] if state.selected_segment else None,
+    )
+    audio, audio_status = _review_segment_audio(context["selected"], ss)
     return (
         state.chapter_table,
+        context["summary"],
         gr.update(choices=state.chapter_choices, value=state.selected_chapter),
-        _audio_update(state.chapter_audio),
-        state.chapter_status,
-        gr.update(choices=state.segment_choices, value=state.selected_segment),
-        gr.update(choices=state.segment_choices, value=[]),
-        _audio_update(state.segment_audio),
-        state.segment_status,
+        gr.update(choices=context["choices"], value=context["selected"]),
+        context["detail"],
+        context["target"],
+        audio,
+        audio_status,
         gr.update(value=""),
+        _review_button_update(context["selected"]),
     )
 
 
@@ -1872,23 +2163,21 @@ def preview_chapters(ss):
     """Use the unified initializer for every review-page entry point."""
     return initialize_review_page(ss)
 
+
 def play_segment(choices, ss):
     if not ss or not ss.project or not choices:
-        yield _audio_update(None), "⚪ 未选择段落。"
+        yield _audio_update(None), "当前试听：尚未选择段落。"
         return
     snapshot = _snap(ss)
     if not snapshot:
-        yield _audio_update(None), "⚪ 请先打开项目。"
+        yield _audio_update(None), "当前试听：请先打开项目。"
         return
     sid = _selected_segment_id(choices, snapshot.script)
-    yield _audio_update(None), f"⏳ 正在加载段落 {sid} 的试听音频…"
-    result = ReviewAudioService.play_segment(
-        ss.project,
-        ProjectService.get_project_dir(ss.project),
-        snapshot.script,
-        sid,
-    )
-    yield _audio_update(result.path), result.status
+    segment = _review_segment(snapshot.script, sid)
+    label = _review_segment_identity(segment) or sid
+    yield _audio_update(None), f"当前试听：{label}\n⏳ 正在加载…"
+    audio, status = _review_segment_audio(sid, ss)
+    yield audio, status
 
 def _review_repair_message(repair, snapshot=None):
     repair_id = str((repair or {}).get("repair_id") or "")
@@ -1916,6 +2205,7 @@ def _review_repair_clear_outputs(
     chapter_id=None,
     *,
     fence=None,
+    preserve_choice=None,
 ):
     settled_fence = fence
     if fence is not None:
@@ -1934,17 +2224,29 @@ def _review_repair_clear_outputs(
         workspace = (
             f"#### 试听与生产\n❌ 刷新失败：{exc}",
             gr.update(choices=[], value=None),
-            gr.update(choices=[], value=[]),
-            "无法读取音频 revision 状态。",
+            "无法读取当前段落信息。",
+            "目标：尚未选择段落。",
         )
     if settled_fence is not None and not _review_repair_fence_is_current(
         ss, settled_fence
     ):
         return _review_repair_stale_outputs()
+    if preserve_choice:
+        fallback_choice = (
+            preserve_choice[0]
+            if isinstance(preserve_choice, list) and preserve_choice
+            else preserve_choice
+        )
+        audio, audio_status = _review_repair_audio(fallback_choice, ss)
+    else:
+        audio, audio_status = (
+            _audio_update(None),
+            "当前段落试听将在 repair 终态后刷新。",
+        )
     return (
         *workspace,
-        _audio_update(None),
-        "当前段落试听将在 repair 终态后刷新。",
+        audio,
+        audio_status,
         message,
         "",
         "",
@@ -2008,13 +2310,18 @@ def _review_repair_terminal_outputs(
     workspace = _review_workspace_values(
         ss, status_filter or "all", chapter_id, preferred=preferred
     )
-    audio, audio_status = _review_repair_audio(preview_choice, ss)
+    target_choice = preferred[0] if preferred else preview_choice
+    audio, audio_status = _review_repair_audio(target_choice, ss)
     if not _review_repair_fence_is_current(ss, settled_fence):
         return _review_repair_stale_outputs()
-    detail = str(
-        (repair or {}).get("error")
-        or "新 audio revision 已激活，旧 revision 已保留。"
-    )
+    terminal_status = str((repair or {}).get("status") or "")
+    error = str((repair or {}).get("error") or "").strip()
+    if terminal_status in {"error", "cancelled", "interrupted", "needs_attention"}:
+        detail = "重新合成失败，仍在使用旧版本。"
+        if error:
+            detail += f" {error}"
+    else:
+        detail = error or "新 audio revision 已激活，旧 revision 已保留。"
     return (
         *workspace,
         audio,
@@ -2029,18 +2336,21 @@ def _review_repair_terminal_outputs(
 
 def _review_repair_audio(choice, ss):
     if not ss or not ss.project or not choice:
-        return _audio_update(None), "请选择已生成音频的段落。"
+        return _audio_update(None), "当前试听：尚未选择段落。"
     try:
         snapshot = _snap(ss)
+        segment_id = _selected_segment_id(choice, snapshot.script)
         result = ReviewAudioService.play_segment(
             ss.project,
             ProjectService.get_project_dir(ss.project),
             snapshot.script,
-            _selected_segment_id(choice, snapshot.script),
+            segment_id,
         )
-        return _audio_update(result.path), result.status
+        segment = _review_segment(snapshot.script, segment_id)
+        label = _review_segment_identity(segment) or segment_id
+        return _audio_update(result.path), f"当前试听：{label}\n{result.status}"
     except Exception as exc:
-        return _audio_update(None), f"⚠ 刷新段落试听失败：{exc}"
+        return _audio_update(None), f"当前试听：刷新段落试听失败：{exc}"
 
 
 def recover_review_repair(ss):
@@ -2108,7 +2418,8 @@ def refresh_review_repair_tick(
         return _review_repair_stale_outputs()
     if not current_project:
         return _review_repair_clear_outputs(
-            "⚪ 请先打开项目。", ss, status_filter, chapter_id, fence=fence
+            "⚪ 请先打开项目。", ss, status_filter, chapter_id,
+            fence=fence, preserve_choice=preview_choice,
         )
 
     if not task_identifier:
@@ -2139,6 +2450,7 @@ def refresh_review_repair_tick(
                 status_filter,
                 chapter_id,
                 fence=fence,
+                preserve_choice=preview_choice,
             )
     if not _review_repair_fence_is_current(ss, fence):
         return _review_repair_stale_outputs()
@@ -2151,6 +2463,7 @@ def refresh_review_repair_tick(
             status_filter,
             chapter_id,
             fence=fence,
+            preserve_choice=preview_choice,
         )
     if str(snapshot.get("project") or "") != current_project:
         return _review_repair_clear_outputs(
@@ -2159,6 +2472,7 @@ def refresh_review_repair_tick(
             status_filter,
             chapter_id,
             fence=fence,
+            preserve_choice=preview_choice,
         )
     if not repair_identifier:
         linked = RepairService.find_by_task(current_project, task_identifier)
@@ -2181,6 +2495,7 @@ def refresh_review_repair_tick(
             status_filter,
             chapter_id,
             fence=fence,
+            preserve_choice=preview_choice,
         )
     if not _review_repair_fence_is_current(ss, fence):
         return _review_repair_stale_outputs()
@@ -2193,6 +2508,7 @@ def refresh_review_repair_tick(
             status_filter,
             chapter_id,
             fence=fence,
+            preserve_choice=preview_choice,
         )
 
     if not _review_repair_fence_is_current(ss, fence):
@@ -2225,8 +2541,28 @@ def refresh_review_repair_tick(
     )
 
 
+def refresh_review_repair_tick_for_ui(
+    repair_id,
+    task_id,
+    tracked_project,
+    current_segment_id,
+    chapter_id,
+    ss,
+):
+    """Bind the observer to the single current segment without a filter state."""
+    return refresh_review_repair_tick(
+        repair_id,
+        task_id,
+        tracked_project,
+        current_segment_id,
+        None,
+        chapter_id,
+        ss,
+    )
+
+
 def regenerate_segment(
-    choices,
+    current_segment_id,
     emotion,
     emo_alpha,
     speech_rate,
@@ -2238,16 +2574,16 @@ def regenerate_segment(
     status_filter="all",
     chapter_id=None,
 ):
-    """Submit repair and share the timer's terminal reconciliation path."""
-    if not ss or not ss.project or not choices:
+    """Submit exactly one current segment and share the observer path."""
+    if not ss or not ss.project or not current_segment_id:
         return _review_repair_clear_outputs(
-            "请选择段落",
+            "请选择当前段落",
             ss,
             status_filter,
             chapter_id,
         )
     script = _snap(ss).script
-    segment_ids, invalid = _review_selection_ids(choices, script)
+    segment_ids, invalid = _review_selection_ids(current_segment_id, script)
     if invalid:
         details = "、".join(f"{item}: 段落不存在" for item in invalid)
         return _review_repair_clear_outputs(
@@ -2256,9 +2592,34 @@ def regenerate_segment(
             status_filter,
             chapter_id,
         )
+    if chapter_id:
+        chapter_value = str(chapter_id)
+        chapter_ids = {
+            str(segment.get("id") or "")
+            for chapter in script.get("chapters", [])
+            if str(chapter.get("id") or "") == chapter_value
+            for segment in chapter.get("segments", [])
+        }
+        outside = [segment_id for segment_id in segment_ids if segment_id not in chapter_ids]
+        if outside:
+            return _review_repair_clear_outputs(
+                "❌ 当前段落与所选章节不一致，请重新选择。",
+                ss,
+                status_filter,
+                chapter_id,
+                preserve_choice=None,
+            )
+    if len(segment_ids) > 1:
+        return _review_repair_clear_outputs(
+            "❌ 只能重新合成当前段落。",
+            ss,
+            status_filter,
+            chapter_id,
+            preserve_choice=current_segment_id,
+        )
     if not segment_ids:
         return _review_repair_clear_outputs(
-            "请选择至少一个段落。",
+            "请选择当前段落。",
             ss,
             status_filter,
             chapter_id,
@@ -2325,14 +2686,55 @@ def regenerate_segment(
     except (RepairError, ProductionJobError) as exc:
         _review_repair_fence_set(ss, getattr(ss, "project", None), "", "", force=True)
         return _review_repair_clear_outputs(
-            f"❌ {exc}", ss, status_filter, chapter_id
+            f"❌ 重新合成失败，仍在使用旧版本：{exc}",
+            ss,
+            status_filter,
+            chapter_id,
+            preserve_choice=current_segment_id,
         )
     except Exception as exc:
         logger.exception("段落 Repair 提交失败")
         _review_repair_fence_set(ss, getattr(ss, "project", None), "", "", force=True)
         return _review_repair_clear_outputs(
-            f"❌ {exc}", ss, status_filter, chapter_id
+            f"❌ 重新合成失败，仍在使用旧版本：{exc}",
+            ss,
+            status_filter,
+            chapter_id,
+            preserve_choice=current_segment_id,
         )
+
+
+def submit_review_repair(
+    current_segment_id,
+    emotion,
+    override_alpha,
+    alpha,
+    override_rate,
+    rate,
+    voice_choice,
+    ss,
+    tracked_repair_id="",
+    tracked_task_id="",
+    tracked_project="",
+    chapter_id=None,
+):
+    """Translate optional UI overrides into the RepairService None contract."""
+    emotion_value = emotion if emotion not in (None, "", "沿用原设定") else None
+    alpha_value = float(alpha) if override_alpha and alpha is not None else None
+    rate_value = float(rate) if override_rate and rate is not None else None
+    return regenerate_segment(
+        current_segment_id,
+        emotion_value,
+        alpha_value,
+        rate_value,
+        voice_choice,
+        ss,
+        tracked_repair_id,
+        tracked_task_id,
+        tracked_project,
+        None,
+        chapter_id,
+    )
 
 # ═══════════ 角色单独补录 / 补合成导出（T1-T4） ═══════════
 
@@ -3092,20 +3494,34 @@ def preview_chapter_options(ss):
 def preview_chapter(ss, chapter_id):
     """生成单章试听，并始终返回播放器状态说明。"""
     if not ss or not ss.project or not chapter_id:
-        yield _audio_update(None), "⚪ 请先打开项目并选择章节。"
+        yield _audio_update(None), "当前试听：请先打开项目并选择章节。"
         return
     snapshot = _snap(ss)
     if not snapshot:
-        yield _audio_update(None), "⚪ 请先打开项目。"
+        yield _audio_update(None), "当前试听：请先打开项目。"
         return
-    yield _audio_update(None), "⏳ 正在生成章节试听，请稍候…"
+    chapter = next(
+        (
+            (index, item)
+            for index, item in enumerate(snapshot.script.get("chapters", []))
+            if str(item.get("id") or "") == str(chapter_id)
+        ),
+        None,
+    )
+    chapter_label = (
+        chapter_identity.chapter_label(
+            chapter[1], chapter[0], len(snapshot.script.get("chapters", []))
+        )
+        if chapter else str(chapter_id)
+    )
+    yield _audio_update(None), f"当前试听：{chapter_label} · 整章\n⏳ 正在生成…"
     result = ReviewAudioService.render_chapter_preview(
         ss.project,
         ProjectService.get_project_dir(ss.project),
         snapshot.script,
         chapter_id,
     )
-    yield _audio_update(result.path), result.status
+    yield _audio_update(result.path), f"当前试听：{chapter_label} · 整章\n{result.status}"
 
 
 # ═══════════ UI ═══════════
@@ -3174,14 +3590,32 @@ def _review_outputs():
     """Return the complete review-page callback contract in one stable order."""
     return [
         e_chapter_table,
+        e_review_summary,
         e_chapter_sel,
-        e_chapter_audio,
-        e_chapter_audio_status,
-        e_seg_preview_sel,
-        e_seg_regen_sel,
-        e_seg_audio,
-        e_seg_audio_status,
+        e_current_segment,
+        e_segment_detail,
+        e_repair_target,
+        e_review_audio,
+        e_review_audio_status,
         e_regenerate_msg,
+        e_regenerate,
+    ]
+
+
+def _review_repair_outputs():
+    """Return the stable single-segment repair observer contract."""
+    return [
+        e_review_summary,
+        e_current_segment,
+        e_segment_detail,
+        e_repair_target,
+        e_review_audio,
+        e_review_audio_status,
+        e_regenerate_msg,
+        e_review_repair_id,
+        e_review_repair_task_id,
+        e_review_repair_project,
+        review_repair_timer,
     ]
 
 
@@ -3208,12 +3642,8 @@ def _open_chain_rest(event):
     )
     e = e.then(refresh_voice_cast_ui, [ss], [v_status, v_cast_finalize])
     e = e.then(refresh_top_status, [ss], [top_status])
-    e = e.then(preview_chapters, [ss], _review_outputs())
-    e = e.then(preview_chapter_options, [ss], [e_chapter_sel])
-    e = e.then(
-        refresh_review_workspace,
-        [e_audio_filter, e_chapter_sel, ss],
-        [e_review_summary, e_seg_preview_sel, e_seg_regen_sel, e_segment_status],
+    e = e.then(preview_chapters, [ss], _review_outputs()).then(
+        reset_review_overrides, [ss], _review_override_outputs()
     )
     e = e.then(
         recover_review_repair,
@@ -3279,12 +3709,8 @@ def _post_archive_reconcile(event):
         ],
     )
     e = e.then(refresh_top_status, [ss], [top_status])
-    e = e.then(preview_chapters, [ss], _review_outputs())
-    e = e.then(preview_chapter_options, [ss], [e_chapter_sel])
-    e = e.then(
-        refresh_review_workspace,
-        [e_audio_filter, e_chapter_sel, ss],
-        [e_review_summary, e_seg_preview_sel, e_seg_regen_sel, e_segment_status],
+    e = e.then(preview_chapters, [ss], _review_outputs()).then(
+        reset_review_overrides, [ss], _review_override_outputs()
     )
     e = e.then(
         recover_review_repair,
@@ -3473,31 +3899,24 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
             # ───────── 试听与修复 ─────────
             review_page = create_review_page()
             grp_review = review_page["group"]
-            e_review_refresh = review_page["e_review_refresh"]
             e_review_summary = review_page["e_review_summary"]
             e_chapter_table = review_page["e_chapter_table"]
             e_chapter_sel = review_page["e_chapter_sel"]
-            e_chapter_reload = review_page["e_chapter_reload"]
-            e_chapter_audio = review_page["e_chapter_audio"]
-            e_chapter_audio_status = review_page["e_chapter_audio_status"]
-            e_chapter_status = review_page["e_chapter_status"]
-            e_seg_preview_sel = review_page["e_seg_preview_sel"]
-            e_audio_filter = review_page["e_audio_filter"]
+            e_chapter_preview = review_page["e_chapter_preview"]
+            e_current_segment = review_page["e_current_segment"]
             e_prev = review_page["e_prev"]
             e_next = review_page["e_next"]
-            e_seg_regen_sel = review_page["e_seg_regen_sel"]
-            e_select_chapter_segments = review_page["e_select_chapter_segments"]
-            e_select_filtered_segments = review_page["e_select_filtered_segments"]
-            e_clear_segment_selection = review_page["e_clear_segment_selection"]
-            e_batch_repair = review_page["e_batch_repair"]
             e_emo = review_page["e_emo"]
-            e_alpha = review_page["e_alpha"]
-            e_rate = review_page["e_rate"]
             e_voice = review_page["e_voice"]
+            e_alpha_override = review_page["e_alpha_override"]
+            e_alpha = review_page["e_alpha"]
+            e_rate_override = review_page["e_rate_override"]
+            e_rate = review_page["e_rate"]
             e_regenerate = review_page["e_regenerate"]
-            e_seg_audio = review_page["e_seg_audio"]
-            e_seg_audio_status = review_page["e_seg_audio_status"]
-            e_segment_status = review_page["e_segment_status"]
+            e_review_audio = review_page["e_review_audio"]
+            e_review_audio_status = review_page["e_review_audio_status"]
+            e_segment_detail = review_page["e_segment_detail"]
+            e_repair_target = review_page["e_repair_target"]
             e_regenerate_msg = review_page["e_regenerate_msg"]
             e_review_repair_id = review_page["e_review_repair_id"]
             e_review_repair_task_id = review_page["e_review_repair_task_id"]
@@ -3612,29 +4031,16 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     # deliberately separate from the Production observer and stops on every
     # terminal state, including interrupted/needs_attention.
     review_repair_timer.tick(
-        refresh_review_repair_tick,
+        refresh_review_repair_tick_for_ui,
         [
             e_review_repair_id,
             e_review_repair_task_id,
             e_review_repair_project,
-            e_seg_preview_sel,
-            e_audio_filter,
+            e_current_segment,
             e_chapter_sel,
             ss,
         ],
-        [
-            e_review_summary,
-            e_seg_preview_sel,
-            e_seg_regen_sel,
-            e_segment_status,
-            e_seg_audio,
-            e_seg_audio_status,
-            e_regenerate_msg,
-            e_review_repair_id,
-            e_review_repair_task_id,
-            e_review_repair_project,
-            review_repair_timer,
-        ],
+        _review_repair_outputs(),
     )
 
     # 旧的全量刷新契约（22 元组）已移除（阶段三：open_project 首步 + _open_chain_rest 打开链）
@@ -3671,10 +4077,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         refresh_production_voice_choices, [], [e_voice, utility_override_voice]).then(
         refresh_production_check, [ss], [production_check]).then(
         preview_chapters, [ss], _review_outputs()).then(
-        preview_chapter_options, [ss], [e_chapter_sel]).then(
-        refresh_review_workspace,
-        [e_audio_filter, e_chapter_sel, ss],
-        [e_review_summary, e_seg_preview_sel, e_seg_regen_sel, e_segment_status]).then(
+        reset_review_overrides, [ss], _review_override_outputs()).then(
         recover_review_repair,
         [ss],
         [e_review_repair_id, e_review_repair_task_id, e_review_repair_project, review_repair_timer]).then(
@@ -3712,11 +4115,7 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
         preview_chapters, [ss],
         _review_outputs(),
     ).then(
-        preview_chapter_options, [ss], [e_chapter_sel]
-    ).then(
-        refresh_review_workspace,
-        [e_audio_filter, e_chapter_sel, ss],
-        [e_review_summary, e_seg_preview_sel, e_seg_regen_sel, e_segment_status],
+        reset_review_overrides, [ss], _review_override_outputs()
     ).then(
         recover_review_repair,
         [ss],
@@ -3907,66 +4306,93 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     s_resume.click(resume_synthesis, [ss], [s_queue_list, s_pause, s_resume]).then(
         refresh_production_task, [ss], [s_task_status])
     s_open_btn.click(open_segments_folder, [ss], s_open_msg)
-    e_chapter_sel.change(preview_chapter, [ss, e_chapter_sel],
-                         [e_chapter_audio, e_chapter_audio_status]).then(
-        refresh_review_workspace,
-        [e_audio_filter, e_chapter_sel, ss],
-        [e_review_summary, e_seg_preview_sel, e_seg_regen_sel, e_segment_status],
+    e_chapter_preview.click(
+        preview_chapter,
+        [ss, e_chapter_sel],
+        [e_review_audio, e_review_audio_status],
     )
-    e_chapter_reload.click(preview_chapter, [ss, e_chapter_sel], [e_chapter_audio, e_chapter_audio_status])
-    e_seg_preview_sel.change(
-        play_segment, [e_seg_preview_sel, ss], [e_seg_audio, e_seg_audio_status]
+    e_chapter_sel.change(
+        refresh_review_workspace_for_chapter,
+        [e_chapter_sel, ss],
+        [
+            e_review_summary,
+            e_current_segment,
+            e_segment_detail,
+            e_repair_target,
+            e_review_audio,
+            e_review_audio_status,
+        ],
     ).then(
-        show_segment_status, [e_seg_preview_sel, ss], [e_segment_status]
+        refresh_review_segment_context,
+        [e_current_segment, ss],
+        [e_segment_detail, e_repair_target, e_regenerate],
+    ).then(
+        reset_review_overrides, [ss], _review_override_outputs()
     )
-    e_audio_filter.change(
-        refresh_review_workspace,
-        [e_audio_filter, e_chapter_sel, ss],
-        [e_review_summary, e_seg_preview_sel, e_seg_regen_sel, e_segment_status],
-    )
-    e_select_chapter_segments.click(
-        lambda status, chapter, state: select_review_segments(
-            "chapter", status, chapter, state
-        ),
-        [e_audio_filter, e_chapter_sel, ss],
-        [e_seg_regen_sel],
-    )
-    e_select_filtered_segments.click(
-        lambda status, chapter, state: select_review_segments(
-            "filtered", status, chapter, state
-        ),
-        [e_audio_filter, e_chapter_sel, ss],
-        [e_seg_regen_sel],
-    )
-    e_clear_segment_selection.click(
-        clear_review_segment_selection,
-        [e_audio_filter, e_chapter_sel, ss],
-        [e_seg_regen_sel],
+    e_current_segment.change(
+        play_segment,
+        [e_current_segment, ss],
+        [e_review_audio, e_review_audio_status],
+    ).then(
+        refresh_review_segment_context,
+        [e_current_segment, ss],
+        [e_segment_detail, e_repair_target, e_regenerate],
+    ).then(
+        reset_review_overrides, [ss], _review_override_outputs()
     )
     e_prev.click(
-        lambda choice, status, chapter, state: navigate_review_segment(
-            "previous", choice, status, chapter, state
+        lambda choice, chapter, state: navigate_review_segment(
+            "previous", choice, None, chapter, state
         ),
-        [e_seg_preview_sel, e_audio_filter, e_chapter_sel, ss],
-        [e_seg_preview_sel, e_segment_status],
+        [e_current_segment, e_chapter_sel, ss],
+        [e_current_segment, e_review_audio, e_review_audio_status, e_segment_detail, e_repair_target],
+    ).then(
+        refresh_review_segment_context,
+        [e_current_segment, ss],
+        [e_segment_detail, e_repair_target, e_regenerate],
+    ).then(
+        reset_review_overrides, [ss], _review_override_outputs()
     )
     e_next.click(
-        lambda choice, status, chapter, state: navigate_review_segment(
-            "next", choice, status, chapter, state
+        lambda choice, chapter, state: navigate_review_segment(
+            "next", choice, None, chapter, state
         ),
-        [e_seg_preview_sel, e_audio_filter, e_chapter_sel, ss],
-        [e_seg_preview_sel, e_segment_status],
-    )
-    e_review_refresh.click(
-        preview_chapters, [ss], _review_outputs(),
-    ).then(preview_chapter_options, [ss], [e_chapter_sel]).then(
-        refresh_review_workspace,
-        [e_audio_filter, e_chapter_sel, ss],
-        [e_review_summary, e_seg_preview_sel, e_seg_regen_sel, e_segment_status],
+        [e_current_segment, e_chapter_sel, ss],
+        [e_current_segment, e_review_audio, e_review_audio_status, e_segment_detail, e_repair_target],
     ).then(
-        recover_review_repair,
-        [ss],
-        [e_review_repair_id, e_review_repair_task_id, e_review_repair_project, review_repair_timer],
+        refresh_review_segment_context,
+        [e_current_segment, ss],
+        [e_segment_detail, e_repair_target, e_regenerate],
+    ).then(
+        reset_review_overrides, [ss], _review_override_outputs()
+    )
+    e_regenerate.click(
+        submit_review_repair,
+        [
+            e_current_segment,
+            e_emo,
+            e_alpha_override,
+            e_alpha,
+            e_rate_override,
+            e_rate,
+            e_voice,
+            ss,
+            e_review_repair_id,
+            e_review_repair_task_id,
+            e_review_repair_project,
+            e_chapter_sel,
+        ],
+        _review_repair_outputs(),
+    )
+    e_alpha_override.change(
+        lambda enabled: gr.update(interactive=bool(enabled)),
+        [e_alpha_override],
+        [e_alpha],
+    )
+    e_rate_override.change(
+        lambda enabled: gr.update(interactive=bool(enabled)),
+        [e_rate_override],
+        [e_rate],
     )
     e_readiness_refresh.click(
         export_ui.refresh_export_readiness,

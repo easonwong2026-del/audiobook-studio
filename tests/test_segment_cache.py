@@ -176,6 +176,24 @@ def test_effective_params_override_true_applies_alpha_rate():
     assert sc.effective_params(seg, ov) == ("happy", 0.5, 1.3)
 
 
+def test_effective_params_dict_none_inherits_each_original_value():
+    """UI repair overrides may omit alpha/rate independently."""
+    seg = {
+        "emotion": "happy",
+        "emo_alpha": 0.8,
+        "speech_rate": 1.2,
+    }
+    assert sc.effective_params(
+        seg,
+        {
+            "emotion": None,
+            "override": True,
+            "emo_alpha": 0.7,
+            "speech_rate": None,
+        },
+    ) == ("happy", 0.7, 1.2)
+
+
 def test_effective_params_override_false_keeps_seg_defaults():
     """override=False 时即使 overrides 给了 alpha/rate，仍用段落自身值。"""
     seg = _seg(emotion="angry", emo_alpha=0.7, speech_rate=1.2)

@@ -101,6 +101,28 @@ def _segment_audio(project_name: str, project_dir: str, segment: dict[str, Any])
     stays playable even after Settings switches to IndexTTS 2.5, and a
     dual-engine project can always find the audio it actually produced.
     """
+    # The active revision may be archived outside ``segments/`` while a repair
+    # is preparing or has failed.  Resolve it first so the old audio remains
+    # playable throughout the repair lifecycle.
+    try:
+        from repositories.quality_repo import QualityRepository
+
+        state_path = QualityRepository.state_path(project_name, create=False)
+        revision = (
+            QualityRepository.get_active_revision(
+                project_name, str(segment.get("id") or "")
+            )
+            if os.path.isfile(state_path)
+            else None
+        )
+        if revision and revision.get("relative_path"):
+            active = project_paths.resolve_relative(
+                project_dir, revision.get("relative_path", "")
+            )
+            if _valid_wav_file(active):
+                return active
+    except Exception:
+        pass
     seg_dir = project_paths.project_dir(project_dir, "segments")
     speaker_fingerprint = None
     if os.path.isfile(project_paths.project_file(project_dir, "voice_cast")):
@@ -141,21 +163,32 @@ def _segment_audio(project_name: str, project_dir: str, segment: dict[str, Any])
     return artifact.path if artifact.exists() else None
 
 
-def _segment_label(segment: dict[str, Any]) -> str:
+def _segment_label(segment: dict[str, Any], *, audio_valid: bool = True) -> str:
     text = " ".join(str(segment.get("text") or "").split())
     if len(text) > 36:
         text = text[:36] + "…"
-    return f"{segment.get('id')} · {segment.get('role') or segment.get('speaker') or ''} · {text}"
+    suffix = "" if audio_valid else " · 未生成"
+    icon = "✅" if audio_valid else "⚪"
+    return f"{icon} {segment.get('id')} · {segment.get('role') or segment.get('speaker') or ''} · {text}{suffix}"
 
 
-def build_segment_choices(project_name: str, project_dir: str, script: dict[str, Any]) -> list[tuple[str, str]]:
-    """Build label/value choices only for segments with valid audio."""
+def build_segment_choices(
+    project_name: str,
+    project_dir: str,
+    script: dict[str, Any],
+    *,
+    include_missing: bool = False,
+) -> list[tuple[str, str]]:
+    """Build label/value choices, optionally keeping missing segments visible."""
     choices: list[tuple[str, str]] = []
     for chapter in script.get("chapters", []):
         for segment in chapter.get("segments", []):
             audio = _segment_audio(project_name, project_dir, segment)
-            if _valid_wav_file(audio):
-                choices.append((_segment_label(segment), str(segment.get("id"))))
+            audio_valid = _valid_wav_file(audio)
+            if audio_valid or include_missing:
+                choices.append(
+                    (_segment_label(segment, audio_valid=audio_valid), str(segment.get("id")))
+                )
     return choices
 
 
@@ -294,18 +327,33 @@ def initialize(project_name: str | None, project_dir: str | None, script: dict[s
         )
     table, chapter_choices = build_chapter_table(project_name, project_dir, script, meta)
     selected_chapter = chapter_choices[0][1] if chapter_choices else None
-    chapter_result = (
-        render_chapter_preview(project_name, project_dir, script, selected_chapter)
+    # Chapter preview is deliberately generated only after the user asks for
+    # it.  Page entry loads the current segment into the single shared player.
+    chapter_result = ReviewAudioResult(
+        None,
+        "选择「试听整章」后在同一个播放器中加载章节音频。"
         if selected_chapter is not None
-        else ReviewAudioResult(None, "⚪ 当前项目没有可用章节。")
+        else "⚪ 当前项目没有可用章节。",
     )
-    segment_choices = build_segment_choices(project_name, project_dir, script)
-    selected_segment = segment_choices[0][1] if segment_choices else None
+    segment_choices = build_segment_choices(
+        project_name, project_dir, script, include_missing=True
+    )
+    selected_segment = next(
+        (value for label, value in segment_choices if label.startswith("✅ ")),
+        None,
+    )
     segment_result = (
         play_segment(project_name, project_dir, script, selected_segment)
         if selected_segment is not None
         else ReviewAudioResult(None, "ℹ 当前没有已生成的段落音频可选择。")
     )
+    if selected_segment is None:
+        chapter_result = ReviewAudioResult(
+            None,
+            "ℹ 当前没有可试听的已生成音频。"
+            if selected_chapter is not None
+            else "⚪ 当前项目没有可用章节。",
+        )
     return ReviewPageState(
         chapter_table=table,
         chapter_choices=chapter_choices,
@@ -332,6 +380,7 @@ def _record_event(project_dir: str, action: str, status: str, **details) -> None
 class ReviewAudioService:
     """Stable service façade used by Gradio and platform-independent tests."""
 
+    build_segment_choices = staticmethod(build_segment_choices)
     normalize_segment_id = staticmethod(normalize_segment_id)
     play_segment = staticmethod(play_segment)
     render_chapter_preview = staticmethod(render_chapter_preview)
