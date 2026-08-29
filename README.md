@@ -15,7 +15,7 @@ Audiobook Studio 导入与校验
 
 ## 快速开始
 
-当前基线版本：`v3.3.3`（本地开发线，不代表本轮正式 Release）。
+当前稳定版本：`v3.4.0`。
 
 1. 使用外部 Agent 生成结构化剧本 JSON。
 2. 先运行离线检查：
@@ -24,7 +24,7 @@ Audiobook Studio 导入与校验
    python tools/validate_structured_script.py path/to/structured_script.json
    ```
 
-3. 启动工作台：
+3. 启动工作台（Windows 双击 `start.bat`；终端也可运行 `python launcher.py`）：
 
    ```bash
    python launcher.py
@@ -35,6 +35,30 @@ Audiobook Studio 导入与校验
 
 `python tools/validate_structured_script.py` 与 UI 复用同一个
 `StructuredScriptImportService`，不访问网络。
+
+## 项目模型
+
+一个 Project = 一本书。Chapter 只是书内的脚本结构，`structured_script.json` 中的
+`chapters[]` 决定全书生产顺序，不需要拆分或合并多个项目。
+
+项目选择、打开和维护统一从「项目工作台」的 Catalog / Bookshelf 进入。
+
+## 启动、退出与状态
+
+Windows 日常使用：
+
+1. 启动：双击 `start.bat`。
+2. 正常退出：网页右上角 → 「退出 Studio」→ 「确认退出」。
+3. 外部应急停止：双击 `stop.bat`，或运行 `python launcher.py --stop`。
+4. 状态检查：运行 `python launcher.py --status`。
+
+关闭浏览器标签页、刷新页面或关闭浏览器不会自动停止 Audiobook Studio 后台服务。
+
+## 试听与修复
+
+生产完成后，在「试听与修复」工作区选择章节或当前段落进行试听。单段修复默认
+沿用原始声音、情感和语速，也可以临时覆盖参数；每次修复保留 revision，并支持
+rollback。
 
 ## JSON 入口
 
@@ -106,6 +130,9 @@ tools/validate_structured_script.py
 默认项目数据位于 `~/AudiobookStudio/`，可用 `AUDIOBOOK_STUDIO_DATA_DIR` 或设置页
 切换。程序仍能读取旧版项目目录，但新项目只写入外置数据目录。
 
+v3.4.0 不要求迁移已有用户项目；旧版项目继续按兼容规则读取，存储布局整理仍由用户
+显式发起。
+
 支持的本地环境变量：
 
 | 变量 | 用途 |
@@ -129,4 +156,4 @@ git diff --check
 python -m pytest -q
 ```
 
-本地开发分支以 V3.3.3 基线提交为准；本轮不创建正式版本、Tag 或 Release。
+正式版本 Tag 和 GitHub Release 在 Release Closure PR 合并后再创建。

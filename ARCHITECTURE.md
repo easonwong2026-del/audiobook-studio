@@ -7,23 +7,32 @@
 
 ```text
 外部 Agent / Skill
+       │
        │ structured_script.json
        ▼
-UI JSON 导入
+StructuredScriptImportService
        │
        ▼
-StructuredScriptImportService
-       ├─ lib.script_loader
-       ├─ services.script_consistency
-       ├─ StructuredScriptImportService._assert_slot_available
-       └─ ProjectRepository.create_project（原子创建）
+ProjectRepository
        │
-       ├─ ProjectSnapshot / voice_bindings.json
-       ├─ 本地角色声音绑定
-       ├─ SynthesisService → lib.queue → TTS Adapter → IndexTTS 2 / 2.5
-       ├─ 试听与修复
-       └─ ExportService → WAV / MP3 / M4B / 字幕
+       ▼
+Project / Structured Script
+       │
+       ▼
+Voice Bindings
+       │
+       ▼
+SynthesisService → ProductionRuntime / queue / TTS
+       │
+       ▼
+Listen / Repair
+       │
+       ▼
+Export / Delivery
 ```
+
+当前产品模型是「一个 Project = 一本书」。Chapter 是书内脚本结构，不是独立项目；
+项目选择、打开和维护统一由项目工作台的 Catalog / Bookshelf 提供入口。
 
 ## 主要目录
 
@@ -70,19 +79,43 @@ ui/
 99_系统数据/
   配置/                 project.json、structured_script.json、voice_bindings.json 等
   章节数据/             按章节拆分的剧本 JSON
-  质检/（历史兼容目录，存放 revision/repair 等系统数据）、任务/、缓存/、日志/、临时/
+  质检/（历史兼容目录，不属于当前用户工作流）、任务/、缓存/、日志/、临时/
 ```
 
 v1/v2 项目仍通过 `lib.project_paths` 兼容读取；存储升级必须由用户显式发起，
 打开项目不会自动迁移或批量清理用户数据。
 
 角色、章节和声音资产在工作台中使用下拉/单选控件完成选择，旧版内联入口的功能等价
-路径已经收敛到「项目管理 → 角色与声音 → 生产与试听修复」。
+路径已经收敛到「项目工作台 → 角色与声音 → 生产与试听修复」。
 
 `lib.script_loader` 是 JSON 结构的唯一解析入口；`StructuredScriptImportService` 不
 维护第二套 Schema。结构校验由 `validate_script` 和
 `check_script_consistency` 分工完成：前者负责阻止结构错误，后者负责错误和可继续创建
 的 warning。
+
+## Studio 生命周期
+
+```text
+start.bat
+   ↓
+launcher.py
+   ↓
+Studio instance identity
+   ↓
+app.py / Gradio
+   ↓
+ApplicationLifecycleService
+   ↓
+ProductionRuntime graceful teardown
+```
+
+退出来源包括网页「退出 Studio」、`launcher.py --stop`、`stop.bat`、SIGINT、SIGTERM、
+SIGBREAK 和 Gradio/application shutdown；所有应用停机请求最终由
+`ApplicationLifecycleService` single-flight 编排。网页退出会先请求现有 lifecycle，再让
+Gradio server 返回；浏览器标签页关闭不承担 Studio 生命周期。
+
+`7862` 端口占用只用于拒绝启动，不用于发现或终止目标进程。外部停止入口通过 instance
+identity 校验 PID、仓库路径和 app 路径，再执行 graceful shutdown 与必要的安全兜底。
 
 ## 原子性和安全
 
