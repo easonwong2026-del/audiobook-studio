@@ -100,7 +100,7 @@ class FakeTtsEngine:
     def get_engine_profile(self) -> dict:
         return dict(self._profile)
 
-    def empty_cache(self) -> None:
+    def empty_cache(self, reason: str = "manual") -> None:
         pass
 
     def synthesize_segment(

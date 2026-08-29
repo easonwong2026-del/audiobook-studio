@@ -29,6 +29,11 @@ _INFER_HAS_VAR_KEYWORD = False
 # 调用自身，非重入锁会在同一线程第二次获取时死锁；RLock 允许同一线程重入。
 _ENGINE_LOCK = threading.RLock()
 
+CHECK_INTERVAL = 10
+MIN_FREE_VRAM_BYTES = 2 * 1024**3
+MAX_CACHED_GAP_BYTES = int(1.5 * 1024**3)
+_successful_segments_since_check = 0
+
 TTS_ENGINE_RUNTIME_FAILURE = "TTS_ENGINE_RUNTIME_FAILURE"
 TTS_ENGINE_OOM_EXHAUSTED = "TTS_ENGINE_OOM_EXHAUSTED"
 
@@ -699,7 +704,7 @@ def synthesize_segment(
                             )
                         except Exception:  # noqa: BLE001  # diagnostics must not alter TTS
                             logger.debug("记录 engine_infer trace 失败", exc_info=True)
-                empty_cache()  # 2.4 M-3：段级碎片化显存清理（守卫式，无 CUDA 时 no-op）
+                _note_segment_success()
                 return output_path
 
             except oom_error as oom_exc:
@@ -713,7 +718,7 @@ def synthesize_segment(
                         )
                     except Exception:  # noqa: BLE001  # diagnostics must not alter TTS
                         logger.debug("记录 OOM trace 失败", exc_info=True)
-                empty_cache()
+                empty_cache(reason="oom")
                 if attempt == 0:
                     logger.warning("OOM, retrying after cache clear...")
                     continue
@@ -775,17 +780,52 @@ def synthesize_segment(
         return output_path
 
 
-def empty_cache() -> None:
-    """释放碎片化显存（仅 ``torch.cuda.empty_cache``，不卸载模型）。
+def _check_cuda_memory() -> None:
+    """Check CUDA memory and clear the allocator only past safety thresholds."""
+    try:
+        snapshot = gpu_snapshot()
+        if not snapshot.get("available"):
+            return
+        free_bytes = int(snapshot["free"])
+        allocated_bytes = int(snapshot["allocated"])
+        reserved_bytes = int(snapshot["reserved"])
+        cached_gap_bytes = reserved_bytes - allocated_bytes
+        logger.debug(
+            "CUDA memory check allocated_mb=%.1f reserved_mb=%.1f free_mb=%.1f "
+            "cached_gap_mb=%.1f",
+            allocated_bytes / (1024 * 1024),
+            reserved_bytes / (1024 * 1024),
+            free_bytes / (1024 * 1024),
+            cached_gap_bytes / (1024 * 1024),
+        )
+        if free_bytes < MIN_FREE_VRAM_BYTES:
+            empty_cache(reason="low_free_vram")
+        elif cached_gap_bytes > MAX_CACHED_GAP_BYTES:
+            empty_cache(reason="cached_gap")
+    except Exception:  # telemetry must not alter TTS
+        logger.debug("CUDA memory check failed", exc_info=True)
 
-    2.4 M-3：用于合成终态 / 取消后 / 批量重合成后释放碎片化 VRAM，降低峰值占用。
-    守卫式实现：用 sys.modules 判断 torch 是否已加载，避免 C 扩展 segfault。
-    不调用 import torch（C 扩展的 access violation 会绕过 Python 的异常处理）。
-    子线程中也安全——全量 try/except 包裹 CUDA 调用。
+
+def _note_segment_success() -> None:
+    """Record one successful segment and periodically inspect CUDA memory."""
+    global _successful_segments_since_check
+    _successful_segments_since_check += 1
+    if _successful_segments_since_check < CHECK_INTERVAL:
+        return
+    _successful_segments_since_check = 0
+    _check_cuda_memory()
+
+
+def empty_cache(reason: str = "manual") -> bool:
+    """Release unused PyTorch CUDA allocator blocks without unloading the model.
+
+    The guard intentionally checks ``sys.modules`` instead of importing torch:
+    a missing/CPU-only/broken CUDA runtime must never turn telemetry or cleanup
+    into a synthesis failure.
     """
     import sys as _sys
     if "torch" not in _sys.modules:
-        return
+        return False
     torch = _sys.modules["torch"]
     try:
         cuda_available = getattr(torch, "cuda", None) is not None
@@ -793,8 +833,15 @@ def empty_cache() -> None:
             is_avail = getattr(torch.cuda, "is_available", lambda: False)()
             if is_avail:
                 torch.cuda.empty_cache()
+                logger.info("CUDA cache cleanup reason=%s", str(reason or "manual"))
+                return True
     except Exception:  # pylint: disable=broad-except
-        pass
+        logger.debug(
+            "CUDA cache cleanup failed reason=%s",
+            str(reason or "manual"),
+            exc_info=True,
+        )
+    return False
 
 
 def _extract_speaker_embedding(speaker_audio: str):
@@ -890,7 +937,7 @@ def reset_engine() -> None:
         _INFER_HAS_VAR_KEYWORD = False
         _SPEAKER_EMB_CACHE.clear()
         gc.collect()
-        empty_cache()
+        empty_cache(reason="engine_recycle")
 
 
 def gpu_snapshot() -> dict:

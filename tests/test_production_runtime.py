@@ -319,7 +319,7 @@ def test_runtime_takeover_interrupts_old_synthesis_and_blocks_stale_publish(
     from services.synthesis import SynthesisService
 
     monkeypatch.setattr(tts_engine, "init_engine", lambda: None)
-    monkeypatch.setattr(tts_engine, "empty_cache", lambda: None)
+    monkeypatch.setattr(tts_engine, "empty_cache", lambda reason="manual": None)
     started: list[str] = []
 
     def fake_start(state, *_args, **_kwargs):
@@ -418,6 +418,27 @@ def test_runtime_takeover_interrupts_old_synthesis_and_blocks_stale_publish(
         assert started == ["old_synthesis", "new_synthesis"]
     finally:
         new_runtime.stop()
+
+
+def test_idle_runtime_shutdown_cleans_cuda_cache(tmp_path, monkeypatch):
+    from lib import tts_engine
+
+    reasons = []
+    monkeypatch.setattr(
+        tts_engine,
+        "empty_cache",
+        lambda reason="manual": reasons.append(reason),
+    )
+    runtime = ProductionRuntime(
+        owner_id="shutdown-cache-test",
+        lock_path=str(tmp_path / "runtime.lock"),
+        status_path=str(tmp_path / "status.json"),
+    )
+    runtime._stop.set()
+
+    runtime._run_loop()
+
+    assert reasons == ["shutdown"]
 
 
 def test_worker_acknowledges_pause_only_at_generator_boundary(monkeypatch):

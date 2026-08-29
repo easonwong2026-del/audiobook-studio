@@ -183,7 +183,7 @@ def test_prewarm_same_profile_does_not_reload(
         def get_engine_profile(self) -> dict:
             return dict(self._profile)
 
-        def empty_cache(self) -> None:
+        def empty_cache(self, reason: str = "manual") -> None:
             pass
 
     module = types.ModuleType("lib.tts_engine")
