@@ -175,6 +175,101 @@ def hydrate_opened_project(ss):
     return open_project(ss.project, ss)
 
 
+_studio_exit_lock = threading.Lock()
+_studio_exit_scheduled = False
+
+
+def _has_active_production() -> bool:
+    return any(
+        str(task.get("status") or "") in ACTIVE_PRODUCTION_STATES
+        for task in ProductionJobService.list_tasks()
+        if isinstance(task, dict)
+    )
+
+
+def prepare_studio_exit_confirmation():
+    try:
+        active = _has_active_production()
+    except Exception:
+        logger.exception("读取退出确认所需的生产状态失败")
+        active = None
+
+    if active is True:
+        prompt = (
+            "### 退出 Audiobook Studio？\n\n"
+            "当前仍有合成任务正在运行。\n\n"
+            "现在退出将停止 Audiobook Studio，当前运行中的任务也将终止。"
+        )
+    elif active is None:
+        prompt = (
+            "### 退出 Audiobook Studio？\n\n"
+            "当前任务状态暂时无法确认。现在退出将停止 Audiobook Studio，"
+            "请确认是否继续。"
+        )
+    else:
+        prompt = (
+            "### 退出 Audiobook Studio？\n\n"
+            "退出后后台服务将停止，当前页面将无法继续使用。"
+        )
+    return prompt, gr.update(visible=True), gr.update(visible=False)
+
+
+def cancel_studio_exit_confirmation():
+    return "", gr.update(visible=False), gr.update(visible=True, interactive=True)
+
+
+def _run_scheduled_studio_shutdown():
+    try:
+        get_application_lifecycle().request_application_shutdown("ui_exit")
+    except Exception:  # pragma: no cover - exit must remain best effort
+        logger.exception("UI 退出触发应用停机失败")
+    finally:
+        try:
+            # Let the callback response finish before closing Gradio.  This
+            # makes launch() return and lets its existing finally block run.
+            app.close(verbose=False)
+        except Exception:  # pragma: no cover - exit must remain best effort
+            logger.exception("UI 退出关闭 Gradio 服务失败")
+
+
+def _schedule_studio_shutdown() -> bool:
+    global _studio_exit_scheduled
+    lifecycle = get_application_lifecycle()
+    with _studio_exit_lock:
+        if _studio_exit_scheduled:
+            return True
+        if lifecycle.is_shutting_down():
+            _studio_exit_scheduled = True
+            return True
+        _studio_exit_scheduled = True
+    try:
+        timer = threading.Timer(0.1, _run_scheduled_studio_shutdown)
+        timer.daemon = True
+        timer.start()
+    except Exception:  # pragma: no cover - defensive scheduling fallback
+        with _studio_exit_lock:
+            _studio_exit_scheduled = False
+        logger.exception("安排 UI 退出停机失败")
+        return False
+    return True
+
+
+def confirm_studio_exit():
+    if not _schedule_studio_shutdown():
+        return (
+            "### 无法安排退出\n\n请使用 python launcher.py --stop 停止服务。",
+            gr.update(visible=True),
+            gr.update(visible=True, interactive=True),
+            gr.update(visible=True, interactive=True),
+            gr.update(visible=True, interactive=True),
+        )
+    return (
+        "### Audiobook Studio 正在退出……\n\n后台服务正在关闭，可以关闭此页面。",
+        gr.update(visible=True),
+        gr.update(visible=False, interactive=False),
+        gr.update(visible=False, interactive=False),
+        gr.update(visible=False, interactive=False),
+    )
 
 
 def refresh_top_status(ss):
@@ -3758,6 +3853,33 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
     # 顶部状态栏（从 ui/shared 抽离）
     shared_components = create_status_bar()
     top_status = shared_components["top_status"]
+    studio_exit = shared_components["studio_exit"]
+    studio_exit_confirmation = shared_components["studio_exit_confirmation"]
+    studio_exit_prompt = shared_components["studio_exit_prompt"]
+    studio_exit_cancel = shared_components["studio_exit_cancel"]
+    studio_exit_confirm = shared_components["studio_exit_confirm"]
+
+    studio_exit.click(
+        prepare_studio_exit_confirmation,
+        None,
+        [studio_exit_prompt, studio_exit_confirmation, studio_exit],
+    )
+    studio_exit_cancel.click(
+        cancel_studio_exit_confirmation,
+        None,
+        [studio_exit_prompt, studio_exit_confirmation, studio_exit],
+    )
+    studio_exit_confirm.click(
+        confirm_studio_exit,
+        None,
+        [
+            studio_exit_prompt,
+            studio_exit_confirmation,
+            studio_exit_confirm,
+            studio_exit_cancel,
+            studio_exit,
+        ],
+    )
 
     with gr.Row(elem_classes=["app-shell-row"]):
         # 侧边栏导航按钮（从 ui/navigation 抽离）
