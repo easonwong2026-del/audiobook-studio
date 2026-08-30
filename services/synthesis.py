@@ -540,3 +540,11 @@ class SynthesisService:
                 except Exception:  # noqa: BLE001  # diagnostics must not alter TTS
                     logger.debug("结束 performance trace 失败", exc_info=True)
                 state.notify()
+            try:
+                from lib import tts_engine
+
+                tts_engine.empty_cache(
+                    reason="cancel" if state.cancel else "task_end"
+                )
+            except Exception:  # cleanup must not alter TTS
+                logger.debug("结束合成时清理 CUDA cache 失败", exc_info=True)

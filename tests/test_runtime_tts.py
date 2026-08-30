@@ -44,7 +44,7 @@ def runtime_utility_project(tmp_path, monkeypatch):
     ProjectRepository._INITIALIZED = True
     ProjectRepository.create_project_from_data("book", SCRIPT)
     monkeypatch.setattr(tts_engine, "init_engine", lambda: None)
-    monkeypatch.setattr(tts_engine, "empty_cache", lambda: None)
+    monkeypatch.setattr(tts_engine, "empty_cache", lambda reason="manual": None)
     yield ProjectRepository.get_project_dir("book")
     ProductionRuntimeClient.reset_inline()
 

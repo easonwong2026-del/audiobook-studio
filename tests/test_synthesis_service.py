@@ -85,6 +85,12 @@ def _dummy(path, n=800):
 
 def test_synthesis_runs_to_completion(project, monkeypatch):
     monkeypatch.setattr(tts_engine, "synthesize_segment", _fake_segment_fast)
+    cleanup_reasons = []
+    monkeypatch.setattr(
+        tts_engine,
+        "empty_cache",
+        lambda reason="manual": cleanup_reasons.append(reason),
+    )
     SynthesisService.reset_executor()  # 测试隔离：新线程池
 
     state = SynthesisState(task_id="t1", project=project)
@@ -98,10 +104,19 @@ def test_synthesis_runs_to_completion(project, monkeypatch):
     assert state.progress == 1.0
     assert state.completed == state.total == 3
     assert any("✅" in line for line in state.log_lines)
+    while state.future is not None and not state.future.done():
+        time.sleep(0.01)
+    assert cleanup_reasons == ["task_end"]
 
 
 def test_synthesis_cancel_at_segment_boundary(project, monkeypatch):
     monkeypatch.setattr(tts_engine, "synthesize_segment", _fake_segment_slow)
+    cleanup_reasons = []
+    monkeypatch.setattr(
+        tts_engine,
+        "empty_cache",
+        lambda reason="manual": cleanup_reasons.append(reason),
+    )
     SynthesisService.reset_executor()  # 测试隔离：新线程池
 
     state = SynthesisState(task_id="t2", project=project)
@@ -122,3 +137,6 @@ def test_synthesis_cancel_at_segment_boundary(project, monkeypatch):
     assert state.completed >= 1
     # 取消只在段边界生效：未完成全部段
     assert state.completed < state.total
+    while state.future is not None and not state.future.done():
+        time.sleep(0.01)
+    assert cleanup_reasons == ["cancel"]

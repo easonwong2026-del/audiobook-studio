@@ -156,6 +156,7 @@ class ProductionRuntime:
         self._shutdown_deadline: float | None = None
         self._shutdown_complete = threading.Event()
         self._shutdown_complete.set()
+        self._shutdown_cleanup_deferred = False
 
     @property
     def is_running(self) -> bool:
@@ -372,6 +373,7 @@ class ProductionRuntime:
         # task from a client process must never infer worker death.
         orphaned = TaskRepository.mark_orphaned_interrupted(self.owner_id)
         self._engine_failure = False
+        self._shutdown_cleanup_deferred = False
         self._engine.set_runtime_state("starting")
         self._engine.reset()
         _runtime_event(
@@ -404,6 +406,7 @@ class ProductionRuntime:
             time.sleep(min(self.poll_interval, max(deadline - time.monotonic(), 0.0)))
         orphaned = TaskRepository.mark_orphaned_interrupted(self.owner_id)
         self._engine_failure = False
+        self._shutdown_cleanup_deferred = False
         self._engine.set_runtime_state("starting")
         self._engine.reset()
         _runtime_event(
@@ -429,6 +432,8 @@ class ProductionRuntime:
             export_future = self._export_future
             export_record = self._export_record
         if state is not None:
+            if state.future is not None and not state.future.done():
+                self._shutdown_cleanup_deferred = True
             # Release a worker that is blocked in a pause gate (normal
             # segment boundary or engine-recovery gate).  Persistence is
             # detached first so the durable task keeps its last active
@@ -627,6 +632,7 @@ class ProductionRuntime:
                         )
                         if at_boundary or expired:
                             if expired and not at_boundary:
+                                self._shutdown_cleanup_deferred = True
                                 _runtime_event(
                                     "runtime_shutdown_boundary_timeout",
                                     task_id=cur.task_id,
@@ -700,6 +706,13 @@ class ProductionRuntime:
             # by acquiring the OS lock before it can repair interrupted tasks.
             if self._thread is threading.current_thread():
                 self._thread = None
+            if not self._shutdown_cleanup_deferred:
+                try:
+                    from lib import tts_engine
+
+                    tts_engine.empty_cache(reason="shutdown")
+                except Exception:  # cleanup must not alter shutdown
+                    logger.debug("运行时关闭时清理 CUDA cache 失败", exc_info=True)
             self._engine.mark_unknown()
             self._shutdown_complete.set()
             _runtime_event(
@@ -1374,23 +1387,26 @@ class ProductionRuntime:
         os.makedirs(destination, exist_ok=True)
         from lib import tts_engine
 
-        parts = tts_engine.test_voice(speaker_audio)
-        if not parts:
-            raise RuntimeError("声音试听未生成音频")
-        for path in parts:
-            ProductionRuntime._validate_wav(path)
-        output = os.path.join(
-            destination,
-            f"preview_{ProductionRuntime._safe_component(role)}.wav",
-        )
-        temporary = os.path.join(
-            destination,
-            f".{uuid.uuid4().hex}.part.wav",
-        )
-        tts_engine._concat_wavs(parts, temporary)
-        ProductionRuntime._validate_wav(temporary)
-        os.replace(temporary, output)
-        return output
+        try:
+            parts = tts_engine.test_voice(speaker_audio)
+            if not parts:
+                raise RuntimeError("声音试听未生成音频")
+            for path in parts:
+                ProductionRuntime._validate_wav(path)
+            output = os.path.join(
+                destination,
+                f"preview_{ProductionRuntime._safe_component(role)}.wav",
+            )
+            temporary = os.path.join(
+                destination,
+                f".{uuid.uuid4().hex}.part.wav",
+            )
+            tts_engine._concat_wavs(parts, temporary)
+            ProductionRuntime._validate_wav(temporary)
+            os.replace(temporary, output)
+            return output
+        finally:
+            tts_engine.empty_cache(reason="task_end")
 
     def run_supplement_direct(
         self,
@@ -1510,7 +1526,7 @@ class ProductionRuntime:
                         status="failed",
                         elapsed_ms=int((time.monotonic() - line_started) * 1000),
                     )
-        tts_engine.empty_cache()
+        tts_engine.empty_cache(reason="task_end")
         return results
 
     def run_quick_tts_direct(
@@ -1617,7 +1633,7 @@ class ProductionRuntime:
                 "error": f"❌ {str(exc)[:120]}",
             }
         finally:
-            tts_engine.empty_cache()
+            tts_engine.empty_cache(reason="task_end")
 
     def _run_utility_task(self, record: TaskRecord) -> None:
         """Execute one preview/supplement/quick-tts command synchronously under the OS lock."""

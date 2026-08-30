@@ -95,16 +95,24 @@ class FakeEngineUnsupported:
 
 @pytest.fixture
 def engine_reset():
+    tts_engine._successful_segments_since_check = 0
     yield
     tts_engine._tts = None
+    tts_engine._successful_segments_since_check = 0
 
 
 class TestOOMSplit:
     """B1 Critical：长文本 OOM 自动拆成两半并拼接回原路径，临时文件清理。"""
 
-    def test_oom_split(self, engine_reset, tmp_path):
+    def test_oom_split(self, engine_reset, tmp_path, monkeypatch):
         eng = FakeEngineSupported()
         tts_engine._tts = eng
+        cleanup_reasons = []
+        monkeypatch.setattr(
+            tts_engine,
+            "empty_cache",
+            lambda reason="manual": cleanup_reasons.append(reason),
+        )
 
         out = str(tmp_path / "out.wav")
         # 12 个字符 > 阈值 8，触发 OOM；拆成两半各 6 字符（<=8）不再 OOM
@@ -140,6 +148,7 @@ class TestOOMSplit:
         for kw in eng.capture:
             assert isinstance(kw["emo_alpha"], float), "emo_alpha 不应被当成字符串"
             assert isinstance(kw["output_path"], str), "output_path 不应被当成整数"
+        assert cleanup_reasons == ["oom", "oom"]
 
 
 class TestSpeedPinyin:
