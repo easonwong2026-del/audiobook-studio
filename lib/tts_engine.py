@@ -229,13 +229,13 @@ def _prepare_v25_acceleration() -> dict:
     try:
         flash_attn = importlib.import_module("flash_attn")
         triton = importlib.import_module("triton")
-    except (ImportError, ModuleNotFoundError, OSError) as exc:
+    except (ImportError, ModuleNotFoundError, OSError):
         logger.warning("IndexTTS 2.5 GPT acceleration unavailable: dependency_missing")
         logger.debug("Accel dependency import failed", exc_info=True)
         report["fallback"] = True
         report["reason"] = "dependency_missing"
         return _store_accel_status(report)
-    except Exception as exc:  # noqa: BLE001 - native extension imports can be non-ImportError
+    except Exception:  # noqa: BLE001 - native extension imports can be non-ImportError
         logger.warning("IndexTTS 2.5 GPT acceleration unavailable: dependency_import_failed")
         logger.debug("Accel dependency import failed", exc_info=True)
         report["fallback"] = True
