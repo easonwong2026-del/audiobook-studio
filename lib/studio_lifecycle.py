@@ -357,24 +357,23 @@ def send_graceful_shutdown(pid: int) -> bool:
     """Ask a confirmed Studio process to exit through its normal hooks."""
     try:
         if _is_windows():
-            event = getattr(signal, "CTRL_BREAK_EVENT", None)
-            if event is None:
-                return False
-            try:
-                os.kill(pid, event)
-            except (OSError, ProcessLookupError, ValueError):
-                # stop.bat normally runs in a new console.  Attach briefly to
-                # the Studio console so Ctrl+Break can still reach its process
-                # group before the hard-termination fallback is considered.
-                return _windows_send_ctrl_break(pid)
-        else:
-            os.kill(pid, signal.SIGTERM)
+            # os.kill(pid, CTRL_BREAK_EVENT) cannot deliver here:
+            # GenerateConsoleCtrlEvent only reaches process groups sharing the
+            # caller's console, the cross-console failure surfaces as a
+            # CPython SystemError (WinError 87 as __cause__) that escapes the
+            # OSError guards below, and cross-console calls can even report
+            # success without delivering.  Deliver through the AttachConsole
+            # primitive instead; the caller still verifies the outcome via
+            # wait_for_pid_exit before considering harder steps.
+            return _windows_send_ctrl_break(pid)
+        os.kill(pid, signal.SIGTERM)
     except (OSError, ProcessLookupError, ValueError):
         return False
     return True
 
 
 def _windows_send_ctrl_break(pid: int) -> bool:
+    """Deliver CTRL_BREAK to the Studio console from any console topology."""
     try:
         win_dll = getattr(ctypes, "WinDLL", None)
         if win_dll is None:
