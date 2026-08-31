@@ -11,8 +11,10 @@ import os
 
 import gradio as gr
 
-from lib import config, dataframe_style as df_style, voice_lib
+from lib import config, voice_lib
+from lib import dataframe_style as df_style
 from services.project import ProjectService
+from services.voice_assets import VoiceAssetError, VoiceAssetService
 from ui.components import format_role_config_title
 from ui.components.voice_binding import build_role_management_choices
 
@@ -127,7 +129,7 @@ def select_voice_from_browser(rows, evt: gr.SelectData):
     try:
         rows = rows["data"] if isinstance(rows, dict) else rows
         name = rows[evt.index[0]][0]
-    except Exception:
+    except (AttributeError, IndexError, KeyError, TypeError):
         return gr.update(), None
     path = _library_path(name)
     return gr.update(value=name), (path if path and os.path.isfile(path) else None)
@@ -152,3 +154,95 @@ def refresh_voice_filters():
         gr.update(choices=filter_choices, value=None),
         gr.update(choices=save_choices, value="未分类"),
     )
+
+
+def _selected_voice_path(role, ss) -> str | None:
+    if not role or not ss or not getattr(ss, "project", None):
+        return None
+    snapshot = _snapshot(ss)
+    if not snapshot:
+        return None
+    path = str((snapshot.bindings or {}).get(str(role)) or "").strip()
+    if not path:
+        return None
+    if os.path.isabs(path):
+        return path
+    try:
+        from lib import project_paths
+
+        return project_paths.resolve_relative(snapshot.project_dir, path)
+    except ValueError:
+        return os.path.join(snapshot.project_dir, path)
+
+
+def _reference_status_text(status: dict) -> str:
+    labels = {
+        "ready": "✅ Reference ready",
+        "needs_reference": "⚠ 需要生成参考音频",
+        "manual_required": "❌ 需要人工提供参考",
+        "error": "❌ 参考音频处理失败",
+    }
+    original = status.get("original_audio") or "未选择"
+    original_duration = status.get("original_duration")
+    reference = status.get("reference_audio") or "待生成"
+    reference_duration = status.get("reference_duration")
+    source_line = f"原始声音：{original}\n原始时长：{float(original_duration):.1f} 秒" if original_duration is not None else f"原始声音：{original}\n原始时长：读取失败"
+    reference_line = f"TTS 参考：{reference}\n参考时长：{float(reference_duration):.1f} 秒" if reference_duration is not None else f"TTS 参考：{reference}\n参考时长：待生成"
+    return f"{source_line}\n\n{reference_line}\n\n状态：{labels.get(status.get('reference_status'), '⚠ 状态未知')}"
+
+
+def refresh_reference_status(role, ss):
+    source = _selected_voice_path(role, ss)
+    if not source or not os.path.isfile(source):
+        return "TTS 参考：未选择", None
+    try:
+        status = VoiceAssetService.status_for_path(source)
+    except VoiceAssetError as exc:
+        return f"❌ 参考音频不可用：{exc}", None
+    return _reference_status_text(status), None
+
+
+def preview_reference(role, ss):
+    source = _selected_voice_path(role, ss)
+    if not source or not os.path.isfile(source):
+        return None
+    try:
+        reference = VoiceAssetService.resolve_tts_reference(source_path=source)
+    except VoiceAssetError:
+        return None
+    return reference if os.path.isfile(reference) else None
+
+
+def regenerate_reference(role, ss):
+    source = _selected_voice_path(role, ss)
+    if not source or not os.path.isfile(source):
+        return "请先选择或绑定原始声音。", None
+    try:
+        VoiceAssetService.ensure_reference(source_path=source, force=True)
+    except VoiceAssetError as exc:
+        try:
+            status = VoiceAssetService.status_for_path(source)
+            return f"{_reference_status_text(status)}\n\n❌ {exc.code}：{exc}", None
+        except VoiceAssetError:
+            return f"❌ {exc.code}：{exc}", None
+    status = VoiceAssetService.status_for_path(source)
+    reference = status.get("_reference_path")
+    return _reference_status_text(status), reference if reference and os.path.isfile(reference) else None
+
+
+def _library_check_text(result: dict) -> str:
+    return (
+        f"总资产：{result.get('total', 0)} · "
+        f"ready：{result.get('ready', 0)} · "
+        f"needs_reference：{result.get('needs_reference', 0)} · "
+        f"manual_required：{result.get('manual_required', 0)} · "
+        f"error：{result.get('error', 0)}"
+    )
+
+
+def check_voice_library():
+    return _library_check_text(VoiceAssetService.check_library())
+
+
+def batch_generate_references():
+    return _library_check_text(VoiceAssetService.generate_missing_references())

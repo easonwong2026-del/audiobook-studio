@@ -53,12 +53,12 @@ class BindingRepository:
             return []
         categories: set[str] = set()
         # 支持的音频扩展名（与 voice_lib.py 一致）
-        voice_exts = (".wav", ".mp3", ".flac", ".ogg")
+        voice_exts = (".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac")
         for name in os.listdir(root):
             if not os.path.isfile(os.path.join(root, name)):
                 continue
             ext = os.path.splitext(name)[1].lower()
-            if ext in voice_exts:
+            if ext in voice_exts and not name.lower().endswith(".reference.wav"):
                 categories.add(BindingRepository._category_of(name))
         return sorted(categories)
 

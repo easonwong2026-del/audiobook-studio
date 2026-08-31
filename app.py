@@ -4344,6 +4344,11 @@ with gr.Blocks(theme=THEME, title=f"Audiobook Studio v{__version__}") as app:
                 "refresh_voice_lib": voice_ui.refresh_voice_lib,
                 "select_voice_from_browser": voice_ui.select_voice_from_browser,
                 "preview_bound_voice": preview_bound_voice,
+                "refresh_reference_status": voice_ui.refresh_reference_status,
+                "preview_reference": voice_ui.preview_reference,
+                "regenerate_reference": voice_ui.regenerate_reference,
+                "check_voice_library": voice_ui.check_voice_library,
+                "batch_generate_references": voice_ui.batch_generate_references,
             },
         },
     )

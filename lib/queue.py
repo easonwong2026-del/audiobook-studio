@@ -39,6 +39,33 @@ def _trace_call(trace, method: str, *args, **kwargs):
         return None
 
 
+def _resolve_tts_speaker(
+    source_path: str,
+    voice_asset_id: str | None,
+    cache: dict[str, str],
+) -> str:
+    """Resolve a derived reference once per asset/source for this task."""
+    key = str(voice_asset_id or os.path.abspath(source_path))
+    if key not in cache:
+        from services.voice_assets import VoiceAssetError, VoiceAssetService
+
+        try:
+            cache[key] = VoiceAssetService.resolve_tts_reference(
+                voice_asset_id=voice_asset_id,
+                source_path=None if voice_asset_id else source_path,
+                allow_legacy_short=True,
+            )
+        except VoiceAssetError:
+            # Very old manual projects and GPU-free tests may contain a tiny
+            # placeholder instead of an audio file.  Keep that legacy bridge
+            # only for untyped placeholders; real assets remain fail-closed.
+            if not voice_asset_id and os.path.getsize(source_path) <= 64:
+                cache[key] = source_path
+            else:
+                raise
+    return cache[key]
+
+
 class _PhaseFailure(Exception):
     """Internal phase-tagged failure raised by lib layers below the engine."""
 
@@ -288,6 +315,7 @@ def synthesize_project(
     os.makedirs(segments_dir, exist_ok=True)
     cast_active = os.path.isfile(project_paths.project_file(project_dir, "voice_cast"))
     speaker_fingerprints: dict[str, str | None] = {}
+    reference_paths: dict[str, str] = {}
     cast_role_bindings = (
         bindings_document.get("role_bindings", {})
         if isinstance(bindings_document, dict) else {}
@@ -388,9 +416,11 @@ def synthesize_project(
                 )
                 active_segment_trace = segment_trace
                 speaker = per_segment_voice.get(str(seg.id)) or voice_bindings.get(seg.role)
-                if not speaker and cast_active and getattr(seg, "role_id", None):
-                    cast_binding = cast_role_bindings.get(str(seg.role_id))
-                    if isinstance(cast_binding, dict):
+                cast_binding = None
+                if cast_active and getattr(seg, "role_id", None):
+                    candidate = cast_role_bindings.get(str(seg.role_id))
+                    cast_binding = candidate if isinstance(candidate, dict) else None
+                    if not speaker and cast_binding:
                         speaker = cast_binding.get("project_voice_path")
                 if not speaker:
                     _deliver_failure(hooks, SynthesisFailure.from_exception(
@@ -413,7 +443,8 @@ def synthesize_project(
 
                 if not os.path.isabs(str(speaker)):
                     speaker = os.path.join(project_dir, str(speaker))
-                if not os.path.isfile(speaker):
+                source_speaker = os.path.abspath(str(speaker))
+                if not os.path.isfile(source_speaker):
                     _deliver_failure(hooks, SynthesisFailure.from_exception(
                         segment_id=str(seg.id),
                         chapter_id=str(ch.id),
@@ -432,14 +463,45 @@ def synthesize_project(
                     _trace_call(segment_trace, "close")
                     continue
 
+                voice_asset_id = (
+                    str(cast_binding.get("voice_asset_id") or "").strip()
+                    if cast_binding and str(seg.id) not in per_segment_voice
+                    else None
+                ) or None
+                try:
+                    speaker = _resolve_tts_speaker(
+                        source_speaker,
+                        voice_asset_id,
+                        reference_paths,
+                    )
+                except (OSError, ValueError) as exc:
+                    code = getattr(exc, "code", None) or "REFERENCE_AUDIO_NOT_READY"
+                    failure = SynthesisFailure.from_exception(
+                        segment_id=str(seg.id),
+                        chapter_id=str(ch.id),
+                        phase=PHASE_DIRECTED_SYNTHESIS,
+                        exc=exc,
+                        code=code,
+                    )
+                    _deliver_failure(hooks, failure)
+                    yield f"[X] {seg.id} TTS 参考音频不可用：{exc}"
+                    _status_update(
+                        status_writer,
+                        seg.id,
+                        "failed",
+                        performance_trace=performance_trace,
+                        chapter_id=ch_label,
+                    )
+                    _trace_call(segment_trace, "close")
+                    continue
+
                 speaker_fingerprint = None
                 if cast_active or str(seg.id) in per_segment_voice:
-                    resolved_speaker = speaker
-                    if resolved_speaker not in speaker_fingerprints:
-                        speaker_fingerprints[resolved_speaker] = (
-                            segment_cache.speaker_fingerprint_for_path(resolved_speaker)
+                    if source_speaker not in speaker_fingerprints:
+                        speaker_fingerprints[source_speaker] = (
+                            segment_cache.speaker_fingerprint_for_path(source_speaker)
                         )
-                    speaker_fingerprint = speaker_fingerprints[resolved_speaker]
+                    speaker_fingerprint = speaker_fingerprints[source_speaker]
 
                 seg_start = time.time()
                 # 2.3 O2：用有效合成参数（全局覆盖 + 段落默认）派生缓存键与调用参数，

@@ -807,6 +807,10 @@ class VoiceCastResolver:
             if role_id not in selected or not binding.get("voice_asset_id") or role_id not in roster:
                 continue
             asset = _asset_for_role(project_name, role_id, binding)
+            # Binding is the first lazy-migration opportunity.  A malformed or
+            # unsuitable legacy file records its status but does not block the
+            # existing cast write; synthesis remains fail-closed.
+            VoiceAssetService.prepare_reference(voice_asset_id=asset["voice_asset_id"])
             filename = f"{_safe_component(role_id)}_{asset['sha256'][:8]}{os.path.splitext(asset['file_name'])[1].lower() or '.wav'}"
             destination = os.path.join(voice_dir, filename)
             source = asset["_path"]

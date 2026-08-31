@@ -360,6 +360,11 @@ class ProjectService:
                 )
             except OSError as exc:
                 logger.warning("同步角色声音配置副本失败: %s", exc)
+        # Prepare the derived asset when possible; legacy bindings remain
+        # usable when an old/non-audio fixture cannot be analyzed.
+        from .voice_assets import VoiceAssetService
+
+        VoiceAssetService.prepare_reference(source_path=dest)
         return dest
 
     @staticmethod

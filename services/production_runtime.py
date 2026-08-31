@@ -1366,6 +1366,19 @@ class ProductionRuntime:
             if audio.getnframes() <= 0 or audio.getframerate() <= 0:
                 raise RuntimeError("TTS 生成的 WAV 为空")
 
+    @staticmethod
+    def _resolve_tts_reference(path: str) -> str:
+        """Keep utility inference on the same safe-reference path as production."""
+        source = os.path.abspath(str(path or ""))
+        if not os.path.isfile(source):
+            return source
+        from .voice_assets import VoiceAssetService
+
+        return VoiceAssetService.resolve_tts_reference(
+            source_path=source,
+            allow_legacy_short=True,
+        )
+
     def run_voice_preview_direct(
         self,
         speaker_audio: str,
@@ -1387,6 +1400,7 @@ class ProductionRuntime:
         os.makedirs(destination, exist_ok=True)
         from lib import tts_engine
 
+        speaker_audio = self._resolve_tts_reference(speaker_audio)
         try:
             parts = tts_engine.test_voice(speaker_audio)
             if not parts:
@@ -1444,6 +1458,8 @@ class ProductionRuntime:
         except (TypeError, ValueError):
             beams = 2
         speaker_audio = str(payload.get("speaker_audio") or "")
+        if os.path.isfile(speaker_audio):
+            speaker_audio = self._resolve_tts_reference(speaker_audio)
         from lib import tts_engine
 
         results: list[dict[str, Any]] = []
@@ -1561,6 +1577,8 @@ class ProductionRuntime:
             heartbeat()
         text = str(payload.get("text") or "").strip()
         speaker_audio = str(payload.get("speaker_audio") or "")
+        if os.path.isfile(speaker_audio):
+            speaker_audio = self._resolve_tts_reference(speaker_audio)
         try:
             beams = max(int(payload.get("num_beams", 2) or 2), 1)
         except (TypeError, ValueError):

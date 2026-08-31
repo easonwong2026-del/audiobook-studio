@@ -65,6 +65,13 @@ def create_voice_page() -> dict:
                         v_current = gr.Markdown("当前参考音频：未选择")
                         v_bind = gr.Button("确认绑定", variant="primary", elem_classes=["voice-bind-action"])
                     v_bind_msg = gr.Markdown("")
+                    v_reference_status = gr.Markdown("TTS 参考：未选择")
+                    with gr.Row():
+                        v_reference_preview_btn = gr.Button("试听参考", size="sm")
+                        v_reference_regenerate_btn = gr.Button("重新生成", size="sm")
+                    v_reference_audio = gr.Audio(
+                        label="TTS 参考试听", type="filepath", interactive=False,
+                    )
 
         v_role = gr.State(value=None)
 
@@ -96,6 +103,10 @@ def create_voice_page() -> dict:
                 )
             v_save_btn = gr.Button("保存到音色库", variant="secondary")
             v_save_msg = gr.Markdown("")
+            with gr.Row():
+                v_library_check_btn = gr.Button("检查音色库", size="sm")
+                v_library_batch_btn = gr.Button("批量生成缺失参考", size="sm")
+            v_library_status = gr.Markdown("")
 
     return {
         "group": grp_voices,
@@ -111,6 +122,10 @@ def create_voice_page() -> dict:
         "v_current": v_current,
         "v_bind": v_bind,
         "v_bind_msg": v_bind_msg,
+        "v_reference_status": v_reference_status,
+        "v_reference_preview_btn": v_reference_preview_btn,
+        "v_reference_regenerate_btn": v_reference_regenerate_btn,
+        "v_reference_audio": v_reference_audio,
         "v_preview_btn": v_preview_btn,
         "v_preview_audio": v_preview_audio,
         "v_record": v_record,
@@ -119,6 +134,9 @@ def create_voice_page() -> dict:
         "v_save_category": v_save_category,
         "v_save_btn": v_save_btn,
         "v_save_msg": v_save_msg,
+        "v_library_check_btn": v_library_check_btn,
+        "v_library_batch_btn": v_library_batch_btn,
+        "v_library_status": v_library_status,
         "v_lib_search": v_lib_search,
         "v_lib_category": v_lib_category,
         "v_lib_browser": v_lib_browser,

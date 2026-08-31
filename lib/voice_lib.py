@@ -18,7 +18,7 @@ from . import config as _cfg
 logger = logging.getLogger(__name__)
 
 # 支持的音频扩展名（用于过滤非音频文件）
-_VOICE_EXTS = (".wav", ".mp3", ".flac", ".ogg")
+_VOICE_EXTS = (".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac")
 
 
 def _category_of(filename: str) -> str:
@@ -51,7 +51,7 @@ def scan_voice_library(search: str = "", category: str = None) -> list[dict]:
         if not os.path.isfile(full):
             continue
         ext = os.path.splitext(name)[1].lower()
-        if ext not in _VOICE_EXTS:
+        if ext not in _VOICE_EXTS or name.lower().endswith(".reference.wav"):
             continue
         try:
             size_kb = round(os.path.getsize(full) / 1024.0, 1)
@@ -90,7 +90,7 @@ def list_categories() -> list[str]:
         if not os.path.isfile(full):
             continue
         ext = os.path.splitext(name)[1].lower()
-        if ext not in _VOICE_EXTS:
+        if ext not in _VOICE_EXTS or name.lower().endswith(".reference.wav"):
             continue
         cats.add(_category_of(name))
     return sorted(cats)

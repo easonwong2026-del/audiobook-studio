@@ -13,7 +13,7 @@ def wire_voice_page(page: dict, context: dict) -> None:
     cb = context["callbacks"]
     session = context["session"]
 
-    page["v_table"].change(
+    select_chain = page["v_table"].change(
         cb["select_role_from_list"],
         [page["v_table"], session],
         [
@@ -22,6 +22,13 @@ def wire_voice_page(page: dict, context: dict) -> None:
             page["v_bind_msg"],
         ],
     )
+    refresh_reference = cb.get("refresh_reference_status")
+    if refresh_reference:
+        select_chain.then(
+            refresh_reference,
+            [page["v_role"], session],
+            [page["v_reference_status"], page["v_reference_audio"]],
+        )
     page["v_role_search"].change(
         cb["refresh_role_list"],
         [page["v_role_search"], page["v_role"], session],
@@ -44,6 +51,12 @@ def wire_voice_page(page: dict, context: dict) -> None:
         )
     else:
         bind_chain.then(cb["refresh_role_summary"], session, page["v_status"])
+    if refresh_reference:
+        bind_chain.then(
+            refresh_reference,
+            [page["v_role"], session],
+            [page["v_reference_status"], page["v_reference_audio"]],
+        )
     page["v_cast_finalize"].click(
         cb["finalize_voice_cast"], session, page["v_status"]
     )
@@ -89,3 +102,23 @@ def wire_voice_page(page: dict, context: dict) -> None:
         [page["v_role"], page["v_audio"], page["v_lib"], session],
         page["v_preview_audio"],
     )
+    preview_reference = cb.get("preview_reference")
+    if preview_reference:
+        page["v_reference_preview_btn"].click(
+            preview_reference,
+            [page["v_role"], session],
+            page["v_reference_audio"],
+        )
+    regenerate_reference = cb.get("regenerate_reference")
+    if regenerate_reference:
+        page["v_reference_regenerate_btn"].click(
+            regenerate_reference,
+            [page["v_role"], session],
+            [page["v_reference_status"], page["v_reference_audio"]],
+        )
+    check_library = cb.get("check_voice_library")
+    if check_library:
+        page["v_library_check_btn"].click(check_library, None, page["v_library_status"])
+    batch_library = cb.get("batch_generate_references")
+    if batch_library:
+        page["v_library_batch_btn"].click(batch_library, None, page["v_library_status"])
