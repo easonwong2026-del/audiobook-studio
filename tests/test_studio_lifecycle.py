@@ -300,11 +300,72 @@ def test_windows_start_uses_a_new_process_group(monkeypatch):
     assert captured["command"][-1] == f"{lifecycle.INSTANCE_ID_ARGUMENT}marker"
 
 
-def test_windows_graceful_shutdown_uses_ctrl_break_without_real_signal(monkeypatch):
-    sent = []
+def test_windows_graceful_shutdown_uses_attachconsole_delivery(monkeypatch):
     monkeypatch.setattr(lifecycle, "_is_windows", lambda: True)
-    monkeypatch.setattr(lifecycle.signal, "CTRL_BREAK_EVENT", 1, raising=False)
-    monkeypatch.setattr(lifecycle.os, "kill", lambda pid, event: sent.append((pid, event)))
+    monkeypatch.setattr(
+        lifecycle.os,
+        "kill",
+        lambda *_args: pytest.fail(
+            "os.kill must not be used for Windows graceful shutdown"
+        ),
+    )
+    sent = []
+    monkeypatch.setattr(
+        lifecycle, "_windows_send_ctrl_break", lambda pid: sent.append(pid) or True
+    )
 
     assert lifecycle.send_graceful_shutdown(321) is True
-    assert sent == [(321, 1)]
+    assert sent == [321]
+
+
+def test_windows_graceful_shutdown_fallback_failure_reaches_hard_kill_ladder(
+    monkeypatch,
+):
+    monkeypatch.setattr(lifecycle, "_is_windows", lambda: True)
+    monkeypatch.setattr(lifecycle, "_windows_send_ctrl_break", lambda _pid: False)
+
+    assert lifecycle.send_graceful_shutdown(321) is False
+
+
+def test_windows_graceful_shutdown_never_lets_kill_systemerror_escape(monkeypatch):
+    """Regression: CPython 3.11 reports a failed GenerateConsoleCtrlEvent as
+    SystemError (WinError 87 as __cause__), which escaped the OSError guards
+    and crashed ``launcher.py --stop``.  Whatever primitive the Windows path
+    uses, that exception class must never escape this helper."""
+
+    monkeypatch.setattr(lifecycle, "_is_windows", lambda: True)
+
+    def broken_kill(_pid, _event):
+        cause = OSError(87, "The parameter is incorrect")
+        error = SystemError(
+            "<built-in function kill> returned a result with an exception set"
+        )
+        error.__cause__ = cause
+        raise error
+
+    monkeypatch.setattr(lifecycle.os, "kill", broken_kill)
+    monkeypatch.setattr(lifecycle, "_windows_send_ctrl_break", lambda _pid: False)
+
+    assert lifecycle.send_graceful_shutdown(321) is False
+
+
+def test_posix_graceful_shutdown_sends_sigterm(monkeypatch):
+    monkeypatch.setattr(lifecycle, "_is_windows", lambda: False)
+    sent = []
+    monkeypatch.setattr(
+        lifecycle.os, "kill", lambda pid, sig: sent.append((pid, sig))
+    )
+
+    assert lifecycle.send_graceful_shutdown(321) is True
+    assert sent == [(321, lifecycle.signal.SIGTERM)]
+
+
+def test_posix_graceful_shutdown_error_returns_false(monkeypatch):
+    monkeypatch.setattr(lifecycle, "_is_windows", lambda: False)
+
+    def lookup_failed(_pid, _sig):
+        raise ProcessLookupError(3, "No such process")
+
+    monkeypatch.setattr(lifecycle.os, "kill", lookup_failed)
+
+    assert lifecycle.send_graceful_shutdown(321) is False
