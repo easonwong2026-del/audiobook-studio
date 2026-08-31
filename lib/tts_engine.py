@@ -1,16 +1,23 @@
 """IndexTTS2 封装 + VRAM 管理 + OOM 自动降级"""
 from __future__ import annotations
+
 import gc
+import importlib
 import inspect
-import os
 import logging
+import os
+import shutil
+import sys
 import threading
 import time
 from collections.abc import Mapping
-from . import config as _cfg
+from contextlib import contextmanager, nullcontext
+from importlib import metadata
+
 from . import audio_format as af
-from .segment_cache import SpeakerEmbeddingLRU
+from . import config as _cfg
 from .failures import PHASE_ENGINE_INFER
+from .segment_cache import SpeakerEmbeddingLRU
 from .tts_model_layout import model_config_candidates, resolve_model_config_path
 
 logger = logging.getLogger(__name__)
@@ -19,6 +26,16 @@ logger = logging.getLogger(__name__)
 _tts = None
 _ENGINE_PROFILE: dict = {}
 _LAST_ADAPTER_REPORT: dict = {}
+_ACCEL_STATUS: dict = {
+    "requested": False,
+    "available": False,
+    "enabled": False,
+    "active": False,
+    "fallback": False,
+    "reason": "not_initialized",
+    "flash_attn_version": "",
+    "triton_version": "",
+}
 _CAPABILITY_ENGINE_ID: int | None = None
 _CAPABILITY_ENGINE_REF = None
 _INFER_PARAM_NAMES: frozenset[str] = frozenset()
@@ -28,6 +45,7 @@ _INFER_HAS_VAR_KEYWORD = False
 # 批量并发调用时引擎内部状态竞争。必须用 RLock——OOM 时 synthesize_segment 会递归
 # 调用自身，非重入锁会在同一线程第二次获取时死锁；RLock 允许同一线程重入。
 _ENGINE_LOCK = threading.RLock()
+_TRITON_CACHE_WORKAROUND_LOCK = threading.RLock()
 
 CHECK_INTERVAL = 10
 MIN_FREE_VRAM_BYTES = 2 * 1024**3
@@ -36,6 +54,10 @@ _successful_segments_since_check = 0
 
 TTS_ENGINE_RUNTIME_FAILURE = "TTS_ENGINE_RUNTIME_FAILURE"
 TTS_ENGINE_OOM_EXHAUSTED = "TTS_ENGINE_OOM_EXHAUSTED"
+
+ACCEL_OVERLAY_ENV = "AUDIOBOOK_STUDIO_ACCEL_OVERLAY"
+ACCEL_DISABLE_ENV = "AUDIOBOOK_STUDIO_DISABLE_INDEXTTS25_ACCEL"
+_TRITON_WINDOWS_VERSION = "3.4.0.post21"
 
 
 class EngineRuntimeFailure(RuntimeError):
@@ -76,6 +98,251 @@ class EngineRuntimeFailure(RuntimeError):
         self.recoverable = bool(recoverable) and known_fingerprint
         detail = f" (errno={errno})" if errno is not None else ""
         super().__init__(f"{self.code} phase={self.phase}{detail}: {message}")
+
+
+def _is_windows() -> bool:
+    """Return the platform state without mutating ``os.name`` in tests."""
+    return os.name == "nt"
+
+
+def _store_accel_status(report: Mapping[str, object]) -> dict:
+    global _ACCEL_STATUS
+    fields = (
+        "requested", "available", "enabled", "active", "fallback", "reason",
+        "flash_attn_version", "triton_version",
+    )
+    _ACCEL_STATUS = {field: report.get(field) for field in fields}
+    return dict(_ACCEL_STATUS)
+
+
+def get_acceleration_status() -> dict:
+    """Return path-free IndexTTS 2.5 GPT acceleration status."""
+    with _ENGINE_LOCK:
+        return dict(_ACCEL_STATUS)
+
+
+def _base_accel_status(*, requested: bool = True, reason: str = "") -> dict:
+    return {
+        "requested": bool(requested),
+        "available": False,
+        "enabled": False,
+        "active": False,
+        "fallback": not requested,
+        "reason": reason,
+        "flash_attn_version": "",
+        "triton_version": "",
+    }
+
+
+def _same_path(left: object, right: object) -> bool:
+    try:
+        return os.path.abspath(os.fspath(left)) == os.path.abspath(os.fspath(right))
+    except (TypeError, ValueError, OSError):
+        return False
+
+
+def _path_is_under(path: object, root: object) -> bool:
+    try:
+        return os.path.commonpath((os.path.abspath(os.fspath(path)), os.path.abspath(os.fspath(root)))) == os.path.abspath(os.fspath(root))
+    except (TypeError, ValueError, OSError):
+        return False
+
+
+def _prepend_accel_overlay() -> tuple[str | None, str | None]:
+    raw = os.environ.get(ACCEL_OVERLAY_ENV)
+    if not raw:
+        return None, None
+    overlay = os.path.abspath(os.path.expanduser(raw))
+    if not os.path.isdir(overlay):
+        logger.warning("IndexTTS 2.5 accel overlay is invalid")
+        logger.debug("Invalid IndexTTS 2.5 accel overlay: %s", overlay)
+        return None, "overlay_invalid"
+    sys.path[:] = [entry for entry in sys.path if not _same_path(entry, overlay)]
+    sys.path.insert(0, overlay)
+    return overlay, None
+
+
+def _module_version(module: object) -> str:
+    return str(getattr(module, "__version__", "") or "unknown")
+
+
+def _triton_version(module: object) -> str:
+    for distribution in ("triton-windows", "triton"):
+        try:
+            return metadata.version(distribution)
+        except metadata.PackageNotFoundError:
+            continue
+    return _module_version(module)
+
+
+def _is_affected_triton_windows(module: object) -> bool:
+    try:
+        return metadata.version("triton-windows") == _TRITON_WINDOWS_VERSION
+    except metadata.PackageNotFoundError:
+        # GPU-free tests can provide a module-only fake; real wheels carry
+        # distribution metadata even though triton.__version__ is 3.4.0.
+        return _module_version(module) == _TRITON_WINDOWS_VERSION
+
+
+def _resolve_triton_tcc(triton_module: object) -> str | None:
+    origin = getattr(triton_module, "__file__", None)
+    if not origin:
+        try:
+            origin = importlib.util.find_spec("triton").origin
+        except (AttributeError, ImportError, ModuleNotFoundError, ValueError):
+            origin = None
+    if not origin:
+        return None
+    package_dir = os.path.dirname(os.path.abspath(os.fspath(origin)))
+    candidate = os.path.join(package_dir, "runtime", "tcc", "tcc.exe")
+    return candidate if os.path.isfile(candidate) else None
+
+
+def _valid_cc(value: object) -> bool:
+    if not value:
+        return False
+    try:
+        text = os.path.expanduser(os.fspath(value))
+    except (TypeError, ValueError):
+        return False
+    return os.path.isfile(text) or shutil.which(text) is not None
+
+
+def _prepare_v25_acceleration() -> dict:
+    """Prepare optional Windows-only GPT acceleration before IndexTTS import."""
+    report = _base_accel_status()
+    if os.environ.get(ACCEL_DISABLE_ENV) == "1":
+        report["requested"] = False
+        report["fallback"] = True
+        report["reason"] = "emergency_disabled"
+        return _store_accel_status(report)
+    if not _is_windows():
+        report["fallback"] = True
+        report["reason"] = "unsupported_platform"
+        return _store_accel_status(report)
+
+    overlay, overlay_error = _prepend_accel_overlay()
+    if overlay_error:
+        report["fallback"] = True
+        report["reason"] = overlay_error
+        return _store_accel_status(report)
+    try:
+        flash_attn = importlib.import_module("flash_attn")
+        triton = importlib.import_module("triton")
+    except (ImportError, ModuleNotFoundError, OSError):
+        logger.warning("IndexTTS 2.5 GPT acceleration unavailable: dependency_missing")
+        logger.debug("Accel dependency import failed", exc_info=True)
+        report["fallback"] = True
+        report["reason"] = "dependency_missing"
+        return _store_accel_status(report)
+    except Exception:  # noqa: BLE001 - native extension imports can be non-ImportError
+        logger.warning("IndexTTS 2.5 GPT acceleration unavailable: dependency_import_failed")
+        logger.debug("Accel dependency import failed", exc_info=True)
+        report["fallback"] = True
+        report["reason"] = "dependency_import_failed"
+        return _store_accel_status(report)
+
+    report["flash_attn_version"] = _module_version(flash_attn)
+    report["triton_version"] = _triton_version(triton)
+    if overlay and not all(
+        _path_is_under(getattr(module, "__file__", None), overlay)
+        for module in (flash_attn, triton)
+    ):
+        logger.warning("IndexTTS 2.5 GPT acceleration unavailable: overlay_source_mismatch")
+        logger.debug("Accel modules did not resolve from overlay: %s", overlay)
+        report["fallback"] = True
+        report["reason"] = "overlay_source_mismatch"
+        return _store_accel_status(report)
+
+    current_cc = os.environ.get("CC")
+    if current_cc and _valid_cc(current_cc):
+        logger.debug("Using existing process-local CC for Triton")
+    else:
+        # An external overlay owns its bundled TinyCC; prefer it so Triton's
+        # compiler and runtime support files come from the same package.
+        resolved_cc = _resolve_triton_tcc(triton) if overlay else None
+        if resolved_cc is None:
+            for name in ("cl", "gcc", "clang"):
+                resolved_cc = shutil.which(name)
+                if resolved_cc:
+                    break
+        if resolved_cc is None:
+            resolved_cc = _resolve_triton_tcc(triton)
+        if resolved_cc is None:
+            report["fallback"] = True
+            report["reason"] = "compiler_missing"
+            return _store_accel_status(report)
+        os.environ["CC"] = resolved_cc
+        logger.debug("Using process-local Triton CC: %s", resolved_cc)
+
+    report["available"] = True
+    report["enabled"] = True
+    report["reason"] = "runtime_ready"
+    report["fallback"] = False
+    return _store_accel_status(report)
+
+
+class _TritonCacheOSProxy:
+    """Proxy only for Triton's module-local ``os`` binding."""
+
+    def __init__(self, original):
+        self._original = original
+
+    def removedirs(self, path):
+        # triton-windows 3.4.0.post21 can remove cache parents via removedirs;
+        # the affected temp directory needs one leaf removal only.
+        return self._original.rmdir(path)
+
+    def __getattr__(self, name):
+        return getattr(self._original, name)
+
+
+@contextmanager
+def _scoped_triton_cache_workaround():
+    """Apply the verified Triton cache fix only around ``FileCacheManager.put``."""
+    if not _is_windows():
+        yield
+        return
+    cache_module = None
+    try:
+        triton = importlib.import_module("triton")
+        if _is_affected_triton_windows(triton):
+            candidate = importlib.import_module("triton.runtime.cache")
+            manager = getattr(candidate, "FileCacheManager", None)
+            if callable(getattr(manager, "put", None)):
+                original_os = getattr(candidate, "os", None)
+                if original_os is not None and not isinstance(original_os, _TritonCacheOSProxy):
+                    cache_module = candidate
+    except (ImportError, ModuleNotFoundError, AttributeError, TypeError) as exc:
+        logger.debug("Triton cache workaround not installed: %s", exc)
+    if cache_module is None:
+        yield
+        return
+    original_put = manager.put
+
+    def put_with_leaf_cleanup(*args, **kwargs):
+        with _TRITON_CACHE_WORKAROUND_LOCK:
+            put_os = cache_module.os
+            cache_module.os = _TritonCacheOSProxy(put_os)
+            try:
+                return original_put(*args, **kwargs)
+            finally:
+                cache_module.os = put_os
+
+    manager.put = put_with_leaf_cleanup
+    try:
+        yield
+    finally:
+        manager.put = original_put
+
+
+def _v25_accel_is_active(engine: object) -> bool:
+    """Check the actual IndexTTS 2.5 GPT AccelInferenceEngine state."""
+    candidates = (getattr(engine, "gpt", None), engine)
+    try:
+        return any(getattr(candidate, "accel_engine", None) is not None for candidate in candidates)
+    except Exception:  # noqa: BLE001 - defensive around third-party properties
+        return False
 
 
 
@@ -208,7 +475,7 @@ class IndexTTS2Backend:
 
 
 class IndexTTS25Backend:
-    """Native IndexTTS 2.5 adapter with the conservative first baseline."""
+    """Native IndexTTS 2.5 adapter with production GPT Accel policy."""
 
     version = "2.5"
 
@@ -224,6 +491,7 @@ class IndexTTS25Backend:
         cfg_path: str,
         model_dir: str,
         precision: str,
+        use_accel: bool = False,
     ) -> dict[str, object]:
         return {
             "cfg_path": cfg_path,
@@ -231,7 +499,7 @@ class IndexTTS25Backend:
             "use_bf16": precision == "BF16",
             "use_cuda_kernel": False,
             "use_deepspeed": False,
-            "use_accel": False,
+            "use_accel": bool(use_accel),
             "use_torch_compile": False,
             "use_qwen_emo": True,
         }
@@ -344,6 +612,11 @@ def init_engine(
         version = str(resolved["engine_version"])
         model_dir = str(resolved["model_dir"])
         backend = _backend_for(version)
+        accel_report = None
+        if version == "2.5":
+            # This must precede ``infer_v2_5`` import: its import graph loads
+            # the GPT acceleration dependencies before the constructor runs.
+            accel_report = _prepare_v25_acceleration()
         IndexTTS2 = backend.load_class()
 
         cfg_path = resolve_model_config_path(version, model_dir)
@@ -369,14 +642,15 @@ def init_engine(
                 )
         precision = str(resolved["precision"])
         logger.info("Loading IndexTTS %s model (%s)...", version, precision)
-        # Keep the legacy constructor defaults intact for rollback.  The v2.5
-        # adapter below owns its separate conservative baseline and never
-        # inherits these optional acceleration flags.
+        # Keep the legacy constructor defaults intact for rollback.  v2.5 owns
+        # its production policy: Accel only when its runtime capability is ready;
+        # compile, CUDA kernel, and DeepSpeed remain intentionally disabled.
         if version == "2.5":
             common = backend.constructor_kwargs(
                 cfg_path=str(cfg_path),
                 model_dir=model_dir,
                 precision=precision,
+                use_accel=bool(accel_report and accel_report.get("available")),
             )
         else:
             common = backend.constructor_kwargs(
@@ -387,12 +661,51 @@ def init_engine(
                 use_deepspeed=use_deepspeed,
                 use_accel=use_accel,
             )
-        _tts = IndexTTS2(**common)
+        constructor_scope = (
+            _scoped_triton_cache_workaround()
+            if accel_report and accel_report.get("available")
+            else nullcontext()
+        )
+        try:
+            with constructor_scope:
+                constructed = IndexTTS2(**common)
+        except Exception:
+            if accel_report and accel_report.get("available"):
+                accel_report["reason"] = "accel_init_failed"
+                accel_report["fallback"] = False
+                _store_accel_status(accel_report)
+                logger.exception("IndexTTS 2.5 GPT acceleration initialization failed")
+            raise
+        if accel_report and accel_report.get("available"):
+            if not _v25_accel_is_active(constructed):
+                accel_report["reason"] = "accel_init_failed"
+                accel_report["fallback"] = False
+                _store_accel_status(accel_report)
+                raise RuntimeError(
+                    "accel_init_failed: IndexTTS 2.5 did not expose AccelInferenceEngine"
+                )
+            accel_report["active"] = True
+            accel_report["reason"] = "accel_active"
+            accel_report["fallback"] = False
+            _store_accel_status(accel_report)
+        _tts = constructed
         _ENGINE_PROFILE = dict(resolved)
         actual_device = getattr(_tts, "device", None)
         if actual_device is not None:
             _ENGINE_PROFILE["device"] = str(actual_device)
         _engine_capabilities()
+        if version == "2.5" and accel_report:
+            logger.info(
+                "IndexTTS 2.5 acceleration: requested=%s available=%s active=%s "
+                "fallback=%s flash_attn=%s triton=%s reason=%s",
+                accel_report.get("requested"),
+                accel_report.get("available"),
+                accel_report.get("active"),
+                accel_report.get("fallback"),
+                accel_report.get("flash_attn_version") or "unknown",
+                accel_report.get("triton_version") or "unknown",
+                accel_report.get("reason"),
+            )
         logger.info("Model loaded.")
 
 
@@ -663,7 +976,13 @@ def synthesize_segment(
                 infer_success = False
                 infer_error: BaseException | None = None
                 try:
-                    _tts.infer(**infer_kwargs, **generation_kwargs)
+                    infer_scope = (
+                        _scoped_triton_cache_workaround()
+                        if version == "2.5" and _ACCEL_STATUS.get("active")
+                        else nullcontext()
+                    )
+                    with infer_scope:
+                        _tts.infer(**infer_kwargs, **generation_kwargs)
                     infer_success = True
                 except EngineRuntimeFailure as exc:
                     infer_error = exc
@@ -924,13 +1243,23 @@ def reset_engine() -> None:
     the runtime lifecycle (process-level recycle happens via runtime restart
     and ownership takeover).
     """
-    global _tts, _ENGINE_PROFILE, _LAST_ADAPTER_REPORT
+    global _tts, _ENGINE_PROFILE, _LAST_ADAPTER_REPORT, _ACCEL_STATUS
     global _CAPABILITY_ENGINE_ID, _CAPABILITY_ENGINE_REF
     global _INFER_PARAM_NAMES, _INFER_HAS_VAR_KEYWORD
     with _ENGINE_LOCK:
         _tts = None
         _ENGINE_PROFILE = {}
         _LAST_ADAPTER_REPORT = {}
+        _ACCEL_STATUS = {
+            "requested": False,
+            "available": False,
+            "enabled": False,
+            "active": False,
+            "fallback": False,
+            "reason": "not_initialized",
+            "flash_attn_version": "",
+            "triton_version": "",
+        }
         _CAPABILITY_ENGINE_ID = None
         _CAPABILITY_ENGINE_REF = None
         _INFER_PARAM_NAMES = frozenset()
