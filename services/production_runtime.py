@@ -219,7 +219,27 @@ class ProductionRuntime:
         version = "2.5" if ("25" in raw or "2.5" in raw) else "2"
         target = resolve_profile({"engine_version": version})
         current = self._engine.snapshot()
-        if str(current.get("state") or "") == "ready" and profile_matches(current, target):
+        accel_matches = True
+        if target.get("engine_version") == "2.5":
+            try:
+                from lib import config as runtime_config
+                from lib import tts_engine
+
+                status_getter = getattr(tts_engine, "get_acceleration_status", None)
+                if callable(status_getter):
+                    status = status_getter()
+                    if isinstance(status, dict) and status.get("reason") != "emergency_disabled":
+                        accel_matches = bool(status.get("requested")) == runtime_config.get_bool(
+                            runtime_config.INDEXTTS25_GPT_ACCEL_CONFIG_KEY,
+                            True,
+                        )
+            except (ImportError, OSError, RuntimeError, TypeError, ValueError):
+                logger.debug("读取 IndexTTS 2.5 GPT 加速状态失败", exc_info=True)
+        if (
+            str(current.get("state") or "") == "ready"
+            and profile_matches(current, target)
+            and accel_matches
+        ):
             return True
         self._engine.recycle(target)
         return True

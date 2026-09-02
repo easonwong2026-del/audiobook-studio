@@ -13,6 +13,7 @@ def wire_settings_page(
         page["s_tts_engine"],
         page["s_legacy_model_dir"],
         page["s_indextts25_model_dir"],
+        page["s_indextts25_gpt_accel_enabled"],
     ]
     tts_outputs = [
         page["s_tts_status"],
@@ -35,6 +36,7 @@ def wire_settings_page(
         page["s_tts_engine"],
         page["s_legacy_model_dir"],
         page["s_indextts25_model_dir"],
+        page["s_indextts25_gpt_accel_enabled"],
     ):
         component.change(
             settings_handlers.refresh_tts_engine_ui,

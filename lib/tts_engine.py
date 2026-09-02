@@ -216,6 +216,11 @@ def _prepare_v25_acceleration() -> dict:
         report["fallback"] = True
         report["reason"] = "emergency_disabled"
         return _store_accel_status(report)
+    if not _cfg.get_bool(_cfg.INDEXTTS25_GPT_ACCEL_CONFIG_KEY, True):
+        report["requested"] = False
+        report["fallback"] = True
+        report["reason"] = "user_disabled"
+        return _store_accel_status(report)
     if not _is_windows():
         report["fallback"] = True
         report["reason"] = "unsupported_platform"

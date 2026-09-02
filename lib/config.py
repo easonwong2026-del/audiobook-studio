@@ -37,6 +37,7 @@ ENV_PYTHON = "AUDIOBOOK_STUDIO_PYTHON"
 ENV_FFMPEG = "AUDIOBOOK_STUDIO_FFMPEG"
 ENV_TTS_BACKEND = "AUDIOBOOK_STUDIO_TTS_BACKEND"
 ENV_TTS_VERSION = "AUDIOBOOK_STUDIO_TTS_VERSION"
+INDEXTTS25_GPT_ACCEL_CONFIG_KEY = "indextts25_gpt_accel_enabled"
 
 _DEFAULT_DATA_DIR = os.path.join(os.path.expanduser("~"), "AudiobookStudio")
 
@@ -70,6 +71,23 @@ def get_int(key: str, default: int = 0) -> int:
         return int(_read_config().get(key, default))
     except (TypeError, ValueError):
         return default
+
+
+def get_bool(key: str, default: bool = False) -> bool:
+    """读取配置中的布尔项，缺省或格式错误时安全回退到 default。"""
+    data = _read_config()
+    value = data.get(key, default) if isinstance(data, dict) else default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    return bool(default)
 
 
 def _data_dir_path() -> str:

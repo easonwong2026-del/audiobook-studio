@@ -80,6 +80,20 @@ def _first(*values: Any) -> Any:
     return next((value for value in values if value is not None and str(value).strip()), None)
 
 
+def _bool_value(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    return bool(default)
+
+
 def _normalize_engine(value: Any, default: str | None = None) -> str | None:
     raw = str(value or "").strip().lower().replace(" ", "").replace("-", "_")
     if ":" in raw:
@@ -210,6 +224,9 @@ def get_tts_engine_settings() -> dict[str, Any]:
         "engine": selected,
         "legacy_model_dir": legacy_dir,
         "indextts25_model_dir": engine_25_dir,
+        config.INDEXTTS25_GPT_ACCEL_CONFIG_KEY: _bool_value(
+            raw.get(config.INDEXTTS25_GPT_ACCEL_CONFIG_KEY), True
+        ),
     }
 
 
@@ -334,6 +351,7 @@ def _frozen_engine_message(tasks: list[Any] | None = None) -> str:
 def get_tts_engine_ui_state() -> dict[str, Any]:
     settings = get_tts_engine_settings()
     tasks = _active_tts_tasks()
+    accel_enabled = settings[config.INDEXTTS25_GPT_ACCEL_CONFIG_KEY]
     return {
         **settings,
         "legacy_ready": _model_ready(settings["legacy_model_dir"], "v2"),
@@ -342,6 +360,11 @@ def get_tts_engine_ui_state() -> dict[str, Any]:
         "indextts25_model_status": _ready_message(settings["indextts25_model_dir"], "v2.5"),
         "runtime_engine_message": _runtime_engine_message(),
         "frozen_engine_message": _frozen_engine_message(tasks),
+        "tts_status_message": (
+            "⚠ GPT 加速：配置：开启；实际：环境变量已强制关闭。"
+            if accel_enabled and os.environ.get("AUDIOBOOK_STUDIO_DISABLE_INDEXTTS25_ACCEL") == "1"
+            else ""
+        ),
     }
 
 
@@ -349,9 +372,11 @@ def _persist_tts_engine_settings(
     engine_id: str,
     legacy_model_dir: str,
     engine_25_model_dir: str,
+    indextts25_gpt_accel_enabled: bool = True,
 ) -> None:
     """Persist the UI choice while preserving unrelated config keys."""
     version = _version_for_engine(engine_id)
+    accel_enabled = _bool_value(indextts25_gpt_accel_enabled, True)
     profile = {
         "engine_backend": "indextts",
         "engine_version": version,
@@ -381,6 +406,7 @@ def _persist_tts_engine_settings(
         "model_dir_v25": engine_25_model_dir,
         "legacy_model_dir": legacy_model_dir,
         "indextts25_model_dir": engine_25_model_dir,
+        config.INDEXTTS25_GPT_ACCEL_CONFIG_KEY: accel_enabled,
         "tts_model_dirs": {
             TTS_ENGINE_LEGACY: legacy_model_dir,
             TTS_ENGINE_25: engine_25_model_dir,
@@ -445,9 +471,14 @@ def refresh_tts_engine_ui(
     _engine_id: str,
     legacy_model_dir: str,
     engine_25_model_dir: str,
+    indextts25_gpt_accel_enabled: bool = True,
 ) -> tuple[str, str, str, str, str]:
+    accel_enabled = _bool_value(indextts25_gpt_accel_enabled, True)
+    message = "已刷新模型目录与 runtime 状态。"
+    if accel_enabled and os.environ.get("AUDIOBOOK_STUDIO_DISABLE_INDEXTTS25_ACCEL") == "1":
+        message += "\n⚠ GPT 加速：配置：开启；实际：环境变量已强制关闭。"
     return _tts_output_values(
-        "已刷新模型目录与 runtime 状态。",
+        message,
         _clean_path(legacy_model_dir),
         _clean_path(engine_25_model_dir),
     )
@@ -457,11 +488,13 @@ def apply_tts_engine(
     engine_id: str,
     legacy_model_dir: str,
     engine_25_model_dir: str,
+    indextts25_gpt_accel_enabled: bool = True,
 ) -> tuple[str, str, str, str, str]:
     """Save the selected engine only when all TTS lanes are idle."""
     selected = _normalize_engine(engine_id)
     legacy_dir = _clean_path(legacy_model_dir)
     engine_25_dir = _clean_path(engine_25_model_dir)
+    accel_enabled = _bool_value(indextts25_gpt_accel_enabled, True)
     if not selected:
         return _tts_output_values("❌ 未知的 TTS 引擎，未保存设置。", legacy_dir, engine_25_dir)
 
@@ -489,7 +522,12 @@ def apply_tts_engine(
         )
 
     try:
-        _persist_tts_engine_settings(selected, legacy_dir, engine_25_dir)
+        _persist_tts_engine_settings(
+            selected,
+            legacy_dir,
+            engine_25_dir,
+            accel_enabled,
+        )
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         message = f"❌ TTS 引擎设置保存失败：{html.escape(str(exc))}"
     else:
@@ -501,7 +539,15 @@ def apply_tts_engine(
                 f"{html.escape(str(exc))}。请重启生产运行时后再试。"
             )
         else:
-            message = f"✅ 已应用 {TTS_ENGINE_LABELS[selected]}；{recycle_message}。"
+            accel_message = ""
+            if selected == TTS_ENGINE_25:
+                accel_label = (
+                    "配置：开启；实际：环境变量已强制关闭"
+                    if accel_enabled and os.environ.get("AUDIOBOOK_STUDIO_DISABLE_INDEXTTS25_ACCEL") == "1"
+                    else "已开启" if accel_enabled else "已关闭"
+                )
+                accel_message = f"；GPT 加速：{accel_label}"
+            message = f"✅ 已应用 {TTS_ENGINE_LABELS[selected]}{accel_message}；{recycle_message}。"
     return _tts_output_values(message, legacy_dir, engine_25_dir)
 
 

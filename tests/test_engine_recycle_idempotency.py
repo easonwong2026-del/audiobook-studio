@@ -25,7 +25,6 @@ IMPORTANT: fake engine tests prove flow correctness, NOT GPU/model
 correctness.  Real IndexTTS 2 / 2.5 validation requires a Windows RTX box.
 """
 from __future__ import annotations
-from lib import project_paths
 
 import json
 import os
@@ -36,6 +35,7 @@ from pathlib import Path
 
 import pytest
 
+from lib import project_paths, tts_engine
 from lib.tts_profile import resolve_profile
 from repositories.project_repo import ProjectRepository
 from repositories.task_repo import TaskRecord, TaskRepository
@@ -247,6 +247,42 @@ def test_request_recycle_same_profile_is_noop(tmp_path, monkeypatch):
     assert runtime._engine.state == "ready"
     assert runtime._engine.snapshot()["engine_generation"] == generation
     assert runtime._engine.snapshot()["recovery_count"] == recovery
+
+
+@pytest.mark.parametrize(("current_requested", "configured"), [(True, False), (False, True)])
+def test_request_recycle_when_v25_accel_setting_changes_once(
+    runtime_project, tmp_path, monkeypatch, current_requested, configured,
+):
+    from lib import config
+
+    profile = resolve_profile({"engine_version": "2.5"})
+    status = {
+        "requested": current_requested,
+        "reason": "accel_active" if current_requested else "user_disabled",
+    }
+    recycle_calls = []
+
+    monkeypatch.setattr(tts_engine, "get_acceleration_status", lambda: dict(status))
+    monkeypatch.setattr(config, "get_bool", lambda *_args, **_kwargs: configured)
+
+    def recycle(_target):
+        recycle_calls.append(True)
+        status["requested"] = configured
+        status["reason"] = "accel_active" if configured else "user_disabled"
+
+    runtime = ProductionRuntime(
+        owner_id="accel-recycle-test",
+        lock_path=str(tmp_path / "runtime.lock"),
+        status_path=str(tmp_path / "runtime_engine_status.json"),
+    )
+    runtime._engine = types.SimpleNamespace(
+        snapshot=lambda: {"state": "ready", **profile},
+        recycle=recycle,
+    )
+
+    assert runtime.request_engine_recycle("indextts25") is True
+    assert runtime.request_engine_recycle("indextts25") is True
+    assert recycle_calls == [True]
 
 
 # ── 1b. lifecycle.recycle(same profile) keeps FORCE-reload semantics ──────

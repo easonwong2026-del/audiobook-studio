@@ -81,10 +81,19 @@ def create_settings_page() -> dict:
                                 tts_state["indextts25_model_status"],
                                 elem_classes=["tts-model-status"],
                             )
+                    s_indextts25_gpt_accel_enabled = gr.Checkbox(
+                        label="IndexTTS 2.5 GPT 加速（实验性）",
+                        value=tts_state["indextts25_gpt_accel_enabled"],
+                        info=(
+                            "启用后使用 IndexTTS 2.5 GPT 加速推理，提高合成速度。\n"
+                            "如发现声音、语气或韵律异常，可关闭后进行音质对比。\n"
+                            "仅对 IndexTTS 2.5 生效。"
+                        ),
+                    )
                     with gr.Row():
                         s_tts_apply = gr.Button("应用 TTS 引擎", variant="primary")
                         s_tts_refresh = gr.Button("刷新状态")
-                    s_tts_status = gr.Markdown("")
+                    s_tts_status = gr.Markdown(tts_state.get("tts_status_message", ""))
                     s_tts_runtime_engine = gr.Markdown(
                         tts_state["runtime_engine_message"],
                         elem_classes=["tts-runtime-status"],
@@ -155,6 +164,7 @@ def create_settings_page() -> dict:
         "s_indextts25_model_dir": s_indextts25_model_dir,
         "s_legacy_model_status": s_legacy_model_status,
         "s_indextts25_model_status": s_indextts25_model_status,
+        "s_indextts25_gpt_accel_enabled": s_indextts25_gpt_accel_enabled,
         "s_tts_apply": s_tts_apply,
         "s_tts_refresh": s_tts_refresh,
         "s_tts_status": s_tts_status,
