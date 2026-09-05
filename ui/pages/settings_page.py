@@ -81,15 +81,40 @@ def create_settings_page() -> dict:
                                 tts_state["indextts25_model_status"],
                                 elem_classes=["tts-model-status"],
                             )
-                    s_indextts25_gpt_accel_enabled = gr.Checkbox(
-                        label="IndexTTS 2.5 GPT 加速（实验性）",
-                        value=tts_state["indextts25_gpt_accel_enabled"],
-                        info=(
-                            "启用后使用 IndexTTS 2.5 GPT 加速推理，提高合成速度。\n"
-                            "如发现声音、语气或韵律异常，可关闭后进行音质对比。\n"
-                            "仅对 IndexTTS 2.5 生效。"
-                        ),
-                    )
+                    with gr.Row(equal_height=False):
+                        with gr.Column(scale=1):
+                            gr.Markdown("##### TTS2 性能设置")
+                            s_tts2_cuda_kernel = gr.Checkbox(
+                                label="CUDA Kernel",
+                                value=tts_state["tts2_performance"]["cuda_kernel"],
+                                info="沿用当前 TTS2 CUDA Kernel 路径。",
+                            )
+                            s_tts2_gpt_accel = gr.Checkbox(
+                                label="GPT Accel",
+                                value=tts_state["tts2_performance"]["gpt_accel"],
+                                info="使用 IndexTTS2 GPT 加速；依赖不可用时安全回退。",
+                            )
+                            s_tts2_s2mel_compile = gr.Checkbox(
+                                label="s2mel torch.compile",
+                                value=tts_state["tts2_performance"]["s2mel_compile"],
+                                info="使用 upstream 的 s2mel compile；依赖不可用时安全回退。",
+                            )
+                            s_tts2_conditioning_cache = gr.Checkbox(
+                                label="多音色 Conditioning Cache",
+                                value=tts_state["tts2_performance"]["conditioning_cache"],
+                                info="缓存最多 4 组参考音频 conditioning，仅对 TTS2 生效。",
+                            )
+                        with gr.Column(scale=1):
+                            gr.Markdown("##### TTS2.5 性能设置")
+                            s_indextts25_gpt_accel_enabled = gr.Checkbox(
+                                label="GPT Accel",
+                                value=tts_state["tts25_performance"]["gpt_accel"],
+                                info=(
+                                    "沿用当前 TTS2.5 GPT 加速 capability / overlay 路径；"
+                                    "依赖不可用时安全回退。"
+                                ),
+                            )
+                    gr.Markdown("性能开关会立即保存；引擎初始化参数在空闲时重载，合成中修改将在当前任务结束后生效。")
                     with gr.Row():
                         s_tts_apply = gr.Button("应用 TTS 引擎", variant="primary")
                         s_tts_refresh = gr.Button("刷新状态")
@@ -165,6 +190,10 @@ def create_settings_page() -> dict:
         "s_legacy_model_status": s_legacy_model_status,
         "s_indextts25_model_status": s_indextts25_model_status,
         "s_indextts25_gpt_accel_enabled": s_indextts25_gpt_accel_enabled,
+        "s_tts2_cuda_kernel": s_tts2_cuda_kernel,
+        "s_tts2_gpt_accel": s_tts2_gpt_accel,
+        "s_tts2_s2mel_compile": s_tts2_s2mel_compile,
+        "s_tts2_conditioning_cache": s_tts2_conditioning_cache,
         "s_tts_apply": s_tts_apply,
         "s_tts_refresh": s_tts_refresh,
         "s_tts_status": s_tts_status,

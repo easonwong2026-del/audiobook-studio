@@ -14,6 +14,10 @@ def wire_settings_page(
         page["s_legacy_model_dir"],
         page["s_indextts25_model_dir"],
         page["s_indextts25_gpt_accel_enabled"],
+        page["s_tts2_cuda_kernel"],
+        page["s_tts2_gpt_accel"],
+        page["s_tts2_s2mel_compile"],
+        page["s_tts2_conditioning_cache"],
     ]
     tts_outputs = [
         page["s_tts_status"],
@@ -36,13 +40,29 @@ def wire_settings_page(
         page["s_tts_engine"],
         page["s_legacy_model_dir"],
         page["s_indextts25_model_dir"],
-        page["s_indextts25_gpt_accel_enabled"],
     ):
         component.change(
             settings_handlers.refresh_tts_engine_ui,
             tts_inputs,
             tts_outputs,
         )
+    tts2_performance_inputs = [
+        page["s_tts2_cuda_kernel"],
+        page["s_tts2_gpt_accel"],
+        page["s_tts2_s2mel_compile"],
+        page["s_tts2_conditioning_cache"],
+    ]
+    for component in tts2_performance_inputs:
+        component.change(
+            settings_handlers.apply_tts2_performance_settings,
+            tts2_performance_inputs,
+            tts_outputs,
+        )
+    page["s_indextts25_gpt_accel_enabled"].change(
+        settings_handlers.apply_tts25_performance_settings,
+        [page["s_indextts25_gpt_accel_enabled"]],
+        tts_outputs,
+    )
     data_dir_chain = page["s_data_apply"].click(
         settings_handlers.apply_data_dir,
         [page["s_data_dir"], session] if session is not None else [page["s_data_dir"]],

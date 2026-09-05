@@ -24,6 +24,8 @@ import os
 import re
 import threading
 import time
+from copy import deepcopy
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
 
@@ -93,6 +95,9 @@ def _empty_runtime_engine_status() -> dict[str, Any]:
         "precision": "",
         "device": "",
         "cache_identity": "",
+        "performance": {},
+        "effective_performance": {},
+        "performance_status": {},
     }
 
 
@@ -233,6 +238,21 @@ def read_runtime_engine_status() -> dict[str, Any]:
             "precision": str(data.get("precision") or "") if live else "",
             "device": str(data.get("device") or "") if live else "",
             "cache_identity": str(data.get("cache_identity") or "") if live else "",
+            "performance": (
+                deepcopy(dict(data.get("performance")))
+                if live and isinstance(data.get("performance"), Mapping)
+                else {}
+            ),
+            "effective_performance": (
+                deepcopy(dict(data.get("effective_performance")))
+                if live and isinstance(data.get("effective_performance"), Mapping)
+                else {}
+            ),
+            "performance_status": (
+                deepcopy(dict(data.get("performance_status")))
+                if live and isinstance(data.get("performance_status"), Mapping)
+                else {}
+            ),
         }
         return status
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
@@ -310,6 +330,13 @@ class RuntimeEngineLifecycle:
                 "precision": self._engine_profile.get("precision", ""),
                 "device": self._engine_profile.get("device", ""),
                 "cache_identity": self._engine_profile.get("cache_identity", ""),
+                "performance": deepcopy(self._engine_profile.get("performance") or {}),
+                "effective_performance": deepcopy(
+                    self._engine_profile.get("effective_performance") or {}
+                ),
+                "performance_status": deepcopy(
+                    self._engine_profile.get("performance_status") or {}
+                ),
             }
 
     def reset(self) -> None:
@@ -639,6 +666,13 @@ class RuntimeEngineLifecycle:
                 "precision": self._engine_profile.get("precision", ""),
                 "device": self._engine_profile.get("device", ""),
                 "cache_identity": self._engine_profile.get("cache_identity", ""),
+                "performance": deepcopy(self._engine_profile.get("performance") or {}),
+                "effective_performance": deepcopy(
+                    self._engine_profile.get("effective_performance") or {}
+                ),
+                "performance_status": deepcopy(
+                    self._engine_profile.get("performance_status") or {}
+                ),
             })
         except Exception:  # pylint: disable=broad-except
             # A status snapshot is best-effort; engine work must not depend
