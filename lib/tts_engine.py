@@ -498,13 +498,18 @@ def _constructor_kwargs_for(cls: object, kwargs: Mapping[str, object]) -> dict[s
 def _optional_capability_error(exc: BaseException, field: str) -> bool:
     message = str(exc).lower()
     tokens = {
-        "gpt_accel": ("accel", "flash_attn", "cuda", "triton"),
+        "gpt_accel": ("accel", "flash_attn", "flash-attention"),
         "s2mel_compile": ("compile", "inductor", "triton"),
         "cuda_kernel": ("cuda", "kernel", "activation"),
     }.get(field, ())
-    return isinstance(exc, (ImportError, ModuleNotFoundError, AttributeError, RuntimeError, OSError)) and any(
-        token in message for token in tokens
-    )
+    if not isinstance(
+        exc,
+        (ImportError, ModuleNotFoundError, AttributeError, RuntimeError, OSError),
+    ):
+        return False
+    if any(marker in message for marker in ("out of memory", "out_of_memory", "oom")):
+        return False
+    return any(token in message for token in tokens)
 
 
 def _generic_accel_is_active(engine: object) -> bool:
@@ -585,11 +590,17 @@ def _prepare_conditioning_cache(
     key: tuple[str, str],
 ) -> bool:
     """Restore a hit or force upstream to recompute a miss."""
-    bundle = _CONDITIONING_CACHE.pop(key, None)
+    bundle = _CONDITIONING_CACHE.get(key)
     if bundle is not None and _restore_conditioning_bundle(engine, bundle):
-        _CONDITIONING_CACHE[key] = bundle
+        _CONDITIONING_CACHE.move_to_end(key)
         logger.debug("TTS2 conditioning cache hit")
         return True
+    if bundle is not None:
+        _CONDITIONING_CACHE.pop(key, None)
+    if len(_CONDITIONING_CACHE) >= CONDITIONING_CACHE_MAXSIZE:
+        # Evict before upstream allocates the next bundle.  This bounds the
+        # number of old GPU bundles held by the Studio-owned LRU at max-1.
+        _CONDITIONING_CACHE.popitem(last=False)
     _invalidate_upstream_conditioning(engine)
     logger.debug("TTS2 conditioning cache miss")
     return False
@@ -1022,13 +1033,13 @@ def init_engine(
             if accel_report and accel_report.get("available")
             else nullcontext()
         )
+        fallback_common = dict(common)
+        fallback_fields: list[str] = []
         try:
             with constructor_scope:
                 constructed = IndexTTS2(**common)
         except Exception as exc:
             if version == "2":
-                fallback_common = dict(common)
-                fallback_fields: list[str] = []
                 for field, constructor_field in (
                     ("gpt_accel", "use_accel"),
                     ("s2mel_compile", "use_torch_compile"),
@@ -1038,23 +1049,21 @@ def init_engine(
                         and bool(common.get(constructor_field))
                         and _optional_capability_error(exc, field)
                     ):
-                        fallback_common[constructor_field] = False
                         fallback_fields.append(field)
                 if fallback_fields:
+                    for field, constructor_field in (
+                        ("gpt_accel", "use_accel"),
+                        ("s2mel_compile", "use_torch_compile"),
+                    ):
+                        if field in fallback_fields:
+                            fallback_common[constructor_field] = False
+                    failure_message = str(exc)
                     logger.warning(
                         "IndexTTS 2 optional capability unavailable; "
                         "falling back to baseline fields=%s error=%s",
                         ",".join(fallback_fields),
-                        str(exc),
+                        failure_message,
                     )
-                    with nullcontext():
-                        constructed = IndexTTS2(**fallback_common)
-                    for field in fallback_fields:
-                        v2_status[field] = _performance_status(
-                            True, False, "init_failed"
-                        )
-                        v2_constructor_values[field] = False
-                    common = fallback_common
                 else:
                     raise
             else:
@@ -1064,6 +1073,18 @@ def init_engine(
                     _store_accel_status(accel_report)
                     logger.exception("IndexTTS 2.5 GPT acceleration initialization failed")
                 raise
+        if fallback_fields:
+            # The exception handler has exited, so its traceback no longer
+            # retains the failed constructor frame before cleanup/retry.
+            gc.collect()
+            reset_engine()
+            constructed = IndexTTS2(**fallback_common)
+            for field in fallback_fields:
+                v2_status[field] = _performance_status(
+                    True, False, "init_failed"
+                )
+                v2_constructor_values[field] = False
+            common = fallback_common
         if accel_report and accel_report.get("available"):
             if not _v25_accel_is_active(constructed):
                 accel_report["reason"] = "accel_init_failed"
@@ -1312,7 +1333,6 @@ def synthesize_segment(
     output_path: str = "",
     max_tokens: int = 120,
     pinyin_hints: dict | None = None,
-    emo_audio_prompt: str | None = None,
     # num_beams 控制 GPT beam search 宽度（默认 2=质量/速度平衡）。
     # 3=质量优先但更慢；1=最快但需听测质量；2=默认折中，用户仍可显式传值覆盖。
     num_beams: int = 2,
@@ -1320,6 +1340,8 @@ def synthesize_segment(
     trace_segment_id: str | None = None,
     trace_chapter_id: str | None = None,
     trace_part_index: int | str | None = None,
+    *,
+    emo_audio_prompt: str | None = None,
 ) -> str:
     # 引擎互斥（RLock）：保证合成与模型加载串行化；OOM 递归调用自身时同一线程
     # 可重入，不会死锁。调用方无需再加锁。

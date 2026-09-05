@@ -226,6 +226,102 @@ def test_profile_flags_reach_the_native_tts2_constructor(monkeypatch, tmp_path):
     tts_engine.reset_engine()
 
 
+def test_tts2_optional_constructor_fallback_cleans_before_one_baseline_retry(
+    monkeypatch, tmp_path
+):
+    events = []
+
+    class FakeNative:
+        def __init__(self, **kwargs):
+            use_compile = bool(kwargs["use_torch_compile"])
+            events.append(("construct", use_compile))
+            if use_compile:
+                raise RuntimeError("torch.compile triton initialization failed")
+            self.device = "cpu"
+            self.use_cuda_kernel = False
+            self.use_torch_compile = False
+            self.gpt = types.SimpleNamespace()
+            self.s2mel = types.SimpleNamespace()
+
+        def infer(self, **_kwargs):
+            return None
+
+    model_dir = tmp_path / "v2"
+    model_dir.mkdir()
+    (model_dir / "config.yaml").write_text("version: 2\n", encoding="utf-8")
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        types.SimpleNamespace(
+            cuda=types.SimpleNamespace(
+                is_available=lambda: True,
+                empty_cache=lambda: None,
+            ),
+            compile=lambda *_args, **_kwargs: None,
+        ),
+    )
+    monkeypatch.setattr(
+        tts_engine,
+        "_prepare_v2_performance",
+        lambda requested, _torch: (
+            {field: bool(value) for field, value in requested.items()},
+            {
+                field: tts_engine._pending_performance_status(bool(value))
+                for field, value in requested.items()
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        tts_engine.IndexTTS2Backend,
+        "load_class",
+        staticmethod(lambda: FakeNative),
+    )
+    real_reset_engine = tts_engine.reset_engine
+    monkeypatch.setattr(tts_engine, "reset_engine", lambda: events.append("cleanup"))
+    monkeypatch.setattr(tts_engine.gc, "collect", lambda: events.append("gc"))
+
+    try:
+        tts_engine.init_engine(profile=resolve_profile({
+            "engine_version": "2",
+            "model_dir": str(model_dir),
+            "performance": {
+                "cuda_kernel": False,
+                "gpt_accel": False,
+                "s2mel_compile": True,
+                "conditioning_cache": False,
+            },
+        }))
+
+        assert events == [
+            ("construct", True),
+            "gc",
+            "cleanup",
+            ("construct", False),
+        ]
+        profile = tts_engine.get_engine_profile()
+        assert profile["effective_performance"]["s2mel_compile"] is False
+        assert profile["performance_status"]["s2mel_compile"] == {
+            "requested": True,
+            "effective": False,
+            "state": "unavailable",
+            "reason": "init_failed",
+        }
+    finally:
+        real_reset_engine()
+
+
+def test_legacy_positional_num_beams_slot_is_preserved(monkeypatch):
+    engine = _FakeConditioningEngine()
+    _install_conditioning_engine(monkeypatch, engine)
+    monkeypatch.setattr(tts_engine, "_CONDITIONING_CACHE_ENABLED", False)
+
+    tts_engine.synthesize_segment(
+        "text", "speaker.wav", "neutral", 1.0, 1.0, "out.wav", 120, None, 5
+    )
+
+    assert engine.last_generation_kwargs["num_beams"] == 5
+
+
 class _FakeConditioningEngine:
     def __init__(self):
         self.cache_spk_cond = None
@@ -237,6 +333,8 @@ class _FakeConditioningEngine:
         self.cache_mel = None
         self.speaker_computes = 0
         self.emotion_computes = 0
+        self.cache_sizes_at_infer = []
+        self.last_generation_kwargs = {}
 
     def infer(
         self,
@@ -252,6 +350,8 @@ class _FakeConditioningEngine:
     ):
         del text, output_path, use_emo_text, emo_text, emo_alpha
         del max_text_tokens_per_segment
+        self.cache_sizes_at_infer.append(len(tts_engine._CONDITIONING_CACHE))
+        self.last_generation_kwargs = dict(_kwargs)
         emotion_ref = emo_audio_prompt or spk_audio_prompt
         if self.cache_spk_cond is None or self.cache_spk_audio_prompt != spk_audio_prompt:
             self.speaker_computes += 1
@@ -325,6 +425,24 @@ def test_conditioning_cache_hits_lru_and_file_identity(monkeypatch, tmp_path):
     computes = engine.speaker_computes
     tts_engine.synthesize_segment("text", str(speaker_a), output_path="out.wav")
     assert engine.speaker_computes == computes + 1
+
+
+def test_conditioning_cache_evicts_before_fifth_infer(monkeypatch, tmp_path):
+    engine = _FakeConditioningEngine()
+    _install_conditioning_engine(monkeypatch, engine)
+
+    for index in range(tts_engine.CONDITIONING_CACHE_MAXSIZE):
+        speaker = tmp_path / f"speaker-{index}.wav"
+        speaker.write_bytes(str(index).encode())
+        tts_engine.synthesize_segment("text", str(speaker), output_path="out.wav")
+
+    assert len(tts_engine._CONDITIONING_CACHE) == tts_engine.CONDITIONING_CACHE_MAXSIZE
+    fifth = tmp_path / "speaker-4.wav"
+    fifth.write_bytes(b"4")
+    tts_engine.synthesize_segment("text", str(fifth), output_path="out.wav")
+
+    assert engine.cache_sizes_at_infer[-1] == tts_engine.CONDITIONING_CACHE_MAXSIZE - 1
+    assert len(tts_engine._CONDITIONING_CACHE) == tts_engine.CONDITIONING_CACHE_MAXSIZE
 
 
 def test_conditioning_cache_separates_emotion_reference_and_clears(monkeypatch, tmp_path):

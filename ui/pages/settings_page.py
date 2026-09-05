@@ -92,7 +92,10 @@ def create_settings_page() -> dict:
                             s_tts2_gpt_accel = gr.Checkbox(
                                 label="GPT Accel",
                                 value=tts_state["tts2_performance"]["gpt_accel"],
-                                info="使用 IndexTTS2 GPT 加速；依赖不可用时安全回退。",
+                                info=(
+                                    "使用 IndexTTS2 实验性 GPT 加速路径；可能改变生成实现，"
+                                    "建议开启后进行音质试听确认。依赖不可用时安全回退。"
+                                ),
                             )
                             s_tts2_s2mel_compile = gr.Checkbox(
                                 label="s2mel torch.compile",
