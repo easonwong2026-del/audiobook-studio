@@ -20,6 +20,8 @@ import json
 import logging
 import os
 import shutil
+from copy import deepcopy
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from repositories.config_repo import ConfigRepository
@@ -37,6 +39,25 @@ ENV_PYTHON = "AUDIOBOOK_STUDIO_PYTHON"
 ENV_FFMPEG = "AUDIOBOOK_STUDIO_FFMPEG"
 ENV_TTS_BACKEND = "AUDIOBOOK_STUDIO_TTS_BACKEND"
 ENV_TTS_VERSION = "AUDIOBOOK_STUDIO_TTS_VERSION"
+INDEXTTS25_GPT_ACCEL_CONFIG_KEY = "indextts25_gpt_accel_enabled"
+TTS_PERFORMANCE_CONFIG_KEY = "tts_performance"
+TTS2_PERFORMANCE_KEY = "tts2"
+TTS25_PERFORMANCE_KEY = "tts25"
+
+# These values mirror the production arguments used by main before the
+# settings existed.  Keep the two lanes separate: a v2 change must never
+# silently rewrite the v2.5 policy (whose GPT accel default is enabled).
+TTS_PERFORMANCE_DEFAULTS = {
+    TTS2_PERFORMANCE_KEY: {
+        "cuda_kernel": True,
+        "gpt_accel": False,
+        "s2mel_compile": False,
+        "conditioning_cache": False,
+    },
+    TTS25_PERFORMANCE_KEY: {
+        "gpt_accel": True,
+    },
+}
 
 _DEFAULT_DATA_DIR = os.path.join(os.path.expanduser("~"), "AudiobookStudio")
 
@@ -70,6 +91,123 @@ def get_int(key: str, default: int = 0) -> int:
         return int(_read_config().get(key, default))
     except (TypeError, ValueError):
         return default
+
+
+def get_bool(key: str, default: bool = False) -> bool:
+    """读取配置中的布尔项，缺省或格式错误时安全回退到 default。"""
+    data = _read_config()
+    value = data.get(key, default) if isinstance(data, dict) else default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    return bool(default)
+
+
+def _bool_value(value, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    return bool(default)
+
+
+def _performance_lane(version: str) -> str:
+    raw = str(version or "").strip().lower().replace("_", ".").replace("-", ".")
+    return TTS25_PERFORMANCE_KEY if raw in {"25", "2.5", "v25", "v2.5", "tts25"} else TTS2_PERFORMANCE_KEY
+
+
+def get_tts_performance(version: str | None = None, *, data: Mapping | None = None) -> dict:
+    """Return normalized, version-isolated TTS performance settings.
+
+    ``data`` is injectable for UI/tests; omitting it reads the existing
+    ``config.json`` through the normal config facade.  The old flat v2.5 key
+    is read only as a migration fallback for the preceding release.
+    """
+    source = data if isinstance(data, Mapping) else _read_config()
+    stored = source.get(TTS_PERFORMANCE_CONFIG_KEY)
+    result = deepcopy(TTS_PERFORMANCE_DEFAULTS)
+    for lane, defaults in TTS_PERFORMANCE_DEFAULTS.items():
+        lane_data = stored.get(lane) if isinstance(stored, Mapping) else None
+        for field, default in defaults.items():
+            if isinstance(lane_data, Mapping) and field in lane_data:
+                result[lane][field] = _bool_value(lane_data[field], default)
+            elif (
+                lane == TTS25_PERFORMANCE_KEY
+                and field == "gpt_accel"
+                and INDEXTTS25_GPT_ACCEL_CONFIG_KEY in source
+            ):
+                result[lane][field] = _bool_value(
+                    source[INDEXTTS25_GPT_ACCEL_CONFIG_KEY], default
+                )
+            elif (
+                data is None
+                and lane == TTS25_PERFORMANCE_KEY
+                and field == "gpt_accel"
+            ):
+                # Keep the old get_bool seam usable by existing callers/tests
+                # while the nested schema remains the source of truth.
+                result[lane][field] = get_bool(
+                    INDEXTTS25_GPT_ACCEL_CONFIG_KEY, default
+                )
+    if version is None:
+        return result
+    return dict(result[_performance_lane(version)])
+
+
+def normalize_tts_performance(
+    version: str,
+    value: Mapping | None,
+    *,
+    data: Mapping | None = None,
+) -> dict:
+    """Normalize one explicit profile lane over its current/default values."""
+    normalized = get_tts_performance(version, data=data)
+    if not isinstance(value, Mapping):
+        return normalized
+    for field, default in normalized.items():
+        if field in value:
+            normalized[field] = _bool_value(value[field], default)
+    return normalized
+
+
+def merge_tts_performance(data: Mapping | None, updates: Mapping | None) -> dict:
+    """Merge known performance fields without dropping other config keys."""
+    merged = deepcopy(dict(data)) if isinstance(data, Mapping) else {}
+    current = get_tts_performance(data=merged)
+    stored = merged.get(TTS_PERFORMANCE_CONFIG_KEY)
+    container = deepcopy(dict(stored)) if isinstance(stored, Mapping) else {}
+    updates = updates if isinstance(updates, Mapping) else {}
+    for lane, defaults in TTS_PERFORMANCE_DEFAULTS.items():
+        lane_data = container.get(lane)
+        lane_data = deepcopy(dict(lane_data)) if isinstance(lane_data, Mapping) else {}
+        for field, default in defaults.items():
+            lane_data.setdefault(field, current[lane].get(field, default))
+        lane_update = updates.get(lane)
+        if isinstance(lane_update, Mapping):
+            for field, default in defaults.items():
+                if field in lane_update:
+                    lane_data[field] = _bool_value(lane_update[field], default)
+        container[lane] = lane_data
+    merged[TTS_PERFORMANCE_CONFIG_KEY] = container
+    # Compatibility for the immediately preceding local setting.  New reads
+    # prefer the nested lane, so this is an alias rather than shared state.
+    merged[INDEXTTS25_GPT_ACCEL_CONFIG_KEY] = bool(
+        container[TTS25_PERFORMANCE_KEY]["gpt_accel"]
+    )
+    return merged
 
 
 def _data_dir_path() -> str:

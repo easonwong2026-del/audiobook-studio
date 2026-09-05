@@ -1104,6 +1104,9 @@ class ProductionJobService:
             "precision": status.get("precision", ""),
             "device": status.get("device", ""),
             "cache_identity": status.get("cache_identity", ""),
+            "performance": status.get("performance", {}),
+            "effective_performance": status.get("effective_performance", {}),
+            "performance_status": status.get("performance_status", {}),
             # This is deliberately separate from the runtime-owned fields
             # above.  A client may show the configured default while the
             # actual runtime remains old/stale; it must never overwrite the
@@ -1121,6 +1124,9 @@ class ProductionJobService:
                 "precision": status.get("precision", ""),
                 "device": status.get("device", ""),
                 "cache_identity": status.get("cache_identity", ""),
+                "performance": status.get("performance", {}),
+                "effective_performance": status.get("effective_performance", {}),
+                "performance_status": status.get("performance_status", {}),
             },
             "task_engine": (
                 public_profile(active_task["engine_snapshot"])

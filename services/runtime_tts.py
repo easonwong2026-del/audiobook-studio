@@ -190,6 +190,8 @@ def _runtime_current_profile() -> dict[str, Any] | None:
         "model_identity": str(status.get("model_identity") or ""),
         "precision": str(status.get("precision") or ""),
         "device": str(status.get("device") or ""),
+        "performance": dict(status.get("performance") or {})
+        if isinstance(status.get("performance"), dict) else {},
     }
 
 

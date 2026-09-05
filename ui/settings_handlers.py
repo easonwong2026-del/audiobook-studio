@@ -35,6 +35,14 @@ TTS_ENGINE_CHOICES = [
     (TTS_ENGINE_LABELS[TTS_ENGINE_25], TTS_ENGINE_25),
 ]
 
+TTS2_PERFORMANCE_LABELS = {
+    "cuda_kernel": "CUDA Kernel",
+    "gpt_accel": "GPT Accel",
+    "s2mel_compile": "s2mel torch.compile",
+    "conditioning_cache": "多音色 Conditioning Cache",
+}
+TTS25_PERFORMANCE_LABELS = {"gpt_accel": "GPT Accel"}
+
 _ENGINE_ALIASES = {
     TTS_ENGINE_LEGACY: {
         "legacy", "indextts2", "indextts2legacy", "v2", "2", "2.0",
@@ -78,6 +86,20 @@ def apply_prewarm_setting(enabled: bool) -> str:
 
 def _first(*values: Any) -> Any:
     return next((value for value in values if value is not None and str(value).strip()), None)
+
+
+def _bool_value(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    return bool(default)
 
 
 def _normalize_engine(value: Any, default: str | None = None) -> str | None:
@@ -206,10 +228,16 @@ def get_tts_engine_settings() -> dict[str, Any]:
         resolved_v25,
         os.path.join(os.path.dirname(legacy_dir), "checkpoints-v2.5") if legacy_dir else None,
     ))
+    performance = config.get_tts_performance(data=raw)
     return {
         "engine": selected,
         "legacy_model_dir": legacy_dir,
         "indextts25_model_dir": engine_25_dir,
+        "tts2_performance": performance[config.TTS2_PERFORMANCE_KEY],
+        "tts25_performance": performance[config.TTS25_PERFORMANCE_KEY],
+        config.INDEXTTS25_GPT_ACCEL_CONFIG_KEY: _bool_value(
+            performance[config.TTS25_PERFORMANCE_KEY]["gpt_accel"], True
+        ),
     }
 
 
@@ -342,16 +370,97 @@ def get_tts_engine_ui_state() -> dict[str, Any]:
         "indextts25_model_status": _ready_message(settings["indextts25_model_dir"], "v2.5"),
         "runtime_engine_message": _runtime_engine_message(),
         "frozen_engine_message": _frozen_engine_message(tasks),
+        "tts_status_message": _performance_status_message(settings, tasks),
     }
+
+
+def _performance_from_values(
+    indextts25_gpt_accel_enabled: Any,
+    tts2_cuda_kernel: Any,
+    tts2_gpt_accel: Any,
+    tts2_s2mel_compile: Any,
+    tts2_conditioning_cache: Any,
+) -> dict[str, dict[str, bool]]:
+    return {
+        config.TTS2_PERFORMANCE_KEY: {
+            "cuda_kernel": _bool_value(tts2_cuda_kernel, True),
+            "gpt_accel": _bool_value(tts2_gpt_accel, False),
+            "s2mel_compile": _bool_value(tts2_s2mel_compile, False),
+            "conditioning_cache": _bool_value(tts2_conditioning_cache, False),
+        },
+        config.TTS25_PERFORMANCE_KEY: {
+            "gpt_accel": _bool_value(indextts25_gpt_accel_enabled, True),
+        },
+    }
+
+
+def _performance_changed(
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+) -> bool:
+    return any(
+        dict(left.get(lane) or {}) != dict(right.get(lane) or {})
+        for lane in (config.TTS2_PERFORMANCE_KEY, config.TTS25_PERFORMANCE_KEY)
+    )
+
+
+def _performance_status_message(
+    settings: Mapping[str, Any],
+    tasks: list[Any] | None = None,
+) -> str:
+    selected = str(settings.get("engine") or TTS_ENGINE_25)
+    requested = {
+        config.TTS2_PERFORMANCE_KEY: dict(settings.get("tts2_performance") or {}),
+        config.TTS25_PERFORMANCE_KEY: dict(settings.get("tts25_performance") or {}),
+    }
+    runtime = None
+    for snapshot in _runtime_snapshots():
+        runtime_engine = _engine_from_version(snapshot.get("engine_version"))
+        runtime_engine = runtime_engine or _normalize_engine(
+            _first(snapshot.get("engine_identity"), snapshot.get("engine"))
+        )
+        if runtime_engine == selected:
+            runtime = snapshot
+            break
+    if runtime is not None and str(runtime.get("engine_state") or runtime.get("state")) == "ready":
+        runtime_requested = runtime.get("performance")
+        if isinstance(runtime_requested, Mapping):
+            lane = config.TTS25_PERFORMANCE_KEY if selected == TTS_ENGINE_25 else config.TTS2_PERFORMANCE_KEY
+            if dict(runtime_requested.get(lane) or runtime_requested) == requested[lane]:
+                unavailable = []
+                status = runtime.get("performance_status")
+                if isinstance(status, Mapping):
+                    labels = TTS2_PERFORMANCE_LABELS | TTS25_PERFORMANCE_LABELS
+                    for field, item in status.items():
+                        if isinstance(item, Mapping) and item.get("state") == "unavailable":
+                            unavailable.append(labels.get(field, field))
+                if unavailable:
+                    return "状态：当前环境不可用，已安全回退 baseline（" + "、".join(unavailable) + "）"
+                message = "状态：已生效"
+                if (
+                    selected == TTS_ENGINE_25
+                    and requested[config.TTS25_PERFORMANCE_KEY].get("gpt_accel")
+                    and os.environ.get("AUDIOBOOK_STUDIO_DISABLE_INDEXTTS25_ACCEL") == "1"
+                ):
+                    return message + "；GPT Accel 实际被环境变量关闭"
+                return message
+    active = tasks if tasks is not None else _active_tts_tasks()
+    if active:
+        return "状态：已保存，将在当前任务结束后生效"
+    return "状态：已保存，将在下一次 runtime 初始化/切换时生效"
 
 
 def _persist_tts_engine_settings(
     engine_id: str,
     legacy_model_dir: str,
     engine_25_model_dir: str,
+    indextts25_gpt_accel_enabled: bool = True,
+    *,
+    performance: Mapping[str, Any] | None = None,
 ) -> None:
     """Persist the UI choice while preserving unrelated config keys."""
     version = _version_for_engine(engine_id)
+    accel_enabled = _bool_value(indextts25_gpt_accel_enabled, True)
     profile = {
         "engine_backend": "indextts",
         "engine_version": version,
@@ -372,6 +481,11 @@ def _persist_tts_engine_settings(
             break
 
     data = _read_raw_config()
+    performance_updates = performance if isinstance(performance, Mapping) else {
+        config.TTS25_PERFORMANCE_KEY: {"gpt_accel": accel_enabled},
+    }
+    data = config.merge_tts_performance(data, performance_updates)
+    saved_performance = config.get_tts_performance(data=data)
     data.update({
         "tts_engine": engine_id,
         "engine_backend": "indextts",
@@ -381,12 +495,44 @@ def _persist_tts_engine_settings(
         "model_dir_v25": engine_25_model_dir,
         "legacy_model_dir": legacy_model_dir,
         "indextts25_model_dir": engine_25_model_dir,
+        config.INDEXTTS25_GPT_ACCEL_CONFIG_KEY: saved_performance[
+            config.TTS25_PERFORMANCE_KEY
+        ]["gpt_accel"],
         "tts_model_dirs": {
             TTS_ENGINE_LEGACY: legacy_model_dir,
             TTS_ENGINE_25: engine_25_model_dir,
         },
     })
     atomic_write(_config_path(), data)
+
+
+def _persist_with_performance(
+    engine_id: str,
+    legacy_model_dir: str,
+    engine_25_model_dir: str,
+    performance: Mapping[str, Any],
+) -> None:
+    """Call the private persistence seam while retaining old test/caller arity."""
+    accel_enabled = bool(
+        (performance.get(config.TTS25_PERFORMANCE_KEY) or {}).get("gpt_accel", True)
+    )
+    try:
+        _persist_tts_engine_settings(
+            engine_id,
+            legacy_model_dir,
+            engine_25_model_dir,
+            accel_enabled,
+            performance=performance,
+        )
+    except TypeError as exc:
+        if "performance" not in str(exc):
+            raise
+        _persist_tts_engine_settings(
+            engine_id,
+            legacy_model_dir,
+            engine_25_model_dir,
+            accel_enabled,
+        )
 
 
 def _request_runtime_recycle(engine_id: str) -> str:
@@ -445,9 +591,23 @@ def refresh_tts_engine_ui(
     _engine_id: str,
     legacy_model_dir: str,
     engine_25_model_dir: str,
+    indextts25_gpt_accel_enabled: bool = True,
+    tts2_cuda_kernel: bool = True,
+    tts2_gpt_accel: bool = False,
+    tts2_s2mel_compile: bool = False,
+    tts2_conditioning_cache: bool = False,
 ) -> tuple[str, str, str, str, str]:
+    del _engine_id, tts2_cuda_kernel, tts2_gpt_accel, tts2_s2mel_compile
+    del tts2_conditioning_cache
+    settings = get_tts_engine_settings()
+    message = "已刷新模型目录与 runtime 状态。\n" + _performance_status_message(settings)
+    if (
+        _bool_value(indextts25_gpt_accel_enabled, True)
+        and os.environ.get("AUDIOBOOK_STUDIO_DISABLE_INDEXTTS25_ACCEL") == "1"
+    ):
+        message += "\n⚠ GPT Accel：配置：开启；实际：环境变量已强制关闭。"
     return _tts_output_values(
-        "已刷新模型目录与 runtime 状态。",
+        message,
         _clean_path(legacy_model_dir),
         _clean_path(engine_25_model_dir),
     )
@@ -457,39 +617,64 @@ def apply_tts_engine(
     engine_id: str,
     legacy_model_dir: str,
     engine_25_model_dir: str,
+    indextts25_gpt_accel_enabled: bool = True,
+    tts2_cuda_kernel: bool = True,
+    tts2_gpt_accel: bool = False,
+    tts2_s2mel_compile: bool = False,
+    tts2_conditioning_cache: bool = False,
 ) -> tuple[str, str, str, str, str]:
-    """Save the selected engine only when all TTS lanes are idle."""
+    """Save engine/profile settings and apply performance changes safely."""
     selected = _normalize_engine(engine_id)
     legacy_dir = _clean_path(legacy_model_dir)
     engine_25_dir = _clean_path(engine_25_model_dir)
+    performance = _performance_from_values(
+        indextts25_gpt_accel_enabled,
+        tts2_cuda_kernel,
+        tts2_gpt_accel,
+        tts2_s2mel_compile,
+        tts2_conditioning_cache,
+    )
     if not selected:
         return _tts_output_values("❌ 未知的 TTS 引擎，未保存设置。", legacy_dir, engine_25_dir)
 
+    current = get_tts_engine_settings()
+    engine_changed = any((
+        selected != current.get("engine"),
+        legacy_dir != current.get("legacy_model_dir"),
+        engine_25_dir != current.get("indextts25_model_dir"),
+    ))
     active = _active_tts_tasks()
     if active:
-        rejection_messages = list(dict.fromkeys(
-            _TASK_REJECTION_MESSAGES.get(
-                str(getattr(item, "task_type", "")),
-                "当前有生产任务正在运行，请等待任务结束或取消后再切换 TTS 引擎。",
+        if engine_changed:
+            rejection_messages = list(dict.fromkeys(
+                _TASK_REJECTION_MESSAGES.get(
+                    str(getattr(item, "task_type", "")),
+                    "当前有生产任务正在运行，请等待任务结束或取消后再切换 TTS 引擎。",
+                )
+                for item in active
+            ))
+            task_labels = "、".join(
+                dict.fromkeys(
+                    _TASK_TYPE_LABELS.get(
+                        str(getattr(item, "task_type", "")), "生产"
+                    )
+                    for item in active
+                )
             )
-            for item in active
-        ))
-        task_labels = "、".join(
-            dict.fromkeys(_TASK_TYPE_LABELS.get(str(getattr(item, "task_type", "")), "生产") for item in active)
-        )
-        message = (
-            "当前有生产任务正在运行，请等待任务结束或取消后再切换 TTS 引擎。"
-            f"（{task_labels}）\n⚠ 无法切换 TTS 引擎：" + "；".join(rejection_messages)
-        )
-        return _tts_output_values(
-            message,
-            legacy_dir,
-            engine_25_dir,
-            active,
-        )
+            message = (
+                "当前有生产任务正在运行，请等待任务结束或取消后再切换 TTS 引擎。"
+                f"（{task_labels}）\n⚠ 无法切换 TTS 引擎："
+                + "；".join(rejection_messages)
+            )
+            return _tts_output_values(message, legacy_dir, engine_25_dir, active)
 
     try:
-        _persist_tts_engine_settings(selected, legacy_dir, engine_25_dir)
+        _persist_with_performance(
+            selected,
+            legacy_dir,
+            engine_25_dir,
+            performance,
+        )
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         message = f"❌ TTS 引擎设置保存失败：{html.escape(str(exc))}"
     else:
@@ -501,8 +686,139 @@ def apply_tts_engine(
                 f"{html.escape(str(exc))}。请重启生产运行时后再试。"
             )
         else:
-            message = f"✅ 已应用 {TTS_ENGINE_LABELS[selected]}；{recycle_message}。"
+            message = (
+                f"✅ 已保存并应用 {TTS_ENGINE_LABELS[selected]}；"
+                f"{recycle_message}。"
+            )
+            if active:
+                message += " 当前任务继续使用原 runtime，设置将在任务结束后生效。"
     return _tts_output_values(message, legacy_dir, engine_25_dir)
+
+
+def _apply_performance_updates(
+    updates: Mapping[str, Any],
+    changed_lanes: set[str] | frozenset[str],
+) -> tuple[str, str, str, str, str]:
+    """Persist only the changed version lane and schedule its safe reload."""
+    current = get_tts_engine_settings()
+    current_performance = {
+        config.TTS2_PERFORMANCE_KEY: current["tts2_performance"],
+        config.TTS25_PERFORMANCE_KEY: current["tts25_performance"],
+    }
+    desired = {
+        lane: dict(current_performance[lane])
+        for lane in current_performance
+    }
+    for lane in changed_lanes:
+        lane_update = updates.get(lane)
+        if isinstance(lane_update, Mapping):
+            desired[lane].update(lane_update)
+    if not _performance_changed(current_performance, desired):
+        return _tts_output_values(
+            _performance_status_message(current),
+            current["legacy_model_dir"],
+            current["indextts25_model_dir"],
+        )
+    try:
+        _persist_with_performance(
+            current["engine"],
+            current["legacy_model_dir"],
+            current["indextts25_model_dir"],
+            {lane: updates[lane] for lane in changed_lanes if lane in updates},
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        return _tts_output_values(
+            f"❌ 性能设置保存失败：{html.escape(str(exc))}",
+            current["legacy_model_dir"],
+            current["indextts25_model_dir"],
+        )
+
+    selected_lane = (
+        config.TTS25_PERFORMANCE_KEY
+        if current["engine"] == TTS_ENGINE_25
+        else config.TTS2_PERFORMANCE_KEY
+    )
+    active = _active_tts_tasks()
+    reload_needed = (
+        selected_lane in changed_lanes
+        and current_performance[selected_lane] != desired[selected_lane]
+    )
+    try:
+        recycle_message = (
+            _request_runtime_recycle(current["engine"])
+            if reload_needed else "当前 runtime 无需重载"
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        return _tts_output_values(
+            f"⚠ 性能设置已保存，但 runtime recycle 失败：{html.escape(str(exc))}",
+            current["legacy_model_dir"],
+            current["indextts25_model_dir"],
+            active,
+        )
+    if reload_needed and active:
+        message = "✅ 性能设置已保存，将在当前任务结束后生效。"
+    elif reload_needed:
+        message = f"✅ 性能设置已保存；{recycle_message}。"
+    else:
+        message = "✅ 性能设置已保存；切换到对应 TTS 版本后生效。"
+    return _tts_output_values(
+        message,
+        current["legacy_model_dir"],
+        current["indextts25_model_dir"],
+        active,
+    )
+
+
+def apply_tts2_performance_settings(
+    tts2_cuda_kernel: bool = True,
+    tts2_gpt_accel: bool = False,
+    tts2_s2mel_compile: bool = False,
+    tts2_conditioning_cache: bool = False,
+) -> tuple[str, str, str, str, str]:
+    return _apply_performance_updates(
+        {
+            config.TTS2_PERFORMANCE_KEY: {
+                "cuda_kernel": _bool_value(tts2_cuda_kernel, True),
+                "gpt_accel": _bool_value(tts2_gpt_accel, False),
+                "s2mel_compile": _bool_value(tts2_s2mel_compile, False),
+                "conditioning_cache": _bool_value(tts2_conditioning_cache, False),
+            },
+        },
+        {config.TTS2_PERFORMANCE_KEY},
+    )
+
+
+def apply_tts25_performance_settings(
+    indextts25_gpt_accel_enabled: bool = True,
+) -> tuple[str, str, str, str, str]:
+    return _apply_performance_updates(
+        {
+            config.TTS25_PERFORMANCE_KEY: {
+                "gpt_accel": _bool_value(indextts25_gpt_accel_enabled, True),
+            },
+        },
+        {config.TTS25_PERFORMANCE_KEY},
+    )
+
+
+def apply_tts_performance_settings(
+    indextts25_gpt_accel_enabled: bool = True,
+    tts2_cuda_kernel: bool = True,
+    tts2_gpt_accel: bool = False,
+    tts2_s2mel_compile: bool = False,
+    tts2_conditioning_cache: bool = False,
+) -> tuple[str, str, str, str, str]:
+    """Compatibility callback for callers that submit both version lanes."""
+    return _apply_performance_updates(
+        _performance_from_values(
+            indextts25_gpt_accel_enabled,
+            tts2_cuda_kernel,
+            tts2_gpt_accel,
+            tts2_s2mel_compile,
+            tts2_conditioning_cache,
+        ),
+        {config.TTS2_PERFORMANCE_KEY, config.TTS25_PERFORMANCE_KEY},
+    )
 
 
 def refresh_abnormal_projects() -> tuple:

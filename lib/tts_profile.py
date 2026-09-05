@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -241,6 +242,29 @@ def resolve_profile(value: Mapping[str, Any] | str | None = None) -> dict[str, A
     # Never trust a caller-provided identity to select a different adapter.
     if ":" in identity:
         identity = engine_identity(version, identity.split(":", 1)[0])
+    from . import config as runtime_config
+
+    performance = runtime_config.get_tts_performance(version, data=data)
+    explicit_performance = explicit.get("performance")
+    if not isinstance(explicit_performance, Mapping):
+        explicit_performance = explicit.get("tts_performance")
+    if isinstance(explicit_performance, Mapping):
+        lane_fields = set(performance)
+        if lane_fields & set(explicit_performance):
+            performance = runtime_config.normalize_tts_performance(
+                version,
+                explicit_performance,
+                data=data,
+            )
+        else:
+            lane = "tts25" if version == VERSION_V25 else "tts2"
+            lane_value = explicit_performance.get(lane)
+            if isinstance(lane_value, Mapping):
+                performance = runtime_config.normalize_tts_performance(
+                    version,
+                    lane_value,
+                    data=data,
+                )
     resolved = {
         "engine_backend": backend,
         "engine_version": version,
@@ -249,6 +273,7 @@ def resolve_profile(value: Mapping[str, Any] | str | None = None) -> dict[str, A
         "model_identity": str(explicit.get("model_identity") or model_fingerprint(model_dir, version)),
         "precision": precision,
         "device": str(explicit.get("device") or "auto"),
+        "performance": performance,
     }
     resolved["cache_identity"] = "|".join(
         str(resolved.get(key) or "")
@@ -260,13 +285,20 @@ def resolve_profile(value: Mapping[str, Any] | str | None = None) -> dict[str, A
 def public_profile(profile: Mapping[str, Any] | None) -> dict[str, Any]:
     """Return task/status-safe identity data without absolute model paths."""
     resolved = resolve_profile(profile or {})
-    return {
+    result = {
         key: resolved.get(key)
         for key in (
             "engine_backend", "engine_version", "engine_identity",
             "model_identity", "precision", "device", "cache_identity",
         )
     }
+    result["performance"] = deepcopy(resolved.get("performance") or {})
+    source = profile if isinstance(profile, Mapping) else {}
+    for key in ("effective_performance", "performance_status"):
+        value = source.get(key)
+        if isinstance(value, Mapping):
+            result[key] = deepcopy(dict(value))
+    return result
 
 
 def profile_matches(left: Mapping[str, Any] | None, right: Mapping[str, Any] | None) -> bool:
@@ -274,8 +306,16 @@ def profile_matches(left: Mapping[str, Any] | None, right: Mapping[str, Any] | N
         return False
     a = resolve_profile(left)
     b = resolve_profile(right)
-    return (a["engine_identity"], a["model_identity"], a["precision"]) == (
-        b["engine_identity"], b["model_identity"], b["precision"]
+    return (
+        a["engine_identity"],
+        a["model_identity"],
+        a["precision"],
+        a.get("performance", {}),
+    ) == (
+        b["engine_identity"],
+        b["model_identity"],
+        b["precision"],
+        b.get("performance", {}),
     )
 
 

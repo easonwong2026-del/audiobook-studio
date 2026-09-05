@@ -127,7 +127,17 @@ class ConfigRepository:
         Raises:
             AtomicWriteError: 写入失败时抛出。
         """
-        _atomic_write(ConfigRepository.CONFIG_PATH, config.to_dict())
+        data: dict[str, Any] = {}
+        if os.path.isfile(ConfigRepository.CONFIG_PATH):
+            try:
+                with open(ConfigRepository.CONFIG_PATH, encoding="utf-8") as f:
+                    existing = json.load(f)
+                if isinstance(existing, dict):
+                    data.update(existing)
+            except (json.JSONDecodeError, OSError):
+                pass
+        data.update(config.to_dict())
+        _atomic_write(ConfigRepository.CONFIG_PATH, data)
 
     @staticmethod
     def set_data_dir(path: str) -> str:

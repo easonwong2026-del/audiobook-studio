@@ -127,6 +127,7 @@ class ProductionRuntime:
         self._last_full_claim = 0.0
         self._last_full_heartbeat = 0.0
         self._pending_signal = RuntimePendingSignal()
+        self._deferred_engine_command_logged = False
         # P1 修复：每 claim 类型最后一次全扫的信号 stamp（key: synthesis/export/utility）。
         # 合成活跃期间他项目 notify → 该类型扫一次记 stamp → 后续 tick 同 stamp 跳过，
         # 避免 export claim 每 0.1s tick 全库扫描；任务 retire 后类型 stamp 仍是旧值 →
@@ -219,7 +220,31 @@ class ProductionRuntime:
         version = "2.5" if ("25" in raw or "2.5" in raw) else "2"
         target = resolve_profile({"engine_version": version})
         current = self._engine.snapshot()
-        if str(current.get("state") or "") == "ready" and profile_matches(current, target):
+        accel_matches = True
+        accel_status_observed = False
+        if target.get("engine_version") == "2.5":
+            try:
+                from lib import config as runtime_config
+                from lib import tts_engine
+
+                target["performance"] = runtime_config.get_tts_performance("2.5")
+                status_getter = getattr(tts_engine, "get_acceleration_status", None)
+                if callable(status_getter):
+                    status = status_getter()
+                    if isinstance(status, dict) and status.get("reason") != "emergency_disabled":
+                        accel_status_observed = True
+                        accel_matches = bool(status.get("requested")) == bool(
+                            target.get("performance", {}).get("gpt_accel")
+                        )
+            except (ImportError, OSError, RuntimeError, TypeError, ValueError):
+                logger.debug("读取 IndexTTS 2.5 GPT 加速状态失败", exc_info=True)
+        profile_match = profile_matches(current, target)
+        if target.get("engine_version") == "2.5" and accel_status_observed:
+            profile_match = all(
+                str(current.get(key) or "") == str(target.get(key) or "")
+                for key in ("engine_identity", "model_identity", "precision")
+            )
+        if str(current.get("state") or "") == "ready" and profile_match and accel_matches:
             return True
         self._engine.recycle(target)
         return True
@@ -244,14 +269,29 @@ class ProductionRuntime:
             if self._current_state is not None or (
                 self._export_future is not None and not self._export_future.done()
             ):
+                if not self._deferred_engine_command_logged:
+                    _runtime_event(
+                        "engine_config_deferred",
+                        owner=self.owner_id,
+                        engine_id=str(command.get("engine_id") or ""),
+                    )
+                    self._deferred_engine_command_logged = True
                 return
         if self._durable_tts_task_active():
+            if not self._deferred_engine_command_logged:
+                _runtime_event(
+                    "engine_config_deferred",
+                    owner=self.owner_id,
+                    engine_id=str(command.get("engine_id") or ""),
+                )
+                self._deferred_engine_command_logged = True
             return
         try:
             self.request_engine_recycle(str(command.get("engine_id") or ""))
         except Exception as exc:
             logger.error("runtime_event=engine_switch_failure error=%s", exc)
         finally:
+            self._deferred_engine_command_logged = False
             try:
                 os.remove(path)
             except OSError:
@@ -2151,7 +2191,7 @@ class ProductionRuntimeClient:
 
     @classmethod
     def request_engine_recycle(cls, engine_id: str) -> bool:
-        """Ask the singleton owner to reload an idle selected engine."""
+        """Ask the singleton owner to reload an engine at a safe boundary."""
         mode = cls.mode()
         if mode in {"off", "disabled"}:
             raise RuntimeError("生产 runtime 已禁用")
@@ -2164,6 +2204,23 @@ class ProductionRuntimeClient:
                     runtime = _INLINE_RUNTIME
             if runtime is None:
                 raise RuntimeError("无法取得 inline runtime")
+            with runtime._state_lock:
+                active = runtime._current_state is not None or (
+                    runtime._export_future is not None
+                    and not runtime._export_future.done()
+                )
+            active = active or runtime._durable_tts_task_active()
+            if active:
+                path = ProductionRuntime._engine_command_path()
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                atomic_write(path, {
+                    "engine_id": str(engine_id or ""),
+                    "requested_at": datetime.now(timezone.utc).isoformat(
+                        timespec="seconds"
+                    ).replace("+00:00", "Z"),
+                })
+                runtime.poke()
+                return True
             return runtime.request_engine_recycle(engine_id)
         path = ProductionRuntime._engine_command_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)

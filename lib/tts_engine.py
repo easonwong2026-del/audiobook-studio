@@ -10,6 +10,7 @@ import shutil
 import sys
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
 from importlib import metadata
@@ -58,6 +59,19 @@ TTS_ENGINE_OOM_EXHAUSTED = "TTS_ENGINE_OOM_EXHAUSTED"
 ACCEL_OVERLAY_ENV = "AUDIOBOOK_STUDIO_ACCEL_OVERLAY"
 ACCEL_DISABLE_ENV = "AUDIOBOOK_STUDIO_DISABLE_INDEXTTS25_ACCEL"
 _TRITON_WINDOWS_VERSION = "3.4.0.post21"
+
+CONDITIONING_CACHE_MAXSIZE = 4
+_CONDITIONING_FIELDS = (
+    "cache_spk_cond",
+    "cache_s2mel_style",
+    "cache_s2mel_prompt",
+    "cache_spk_audio_prompt",
+    "cache_emo_cond",
+    "cache_emo_audio_prompt",
+    "cache_mel",
+)
+_CONDITIONING_CACHE: OrderedDict[tuple[str, str], dict[str, object]] = OrderedDict()
+_CONDITIONING_CACHE_ENABLED = False
 
 
 class EngineRuntimeFailure(RuntimeError):
@@ -208,13 +222,20 @@ def _valid_cc(value: object) -> bool:
     return os.path.isfile(text) or shutil.which(text) is not None
 
 
-def _prepare_v25_acceleration() -> dict:
+def _prepare_v25_acceleration(requested: bool | None = None) -> dict:
     """Prepare optional Windows-only GPT acceleration before IndexTTS import."""
-    report = _base_accel_status()
+    if requested is None:
+        requested = bool(_cfg.get_tts_performance("2.5").get("gpt_accel"))
+    report = _base_accel_status(requested=bool(requested))
     if os.environ.get(ACCEL_DISABLE_ENV) == "1":
         report["requested"] = False
         report["fallback"] = True
         report["reason"] = "emergency_disabled"
+        return _store_accel_status(report)
+    if not requested:
+        report["requested"] = False
+        report["fallback"] = True
+        report["reason"] = "user_disabled"
         return _store_accel_status(report)
     if not _is_windows():
         report["fallback"] = True
@@ -345,6 +366,313 @@ def _v25_accel_is_active(engine: object) -> bool:
         return False
 
 
+def _cuda_is_available(torch_module: object) -> bool:
+    try:
+        cuda = getattr(torch_module, "cuda", None)
+        return bool(cuda is not None and cuda.is_available())
+    except Exception:  # noqa: BLE001 - capability probes are best effort
+        return False
+
+
+def _performance_status(
+    requested: bool,
+    effective: bool,
+    reason: str,
+) -> dict[str, object]:
+    return {
+        "requested": bool(requested),
+        "effective": bool(effective),
+        "state": (
+            "disabled" if not requested
+            else "active" if effective
+            else "unavailable"
+        ),
+        "reason": str(reason or ""),
+    }
+
+
+def _pending_performance_status(requested: bool, reason: str = "capability_available") -> dict[str, object]:
+    return {
+        "requested": bool(requested),
+        "effective": False,
+        "state": "pending" if requested else "disabled",
+        "reason": reason,
+    }
+
+
+def _prepare_v2_performance(
+    requested: Mapping[str, object],
+    torch_module: object,
+) -> tuple[dict[str, bool], dict[str, dict[str, object]]]:
+    """Resolve v2 optional capabilities without touching the v2.5 overlay."""
+    values = {
+        field: bool(requested.get(field))
+        for field in (
+            "cuda_kernel", "gpt_accel", "s2mel_compile", "conditioning_cache"
+        )
+    }
+    statuses = {
+        field: _pending_performance_status(value)
+        for field, value in values.items()
+    }
+    cuda_available = _cuda_is_available(torch_module)
+    if values["cuda_kernel"] and not cuda_available:
+        values["cuda_kernel"] = False
+        statuses["cuda_kernel"] = _performance_status(
+            True, False, "unsupported_device"
+        )
+    if values["gpt_accel"]:
+        if not cuda_available:
+            values["gpt_accel"] = False
+            statuses["gpt_accel"] = _performance_status(
+                True, False, "unsupported_device"
+            )
+        else:
+            try:
+                importlib.import_module("flash_attn")
+                importlib.import_module("indextts.accel")
+            except (ImportError, ModuleNotFoundError, OSError):
+                values["gpt_accel"] = False
+                statuses["gpt_accel"] = _performance_status(
+                    True, False, "dependency_missing"
+                )
+                logger.warning(
+                    "IndexTTS 2 GPT acceleration unavailable: dependency_missing"
+                )
+            except Exception:  # noqa: BLE001 - native extensions vary by platform
+                values["gpt_accel"] = False
+                statuses["gpt_accel"] = _performance_status(
+                    True, False, "dependency_import_failed"
+                )
+                logger.warning(
+                    "IndexTTS 2 GPT acceleration unavailable: dependency_import_failed"
+                )
+    if values["s2mel_compile"]:
+        if not callable(getattr(torch_module, "compile", None)):
+            values["s2mel_compile"] = False
+            statuses["s2mel_compile"] = _performance_status(
+                True, False, "torch_compile_missing"
+            )
+        else:
+            try:
+                importlib.import_module("triton")
+            except (ImportError, ModuleNotFoundError, OSError):
+                values["s2mel_compile"] = False
+                statuses["s2mel_compile"] = _performance_status(
+                    True, False, "dependency_missing"
+                )
+                logger.warning(
+                    "IndexTTS 2 s2mel torch.compile unavailable: dependency_missing"
+                )
+            except Exception:  # noqa: BLE001 - native extensions vary by platform
+                values["s2mel_compile"] = False
+                statuses["s2mel_compile"] = _performance_status(
+                    True, False, "dependency_import_failed"
+                )
+                logger.warning(
+                    "IndexTTS 2 s2mel torch.compile unavailable: dependency_import_failed"
+                )
+    # Conditioning is a Studio adapter feature.  The actual upstream field
+    # check happens after construction, once the concrete engine exists.
+    return values, statuses
+
+
+def _constructor_kwargs_for(cls: object, kwargs: Mapping[str, object]) -> dict[str, object]:
+    """Drop optional kwargs when an older installed upstream lacks them."""
+    try:
+        signature = inspect.signature(cls)
+    except (TypeError, ValueError):
+        return dict(kwargs)
+    if any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    ):
+        return dict(kwargs)
+    return {
+        key: value
+        for key, value in kwargs.items()
+        if key in signature.parameters
+    }
+
+
+def _optional_capability_error(exc: BaseException, field: str) -> bool:
+    message = str(exc).lower()
+    tokens = {
+        "gpt_accel": ("accel", "flash_attn", "flash-attention"),
+        "s2mel_compile": ("compile", "inductor", "triton"),
+        "cuda_kernel": ("cuda", "kernel", "activation"),
+    }.get(field, ())
+    if not isinstance(
+        exc,
+        (ImportError, ModuleNotFoundError, AttributeError, RuntimeError, OSError),
+    ):
+        return False
+    if any(marker in message for marker in ("out of memory", "out_of_memory", "oom")):
+        return False
+    return any(token in message for token in tokens)
+
+
+def _generic_accel_is_active(engine: object) -> bool:
+    candidates = (getattr(engine, "gpt", None), engine)
+    try:
+        return any(
+            hasattr(candidate, "accel_engine")
+            and getattr(candidate, "accel_engine", None) is not None
+            for candidate in candidates
+            if candidate is not None
+        )
+    except Exception:  # noqa: BLE001 - defensive around third-party properties
+        return False
+
+
+def _conditioning_cache_supported(engine: object) -> bool:
+    try:
+        return all(hasattr(engine, field) for field in _CONDITIONING_FIELDS)
+    except Exception:  # noqa: BLE001 - third-party objects may expose properties
+        return False
+
+
+def _reference_identity(path: object) -> str:
+    """Use path + metadata, never basename, for conditioning cache keys."""
+    try:
+        normalized = os.path.realpath(os.path.abspath(os.path.expanduser(os.fspath(path))))
+    except (TypeError, ValueError, OSError):
+        normalized = str(path or "")
+    try:
+        stat = os.stat(normalized)
+        return f"{normalized}|{stat.st_size}|{stat.st_mtime_ns}"
+    except OSError:
+        return f"{normalized}|missing"
+
+
+def _conditioning_cache_key(
+    speaker_audio: object,
+    emotion_audio: object,
+) -> tuple[str, str]:
+    return _reference_identity(speaker_audio), _reference_identity(emotion_audio)
+
+
+def _clear_conditioning_cache() -> None:
+    _CONDITIONING_CACHE.clear()
+
+
+def _invalidate_upstream_conditioning(engine: object) -> None:
+    for field in _CONDITIONING_FIELDS:
+        try:
+            setattr(engine, field, None)
+        except (AttributeError, TypeError):
+            return
+
+
+def _restore_conditioning_bundle(
+    engine: object,
+    bundle: Mapping[str, object],
+) -> bool:
+    try:
+        for field in _CONDITIONING_FIELDS:
+            setattr(engine, field, bundle[field])
+    except (KeyError, AttributeError, TypeError):
+        return False
+    return True
+
+
+def _capture_conditioning_bundle(engine: object) -> dict[str, object] | None:
+    if not _conditioning_cache_supported(engine):
+        return None
+    try:
+        return {field: getattr(engine, field) for field in _CONDITIONING_FIELDS}
+    except (AttributeError, TypeError):
+        return None
+
+
+def _prepare_conditioning_cache(
+    engine: object,
+    key: tuple[str, str],
+) -> bool:
+    """Restore a hit or force upstream to recompute a miss."""
+    bundle = _CONDITIONING_CACHE.get(key)
+    if bundle is not None and _restore_conditioning_bundle(engine, bundle):
+        _CONDITIONING_CACHE.move_to_end(key)
+        logger.debug("TTS2 conditioning cache hit")
+        return True
+    if bundle is not None:
+        _CONDITIONING_CACHE.pop(key, None)
+    if len(_CONDITIONING_CACHE) >= CONDITIONING_CACHE_MAXSIZE:
+        # Evict before upstream allocates the next bundle.  This bounds the
+        # number of old GPU bundles held by the Studio-owned LRU at max-1.
+        _CONDITIONING_CACHE.popitem(last=False)
+    _invalidate_upstream_conditioning(engine)
+    logger.debug("TTS2 conditioning cache miss")
+    return False
+
+
+def _store_conditioning_cache(engine: object, key: tuple[str, str]) -> None:
+    bundle = _capture_conditioning_bundle(engine)
+    if bundle is None:
+        return
+    _CONDITIONING_CACHE.pop(key, None)
+    _CONDITIONING_CACHE[key] = bundle
+    while len(_CONDITIONING_CACHE) > CONDITIONING_CACHE_MAXSIZE:
+        _CONDITIONING_CACHE.popitem(last=False)
+
+
+def _finalize_v2_performance(
+    engine: object,
+    requested: Mapping[str, object],
+    statuses: Mapping[str, Mapping[str, object]],
+    constructor_kwargs: Mapping[str, object],
+) -> tuple[dict[str, bool], dict[str, dict[str, object]]]:
+    effective: dict[str, bool] = {}
+    final_status: dict[str, dict[str, object]] = {}
+    for field in (
+        "cuda_kernel", "gpt_accel", "s2mel_compile", "conditioning_cache"
+    ):
+        is_requested = bool(requested.get(field))
+        previous = dict(statuses.get(field) or {})
+        if not is_requested:
+            effective[field] = False
+            final_status[field] = _performance_status(False, False, "disabled")
+            continue
+        if previous.get("state") == "unavailable":
+            effective[field] = False
+            final_status[field] = previous
+            continue
+        if field == "cuda_kernel":
+            actual = getattr(engine, "use_cuda_kernel", None)
+            actual = bool(actual) if actual is not None else bool(
+                constructor_kwargs.get("use_cuda_kernel")
+            )
+            effective[field] = actual
+            final_status[field] = _performance_status(
+                True, actual, "enabled" if actual else "kernel_unavailable"
+            )
+        elif field == "gpt_accel":
+            actual = (
+                "use_accel" in constructor_kwargs
+                and _generic_accel_is_active(engine)
+            )
+            effective[field] = actual
+            final_status[field] = _performance_status(
+                True, actual, "enabled" if actual else "accel_inactive"
+            )
+        elif field == "s2mel_compile":
+            compile_engine = getattr(engine, "s2mel", None)
+            actual = bool(getattr(engine, "use_torch_compile", False))
+            if actual and compile_engine is not None:
+                actual = callable(getattr(compile_engine, "enable_torch_compile", None))
+            effective[field] = actual
+            final_status[field] = _performance_status(
+                True, actual, "enabled" if actual else "compile_unavailable"
+            )
+        else:
+            actual = _conditioning_cache_supported(engine)
+            effective[field] = actual
+            final_status[field] = _performance_status(
+                True, actual, "enabled" if actual else "upstream_fields_missing"
+            )
+    return effective, final_status
+
+
 
 def engine_lock():
     """返回引擎互斥锁（供测试与调用方查询；业务调用无需自行加锁）。
@@ -424,6 +752,7 @@ class IndexTTS2Backend:
         use_cuda_kernel: bool,
         use_deepspeed: bool,
         use_accel: bool,
+        use_torch_compile: bool = False,
     ) -> dict[str, object]:
         return {
             "cfg_path": cfg_path,
@@ -432,6 +761,7 @@ class IndexTTS2Backend:
             "use_cuda_kernel": use_cuda_kernel,
             "use_deepspeed": use_deepspeed,
             "use_accel": use_accel,
+            "use_torch_compile": use_torch_compile,
         }
 
     @staticmethod
@@ -588,35 +918,62 @@ def init_engine(
     use_cuda_kernel: bool = True,
     use_deepspeed: bool = False,
     use_accel: bool = False,
+    use_torch_compile: bool = False,
     *,
     profile: Mapping[str, object] | None = None,
 ):
-    global _tts, _ENGINE_PROFILE
+    global _tts, _ENGINE_PROFILE, _CONDITIONING_CACHE_ENABLED
     with _ENGINE_LOCK:
         resolved = _resolved_profile(profile, model_dir)
-        # Preserve the historical positional API for callers that do not yet
-        # pass a frozen profile.  Task/runtime profiles remain authoritative;
-        # the legacy switch only affects the v2 default precision.
-        if profile is None and resolved.get("engine_version") == "2" and not use_fp16:
-            resolved["precision"] = "FP32"
-            from .tts_profile import cache_identity
+        version = str(resolved["engine_version"])
+        if profile is None:
+            # Preserve the historical positional API while making the new
+            # profile path authoritative for production/runtime tasks.
+            performance = dict(resolved.get("performance") or {})
+            if version == "2":
+                performance.update({
+                    "cuda_kernel": bool(use_cuda_kernel),
+                    "gpt_accel": bool(use_accel),
+                    "s2mel_compile": bool(use_torch_compile),
+                })
+                resolved["performance"] = performance
+            if version == "2" and not use_fp16:
+                resolved["precision"] = "FP32"
+                from .tts_profile import cache_identity
 
-            resolved["cache_identity"] = cache_identity(resolved)
+                resolved["cache_identity"] = cache_identity(resolved)
         if _tts is not None:
             if profile and not _profile_matches(_ENGINE_PROFILE, resolved):
                 raise RuntimeError(
                     "TTS runtime 已加载另一 engine identity；必须先 recycle 后再切换"
                 )
             return
+        _clear_conditioning_cache()
         __import__("torch")
-        version = str(resolved["engine_version"])
+        torch_module = sys.modules.get("torch")
         model_dir = str(resolved["model_dir"])
         backend = _backend_for(version)
         accel_report = None
+        v2_constructor_values: dict[str, bool] = {}
+        v2_status: dict[str, dict[str, object]] = {}
+        requested_performance = dict(resolved.get("performance") or {})
+        if version == "2":
+            v2_constructor_values, v2_status = _prepare_v2_performance(
+                requested_performance,
+                torch_module,
+            )
         if version == "2.5":
             # This must precede ``infer_v2_5`` import: its import graph loads
             # the GPT acceleration dependencies before the constructor runs.
-            accel_report = _prepare_v25_acceleration()
+            requested_accel = bool(requested_performance.get("gpt_accel"))
+            try:
+                accel_report = _prepare_v25_acceleration(requested=requested_accel)
+            except TypeError as exc:
+                if "requested" not in str(exc):
+                    raise
+                # Older test/launcher seams monkeypatch the no-argument
+                # preparation hook; retain that compatibility path.
+                accel_report = _prepare_v25_acceleration()
         IndexTTS2 = backend.load_class()
 
         cfg_path = resolve_model_config_path(version, model_dir)
@@ -642,9 +999,6 @@ def init_engine(
                 )
         precision = str(resolved["precision"])
         logger.info("Loading IndexTTS %s model (%s)...", version, precision)
-        # Keep the legacy constructor defaults intact for rollback.  v2.5 owns
-        # its production policy: Accel only when its runtime capability is ready;
-        # compile, CUDA kernel, and DeepSpeed remain intentionally disabled.
         if version == "2.5":
             common = backend.constructor_kwargs(
                 cfg_path=str(cfg_path),
@@ -657,25 +1011,80 @@ def init_engine(
                 cfg_path=str(cfg_path),
                 model_dir=model_dir,
                 precision=precision,
-                use_cuda_kernel=use_cuda_kernel,
+                use_cuda_kernel=v2_constructor_values.get("cuda_kernel", False),
                 use_deepspeed=use_deepspeed,
-                use_accel=use_accel,
+                use_accel=v2_constructor_values.get("gpt_accel", False),
+                use_torch_compile=v2_constructor_values.get("s2mel_compile", False),
             )
+        common = _constructor_kwargs_for(IndexTTS2, common)
+        if version == "2":
+            for field, constructor_field in (
+                ("cuda_kernel", "use_cuda_kernel"),
+                ("gpt_accel", "use_accel"),
+                ("s2mel_compile", "use_torch_compile"),
+            ):
+                if requested_performance.get(field) and constructor_field not in common:
+                    v2_status[field] = _performance_status(
+                        True, False, "constructor_unsupported"
+                    )
+                    v2_constructor_values[field] = False
         constructor_scope = (
             _scoped_triton_cache_workaround()
             if accel_report and accel_report.get("available")
             else nullcontext()
         )
+        fallback_common = dict(common)
+        fallback_fields: list[str] = []
         try:
             with constructor_scope:
                 constructed = IndexTTS2(**common)
-        except Exception:
-            if accel_report and accel_report.get("available"):
-                accel_report["reason"] = "accel_init_failed"
-                accel_report["fallback"] = False
-                _store_accel_status(accel_report)
-                logger.exception("IndexTTS 2.5 GPT acceleration initialization failed")
-            raise
+        except Exception as exc:
+            if version == "2":
+                for field, constructor_field in (
+                    ("gpt_accel", "use_accel"),
+                    ("s2mel_compile", "use_torch_compile"),
+                ):
+                    if (
+                        bool(requested_performance.get(field))
+                        and bool(common.get(constructor_field))
+                        and _optional_capability_error(exc, field)
+                    ):
+                        fallback_fields.append(field)
+                if fallback_fields:
+                    for field, constructor_field in (
+                        ("gpt_accel", "use_accel"),
+                        ("s2mel_compile", "use_torch_compile"),
+                    ):
+                        if field in fallback_fields:
+                            fallback_common[constructor_field] = False
+                    failure_message = str(exc)
+                    logger.warning(
+                        "IndexTTS 2 optional capability unavailable; "
+                        "falling back to baseline fields=%s error=%s",
+                        ",".join(fallback_fields),
+                        failure_message,
+                    )
+                else:
+                    raise
+            else:
+                if accel_report and accel_report.get("available"):
+                    accel_report["reason"] = "accel_init_failed"
+                    accel_report["fallback"] = False
+                    _store_accel_status(accel_report)
+                    logger.exception("IndexTTS 2.5 GPT acceleration initialization failed")
+                raise
+        if fallback_fields:
+            # The exception handler has exited, so its traceback no longer
+            # retains the failed constructor frame before cleanup/retry.
+            gc.collect()
+            reset_engine()
+            constructed = IndexTTS2(**fallback_common)
+            for field in fallback_fields:
+                v2_status[field] = _performance_status(
+                    True, False, "init_failed"
+                )
+                v2_constructor_values[field] = False
+            common = fallback_common
         if accel_report and accel_report.get("available"):
             if not _v25_accel_is_active(constructed):
                 accel_report["reason"] = "accel_init_failed"
@@ -693,6 +1102,44 @@ def init_engine(
         actual_device = getattr(_tts, "device", None)
         if actual_device is not None:
             _ENGINE_PROFILE["device"] = str(actual_device)
+        if version == "2":
+            effective_performance, performance_status = _finalize_v2_performance(
+                constructed,
+                requested_performance,
+                v2_status,
+                common,
+            )
+        else:
+            requested_accel = bool(requested_performance.get("gpt_accel"))
+            effective_accel = bool(accel_report and accel_report.get("active"))
+            if not requested_accel:
+                accel_state = _performance_status(False, False, "disabled")
+            elif effective_accel:
+                accel_state = _performance_status(True, True, "enabled")
+            else:
+                accel_state = _performance_status(
+                    True,
+                    False,
+                    str((accel_report or {}).get("reason") or "unavailable"),
+                )
+            effective_performance = {"gpt_accel": effective_accel}
+            performance_status = {"gpt_accel": accel_state}
+        _ENGINE_PROFILE["effective_performance"] = effective_performance
+        _ENGINE_PROFILE["performance_status"] = performance_status
+        _CONDITIONING_CACHE_ENABLED = bool(
+            version == "2" and effective_performance.get("conditioning_cache")
+        )
+        for field, status in performance_status.items():
+            if status.get("state") == "unavailable":
+                logger.warning(
+                    "TTS capability unavailable: version=%s field=%s "
+                    "requested=%s effective=%s reason=%s fallback=baseline",
+                    version,
+                    field,
+                    status.get("requested"),
+                    status.get("effective"),
+                    status.get("reason"),
+                )
         _engine_capabilities()
         if version == "2.5" and accel_report:
             logger.info(
@@ -706,14 +1153,28 @@ def init_engine(
                 accel_report.get("triton_version") or "unknown",
                 accel_report.get("reason"),
             )
+        if version == "2":
+            logger.info(
+                "TTS runtime: version=2 fp16=%s cuda_kernel=%s gpt_accel=%s "
+                "s2mel_compile=%s conditioning_cache=%s",
+                precision == "FP16",
+                effective_performance.get("cuda_kernel", False),
+                effective_performance.get("gpt_accel", False),
+                effective_performance.get("s2mel_compile", False),
+                effective_performance.get("conditioning_cache", False),
+            )
+        else:
+            logger.info(
+                "TTS runtime: version=2.5 cuda_kernel=false gpt_accel=%s",
+                effective_performance.get("gpt_accel", False),
+            )
         logger.info("Model loaded.")
 
 
 def _profile_matches(left: Mapping[str, object], right: Mapping[str, object]) -> bool:
-    return all(
-        str(left.get(key) or "") == str(right.get(key) or "")
-        for key in ("engine_identity", "model_identity", "precision")
-    )
+    from .tts_profile import profile_matches
+
+    return profile_matches(left, right)
 
 
 def _looks_like_local_v25_bundle(model_dir: str) -> bool:
@@ -879,6 +1340,8 @@ def synthesize_segment(
     trace_segment_id: str | None = None,
     trace_chapter_id: str | None = None,
     trace_part_index: int | str | None = None,
+    *,
+    emo_audio_prompt: str | None = None,
 ) -> str:
     # 引擎互斥（RLock）：保证合成与模型加载串行化；OOM 递归调用自身时同一线程
     # 可重入，不会死锁。调用方无需再加锁。
@@ -934,6 +1397,21 @@ def synthesize_segment(
             if "spk_embedding" in param_names
             else None
         )
+        conditioning_key = None
+        if version == "2" and _CONDITIONING_CACHE_ENABLED:
+            effective_emotion_audio = speaker_audio if use_emo else (
+                emo_audio_prompt or speaker_audio
+            )
+            if _conditioning_cache_supported(_tts):
+                conditioning_key = _conditioning_cache_key(
+                    speaker_audio,
+                    effective_emotion_audio,
+                )
+                _prepare_conditioning_cache(_tts, conditioning_key)
+            else:
+                logger.warning(
+                    "TTS2 conditioning cache unavailable: upstream_fields_missing"
+                )
 
         # 真实 IndexTTS2.infer 用 **generation_kwargs（VAR_KEYWORD）接收 GPT 生成参数（如 num_beams），
         # 因此 param_names 中并不显式包含 num_beams；仅凭 "num_beams" in param_names 判断会恒为 False，
@@ -959,6 +1437,12 @@ def synthesize_segment(
                 # 透传给下游 gpt 导致崩溃，且实测该引擎并未暴露 spk_embedding 参数；故以显式形参名为准。
                 if spk_emb is not None and "spk_embedding" in param_names:
                     infer_kwargs["spk_embedding"] = spk_emb
+                if (
+                    emo_audio_prompt is not None
+                    and "emo_audio_prompt" in param_names
+                    and not use_emo
+                ):
+                    infer_kwargs["emo_audio_prompt"] = emo_audio_prompt
                 # The backend owns all version-specific arguments.  In
                 # particular, Canonical pinyin_hints never leaks into v2.5's
                 # generation kwargs: it is rendered into infer_text first.
@@ -1023,6 +1507,8 @@ def synthesize_segment(
                             )
                         except Exception:  # noqa: BLE001  # diagnostics must not alter TTS
                             logger.debug("记录 engine_infer trace 失败", exc_info=True)
+                if conditioning_key is not None:
+                    _store_conditioning_cache(_tts, conditioning_key)
                 _note_segment_success()
                 return output_path
 
@@ -1058,6 +1544,7 @@ def synthesize_segment(
                         output_path=path_a,
                         max_tokens=max_tokens,
                         pinyin_hints=pinyin_hints,
+                        emo_audio_prompt=emo_audio_prompt,
                         num_beams=num_beams,
                         trace=trace,
                         trace_segment_id=trace_segment_id,
@@ -1073,6 +1560,7 @@ def synthesize_segment(
                         output_path=path_b,
                         max_tokens=max_tokens,
                         pinyin_hints=pinyin_hints,
+                        emo_audio_prompt=emo_audio_prompt,
                         num_beams=num_beams,
                         trace=trace,
                         trace_segment_id=trace_segment_id,
@@ -1244,6 +1732,7 @@ def reset_engine() -> None:
     and ownership takeover).
     """
     global _tts, _ENGINE_PROFILE, _LAST_ADAPTER_REPORT, _ACCEL_STATUS
+    global _CONDITIONING_CACHE_ENABLED
     global _CAPABILITY_ENGINE_ID, _CAPABILITY_ENGINE_REF
     global _INFER_PARAM_NAMES, _INFER_HAS_VAR_KEYWORD
     with _ENGINE_LOCK:
@@ -1265,6 +1754,8 @@ def reset_engine() -> None:
         _INFER_PARAM_NAMES = frozenset()
         _INFER_HAS_VAR_KEYWORD = False
         _SPEAKER_EMB_CACHE.clear()
+        _CONDITIONING_CACHE_ENABLED = False
+        _clear_conditioning_cache()
         gc.collect()
         empty_cache(reason="engine_recycle")
 

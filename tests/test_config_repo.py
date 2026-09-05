@@ -14,7 +14,6 @@ import os
 import pytest
 
 from repositories.config_repo import ConfigData, ConfigRepository
-from repositories.exceptions import AtomicWriteError
 
 
 class TestConfigData:
@@ -120,7 +119,6 @@ class TestConfigRepository:
                 initial_content = f.read()
 
             # 模拟写入：先写 tmp 但不 os.replace（模拟崩溃）
-            from repositories._atomic import atomic_write
             tmp = cfg_path + ".tmp"
             bad_data = {"data_dir": "/corrupted", "extra": "x" * 10000}
             with open(tmp, "w", encoding="utf-8") as f:
@@ -175,6 +173,29 @@ class TestConfigRepository:
 
             loaded = ConfigRepository.load()
             assert loaded.model_dir == "/models"  # 保留
+        finally:
+            ConfigRepository.CONFIG_PATH = original_path
+
+    def test_save_preserves_unknown_fields(self, tmp_path):
+        """Updating known config fields does not erase newer config lanes."""
+        cfg_path = str(tmp_path / "config.json")
+        original_path = ConfigRepository.CONFIG_PATH
+        try:
+            ConfigRepository.CONFIG_PATH = cfg_path
+            ConfigRepository.save(ConfigData(data_dir="/old"))
+            with open(cfg_path, "r+", encoding="utf-8") as file:
+                data = json.load(file)
+                data["tts_performance"] = {"tts2": {"gpt_accel": True}}
+                data["ai_provider"] = {"default_provider": "local"}
+                file.seek(0)
+                json.dump(data, file)
+                file.truncate()
+
+            ConfigRepository.set_data_dir(str(tmp_path / "new"))
+            with open(cfg_path, encoding="utf-8") as file:
+                saved = json.load(file)
+            assert saved["tts_performance"]["tts2"]["gpt_accel"] is True
+            assert saved["ai_provider"]["default_provider"] == "local"
         finally:
             ConfigRepository.CONFIG_PATH = original_path
 

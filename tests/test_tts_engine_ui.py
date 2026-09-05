@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from ui import settings_handlers
 
+
 def test_legacy_single_model_config_defaults_to_rollback_engine(monkeypatch):
     monkeypatch.setattr(
         settings_handlers,
@@ -18,6 +19,19 @@ def test_legacy_single_model_config_defaults_to_rollback_engine(monkeypatch):
     monkeypatch.delenv("AUDIOBOOK_STUDIO_VERSION", raising=False)
 
     assert settings_handlers.get_tts_engine_settings()["engine"] == settings_handlers.TTS_ENGINE_LEGACY
+
+
+def test_accel_checkbox_state_defaults_enabled_and_reads_config(monkeypatch):
+    key = settings_handlers.config.INDEXTTS25_GPT_ACCEL_CONFIG_KEY
+    monkeypatch.setattr(settings_handlers, "_profile", dict)
+    monkeypatch.setattr(settings_handlers, "_resolved_model_dirs", lambda: ("", ""))
+    monkeypatch.setattr(settings_handlers.config, "get_model_dir", lambda: "")
+
+    monkeypatch.setattr(settings_handlers, "_read_raw_config", dict)
+    assert settings_handlers.get_tts_engine_settings()[key] is True
+
+    monkeypatch.setattr(settings_handlers, "_read_raw_config", lambda: {key: False})
+    assert settings_handlers.get_tts_engine_settings()[key] is False
 
 
 def test_model_directory_readiness_is_independent(tmp_path):
@@ -72,8 +86,8 @@ def test_idle_apply_persists_then_requests_controlled_recycle(monkeypatch):
     monkeypatch.setattr(
         settings_handlers,
         "_persist_tts_engine_settings",
-        lambda engine, legacy, recommended: calls.append(
-            ("persist", f"{engine}|{legacy}|{recommended}")
+        lambda engine, legacy, recommended, accel_enabled: calls.append(
+            ("persist", f"{engine}|{legacy}|{recommended}|{accel_enabled}")
         ),
     )
     monkeypatch.setattr(
@@ -91,12 +105,13 @@ def test_idle_apply_persists_then_requests_controlled_recycle(monkeypatch):
         settings_handlers.TTS_ENGINE_25,
         "~/models/legacy",
         "~/models/25",
+        True,
     )
 
     assert calls == [
         (
             "persist",
-            f"indextts25|{Path.home() / 'models' / 'legacy'}|{Path.home() / 'models' / '25'}",
+            f"indextts25|{Path.home() / 'models' / 'legacy'}|{Path.home() / 'models' / '25'}|True",
         ),
         ("recycle", "indextts25"),
     ]
@@ -162,6 +177,7 @@ def test_compat_persistence_keeps_unrelated_config_and_selected_profile(monkeypa
         settings_handlers.TTS_ENGINE_LEGACY,
         str(tmp_path / "legacy"),
         str(tmp_path / "recommended"),
+        False,
     )
     saved = json.loads(config_path.read_text(encoding="utf-8"))
 
@@ -170,6 +186,7 @@ def test_compat_persistence_keeps_unrelated_config_and_selected_profile(monkeypa
     assert saved["engine_version"] == "2"
     assert saved["model_dir"] == str(tmp_path / "legacy")
     assert saved["tts_model_dirs"]["indextts25"] == str(tmp_path / "recommended")
+    assert saved[settings_handlers.config.INDEXTTS25_GPT_ACCEL_CONFIG_KEY] is False
 
 
 def test_version_specific_model_dirs_survive_selected_v25_reload(monkeypatch, tmp_path):

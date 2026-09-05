@@ -123,3 +123,13 @@ class TestCancelDoesNotSetCancelledPrematurely:
         for _ in range(3):
             SynthesisService.cancel(st)
         assert st.status == "cancelling"
+
+    @pytest.mark.parametrize(
+        "status", ["done", "cancelled", "error", "interrupted", "needs_attention"]
+    )
+    def test_cancel_after_terminal_state_is_noop(self, status):
+        st = _state(status)
+        SynthesisService.cancel(st)
+        assert st.status == status
+        assert st.cancel is False
+        assert st.cancel_requested is False

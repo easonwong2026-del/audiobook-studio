@@ -66,6 +66,41 @@ def test_v25_without_windows_capability_keeps_baseline(monkeypatch):
     assert tts_engine.get_acceleration_status()["fallback"] is True
 
 
+def test_v25_accel_defaults_enabled_when_config_is_missing(monkeypatch):
+    monkeypatch.setattr(tts_engine._cfg, "_read_config", dict)
+    monkeypatch.setattr(tts_engine, "_is_windows", lambda: False)
+
+    report = tts_engine._prepare_v25_acceleration()
+
+    assert report["requested"] is True
+    assert report["reason"] == "unsupported_platform"
+
+
+def test_v25_config_disable_skips_accel_dependency_import(monkeypatch):
+    monkeypatch.setattr(
+        tts_engine._cfg,
+        "_read_config",
+        lambda: {tts_engine._cfg.INDEXTTS25_GPT_ACCEL_CONFIG_KEY: False},
+    )
+    monkeypatch.setattr(tts_engine, "_is_windows", lambda: True)
+    imported = []
+
+    def unexpected_import(name):
+        imported.append(name)
+        raise AssertionError(f"unexpected accel import: {name}")
+
+    monkeypatch.setattr(tts_engine.importlib, "import_module", unexpected_import)
+
+    report = tts_engine._prepare_v25_acceleration()
+
+    assert report["requested"] is False
+    assert report["enabled"] is False
+    assert report["active"] is False
+    assert report["fallback"] is True
+    assert report["reason"] == "user_disabled"
+    assert imported == []
+
+
 def test_v25_ready_overlay_is_prepared_idempotently_and_sets_process_cc(monkeypatch, tmp_path):
     overlay = tmp_path / "overlay" / "Lib" / "site-packages"
     overlay.mkdir(parents=True)
