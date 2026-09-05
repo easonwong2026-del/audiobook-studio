@@ -84,10 +84,12 @@ def create_settings_page() -> dict:
                     with gr.Row(equal_height=False):
                         with gr.Column(scale=1):
                             gr.Markdown("##### TTS2 性能设置")
-                            s_tts2_cuda_kernel = gr.Checkbox(
-                                label="CUDA Kernel",
-                                value=tts_state["tts2_performance"]["cuda_kernel"],
-                                info="沿用当前 TTS2 CUDA Kernel 路径。",
+                            gr.Markdown("**CUDA Kernel**")
+                            s_tts2_cuda_kernel_status = gr.Markdown(
+                                tts_state["performance_status_messages"][
+                                    config.TTS2_PERFORMANCE_KEY
+                                ]["cuda_kernel"],
+                                elem_classes=["tts-performance-status", "tts-performance-auto"],
                             )
                             s_tts2_gpt_accel = gr.Checkbox(
                                 label="GPT Accel",
@@ -97,15 +99,33 @@ def create_settings_page() -> dict:
                                     "建议开启后进行音质试听确认。依赖不可用时安全回退。"
                                 ),
                             )
+                            s_tts2_gpt_accel_status = gr.Markdown(
+                                tts_state["performance_status_messages"][
+                                    config.TTS2_PERFORMANCE_KEY
+                                ]["gpt_accel"],
+                                elem_classes=["tts-performance-status"],
+                            )
                             s_tts2_s2mel_compile = gr.Checkbox(
                                 label="s2mel torch.compile",
                                 value=tts_state["tts2_performance"]["s2mel_compile"],
                                 info="使用 upstream 的 s2mel compile；依赖不可用时安全回退。",
                             )
+                            s_tts2_s2mel_compile_status = gr.Markdown(
+                                tts_state["performance_status_messages"][
+                                    config.TTS2_PERFORMANCE_KEY
+                                ]["s2mel_compile"],
+                                elem_classes=["tts-performance-status"],
+                            )
                             s_tts2_conditioning_cache = gr.Checkbox(
                                 label="多音色 Conditioning Cache",
                                 value=tts_state["tts2_performance"]["conditioning_cache"],
                                 info="缓存最多 4 组参考音频 conditioning，仅对 TTS2 生效。",
+                            )
+                            s_tts2_conditioning_cache_status = gr.Markdown(
+                                tts_state["performance_status_messages"][
+                                    config.TTS2_PERFORMANCE_KEY
+                                ]["conditioning_cache"],
+                                elem_classes=["tts-performance-status"],
                             )
                         with gr.Column(scale=1):
                             gr.Markdown("##### TTS2.5 性能设置")
@@ -116,6 +136,12 @@ def create_settings_page() -> dict:
                                     "沿用当前 TTS2.5 GPT 加速 capability / overlay 路径；"
                                     "依赖不可用时安全回退。"
                                 ),
+                            )
+                            s_tts25_gpt_accel_status = gr.Markdown(
+                                tts_state["performance_status_messages"][
+                                    config.TTS25_PERFORMANCE_KEY
+                                ]["gpt_accel"],
+                                elem_classes=["tts-performance-status"],
                             )
                     gr.Markdown("性能开关会立即保存；引擎初始化参数在空闲时重载，合成中修改将在当前任务结束后生效。")
                     with gr.Row():
@@ -193,10 +219,14 @@ def create_settings_page() -> dict:
         "s_legacy_model_status": s_legacy_model_status,
         "s_indextts25_model_status": s_indextts25_model_status,
         "s_indextts25_gpt_accel_enabled": s_indextts25_gpt_accel_enabled,
-        "s_tts2_cuda_kernel": s_tts2_cuda_kernel,
+        "s_tts2_cuda_kernel_status": s_tts2_cuda_kernel_status,
         "s_tts2_gpt_accel": s_tts2_gpt_accel,
+        "s_tts2_gpt_accel_status": s_tts2_gpt_accel_status,
         "s_tts2_s2mel_compile": s_tts2_s2mel_compile,
+        "s_tts2_s2mel_compile_status": s_tts2_s2mel_compile_status,
         "s_tts2_conditioning_cache": s_tts2_conditioning_cache,
+        "s_tts2_conditioning_cache_status": s_tts2_conditioning_cache_status,
+        "s_tts25_gpt_accel_status": s_tts25_gpt_accel_status,
         "s_tts_apply": s_tts_apply,
         "s_tts_refresh": s_tts_refresh,
         "s_tts_status": s_tts_status,

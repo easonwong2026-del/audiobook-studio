@@ -18,8 +18,59 @@ def test_performance_defaults_match_the_two_production_lanes():
             "s2mel_compile": False,
             "conditioning_cache": False,
         },
-        "tts25": {"gpt_accel": True},
+        "tts25": {"gpt_accel": False},
     }
+
+
+def test_settings_normalize_cuda_kernel_but_preserve_explicit_frozen_snapshot():
+    raw = {
+        "tts_performance": {
+            "tts2": {"cuda_kernel": False},
+            "tts25": {"gpt_accel": True},
+        },
+        config.INDEXTTS25_GPT_ACCEL_CONFIG_KEY: False,
+    }
+
+    settings = config.get_tts_performance(data=raw)
+    assert settings["tts2"]["cuda_kernel"] is True
+    assert settings["tts25"]["gpt_accel"] is True
+
+    frozen = resolve_profile({
+        "engine_version": "2",
+        "performance": {
+            "cuda_kernel": False,
+            "gpt_accel": False,
+            "s2mel_compile": False,
+            "conditioning_cache": False,
+        },
+    })
+    assert frozen["performance"]["cuda_kernel"] is False
+
+
+def test_merging_settings_rewrites_legacy_cuda_kernel_false_to_true():
+    merged = config.merge_tts_performance(
+        {"tts_performance": {"tts2": {"cuda_kernel": False}}},
+        {config.TTS25_PERFORMANCE_KEY: {"gpt_accel": False}},
+    )
+
+    assert merged[config.TTS_PERFORMANCE_CONFIG_KEY]["tts2"]["cuda_kernel"] is True
+
+
+def test_legacy_flat_v25_true_is_still_a_migration_fallback():
+    settings = config.get_tts_performance(data={
+        config.INDEXTTS25_GPT_ACCEL_CONFIG_KEY: True,
+    })
+
+    assert settings[config.TTS25_PERFORMANCE_KEY]["gpt_accel"] is True
+
+
+def test_settings_callback_always_requests_automatic_cuda_kernel():
+    performance = settings_handlers._performance_from_values(
+        False, False, False, False, False
+    )
+
+    assert performance[config.TTS2_PERFORMANCE_KEY]["cuda_kernel"] is True
+    assert performance[config.TTS25_PERFORMANCE_KEY]["gpt_accel"] is False
 
 
 def test_profile_performance_isolated_and_part_of_runtime_identity(monkeypatch):
@@ -124,7 +175,7 @@ def test_active_tts2_toggle_is_saved_and_deferred(monkeypatch, tmp_path):
     )
 
     result = settings_handlers.apply_tts2_performance_settings(
-        True, True, True, True,
+        False, True, True, True,
     )
     saved = json.loads(config_path.read_text(encoding="utf-8"))
 
@@ -136,7 +187,7 @@ def test_active_tts2_toggle_is_saved_and_deferred(monkeypatch, tmp_path):
         "s2mel_compile": True,
         "conditioning_cache": True,
     }
-    assert saved["tts_performance"]["tts25"]["gpt_accel"] is True
+    assert saved["tts_performance"]["tts25"]["gpt_accel"] is False
 
 
 def test_tts2_constructor_routes_all_requested_performance_arguments():

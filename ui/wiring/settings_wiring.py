@@ -1,6 +1,8 @@
 """设置页事件接线；包含本地数据、TTS 引擎、项目残留和环境诊断。"""
 from __future__ import annotations
 
+import gradio as gr
+
 from ui import settings_handlers
 
 
@@ -9,12 +11,13 @@ def wire_settings_page(
     catalog_refresh: tuple | None = None,
     session=None,
 ) -> None:
+    tts2_cuda_kernel_auto = gr.State(True)
     tts_inputs = [
         page["s_tts_engine"],
         page["s_legacy_model_dir"],
         page["s_indextts25_model_dir"],
         page["s_indextts25_gpt_accel_enabled"],
-        page["s_tts2_cuda_kernel"],
+        tts2_cuda_kernel_auto,
         page["s_tts2_gpt_accel"],
         page["s_tts2_s2mel_compile"],
         page["s_tts2_conditioning_cache"],
@@ -25,6 +28,11 @@ def wire_settings_page(
         page["s_indextts25_model_status"],
         page["s_tts_runtime_engine"],
         page["s_tts_frozen_engine"],
+        page["s_tts2_cuda_kernel_status"],
+        page["s_tts2_gpt_accel_status"],
+        page["s_tts2_s2mel_compile_status"],
+        page["s_tts2_conditioning_cache_status"],
+        page["s_tts25_gpt_accel_status"],
     ]
     page["s_tts_apply"].click(
         settings_handlers.apply_tts_engine,
@@ -47,7 +55,7 @@ def wire_settings_page(
             tts_outputs,
         )
     tts2_performance_inputs = [
-        page["s_tts2_cuda_kernel"],
+        tts2_cuda_kernel_auto,
         page["s_tts2_gpt_accel"],
         page["s_tts2_s2mel_compile"],
         page["s_tts2_conditioning_cache"],
