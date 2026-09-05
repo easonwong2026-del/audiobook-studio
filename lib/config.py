@@ -44,9 +44,9 @@ TTS_PERFORMANCE_CONFIG_KEY = "tts_performance"
 TTS2_PERFORMANCE_KEY = "tts2"
 TTS25_PERFORMANCE_KEY = "tts25"
 
-# These values mirror the production arguments used by main before the
-# settings existed.  Keep the two lanes separate: a v2 change must never
-# silently rewrite the v2.5 policy (whose GPT accel default is enabled).
+# Keep the two lanes separate: a v2 change must never silently rewrite the
+# v2.5 policy.  CUDA Kernel is an automatic TTS2 optimization, not a user
+# policy switch.
 TTS_PERFORMANCE_DEFAULTS = {
     TTS2_PERFORMANCE_KEY: {
         "cuda_kernel": True,
@@ -55,7 +55,7 @@ TTS_PERFORMANCE_DEFAULTS = {
         "conditioning_cache": False,
     },
     TTS25_PERFORMANCE_KEY: {
-        "gpt_accel": True,
+        "gpt_accel": False,
     },
 }
 
@@ -142,6 +142,11 @@ def get_tts_performance(version: str | None = None, *, data: Mapping | None = No
     for lane, defaults in TTS_PERFORMANCE_DEFAULTS.items():
         lane_data = stored.get(lane) if isinstance(stored, Mapping) else None
         for field, default in defaults.items():
+            if lane == TTS2_PERFORMANCE_KEY and field == "cuda_kernel":
+                # Settings/default profiles always request the automatic CUDA
+                # path. Explicit task snapshots are normalized separately.
+                result[lane][field] = True
+                continue
             if isinstance(lane_data, Mapping) and field in lane_data:
                 result[lane][field] = _bool_value(lane_data[field], default)
             elif (
@@ -200,6 +205,8 @@ def merge_tts_performance(data: Mapping | None, updates: Mapping | None) -> dict
             for field, default in defaults.items():
                 if field in lane_update:
                     lane_data[field] = _bool_value(lane_update[field], default)
+        if lane == TTS2_PERFORMANCE_KEY:
+            lane_data["cuda_kernel"] = True
         container[lane] = lane_data
     merged[TTS_PERFORMANCE_CONFIG_KEY] = container
     # Compatibility for the immediately preceding local setting.  New reads

@@ -21,17 +21,20 @@ def test_legacy_single_model_config_defaults_to_rollback_engine(monkeypatch):
     assert settings_handlers.get_tts_engine_settings()["engine"] == settings_handlers.TTS_ENGINE_LEGACY
 
 
-def test_accel_checkbox_state_defaults_enabled_and_reads_config(monkeypatch):
+def test_accel_checkbox_state_defaults_disabled_and_reads_config(monkeypatch):
     key = settings_handlers.config.INDEXTTS25_GPT_ACCEL_CONFIG_KEY
     monkeypatch.setattr(settings_handlers, "_profile", dict)
     monkeypatch.setattr(settings_handlers, "_resolved_model_dirs", lambda: ("", ""))
     monkeypatch.setattr(settings_handlers.config, "get_model_dir", lambda: "")
 
     monkeypatch.setattr(settings_handlers, "_read_raw_config", dict)
-    assert settings_handlers.get_tts_engine_settings()[key] is True
+    assert settings_handlers.get_tts_engine_settings()[key] is False
 
     monkeypatch.setattr(settings_handlers, "_read_raw_config", lambda: {key: False})
     assert settings_handlers.get_tts_engine_settings()[key] is False
+
+    monkeypatch.setattr(settings_handlers, "_read_raw_config", lambda: {key: True})
+    assert settings_handlers.get_tts_engine_settings()[key] is True
 
 
 def test_model_directory_readiness_is_independent(tmp_path):
@@ -44,6 +47,240 @@ def test_model_directory_readiness_is_independent(tmp_path):
     assert settings_handlers._model_ready(str(recommended), "v2.5") is False
     assert "✅ 已就绪" in settings_handlers._ready_message(str(legacy), "v2")
     assert "未就绪" in settings_handlers._ready_message(str(recommended), "v2.5")
+
+
+def _performance_settings(engine="legacy", *, tts2=None, tts25=False):
+    return {
+        "engine": engine,
+        "tts2_performance": {
+            "cuda_kernel": True,
+            "gpt_accel": False,
+            "s2mel_compile": False,
+            "conditioning_cache": False,
+            **(tts2 or {}),
+        },
+        "tts25_performance": {"gpt_accel": tts25},
+    }
+
+
+def test_performance_status_messages_distinguish_off_and_effective_on(monkeypatch):
+    monkeypatch.setattr(
+        settings_handlers,
+        "_runtime_snapshots",
+        lambda: [{
+            "engine_version": "2",
+            "engine_state": "ready",
+            "performance": {
+                "cuda_kernel": True,
+                "gpt_accel": True,
+                "s2mel_compile": False,
+                "conditioning_cache": False,
+            },
+            "effective_performance": {
+                "cuda_kernel": True,
+                "gpt_accel": True,
+                "s2mel_compile": False,
+                "conditioning_cache": False,
+            },
+            "performance_status": {
+                "cuda_kernel": {"requested": True, "effective": True, "state": "active"},
+                "gpt_accel": {"requested": True, "effective": True, "state": "active"},
+            },
+        }],
+    )
+
+    messages = settings_handlers._performance_status_messages(
+        _performance_settings(tts2={"gpt_accel": False}), []
+    )
+
+    assert messages["tts2"]["cuda_kernel"] == "自动：开启 · 实际：已生效"
+    assert messages["tts2"]["gpt_accel"] == "配置：关闭"
+
+
+def test_performance_status_messages_show_unavailable_and_deferred_states(monkeypatch):
+    record = SimpleNamespace(
+        options={
+            "engine_snapshot": {
+                "engine_version": "2",
+                "performance": {"gpt_accel": False},
+            }
+        },
+    )
+    monkeypatch.setattr(settings_handlers, "_active_tts_tasks", lambda: [record])
+    monkeypatch.setattr(
+        settings_handlers,
+        "_runtime_snapshots",
+        lambda: [{
+            "engine_version": "2",
+            "engine_state": "ready",
+            "performance": {"gpt_accel": False},
+            "effective_performance": {"gpt_accel": False},
+            "performance_status": {
+                "gpt_accel": {
+                    "requested": False,
+                    "effective": False,
+                    "state": "disabled",
+                }
+            },
+        }],
+    )
+
+    on_messages = settings_handlers._performance_status_messages(
+        _performance_settings(tts2={"gpt_accel": True}),
+    )
+    assert on_messages["tts2"]["gpt_accel"] == "配置：开启 · 实际：待当前任务结束后生效"
+
+    monkeypatch.setattr(
+        settings_handlers,
+        "_runtime_snapshots",
+        lambda: [{
+            "engine_version": "2",
+            "engine_state": "ready",
+            "performance": {"gpt_accel": True},
+            "effective_performance": {"gpt_accel": False},
+            "performance_status": {
+                "gpt_accel": {
+                    "requested": True,
+                    "effective": False,
+                    "state": "unavailable",
+                }
+            },
+        }],
+    )
+    unavailable = settings_handlers._performance_status_messages(
+        _performance_settings(tts2={"gpt_accel": True}), []
+    )
+    assert unavailable["tts2"]["gpt_accel"] == (
+        "配置：开启 · 实际：不可用，已回退 Baseline"
+    )
+
+
+def test_performance_status_messages_handle_non_current_lane_and_uninitialized_runtime(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        settings_handlers,
+        "_runtime_snapshots",
+        lambda: [{
+            "engine_version": "2.5",
+            "engine_state": "ready",
+            "performance": {"gpt_accel": False},
+            "effective_performance": {"gpt_accel": False},
+            "performance_status": {
+                "gpt_accel": {"requested": False, "effective": False, "state": "disabled"}
+            },
+        }],
+    )
+    messages = settings_handlers._performance_status_messages(
+        _performance_settings(
+            engine="indextts25", tts2={"gpt_accel": True}
+        ),
+        [],
+    )
+    assert messages["tts2"]["gpt_accel"] == "配置：开启 · 实际：切换到 TTS2 后生效"
+
+    monkeypatch.setattr(
+        settings_handlers,
+        "_runtime_snapshots",
+        lambda: [{"engine_version": "2", "engine_state": "uninitialized"}],
+    )
+    messages = settings_handlers._performance_status_messages(
+        _performance_settings(tts2={"gpt_accel": True}), []
+    )
+    assert messages["tts2"]["gpt_accel"] == "配置：开启 · 实际：等待 runtime 初始化"
+
+
+def test_v25_performance_status_messages_show_unavailable_fallback(monkeypatch):
+    monkeypatch.setattr(
+        settings_handlers,
+        "_runtime_snapshots",
+        lambda: [{
+            "engine_version": "2.5",
+            "engine_state": "ready",
+            "performance": {"gpt_accel": True},
+            "effective_performance": {"gpt_accel": False},
+            "performance_status": {
+                "gpt_accel": {
+                    "requested": True,
+                    "effective": False,
+                    "state": "unavailable",
+                    "reason": "dependency_missing",
+                }
+            },
+        }],
+    )
+
+    messages = settings_handlers._performance_status_messages(
+        _performance_settings(engine="indextts25", tts25=True), []
+    )
+
+    assert messages["tts25"]["gpt_accel"] == (
+        "配置：开启 · 实际：不可用，已回退 Baseline"
+    )
+
+
+def test_performance_status_messages_show_deferred_disable(monkeypatch):
+    record = SimpleNamespace(
+        options={
+            "engine_snapshot": {
+                "engine_version": "2",
+                "performance": {"gpt_accel": True},
+            }
+        },
+    )
+    monkeypatch.setattr(settings_handlers, "_active_tts_tasks", lambda: [record])
+    monkeypatch.setattr(
+        settings_handlers,
+        "_runtime_snapshots",
+        lambda: [{
+            "engine_version": "2",
+            "engine_state": "ready",
+            "performance": {"gpt_accel": True},
+            "effective_performance": {"gpt_accel": True},
+            "performance_status": {
+                "gpt_accel": {"requested": True, "effective": True, "state": "active"}
+            },
+        }],
+    )
+
+    messages = settings_handlers._performance_status_messages(
+        _performance_settings(tts2={"gpt_accel": False})
+    )
+
+    assert messages["tts2"]["gpt_accel"] == (
+        "配置：关闭 · 当前任务仍使用原配置，任务结束后生效"
+    )
+
+
+def test_performance_status_messages_keep_pending_distinct_from_unavailable(monkeypatch):
+    monkeypatch.setattr(
+        settings_handlers,
+        "_runtime_snapshots",
+        lambda: [{
+            "engine_version": "2",
+            "engine_state": "ready",
+            "performance": {"gpt_accel": True},
+            "effective_performance": {"gpt_accel": False},
+            "performance_status": {
+                "gpt_accel": {"requested": True, "effective": False, "state": "pending"}
+            },
+        }],
+    )
+
+    messages = settings_handlers._performance_status_messages(
+        _performance_settings(tts2={"gpt_accel": True}), []
+    )
+
+    assert messages["tts2"]["gpt_accel"] == "配置：开启 · 实际：待生效"
+
+
+def test_settings_page_removes_cuda_checkbox_but_keeps_status_markdowns():
+    source = Path(__file__).resolve().parents[1].joinpath("ui/pages/settings_page.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "s_tts2_cuda_kernel = gr.Checkbox" not in source
+    assert '"s_tts2_cuda_kernel_status"' in source
 
 
 def test_active_tts_task_rejects_switch_with_accurate_task_label(monkeypatch):

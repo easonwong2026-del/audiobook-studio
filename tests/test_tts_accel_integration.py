@@ -54,10 +54,10 @@ def _reset_accel_state(monkeypatch):
     tts_engine.reset_engine()
 
 
-def test_v25_without_windows_capability_keeps_baseline(monkeypatch):
+def test_v25_requested_accel_without_windows_capability_keeps_baseline(monkeypatch):
     monkeypatch.setattr(tts_engine, "_is_windows", lambda: False)
 
-    report = tts_engine._prepare_v25_acceleration()
+    report = tts_engine._prepare_v25_acceleration(requested=True)
 
     assert report["requested"] is True
     assert report["available"] is False
@@ -66,14 +66,14 @@ def test_v25_without_windows_capability_keeps_baseline(monkeypatch):
     assert tts_engine.get_acceleration_status()["fallback"] is True
 
 
-def test_v25_accel_defaults_enabled_when_config_is_missing(monkeypatch):
+def test_v25_accel_defaults_disabled_when_config_is_missing(monkeypatch):
     monkeypatch.setattr(tts_engine._cfg, "_read_config", dict)
     monkeypatch.setattr(tts_engine, "_is_windows", lambda: False)
 
     report = tts_engine._prepare_v25_acceleration()
 
-    assert report["requested"] is True
-    assert report["reason"] == "unsupported_platform"
+    assert report["requested"] is False
+    assert report["reason"] == "user_disabled"
 
 
 def test_v25_config_disable_skips_accel_dependency_import(monkeypatch):
@@ -108,8 +108,8 @@ def test_v25_ready_overlay_is_prepared_idempotently_and_sets_process_cc(monkeypa
     monkeypatch.setattr(tts_engine, "_is_windows", lambda: True)
     monkeypatch.setenv(tts_engine.ACCEL_OVERLAY_ENV, str(overlay))
 
-    first = tts_engine._prepare_v25_acceleration()
-    second = tts_engine._prepare_v25_acceleration()
+    first = tts_engine._prepare_v25_acceleration(requested=True)
+    second = tts_engine._prepare_v25_acceleration(requested=True)
 
     assert first["available"] is True
     assert first["enabled"] is True
@@ -125,7 +125,7 @@ def test_invalid_overlay_is_not_added(monkeypatch, tmp_path):
     invalid = tmp_path / "missing-site-packages"
     monkeypatch.setenv(tts_engine.ACCEL_OVERLAY_ENV, str(invalid))
 
-    report = tts_engine._prepare_v25_acceleration()
+    report = tts_engine._prepare_v25_acceleration(requested=True)
 
     assert report["available"] is False
     assert report["reason"] == "overlay_invalid"
@@ -143,7 +143,7 @@ def test_windows_without_accel_dependencies_keeps_baseline(monkeypatch):
 
     monkeypatch.setattr(tts_engine.importlib, "import_module", missing)
 
-    report = tts_engine._prepare_v25_acceleration()
+    report = tts_engine._prepare_v25_acceleration(requested=True)
 
     assert report["available"] is False
     assert report["enabled"] is False
@@ -161,7 +161,7 @@ def test_valid_existing_cc_is_not_overwritten(monkeypatch, tmp_path):
     monkeypatch.setenv(tts_engine.ACCEL_OVERLAY_ENV, str(overlay))
     monkeypatch.setenv("CC", str(existing_cc))
 
-    report = tts_engine._prepare_v25_acceleration()
+    report = tts_engine._prepare_v25_acceleration(requested=True)
 
     assert report["available"] is True
     assert os.environ["CC"] == str(existing_cc)
