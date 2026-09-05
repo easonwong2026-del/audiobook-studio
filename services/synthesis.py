@@ -224,6 +224,8 @@ class SynthesisService:
         检查到 ``cancel`` 标志后真正退出并置 ``cancelled``（终态）。UI 在 ``cancelling``
         期间展示「正在停止，当前段完成后结束」并禁止开启新任务。cancel 优先于 pause。
         """
+        if state.status in {"done", "cancelled", "error", "interrupted", "needs_attention"}:
+            return
         state.cancel = True
         state.cancel_requested = True
         state.status = "cancelling"
