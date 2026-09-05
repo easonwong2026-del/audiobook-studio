@@ -94,7 +94,7 @@ def test_performance_status_messages_distinguish_off_and_effective_on(monkeypatc
     )
 
     assert messages["tts2"]["cuda_kernel"] == "自动：开启 · 实际：已生效"
-    assert messages["tts2"]["gpt_accel"] == "配置：关闭"
+    assert messages["tts2"]["gpt_accel"] == "配置：关闭 · 实际：待生效"
 
 
 def test_performance_status_messages_show_unavailable_and_deferred_states(monkeypatch):
@@ -250,6 +250,11 @@ def test_performance_status_messages_show_deferred_disable(monkeypatch):
     assert messages["tts2"]["gpt_accel"] == (
         "配置：关闭 · 当前任务仍使用原配置，任务结束后生效"
     )
+
+    messages = settings_handlers._performance_status_messages(
+        _performance_settings(tts2={"gpt_accel": False}), []
+    )
+    assert messages["tts2"]["gpt_accel"] == "配置：关闭 · 实际：待生效"
 
 
 def test_performance_status_messages_keep_pending_distinct_from_unavailable(monkeypatch):

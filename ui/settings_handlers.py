@@ -513,8 +513,12 @@ def _performance_status_messages(
             task_uses_lane = _active_task_uses_engine(active, engine_id)
 
             if not configured:
-                if same_runtime_lane and task_uses_lane and old_requested is True:
-                    lane_messages[field] = prefix + " · 当前任务仍使用原配置，任务结束后生效"
+                if same_runtime_lane and old_requested is True:
+                    actual = (
+                        "当前任务仍使用原配置，任务结束后生效"
+                        if task_uses_lane else "实际：待生效"
+                    )
+                    lane_messages[field] = f"{prefix} · {actual}"
                 else:
                     lane_messages[field] = prefix
                 continue
