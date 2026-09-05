@@ -10,6 +10,7 @@ from lib import project_paths
 import sys
 import os
 import json
+import threading
 import time
 
 import numpy as np
@@ -28,13 +29,6 @@ from services.synthesis import SynthesisState, SynthesisService  # noqa: E402
 
 def _fake_segment_fast(output_path, **kwargs):
     """即时桩：写出 output_path 哑 wav，不 sleep（用于「跑到完成」测试）。"""
-    if output_path:
-        _dummy(output_path)
-
-
-def _fake_segment_slow(output_path, **kwargs):
-    """带延迟的桩：每段 sleep，便于在测试中于段边界注入取消。"""
-    time.sleep(0.1)
     if output_path:
         _dummy(output_path)
 
@@ -110,7 +104,18 @@ def test_synthesis_runs_to_completion(project, monkeypatch):
 
 
 def test_synthesis_cancel_at_segment_boundary(project, monkeypatch):
-    monkeypatch.setattr(tts_engine, "synthesize_segment", _fake_segment_slow)
+    segment_release = threading.Event()
+    segment_calls = 0
+
+    def _fake_segment_until_cancel(output_path, **kwargs):
+        nonlocal segment_calls
+        segment_calls += 1
+        if segment_calls > 1:
+            segment_release.wait(timeout=15)
+        if output_path:
+            _dummy(output_path)
+
+    monkeypatch.setattr(tts_engine, "synthesize_segment", _fake_segment_until_cancel)
     cleanup_reasons = []
     monkeypatch.setattr(
         tts_engine,
@@ -129,6 +134,7 @@ def test_synthesis_cancel_at_segment_boundary(project, monkeypatch):
            and time.time() < deadline):
         time.sleep(0.01)
     SynthesisService.cancel(state)
+    segment_release.set()
 
     while state.status not in ("done", "cancelled", "error") and time.time() < deadline:
         time.sleep(0.02)
