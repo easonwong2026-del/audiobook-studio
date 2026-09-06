@@ -92,6 +92,8 @@ def create_settings_page() -> dict:
                                 elem_classes=["tts-performance-status", "tts-performance-auto"],
                             )
                             s_tts2_gpt_accel = gr.Checkbox(
+                                elem_classes=["tts-performance-switch"],
+                                interactive=True,
                                 label="GPT Accel",
                                 value=tts_state["tts2_performance"]["gpt_accel"],
                                 info=(
@@ -106,6 +108,8 @@ def create_settings_page() -> dict:
                                 elem_classes=["tts-performance-status"],
                             )
                             s_tts2_s2mel_compile = gr.Checkbox(
+                                elem_classes=["tts-performance-switch"],
+                                interactive=True,
                                 label="s2mel torch.compile",
                                 value=tts_state["tts2_performance"]["s2mel_compile"],
                                 info="使用 upstream 的 s2mel compile；依赖不可用时安全回退。",
@@ -117,6 +121,8 @@ def create_settings_page() -> dict:
                                 elem_classes=["tts-performance-status"],
                             )
                             s_tts2_conditioning_cache = gr.Checkbox(
+                                elem_classes=["tts-performance-switch"],
+                                interactive=True,
                                 label="多音色 Conditioning Cache",
                                 value=tts_state["tts2_performance"]["conditioning_cache"],
                                 info="缓存最多 4 组参考音频 conditioning，仅对 TTS2 生效。",
@@ -130,6 +136,8 @@ def create_settings_page() -> dict:
                         with gr.Column(scale=1):
                             gr.Markdown("##### TTS2.5 性能设置")
                             s_indextts25_gpt_accel_enabled = gr.Checkbox(
+                                elem_classes=["tts-performance-switch"],
+                                interactive=True,
                                 label="GPT Accel",
                                 value=tts_state["tts25_performance"]["gpt_accel"],
                                 info=(

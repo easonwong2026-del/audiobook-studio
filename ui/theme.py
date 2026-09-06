@@ -432,6 +432,41 @@ button:hover, .gr-button:hover {{ transform:translateY(-1px)!important; }}
   box-sizing:border-box!important;
 }}
 .main-area .gr-row, .main-area .gr-column, .main-area .gr-box {{ min-width:0!important; max-width:100%!important; box-sizing:border-box!important; }}
+/* Native checkbox behavior with a sliding thumb for TTS boolean settings. */
+.gradio-container .tts-performance-switch input[type="checkbox"],
+.gradio-container .tts-performance-switch input[type="checkbox"]:disabled {{
+  appearance:none!important;
+  -webkit-appearance:none!important;
+  width:46px!important;
+  min-width:46px!important;
+  height:26px!important;
+  flex:0 0 46px!important;
+  border:1px solid {TEXT_MUTED}!important;
+  border-radius:999px!important;
+  background-color:{TEXT_MUTED}!important;
+  background-image:radial-gradient(circle, white 0 9px, transparent 10px)!important;
+  background-size:22px 22px!important;
+  background-repeat:no-repeat!important;
+  background-position:1px center!important;
+  box-shadow:none!important;
+  cursor:pointer;
+  transition:background-position .15s ease, background-color .15s ease;
+}}
+.gradio-container .tts-performance-switch input[type="checkbox"]:checked {{
+  background-color:{ACCENT_DEEP}!important;
+  background-position:21px center!important;
+}}
+.gradio-container .tts-performance-switch input[type="checkbox"]:focus-visible {{
+  outline:2px solid {TEXT_PRIMARY}!important;
+  outline-offset:3px!important;
+}}
+.gradio-container .tts-performance-switch input[type="checkbox"]:disabled {{
+  opacity:.5!important;
+  cursor:not-allowed;
+}}
+@media (prefers-reduced-motion: reduce) {{
+  .gradio-container .tts-performance-switch input[type="checkbox"] {{ transition:none; }}
+}}
 .settings-page, .settings-page > *, .settings-card {{ width:100%!important; max-width:100%!important; min-width:0!important; box-sizing:border-box!important; }}
 .settings-page .tabs, .settings-page .settings-tabs, .settings-page [role="tabpanel"] {{ width:100%!important; max-width:100%!important; min-width:0!important; box-sizing:border-box!important; }}
 .settings-provider-row, .settings-actions, .settings-data-actions {{ flex-wrap:wrap!important; gap:10px!important; }}
